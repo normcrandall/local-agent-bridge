@@ -58,7 +58,9 @@ chmod 600 ~/.config/ghtoken
 
 Do not commit this token or place it in the bridge repository.
 
-### 3. Restore the original AI Hero skills
+### 3. Restore Matt Pocock's original AI Hero skills
+
+The original workflows referenced by this project were created by Matt Pocock for [AI Hero](https://www.aihero.dev/) and are maintained in his [Skills for Real Engineers repository on GitHub](https://github.com/mattpocock/skills). This bridge does not vendor or replace those skills; it adds optional multi-model orchestration around an installed upstream copy.
 
 The council companions load their original workflows from `~/.agents/skills`. For an exact copy of the current selection, transfer the canonical skill store:
 
@@ -66,7 +68,7 @@ The council companions load their original workflows from `~/.agents/skills`. Fo
 rsync -a ~/.agents/ <new-computer>:~/.agents/
 ```
 
-Alternatively, install a fresh selection from the upstream repository and verify that `~/.agents/skills/grill-me/SKILL.md` and the other originals exist:
+Alternatively, install a fresh selection from [Matt's upstream repository](https://github.com/mattpocock/skills) and verify that `~/.agents/skills/grill-me/SKILL.md` and the other originals exist:
 
 ```sh
 npx skills@latest add mattpocock/skills
@@ -129,7 +131,7 @@ Four canonical skills provide the same visible vocabulary in Codex, Claude, and 
 
 The installer copies them to `~/.codex/skills`, `~/.claude/skills`, and `~/.gemini/config/skills`; it also installs Antigravity CLI-compatible markdown commands under `~/.gemini/antigravity-cli/skills`. Restart or begin a new session in each app after installation.
 
-Seventeen additive `council-*` companions bring Claude, Codex, and Antigravity into selected AI Hero workflows without changing the originals:
+Seventeen additive `council-*` companions bring Claude, Codex, and Antigravity into selected workflows from [Matt Pocock's skills](https://github.com/mattpocock/skills) without changing the originals:
 
 - Planning and design: `council-grill-me`, `council-grill-with-docs`, `council-decision-mapping`, `council-design-an-interface`, `council-domain-modeling`, `council-improve-codebase-architecture`, and `council-prototype`.
 - Engineering: `council-diagnosing-bugs`, `council-implement`, `council-review`, `council-tdd`, and `council-triage`.
@@ -165,9 +167,9 @@ These skills are supplied by this project and installed across Codex, Claude, an
 | `goal-loop` | Build toward explicit completion criteria through bounded plan, implement, review, fix, and verification cycles. |
 | `agent-dialogue` | Run a bounded, chair-hosted Codex–Claude dialogue inside the current CLI. This remains project-scoped rather than part of the global three-product set. |
 
-### Installed AI Hero skills and council options
+### Installed Matt Pocock's AI Hero skills and council options
 
-The original skills live under `~/.agents/skills` and remain unchanged. “Available” means this bridge installs a working `council-*` companion. “Candidate” means the original is installed but the companion has not been built yet. “Single-agent” identifies routing, reference, setup, or mechanical utilities where a council would normally add little value.
+Credit for the original skills belongs to Matt Pocock and the upstream contributors. See [AI Hero](https://www.aihero.dev/) for Matt's work and [mattpocock/skills](https://github.com/mattpocock/skills) for the source repository. The originals live under `~/.agents/skills` and remain unchanged. “Available” means this bridge installs a working `council-*` companion. “Candidate” means the original is installed but the companion has not been built yet. “Single-agent” identifies routing, reference, setup, or mechanical utilities where a council would normally add little value.
 
 | Original skill | What it does | Multi-model option |
 | --- | --- | --- |
