@@ -1,0 +1,11 @@
+interface:
+  display_name: "Council Ubiquitous Language"
+  short_description: "Run ubiquitous-language with a three-model council"
+  default_prompt: "Use $council-ubiquitous-language with Claude, Codex, and Antigravity for this task."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "collaboration"
+      description: "Persistent Claude, Codex, and Antigravity broker"
+policy:
+  allow_implicit_invocation: true

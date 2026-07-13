@@ -1,0 +1,4 @@
+interface:
+  display_name: "Pair Program"
+  short_description: "Rotate writers and reviewers safely"
+  default_prompt: "Use $pair-program to implement the next task with one writer and rotating cross-model review."

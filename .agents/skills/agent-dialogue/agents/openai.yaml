@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent Dialogue"
+  short_description: "Let Codex and Claude deliberate together"
+  default_prompt: "Use $agent-dialogue to discuss this task with Claude Code and reach a verified conclusion."

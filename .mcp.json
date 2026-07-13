@@ -1,0 +1,28 @@
+{
+  "mcpServers": {
+    "codex": {
+      "type": "stdio",
+      "command": "agent-codex-mcp",
+      "args": [],
+      "env": {}
+    },
+    "antigravity": {
+      "type": "stdio",
+      "command": "agent-antigravity-mcp",
+      "args": [],
+      "env": {}
+    },
+    "collaboration": {
+      "type": "stdio",
+      "command": "agent-collaboration-mcp",
+      "args": [],
+      "env": {}
+    },
+    "playwright": {
+      "type": "stdio",
+      "command": "agent-playwright-mcp",
+      "args": [],
+      "env": {}
+    }
+  }
+}

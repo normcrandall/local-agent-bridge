@@ -1,0 +1,9 @@
+interface:
+  display_name: "Run Roundtable"
+  short_description: "Run a visible persistent agent roundtable"
+  default_prompt: "Use $run-roundtable to have the selected agents collaborate while keeping me updated."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "collaboration"
+      description: "Persistent multi-agent collaboration service"

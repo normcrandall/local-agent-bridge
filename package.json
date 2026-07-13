@@ -1,0 +1,29 @@
+{
+  "name": "local-agent-bridge",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Project-scoped MCP bridge for Codex, Claude Code, and Antigravity",
+  "scripts": {
+    "doctor": "node scripts/doctor.mjs",
+    "generate:skills": "node scripts/generate-council-skills.mjs",
+    "install:global": "node scripts/install-global.mjs",
+    "smoke": "node scripts/smoke-test.mjs",
+    "smoke:live": "node scripts/collaboration-live-smoke.mjs",
+    "talk": "node scripts/bridge-talk.mjs",
+    "test:talk": "node scripts/talk-test.mjs",
+    "test:collaboration": "node scripts/collaboration-test.mjs",
+    "test:desktop": "node scripts/desktop-launcher-test.mjs",
+    "test:github-review": "node scripts/github-review-test.mjs",
+    "test:skills": "node scripts/skill-test.mjs",
+    "test:statusline": "node scripts/statusline-test.mjs",
+    "test:models": "node scripts/model-routing-test.mjs",
+    "test:codex-isolation": "node scripts/codex-isolation-test.mjs",
+    "test:operations": "node scripts/operations-test.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@playwright/mcp": "0.0.78",
+    "zod": "4.4.3"
+  }
+}

@@ -1,0 +1,9 @@
+interface:
+  display_name: "Show Collaboration"
+  short_description: "Show agent calls, turns, status, and history"
+  default_prompt: "Use $show-collaboration to display the history and status of my latest agent collaboration."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "collaboration"
+      description: "Persistent collaboration history service"

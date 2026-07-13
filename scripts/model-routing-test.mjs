@@ -1,0 +1,142 @@
+import assert from "node:assert/strict";
+import {
+  antigravityToolRequest,
+  claudeToolRequest,
+  codexToolRequest,
+} from "../src/tool-requests.mjs";
+
+const claudeDefault = claudeToolRequest({ prompt: "test" });
+assert.equal(claudeDefault.name, "ask_claude");
+assert.equal(Object.hasOwn(claudeDefault.arguments, "model"), false);
+
+const claudeExplicit = claudeToolRequest({ prompt: "test", model: "user-claude-model" });
+assert.equal(claudeExplicit.arguments.model, "user-claude-model");
+const claudeReply = claudeToolRequest({
+  prompt: "continue",
+  sessionId: "claude-session",
+  model: "user-claude-model",
+});
+assert.equal(claudeReply.name, "continue_claude");
+assert.equal(claudeReply.arguments.model, "user-claude-model");
+const claudeReviewPermissions = claudeToolRequest({
+  prompt: "verify",
+  verificationCommands: ["npm test"],
+  handoffPath: ".bridge/handoffs/review.md",
+  githubReview: {
+    repository: "owner/repo",
+    prNumber: 42,
+    headSha: "a".repeat(40),
+    expectedLogin: "review-bot",
+  },
+});
+assert.deepEqual(claudeReviewPermissions.arguments.verificationCommands, ["npm test"]);
+assert.equal(claudeReviewPermissions.arguments.handoffPath, ".bridge/handoffs/review.md");
+assert.equal(claudeReviewPermissions.arguments.githubReview.expectedLogin, "review-bot");
+const claudeWorkPermissions = claudeToolRequest({
+  prompt: "implement",
+  mode: "work",
+  workProfile: "deliver",
+  workCommands: ["npm test", "git push -u origin task-08"],
+});
+assert.deepEqual(claudeWorkPermissions.arguments.workCommands, ["npm test", "git push -u origin task-08"]);
+assert.equal(claudeWorkPermissions.arguments.workProfile, "deliver");
+assert.equal(claudeToolRequest({ prompt: "go", mode: "work", permissionProfile: "yolo" }).arguments.permissionProfile, "yolo");
+
+const codexDefault = codexToolRequest({ prompt: "test", cwd: "/workspace" });
+assert.equal(codexDefault.name, "codex");
+assert.equal(Object.hasOwn(codexDefault.arguments, "model"), false);
+for (const server of ["claude_code", "antigravity", "collaboration", "playwright", "node_repl", "computer-use", "github_review"]) {
+  assert.equal(
+    Object.hasOwn(codexDefault.arguments.config, `mcp_servers.${server}.enabled`),
+    false,
+    `isolated delegated Codex must not create an incomplete ${server} MCP block`,
+  );
+}
+
+const codexExplicit = codexToolRequest({
+  prompt: "test",
+  cwd: "/workspace",
+  model: "user-codex-model",
+});
+assert.equal(codexExplicit.arguments.model, "user-codex-model");
+const codexImplement = codexToolRequest({
+  prompt: "implement",
+  cwd: "/workspace",
+  mode: "work",
+  workProfile: "implement",
+});
+assert.equal(codexImplement.arguments.sandbox, "workspace-write");
+assert.equal(codexImplement.arguments.config["sandbox_workspace_write.network_access"], false);
+assert.match(codexImplement.arguments.prompt, /Do not push/);
+const codexDeliver = codexToolRequest({
+  prompt: "deliver",
+  cwd: "/workspace",
+  mode: "work",
+  workProfile: "deliver",
+});
+assert.equal(codexDeliver.arguments.config["sandbox_workspace_write.network_access"], true);
+assert.match(codexDeliver.arguments.prompt, /push and pull-request creation/);
+const codexYolo = codexToolRequest({ prompt: "go", cwd: "/workspace", mode: "work", permissionProfile: "yolo" });
+assert.equal(codexYolo.arguments.sandbox, "danger-full-access");
+assert.equal(codexYolo.arguments["approval-policy"], "never");
+assert.equal(Object.hasOwn(codexYolo.arguments.config, "mcp_servers.collaboration.enabled"), false);
+assert.match(codexYolo.arguments.prompt, /explicitly authorized danger-full-access/);
+const codexBrowser = codexToolRequest({ prompt: "browse", cwd: "/workspace", browser: true, playwrightBridgePath: "/runtime/scripts/playwright-mcp.sh" });
+assert.equal(codexBrowser.arguments.config["mcp_servers.playwright.enabled"], true);
+assert.equal(codexBrowser.arguments.config["mcp_servers.playwright.command"], "/bin/zsh");
+assert.deepEqual(codexBrowser.arguments.config["mcp_servers.playwright.args"], ["/runtime/scripts/playwright-mcp.sh"]);
+assert.equal(Object.hasOwn(codexBrowser.arguments.config, "mcp_servers.collaboration.enabled"), false);
+assert.throws(() => codexToolRequest({ prompt: "browse", cwd: "/workspace", browser: true }), /playwrightBridgePath/);
+const codexReviewPublication = codexToolRequest({
+  prompt: "review",
+  cwd: "/workspace",
+  mode: "review",
+  verificationCommands: ["npm test"],
+  handoffPath: "docs/handoffs/task-12.md",
+  githubReview: {
+    repository: "owner/repo",
+    prNumber: 42,
+    headSha: "a".repeat(40),
+    expectedLogin: "review-bot",
+  },
+  githubReviewBridgePath: "/runtime/src/github-review-bridge.mjs",
+});
+assert.equal(codexReviewPublication.arguments.sandbox, "read-only");
+assert.equal(codexReviewPublication.arguments.config["mcp_servers.github_review.command"], process.execPath);
+assert.equal(codexReviewPublication.arguments.config["mcp_servers.github_review.enabled"], true);
+assert.deepEqual(codexReviewPublication.arguments.config["mcp_servers.github_review.args"], ["/runtime/src/github-review-bridge.mjs"]);
+assert.equal(codexReviewPublication.arguments.config["mcp_servers.github_review.env.GITHUB_REVIEW_REPOSITORY"], "owner/repo");
+assert.equal(codexReviewPublication.arguments.config["mcp_servers.github_review.env.GITHUB_REVIEW_HANDOFF_PATH"], "/workspace/docs/handoffs/task-12.md");
+assert.match(codexReviewPublication.arguments.prompt, /github_review\.write_handoff/);
+assert.match(codexReviewPublication.arguments.prompt, /github_review\.submit_pr_review/);
+const codexReply = codexToolRequest({
+  prompt: "continue",
+  cwd: "/workspace",
+  sessionId: "codex-thread",
+  model: "ignored-on-existing-thread",
+});
+assert.deepEqual(codexReply, {
+  name: "codex-reply",
+  arguments: { prompt: "continue", threadId: "codex-thread" },
+});
+
+const antigravityYolo = antigravityToolRequest({ prompt: "go", mode: "work", permissionProfile: "yolo" });
+assert.equal(antigravityYolo.arguments.permissionProfile, "yolo");
+
+const antigravityDefault = antigravityToolRequest({ prompt: "test" });
+assert.equal(antigravityDefault.name, "ask_antigravity");
+assert.equal(Object.hasOwn(antigravityDefault.arguments, "model"), false);
+
+const antigravityExplicit = antigravityToolRequest({
+  prompt: "test",
+  model: "Gemini 3.1 Pro (High)",
+});
+assert.equal(antigravityExplicit.arguments.model, "Gemini 3.1 Pro (High)");
+const antigravityReply = antigravityToolRequest({
+  prompt: "continue",
+  sessionId: "00000000-0000-4000-8000-000000000000",
+});
+assert.equal(antigravityReply.name, "continue_antigravity");
+assert.equal(antigravityReply.arguments.conversationId, "00000000-0000-4000-8000-000000000000");
+
+console.log("Model routing tests passed: explicit overrides pass through; omitted models stay omitted.");

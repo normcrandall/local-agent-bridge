@@ -1,0 +1,340 @@
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { resolve } from "node:path";
+import { rm } from "node:fs/promises";
+
+const root = resolve(import.meta.dirname, "..");
+
+async function listTools(label, command, args, env) {
+  const client = new Client({ name: "bridge-smoke-test", version: "0.1.0" });
+  const transport = new StdioClientTransport({ command, args, cwd: root, env });
+  try {
+    await client.connect(transport);
+    const result = await client.listTools();
+    const names = result.tools.map((tool) => tool.name).sort();
+    console.log(`${label}: ${names.join(", ")}`);
+    return result.tools;
+  } finally {
+    await client.close();
+  }
+}
+
+async function callBridgeWithoutModel() {
+  const client = new Client({ name: "bridge-call-test", version: "0.1.0" });
+  const transport = new StdioClientTransport({
+    command: "/bin/zsh",
+    args: [resolve(root, "scripts/claude-bridge-mcp.sh")],
+    cwd: root,
+    env: { ...process.env, CLAUDE_BIN: resolve(root, "scripts/fake-claude.mjs") },
+  });
+  try {
+    await client.connect(transport);
+    const result = await client.callTool({
+      name: "ask_claude",
+      arguments: {
+        prompt: "bridge smoke test",
+        browser: true,
+        model: "custom-claude-model-id",
+        mode: "review",
+        verificationCommands: ["npm test", "git diff --check"],
+        handoffPath: ".bridge/test-handoffs/smoke-review.md",
+        githubReview: {
+          repository: "owner/repo",
+          prNumber: 42,
+          headSha: "a".repeat(40),
+          expectedLogin: "review-bot",
+        },
+      },
+    });
+    if (result.isError) throw new Error("Bridge tool returned an error");
+    const serialized = JSON.stringify(result.content);
+    if (
+      !serialized.includes("mcp__playwright__*")
+      || !serialized.includes("playwright")
+      || !serialized.includes("--model")
+      || !serialized.includes("custom-claude-model-id")
+    ) {
+      throw new Error("Delegated browser or model configuration was not forwarded to Claude");
+    }
+    const invocation = JSON.parse(result.structuredContent.result);
+    const permissionIndex = invocation.args.indexOf("--permission-mode");
+    if (invocation.args[permissionIndex + 1] !== "dontAsk") {
+      throw new Error("Claude review mode is not locked to dontAsk permissions");
+    }
+    const allowedIndex = invocation.args.indexOf("--allowedTools");
+    const allowed = invocation.args.slice(allowedIndex + 1, permissionIndex);
+    for (const rule of [
+      "Read",
+      "Glob",
+      "Grep",
+      "Bash(npm test)",
+      "Bash(git diff --check)",
+      `Edit(/${resolve(root, ".bridge/test-handoffs/smoke-review.md")})`,
+      `Write(/${resolve(root, ".bridge/test-handoffs/smoke-review.md")})`,
+      "mcp__github_review__submit_pr_review",
+    ]) {
+      if (!allowed.includes(rule)) throw new Error(`Claude review permission is missing: ${rule}`);
+    }
+    const yolo = await client.callTool({
+      name: "ask_claude",
+      arguments: { prompt: "explicit yolo smoke test", mode: "work", permissionProfile: "yolo" },
+    });
+    if (yolo.isError) throw new Error("Claude YOLO work-mode bridge tool returned an error");
+    const yoloInvocation = JSON.parse(yolo.structuredContent.result);
+    if (!yoloInvocation.args.includes("--dangerously-skip-permissions")) {
+      throw new Error("Claude YOLO mode did not bypass permission checks");
+    }
+    if (yoloInvocation.args.includes("--permission-mode")) {
+      throw new Error("Claude YOLO mode retained the standard permission gate");
+    }
+    const rejectedReviewYolo = await client.callTool({
+      name: "ask_claude",
+      arguments: { prompt: "must reject", mode: "review", permissionProfile: "yolo" },
+    });
+    if (!rejectedReviewYolo.isError) throw new Error("Claude accepted YOLO permissions in review mode");
+    if (!invocation.args.at(-1).includes("smoke-review.md")) {
+      throw new Error("Claude review prompt did not identify the handoff path");
+    }
+    const delegatedConfig = invocation.mcpConfig.mcpServers.github_review;
+    if (
+      delegatedConfig?.env?.GITHUB_REVIEW_REPOSITORY !== "owner/repo"
+      || delegatedConfig?.env?.GITHUB_REVIEW_PR_NUMBER !== "42"
+      || delegatedConfig?.env?.GITHUB_REVIEW_EXPECTED_LOGIN !== "review-bot"
+    ) {
+      throw new Error("Bound GitHub review configuration was not forwarded to Claude");
+    }
+    const configuredDefault = await client.callTool({
+      name: "ask_claude",
+      arguments: { prompt: "configured model smoke test" },
+    });
+    if (configuredDefault.isError) throw new Error("Default-model bridge tool returned an error");
+    if (JSON.stringify(configuredDefault.content).includes("--model")) {
+      throw new Error("Bridge injected a model when the user did not request one");
+    }
+    const work = await client.callTool({
+      name: "ask_claude",
+      arguments: {
+        prompt: "implement task 8",
+        mode: "work",
+        workProfile: "deliver",
+        workCommands: [
+          "git switch -c task-08",
+          "npm test",
+          "git add src/task-08.mjs",
+          "git commit -m 'feat: complete task 8'",
+          "git push -u origin task-08",
+        ],
+      },
+    });
+    if (work.isError) throw new Error("Work-mode bridge tool returned an error");
+    const workInvocation = JSON.parse(work.structuredContent.result);
+    const workPermissionIndex = workInvocation.args.indexOf("--permission-mode");
+    if (workInvocation.args[workPermissionIndex + 1] !== "dontAsk") {
+      throw new Error("Claude work mode is not locked to dontAsk permissions");
+    }
+    const workAllowedIndex = workInvocation.args.indexOf("--allowedTools");
+    const workAllowed = workInvocation.args.slice(workAllowedIndex + 1, workPermissionIndex);
+    for (const rule of [
+      "Read", "Glob", "Grep", "Edit", "Write",
+      "Bash(git switch -c task-08)",
+      "Bash(npm test)",
+      "Bash(git add src/task-08.mjs)",
+      "Bash(git commit -m 'feat: complete task 8')",
+      "Bash(git push -u origin task-08)",
+      "Bash(pnpm *)",
+      "Bash(shasum *)",
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(gh pr create *)",
+    ]) {
+      if (!workAllowed.includes(rule)) throw new Error(`Claude work permission is missing: ${rule}`);
+    }
+    if (!workInvocation.args.at(-1).includes("git push -u origin task-08")) {
+      throw new Error("Claude work prompt did not identify the exact authorized commands");
+    }
+    console.log("Claude bridge call paths: explicit model forwarded; configured default preserved");
+  } finally {
+    await client.close();
+    await rm(resolve(root, ".bridge/test-handoffs"), { recursive: true, force: true });
+  }
+}
+
+async function callAntigravityWithoutModel() {
+  const client = new Client({ name: "antigravity-call-test", version: "0.1.0" });
+  const transport = new StdioClientTransport({
+    command: "/bin/zsh",
+    args: [resolve(root, "scripts/antigravity-bridge-mcp.sh")],
+    cwd: root,
+    env: { ...process.env, AGY_BIN: "/bin/echo" },
+  });
+  try {
+    await client.connect(transport);
+    const explicit = await client.callTool({
+      name: "ask_antigravity",
+      arguments: { prompt: "bridge smoke test", model: "custom-antigravity-model", mode: "review" },
+    });
+    if (explicit.isError) throw new Error("Antigravity bridge tool returned an error");
+    const serialized = JSON.stringify(explicit.content);
+    if (!serialized.includes("--model") || !serialized.includes("custom-antigravity-model")) {
+      throw new Error("Explicit Antigravity model was not forwarded");
+    }
+    if (!serialized.includes("--mode") || !serialized.includes("plan") || !serialized.includes("--sandbox")) {
+      throw new Error("Antigravity review sandbox configuration was not forwarded");
+    }
+    const configuredDefault = await client.callTool({
+      name: "ask_antigravity",
+      arguments: { prompt: "configured model smoke test" },
+    });
+    if (configuredDefault.isError) throw new Error("Default-model Antigravity tool returned an error");
+    if (JSON.stringify(configuredDefault.content).includes("--model")) {
+      throw new Error("Bridge injected an Antigravity model when the user did not request one");
+    }
+    const yolo = await client.callTool({
+      name: "ask_antigravity",
+      arguments: { prompt: "explicit yolo smoke test", mode: "work", permissionProfile: "yolo" },
+    });
+    if (yolo.isError) throw new Error("Antigravity YOLO work-mode bridge tool returned an error");
+    const yoloSerialized = JSON.stringify(yolo.content);
+    if (!yoloSerialized.includes("--dangerously-skip-permissions") || yoloSerialized.includes("--sandbox")) {
+      throw new Error("Antigravity YOLO mode did not replace the terminal sandbox with auto-approval");
+    }
+    const rejectedReviewYolo = await client.callTool({
+      name: "ask_antigravity",
+      arguments: { prompt: "must reject", mode: "review", permissionProfile: "yolo" },
+    });
+    if (!rejectedReviewYolo.isError) throw new Error("Antigravity accepted YOLO permissions in review mode");
+    console.log("Antigravity bridge call paths: explicit model forwarded; configured default preserved");
+  } finally {
+    await client.close();
+  }
+}
+
+async function testBrowserRuntime() {
+  const client = new Client({ name: "browser-runtime-test", version: "0.1.0" });
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [
+      resolve(root, "node_modules/@playwright/mcp/cli.js"),
+      "--browser",
+      "chrome",
+      "--isolated",
+      "--headless",
+    ],
+    cwd: root,
+  });
+  try {
+    await client.connect(transport);
+    const navigation = await client.callTool({
+      name: "browser_navigate",
+      arguments: { url: "data:text/html,<title>Bridge Smoke</title><h1>Bridge browser works</h1>" },
+    });
+    if (navigation.isError || !JSON.stringify(navigation.content).includes("Bridge browser works")) {
+      throw new Error("Playwright browser runtime did not return the test page");
+    }
+    await client.callTool({ name: "browser_close", arguments: {} });
+    console.log("Playwright browser runtime: passed in isolated headless Chrome");
+  } finally {
+    await client.close();
+  }
+}
+
+const bridgeTools = await listTools(
+  "Claude bridge",
+  "/bin/zsh",
+  [resolve(root, "scripts/claude-bridge-mcp.sh")],
+);
+const codexTools = await listTools(
+  "Codex server",
+  "/bin/zsh",
+  [resolve(root, "scripts/codex-mcp.sh")],
+);
+const antigravityTools = await listTools(
+  "Antigravity bridge",
+  "/bin/zsh",
+  [resolve(root, "scripts/antigravity-bridge-mcp.sh")],
+);
+const collaborationTools = await listTools(
+  "Persistent collaboration",
+  "/bin/zsh",
+  [resolve(root, "scripts/collaboration-bridge-mcp.sh")],
+);
+const browserTools = await listTools(
+  "Playwright server",
+  "/bin/zsh",
+  [resolve(root, "scripts/playwright-mcp.sh")],
+);
+
+const names = (tools) => tools.map((tool) => tool.name);
+
+for (const required of ["ask_claude", "continue_claude"]) {
+  if (!names(bridgeTools).includes(required)) throw new Error(`Missing bridge tool: ${required}`);
+}
+for (const required of ["codex", "codex-reply"]) {
+  if (!names(codexTools).includes(required)) throw new Error(`Missing Codex tool: ${required}`);
+}
+for (const required of ["ask_antigravity", "continue_antigravity"]) {
+  if (!names(antigravityTools).includes(required)) throw new Error(`Missing bridge tool: ${required}`);
+}
+for (const required of [
+  "start_collaboration",
+  "get_collaboration",
+  "continue_collaboration",
+  "cancel_collaboration",
+  "list_collaborations",
+]) {
+  if (!names(collaborationTools).includes(required)) throw new Error(`Missing collaboration tool: ${required}`);
+}
+if (!names(browserTools).includes("browser_navigate")) {
+  throw new Error("Missing Playwright tool: browser_navigate");
+}
+
+const codexSchema = codexTools.find((tool) => tool.name === "codex")?.inputSchema?.properties || {};
+for (const property of ["prompt", "cwd", "sandbox", "approval-policy", "config", "model"]) {
+  if (!(property in codexSchema)) throw new Error(`Codex tool schema is missing: ${property}`);
+}
+const replySchema = codexTools.find((tool) => tool.name === "codex-reply")?.inputSchema?.properties || {};
+if (!("threadId" in replySchema) || !("prompt" in replySchema)) {
+  throw new Error("Codex reply schema is missing threadId or prompt");
+}
+const claudeSchema = bridgeTools.find((tool) => tool.name === "ask_claude")?.inputSchema?.properties || {};
+for (const property of [
+  "prompt",
+  "mode",
+  "browser",
+  "model",
+  "verificationCommands",
+  "workCommands",
+  "workProfile",
+  "handoffPath",
+  "githubReview",
+]) {
+  if (!(property in claudeSchema)) throw new Error(`Claude bridge schema is missing: ${property}`);
+}
+const antigravitySchema = antigravityTools.find((tool) => tool.name === "ask_antigravity")?.inputSchema?.properties || {};
+for (const property of ["prompt", "mode", "model"]) {
+  if (!(property in antigravitySchema)) throw new Error(`Antigravity bridge schema is missing: ${property}`);
+}
+const collaborationSchema = collaborationTools.find((tool) => tool.name === "start_collaboration")?.inputSchema?.properties || {};
+for (const property of [
+  "task",
+  "agents",
+  "startAgent",
+  "workspace",
+  "mode",
+  "writer",
+  "maxTurns",
+  "models",
+  "verificationCommands",
+  "workCommands",
+  "workProfile",
+  "handoffPath",
+  "githubReview",
+]) {
+  if (!(property in collaborationSchema)) throw new Error(`Collaboration schema is missing: ${property}`);
+}
+console.log("Conversation broker schemas: compatible");
+
+await callBridgeWithoutModel();
+await callAntigravityWithoutModel();
+await testBrowserRuntime();
+console.log("MCP smoke test passed without invoking any model.");

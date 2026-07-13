@@ -1,0 +1,80 @@
+---
+name: ask-agent
+description: Hand off one bounded task to Claude Code, Codex, or Antigravity with a visible receipt showing the exact peer, MCP tool, workspace, permissions, and model policy. Use when the user asks one agent to review, plan, implement, browse, verify, or give a second opinion, or when they ask what is being delegated.
+---
+
+# Ask Agent
+
+Make one peer delegation legible. Keep orchestration in the current chair.
+
+Accept natural language or an explicit form such as `$ask-agent --to codex --mode review <task>`.
+
+## Resolve the call
+
+Map the requested peer to its provider adapter:
+
+| Peer | Start | Continue |
+|---|---|---|
+| Claude Code | `ask_claude` | `continue_claude` |
+| Codex | `codex` | `codex-reply` |
+| Antigravity | `ask_antigravity` | `continue_antigravity` |
+
+If the required tool is unavailable, stop and identify the missing server. Never silently substitute a different peer.
+
+Use the persistent `collaboration.start_collaboration` interface with `agents: [<peer>]` for the actual handoff, including reviews. This returns immediately with a durable collaboration ID and makes `runtime.activeCall`, provider-authored summaries, automatic heartbeats, cancellation, and history available to every chair. The provider adapter tools in the table are the implementation layer used by the detached worker; do not block the chair inside a raw direct tool call.
+
+Default to read-only review. Permit work mode only when the user requested edits. Omit `model` unless the user explicitly supplied an override. Use browser access only when required by the task.
+
+For a Claude review, identify the exact repository verification commands and one project-relative handoff file before calling. Pass them as `verificationCommands` and `handoffPath`. Claude may read the workspace, run only those commands, and create or edit only that handoff file; arbitrary Bash, source edits, posting, commits, pushes, and other writes remain denied. Reuse the same fields with `continue_claude`.
+
+For work mode, default `permissionProfile` to `standard`. Set `permissionProfile: yolo` only when the user explicitly says `yolo`; never infer it from urgency or broad implementation language. Before calling, warn that the designated writer will bypass provider approvals and sandbox protections. YOLO never applies to reviewers.
+
+For Claude work mode, use `workProfile: implement` when Claude owns local implementation through commit. Use `workProfile: deliver` when repository policy also assigns Claude the push and pull-request lifecycle. These profiles cover common package-manager, test, checksum, Git, and bounded `gh pr` command families so discovered commands do not require a continuation. Keep `workCommands` only as an additive escape hatch for unusual repository-specific tools.
+
+Use the same `workProfile` distinction when Codex is the delegated writer. `implement` keeps delegated Codex network-disabled and instructs it to stop after local verification/commit. `deliver` enables workspace network access and authorizes the requested push and PR lifecycle. Do not assume moving the chair CLI changes an existing session or collaboration's stored workspace, writer, or profile.
+
+If repository instructions require the reviewer to mirror findings to the pull request, treat that as standing authorization for the review publication only. Resolve the repository, PR number, exact current head SHA, and required bot login from the repository and connected GitHub state. Pass them as `githubReview` for Claude, Codex, or Antigravity. Do not pass a token; the bound publisher reads `~/.config/ghtoken` outside model context and verifies the login. The reviewer must author the durable handoff first, then one formal PR review with a general verdict and inline comments for actionable line-specific findings. Claude and Codex use the bound review tools directly. Antigravity authors a validated review envelope that the broker sends unchanged through the same target-bound publisher because `agy` lacks per-session MCP injection. Do not substitute the chair's personal `gh` identity.
+
+## Show the handoff receipt
+
+Before calling the tool, show:
+
+```text
+HANDOFF
+From: <current chair>
+To: <peer>
+Purpose: <one sentence>
+Tool: <exact MCP tool>
+Broker: collaboration.start_collaboration
+Mode: <review or work>
+Workspace: <path>
+Model: provider configured | <explicit override>
+Browser: off | isolated
+Verification commands: none | <exact commands>
+Work commands: none | <exact commands>
+Work profile: exact | implement | deliver
+Handoff file: response only | <project-relative path>
+PR review: off | <repository>#<number>@<head SHA> as <bot login>
+```
+
+Then send a self-contained prompt containing the objective, constraints, relevant paths or diff, acceptance criteria, and expected output. Tell the peer not to invoke another agent.
+
+Return the collaboration ID immediately. For routine polling call `get_collaboration` with `detail: status`, `includeTurns: 0`, the last `updatedAt` as `afterUpdatedAt`, and `waitSeconds: 8` (or less). Track the last displayed `runtime.turnCount`. Only when that count increases, make one history call with `detail: full`, `includeTurns` equal to the bounded number needed, and `afterTurn` set to the last displayed turn. Never request or repeat the original task and completed turn bodies on heartbeat-only polls. Continue until terminal. Surface `runtime.activeCall.summary` verbatim and distinguish it from the automatic liveness heartbeat. Never infer progress from silence or expose private reasoning.
+
+Never substitute a long-running Bash, sleep, gh, or PR polling loop for broker polling. A blocking shell watcher prevents the host CLI from redrawing its status line. Make each `get_collaboration` call separately, let it return within eight seconds, render the returned heartbeat, and then issue the next poll. Check GitHub only after the broker reports a completed turn or terminal state.
+
+## Show the result receipt
+
+After the call, show:
+
+```text
+HANDOFF COMPLETE
+Peer: <peer>
+Session: <sessionId or threadId or conversationId>
+Handoff: response only | <path>
+PR review: not requested | <event and URL>
+Outcome: <short result>
+Verification: unverified | <checks performed by chair>
+```
+
+Treat the peer response as advice until the chair checks relevant files and tests. For a follow-up, announce the continuation receipt and use the exact returned session identifier.

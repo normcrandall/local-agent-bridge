@@ -1,0 +1,495 @@
+# Codex ↔ Claude Code ↔ Antigravity bridge
+
+This project connects the two local coding agents through MCP without API keys or a hosted relay:
+
+- **Claude Code → Codex:** Claude loads `.mcp.json`, which starts Codex's native MCP server and exposes `codex` and `codex-reply`.
+- **Codex → Claude Code:** Codex loads `.codex/config.toml`, which starts the local adapter and exposes `ask_claude` and `continue_claude`.
+- **Codex or Claude Code → Antigravity:** both load the Antigravity adapter, which exposes `ask_antigravity` and `continue_antigravity`.
+- **Antigravity → Codex or Claude Code:** Antigravity's central MCP configuration can start the same Codex and Claude servers.
+- **Browser work:** both clients load a project-scoped, isolated Playwright MCP server. This is a shared capability, not a shared browser session.
+
+The adapters shell out to the already-authenticated Claude Code and Antigravity CLIs. Exact Claude session IDs and Antigravity conversation IDs preserve continuity. Delegated prompts prohibit nested peer calls, preventing circular routing; working directories are constrained to this project. Calls from Codex require approval by default.
+
+## Setup
+
+```sh
+npm install
+npm run install:global
+npm run doctor
+npm run smoke
+```
+
+Then restart/reopen this project in Codex and Claude Code. Approve the project-scoped MCP server when Claude asks.
+
+Restart `agy` as well. Its shared MCP file at `~/.gemini/config/mcp_config.json` now exposes `codex`, `claude_code`, and `collaboration`; use `/mcp` inside Antigravity to inspect their status. This registration is global, while the service deliberately constrains delegated work to this bridge project.
+
+Restart Codex App, Claude App, and Antigravity App after setup. All three are registered with the persistent `collaboration` MCP server. Claude's ordinary Chat surface uses `~/Library/Application Support/Claude/claude_desktop_config.json`; its Code tab uses this project's `.mcp.json`.
+
+Global launchers are installed under `~/.local/bin/agent-{claude,codex,antigravity,collaboration,playwright}-mcp`, with runtime code under `~/.local/share/agent-bridge/runtime` and persistent collaboration state under `~/.local/share/agent-bridge/state`. CLI hosts use their current directory as the allowed workspace. GUI hosts set `AGENT_BRIDGE_WORKSPACE` explicitly because they do not have a reliable project working directory.
+
+Claude CLI registers `codex`, `antigravity`, `collaboration`, and `playwright` at user scope in `~/.claude.json`. Verify that they remain available outside a project with `(cd /tmp && claude mcp list)`. Project `.mcp.json` entries may coexist as team-shareable project defaults; Claude's scope precedence selects the applicable definition.
+
+Codex App and CLI register `claude_code`, `antigravity`, `collaboration`, and `playwright` globally in `~/.codex/config.toml`, pointing at the stable `~/.local/bin/agent-*-mcp` launchers. Verify the user scope outside any project with `(cd /tmp && codex mcp list)`. The global bridge workspace root is the user's home directory so the same servers can operate across projects; narrower trusted-project entries may override it.
+
+## Move the bridge to another computer
+
+The bridge repository is the portable source of truth for its runtime and `council-*` skills. Provider authentication, MCP registrations, the original AI Hero skills, and collaboration history are machine-local.
+
+### 1. Move the repository
+
+Put this directory in a private Git repository, copy it with AirDrop or external storage, or transfer it with `rsync`. Preserve executable bits and hidden directories such as `.codex`, `.claude`, and `.agents`.
+
+```sh
+git clone <private-bridge-repository> agent-bridge
+cd agent-bridge
+```
+
+Do not copy `node_modules`; recreate it on the destination.
+
+### 2. Install and authenticate the providers
+
+Install Node.js, Codex, Claude Code, and Antigravity on the new computer. Launch each provider directly and sign in there. Do not move authentication tokens by copying all of `~/.codex`, `~/.claude`, or `~/.gemini`; those directories contain unrelated machine-local state and may contain credentials.
+
+If reviewer-authored GitHub reviews are required, securely provision the dedicated bot token separately at `~/.config/ghtoken` and restrict it to the user:
+
+```sh
+chmod 600 ~/.config/ghtoken
+```
+
+Do not commit this token or place it in the bridge repository.
+
+### 3. Restore the original AI Hero skills
+
+The council companions load their original workflows from `~/.agents/skills`. For an exact copy of the current selection, transfer the canonical skill store:
+
+```sh
+rsync -a ~/.agents/ <new-computer>:~/.agents/
+```
+
+Alternatively, install a fresh selection from the upstream repository and verify that `~/.agents/skills/grill-me/SKILL.md` and the other originals exist:
+
+```sh
+npx skills@latest add mattpocock/skills
+```
+
+The upstream installer lets you select skills and target agents interactively. The bridge owns only the `council-*` companions; it does not vendor or silently modify the upstream originals.
+
+### 4. Install the bridge runtime and companion skills
+
+From the transferred repository:
+
+```sh
+npm install
+npm run install:global
+```
+
+This recreates the launchers under `~/.local/bin`, runtime under `~/.local/share/agent-bridge/runtime`, and bridge/council skills for Codex, Claude, Antigravity App, and Antigravity CLI.
+
+### 5. Replace machine-specific paths and register MCP servers
+
+The current project files `.codex/config.toml` and `.mcp.json`, plus GUI MCP configuration, contain absolute paths from the computer where they were generated. Replace the old home and repository paths with the destination paths. Check for leftovers with:
+
+```sh
+rg -n '/Users/' .codex/config.toml .mcp.json
+```
+
+Re-register or update these machine-local configurations:
+
+- Claude CLI: `~/.claude.json`
+- Claude App: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Antigravity: `~/.gemini/config/mcp_config.json`
+- Codex: the project `.codex/config.toml` or the destination's global Codex MCP configuration
+
+Each registration should point to the corresponding destination launcher under `~/.local/bin/agent-*-mcp`. GUI registrations must set `AGENT_BRIDGE_WORKSPACE` to the destination repository or intended workspace.
+
+### 6. Verify and restart
+
+```sh
+npm run doctor
+npm run smoke
+npm run test:skills
+npm run test:collaboration
+```
+
+Restart Codex App, Claude App, Antigravity App, and their CLI sessions after the checks pass.
+
+### Optional: move collaboration history
+
+Portable collaboration records and JSONL transcripts live under `~/.local/share/agent-bridge/state`. Copy that directory only if the history matters. The transcript remains readable, but resuming an old provider session may fail unless that provider's corresponding local conversation state also exists on the new computer. Starting fresh collaborations is safer.
+
+In short: move the repository and `~/.agents`, authenticate providers afresh, run the installer, replace absolute paths, verify, and restart. The remaining portability gap is automatic MCP re-registration; `npm run install:global` does not currently rewrite every application's existing config file.
+
+Four canonical skills provide the same visible vocabulary in Codex, Claude, and Antigravity:
+
+- `ask-agent`: announce and perform one named peer handoff.
+- `run-roundtable`: start and actively monitor a persistent collaboration.
+- `show-collaboration`: render status and turn history as a timeline.
+- `goal-loop`: build toward verified completion through bounded, resumable council cycles.
+- `pair-program`: rotate implementation and review roles with preflight, worktrees, visible progress, recovery, CI, budgets, and review reconciliation.
+
+The installer copies them to `~/.codex/skills`, `~/.claude/skills`, and `~/.gemini/config/skills`; it also installs Antigravity CLI-compatible markdown commands under `~/.gemini/antigravity-cli/skills`. Restart or begin a new session in each app after installation.
+
+Seventeen additive `council-*` companions bring Claude, Codex, and Antigravity into selected AI Hero workflows without changing the originals:
+
+- Planning and design: `council-grill-me`, `council-grill-with-docs`, `council-decision-mapping`, `council-design-an-interface`, `council-domain-modeling`, `council-improve-codebase-architecture`, and `council-prototype`.
+- Engineering: `council-diagnosing-bugs`, `council-implement`, `council-review`, `council-tdd`, and `council-triage`.
+- Artifacts and writing: `council-to-issues`, `council-to-prd`, `council-ubiquitous-language`, `council-edit-article`, and `council-writing-shape`.
+
+Each companion loads the corresponding original from `~/.agents/skills`, preserves its gates and output contract, then adds independent model passes, one-writer enforcement, a portable collaboration ID, and an eight-second progress heartbeat. The broker preflights providers and skips failures instead of failing the collaboration: three, two, or one available model can finish the phase, with degraded results and writer reassignment shown explicitly. Only zero available providers stops the run. Run the original name for the unchanged single-agent workflow or the `council-` name for the multi-model version.
+
+Example invocations:
+
+```text
+$ask-agent --to claude --mode review Review the current diff
+/ask-agent --to codex --mode work Implement the approved plan
+$run-roundtable --agents claude,codex,antigravity --writer codex Plan, implement, and review this change
+/show-collaboration bridge-<uuid>
+$goal-loop --writer codex --max-cycles 4 Build the feature and satisfy the verification checklist
+$council-grill-me Stress-test this architecture before we commit
+/council-review Review the current branch with all three models
+```
+
+Codex uses the `$skill-name` form. Claude and Antigravity expose the same names as slash commands. Each skill prints a receipt before delegation with the selected peer, exact MCP operation, mode, workspace, browser setting, and model behavior, then prints the returned session or collaboration ID and completion state. This keeps a handoff visible instead of making it feel like a black box.
+
+## Complete skill catalog
+
+### Bridge-native skills
+
+These skills are supplied by this project and installed across Codex, Claude, and Antigravity.
+
+| Skill | Purpose |
+| --- | --- |
+| `ask-agent` | Send one bounded task or review to a named peer with a visible handoff receipt. |
+| `run-roundtable` | Run and monitor a persistent Claude–Codex–Antigravity collaboration. |
+| `show-collaboration` | Display collaboration status, skipped providers, turns, and history. |
+| `goal-loop` | Build toward explicit completion criteria through bounded plan, implement, review, fix, and verification cycles. |
+| `agent-dialogue` | Run a bounded, chair-hosted Codex–Claude dialogue inside the current CLI. This remains project-scoped rather than part of the global three-product set. |
+
+### Installed AI Hero skills and council options
+
+The original skills live under `~/.agents/skills` and remain unchanged. “Available” means this bridge installs a working `council-*` companion. “Candidate” means the original is installed but the companion has not been built yet. “Single-agent” identifies routing, reference, setup, or mechanical utilities where a council would normally add little value.
+
+| Original skill | What it does | Multi-model option |
+| --- | --- | --- |
+| `ask-matt` | Routes a request to the appropriate AI Hero workflow. | Candidate: council-aware routing |
+| `codebase-design` | Designs deeper module interfaces, seams, and testable boundaries. | Candidate: `council-codebase-design` |
+| `decision-mapping` | Turns a loose idea into sequenced investigation tickets. | Available: `council-decision-mapping` |
+| `design-an-interface` | Produces radically different API or module-interface designs. | Available: `council-design-an-interface` |
+| `diagnosing-bugs` | Runs an evidence-first diagnosis loop for bugs and regressions. | Available: `council-diagnosing-bugs` |
+| `domain-modeling` | Sharpens domain terminology, boundaries, and decisions. | Available: `council-domain-modeling` |
+| `edit-article` | Restructures and tightens an article draft. | Available: `council-edit-article` |
+| `find-skills` | Finds installable skills for a requested capability. | Single-agent router |
+| `git-guardrails-claude-code` | Adds Claude Code hooks that block dangerous Git commands. | Single-agent setup utility |
+| `grill-me` | Relentlessly interviews the user to sharpen a plan or design. | Available: `council-grill-me` |
+| `grill-with-docs` | Grills a design while maintaining ADRs and a glossary. | Available: `council-grill-with-docs` |
+| `grilling` | Provides the underlying stress-test interview workflow. | Covered by `council-grill-me` |
+| `handoff` | Compacts a conversation into a document another agent can resume. | Candidate: `council-handoff` |
+| `implement` | Implements work from a PRD or issue set. | Available: `council-implement` |
+| `improve-codebase-architecture` | Finds architectural deepening opportunities and produces a visual report. | Available: `council-improve-codebase-architecture` |
+| `migrate-to-shoehorn` | Mechanically migrates test fixtures to `@total-typescript/shoehorn`. | Single-agent utility |
+| `obsidian-vault` | Searches and maintains an Obsidian vault. | Single-agent utility |
+| `prototype` | Builds a throwaway prototype to resolve design uncertainty. | Available: `council-prototype` |
+| `qa` | Runs conversational QA and files discovered issues. | Candidate: `council-qa` |
+| `request-refactor-plan` | Interviews for and publishes a small-commit refactor plan. | Candidate: `council-request-refactor-plan` |
+| `resolving-merge-conflicts` | Resolves an active merge or rebase conflict. | Candidate: `council-resolving-merge-conflicts` with one writer |
+| `review` | Reviews changes against repository standards and the originating specification. | Available: `council-review` |
+| `scaffold-exercises` | Creates course exercise, solution, and explainer structures. | Candidate: `council-scaffold-exercises` |
+| `setup-matt-pocock-skills` | Configures issue tracking, triage labels, and domain-document conventions. | Single-agent setup utility |
+| `setup-pre-commit` | Installs formatting, type-checking, and test hooks. | Single-agent setup utility |
+| `tdd` | Implements features or fixes through red–green–refactor. | Available: `council-tdd` |
+| `teach` | Teaches a concept within the current workspace. | Candidate: `council-teach` |
+| `to-issues` | Decomposes a plan or PRD into tracer-bullet issues. | Available: `council-to-issues` |
+| `to-prd` | Turns the current conversation into a publishable PRD. | Available: `council-to-prd` |
+| `triage` | Moves issues and external PRs through the configured triage state machine. | Available: `council-triage` |
+| `ubiquitous-language` | Creates and hardens a DDD-style terminology glossary. | Available: `council-ubiquitous-language` |
+| `writing-beats` | Builds an article as a choose-your-own-path sequence of beats. | Candidate: `council-writing-beats` |
+| `writing-fragments` | Interviews for raw claims, vignettes, and ideas before structuring them. | Candidate: `council-writing-fragments` |
+| `writing-great-skills` | Provides reference guidance for authoring predictable skills. | Single-agent reference |
+| `writing-shape` | Turns notes or fragments into a coherent article structure. | Available: `council-writing-shape` |
+
+### Every currently available council companion
+
+```text
+council-decision-mapping
+council-design-an-interface
+council-diagnosing-bugs
+council-domain-modeling
+council-edit-article
+council-grill-me
+council-grill-with-docs
+council-implement
+council-improve-codebase-architecture
+council-prototype
+council-review
+council-tdd
+council-to-issues
+council-to-prd
+council-triage
+council-ubiquitous-language
+council-writing-shape
+```
+
+Invoke an original for the existing single-agent behavior or add the `council-` prefix for an available multi-model companion. Council skills attempt Claude, Codex, and Antigravity, continue with whatever subset is available, and expose provider skips and progress to the user.
+
+## Persistent collaboration across desktop apps
+
+The collaboration service lets one app start a detached roundtable and another app inspect or continue it using the same provider sessions. The chair app can close while the worker continues.
+
+Ask any configured app:
+
+> Start a persistent collaboration with Claude, Codex, and Antigravity. Claude plans, Codex implements as the only writer, and Antigravity reviews. Use configured models and return the collaboration ID immediately.
+
+The app calls `start_collaboration` and returns an ID such as `bridge-<uuid>`. In another app, ask:
+
+> Get collaboration `bridge-<uuid>` and show its latest turns.
+
+If the agents need a decision or another phase:
+
+> Continue collaboration `bridge-<uuid>` with this answer: <answer>.
+
+The common tools are:
+
+- `start_collaboration`: starts a detached bounded run and returns immediately.
+- `get_collaboration`: reads status and recent turns; supports a 30-second long poll.
+- `continue_collaboration`: resumes the exact Claude, Codex, and Antigravity sessions.
+- `cancel_collaboration`: terminates the detached worker process group, including the active provider adapter.
+- `list_collaborations`: finds recent portable IDs.
+
+State and JSONL transcripts live under `~/.local/share/agent-bridge/state`. A collaboration records provider session IDs, next speaker, agreement streak, selected agents, models, workspace, cumulative turn count, and an `activeCall` record. While a provider works, `activeCall` contains the provider, phase, automatic liveness heartbeat, elapsed time, and latest provider-authored or adapter-observed summary.
+
+`get_collaboration` is compact by default: `detail: status` and `includeTurns: 0` omit the original brief, command arrays, preflight data, and completed turn bodies. Poll with `afterUpdatedAt`; when `runtime.turnCount` advances, request new output once with `detail: full`, a bounded `includeTurns`, and `afterTurn`. This keeps heartbeats inexpensive without losing durable history.
+
+Make every heartbeat poll a separate `get_collaboration` call with `waitSeconds: 8` or less. Do not replace broker polling with one long-running Bash, sleep, `gh`, or PR watcher: host CLIs generally redraw their status UI only after a tool call returns. Check GitHub after the broker reports a completed turn or terminal state.
+
+A timeout or lost transport becomes `indeterminate`, not unavailable. The broker preserves writer ownership and blocks replacement work in that workspace until the user inspects the provider/workspace and explicitly cancels. Only a confirmed provider failure permits removal from the rotation; cancellation terminates the detached process group.
+
+Delegated peer processes inherit a recursion marker. If a participant tries to start or continue another persistent collaboration through its own MCP tools, the nested mutation is rejected; only the active broker routes turns.
+
+In work mode, `writer` defaults to the starting agent. The designated writer receives edit permissions; every other participant is forced into review mode at both the prompt and provider-tool layers. A workspace lease prevents two persistent work-mode collaborations from editing this project simultaneously. Review-only collaborations may still run concurrently.
+
+Model fields are optional. Omitting them preserves each provider's configured model. Explicit values pass through unchanged.
+
+## Pair-programming operations
+
+Use `$pair-program` when Claude, Codex, and optionally Antigravity should alternate implementation and review across tasks. The installed global `bridge` CLI exposes the operational controls used by that skill:
+
+```bash
+bridge capabilities
+bridge preflight --workspace /path/to/repo --agents claude,codex --mode work --profile deliver
+bridge roles --task 12 --agents claude,codex # --task-number is also accepted
+bridge status
+bridge recover bridge-<uuid>
+bridge worktree --workspace /path/to/repo --task task-12 --branch task-12 --base main
+bridge ci --workspace /path/to/repo --pr 12
+bridge reconcile --reviews reviews.json
+bridge usage --id bridge-<uuid> --max-cost 10 --max-tokens 500000
+bridge bundle --output ~/agent-bridge-transfer # --destination is also accepted
+```
+
+- Role rotation is deterministic but never overrides an explicit writer or transfers an active task.
+- Work-mode collaborations can create an isolated task worktree before any provider starts.
+- Preflight records provider capabilities, repository state, work profile, branch, and remote readiness.
+- Status combines provider heartbeat/summary, writer, branch, PR/CI, and known usage.
+- Recovery is inspect-first; marking indeterminate or cancelling requires an explicit flag.
+- `ciTracking.prNumber` refreshes hosted checks after completed turns.
+- Structured reviews reconcile into accepted, disputed, and rejected evidence rather than majority vote.
+- Optional cost, token, and elapsed-time budgets stop after the current turn.
+- Portable bundles exclude credentials, tokens, collaboration state, `.git`, `.bridge`, and `node_modules`; authenticate providers fresh on the destination computer.
+
+## Let them talk
+
+### Inside either CLI
+
+Start Claude Code in the project and invoke:
+
+```text
+/agent-dialogue Review the current diff with Codex and agree on the real defects
+```
+
+Claude remains the host and calls one persistent Codex thread up to three times. The complete exchange stays visible in Claude Code.
+
+Start Codex in the project with `codex` and invoke:
+
+```text
+$agent-dialogue Review the current diff with Claude and agree on the real defects
+```
+
+Codex remains the host and calls one persistent Claude session up to three times. The complete exchange stays visible in Codex.
+
+Antigravity can be the host too. Start `agy` in this project and ask it to use the `codex` or `claude_code` MCP tools for a bounded review or handoff. Keep routing in the host: a delegated peer must not call another peer recursively.
+
+The host CLI is both participant and chair, so this mode is convenient but not perfectly neutral. Use the external broker below when you want deterministic alternation and a separate transcript.
+
+#### Select models and assign roles
+
+Model flags are optional. With no flags, the bridge omits the MCP `model` property and each delegated CLI uses the model from that user's saved provider settings or environment:
+
+```text
+/agent-dialogue <task>
+$agent-dialogue <task>
+```
+
+Use flags only for a one-run override. Values are passed through unchanged, and can be any alias or full model ID available to the corresponding account:
+
+```text
+/agent-dialogue --codex-model <codex-model> --claude-model <active-claude-model> <task>
+```
+
+```text
+$agent-dialogue --claude-model <claude-model> --codex-model <active-codex-model> <task>
+```
+
+When the requested host model is not already active, launch or switch it first:
+
+```sh
+claude --model <claude-model>
+codex -m <codex-model>
+```
+
+The peer model override is passed directly through MCP. The host model is selected by its CLI session. A model selected only for an unrelated terminal session is not a saved provider default; pass it explicitly when the bridge starts a separate delegated process.
+
+For example, Fable plans, a selected Codex model implements, and Fable reviews:
+
+```sh
+claude --model fable
+```
+
+```text
+/agent-dialogue --claude-model fable --codex-model <codex-model> Fable plans, Codex implements, then Fable reviews: <task>
+```
+
+Or a selected Codex model plans, Fable implements, and Codex reviews:
+
+```text
+$agent-dialogue --codex-model <active-codex-model> --claude-model fable Codex plans, Fable implements, then Codex reviews: <task>
+```
+
+The inverse arrangement also works from Claude Code after selecting Fable with `/model fable`:
+
+```text
+/agent-dialogue --codex-model <codex-model> --claude-model fable Codex plans, Fable implements, then Codex reviews: <task>
+```
+
+Only the designated implementer receives write access. The planner remains read-only and performs the final review against the diff and verification results.
+
+### External broker
+
+Use the turn broker when you want an actual bounded dialogue rather than a single handoff:
+
+```sh
+./bridge talk "Review the current diff together and agree on the real defects"
+```
+
+The broker rotates through persistent sessions for the selected agents, prints each turn, and saves a JSONL transcript under `.bridge/conversations/`. Every turn must end with one of three states:
+
+- `CONTINUE`: another turn is useful.
+- `AGREED`: the agent believes the result is ready; every selected agent must agree consecutively to stop.
+- `NEEDS_USER`: stop and return one concrete decision to you.
+
+The default is six read-only turns. Additional modes are explicit:
+
+```sh
+./bridge talk --turns 10 "Stress-test this architecture"
+./bridge talk --claude-model <claude-model> --codex-model <codex-model> "Compare approaches"
+./bridge talk --agents claude,codex,antigravity "Triangulate this architecture"
+./bridge talk --agents codex,antigravity --start antigravity "Review this implementation"
+./bridge talk --agents claude,codex,antigravity --antigravity-model "Gemini 3.1 Pro (High)" "Compare approaches"
+./bridge talk --work "Implement this task sequentially, then cross-review it"
+./bridge talk --browser "Reproduce this UI bug together"
+```
+
+`--work` lets the selected agents edit sequentially inside the workspace. `--browser` supplies isolated browser access where the selected CLI supports it. The hard 20-turn maximum prevents unbounded agent loops and surprise usage.
+
+Antigravity model labels are passed through unchanged. If `--antigravity-model` is omitted, `agy` uses the model from the user's Antigravity settings. The same omit-by-default rule applies to Claude and Codex.
+
+Validate model strings and options without invoking either provider. Omitting both flags reports `default`, meaning provider-configured rather than bridge-selected:
+
+```sh
+./bridge talk --dry-run --claude-model <claude-model> --codex-model <codex-model> "Task"
+```
+
+## Use it
+
+In Codex:
+
+> Ask Claude to independently review the authentication changes. Use review mode and return only actionable findings.
+
+In Claude Code:
+
+> Ask Codex to review this diff in read-only mode and explain any correctness risks.
+
+In either Codex or Claude Code:
+
+> Ask Antigravity to review this plan with the configured model. Use review mode and return only concrete risks.
+
+For a browser task in either client:
+
+> Use the Playwright browser to open the local app, reproduce the reported issue, and return screenshots and exact reproduction steps.
+
+When Codex delegates a browser task to Claude, it calls `ask_claude` with `browser: true`. When Claude delegates one to Codex, it asks the `codex` tool to use the project Playwright MCP tools.
+
+Both agents share the same working tree, so avoid asking both to edit overlapping files at the same time. The durable collaboration rules live in `AGENTS.md` and `CLAUDE.md`.
+
+## Review and handoff protocol
+
+The intended loop is implementer → independent reviewer → implementer:
+
+1. The implementer completes the task and tests.
+2. The reviewer receives the objective, acceptance criteria, explicit diff/files, and verification commands.
+3. The reviewer runs read-only and reports findings by severity with file/line references.
+4. The implementer verifies findings, fixes valid issues, and requests a focused re-review in the same delegated session.
+
+Either agent can also delegate a bounded implementation task in write mode. Give it non-overlapping file ownership and explicit acceptance criteria.
+
+### Reviewer-authored GitHub reviews
+
+When repository policy says the PR is the source of truth, both directions produce reviewer-authored PR history:
+
+- Claude primary → delegated Codex uses the connected GitHub integration.
+- Codex primary → delegated Claude receives bound `github_review.write_handoff` and `github_review.submit_pr_review` tools.
+- Claude primary → delegated Codex receives the same two bound tools while its source sandbox remains read-only.
+- Claude or Codex primary → delegated Antigravity authors a strict handoff/review envelope; the broker validates it and publishes that exact payload through the same target-bound bot adapter because `agy` has no per-session MCP injection.
+
+Codex resolves and passes an explicit authorization object:
+
+```json
+{
+  "githubReview": {
+    "repository": "veliqon/nolvaren-next",
+    "prNumber": 4,
+    "headSha": "0123456789abcdef0123456789abcdef01234567",
+    "expectedLogin": "veliqon-bot"
+  }
+}
+```
+
+The delegated tool reads `~/.config/ghtoken` itself; the token never enters the prompt, skill, transcript, or MCP response. Before posting it verifies the token login, exact current PR head, and every inline-comment path. It submits a formal GitHub review (`APPROVE`, `REQUEST_CHANGES`, or `COMMENT`) with a general body and optional inline comments, records the returned URL in the handoff, and uses a content marker to avoid duplicate reviews. A re-review must refresh `headSha`.
+
+## Browser boundary
+
+The Codex/ChatGPT desktop built-in browser cannot be passed through this bridge: it is not available to Codex CLI, and `codex mcp-server` is a CLI surface. The configured Playwright MCP server gives both agents an isolated Chrome instance instead. It does not inherit cookies, accounts, or tabs from the Codex browser or your normal Chrome profile.
+
+## Safety defaults
+
+- Codex prompts before running a Claude bridge tool.
+- Claude review delegation uses locked-down `dontAsk` mode: reads are allowed, only declared `verificationCommands` may use Bash, and only one declared `handoffPath` may be written.
+- Claude work delegation also uses locked-down `dontAsk` mode. Choose `workProfile: implement` for local development through commit, or `workProfile: deliver` when the repository's one-implementer policy also assigns push and PR creation. Profiles cover common tests, package managers, checksums, Git, and bounded `gh pr` variants; additive exact `workCommands` handle unusual repository tools. Commands outside both fail immediately instead of prompting or timing out.
+- Codex delegation defaults to `sandbox: read-only` with non-interactive permissions. A designated Codex writer uses `workspace-write`; `workProfile: implement` keeps network disabled, while `workProfile: deliver` enables network for the authorized push and bounded PR lifecycle.
+- Delegated `codex mcp-server` processes run with an isolated bridge-owned `CODEX_HOME`. The bridge links the existing Codex authentication file, atomically reconciles provider credential rotation, and mirrors only safe model defaults; it does not inherit global MCP servers, plugins, notifications, hooks, project trust entries, app tooling, or skills. This prevents completed collaborations from leaving recursive bridge adapter groups behind while preserving the user-configured model. Requested browser and bound GitHub-review servers are injected as complete, task-scoped definitions.
+- An explicit `permissionProfile: yolo` is available only in work mode. It maps to Claude Code permission bypass, Codex `danger-full-access` with approvals disabled, and Antigravity auto-approval without its terminal sandbox. It is never inferred, is recorded in collaboration status/history, and does not apply to reviewers. The default remains `standard`.
+- Nested MCP is disabled in delegated Claude sessions.
+- Antigravity continuations use the exact per-project `conversationId`, never the global `--continue` shortcut.
+- Antigravity delegation always uses its terminal sandbox; review maps to `plan`, work maps to `accept-edits`.
+- Delegated Claude sessions only receive Playwright when `browser: true`; the browser uses an isolated profile.
+- Claude review mode exposes no general GitHub access. When repository policy explicitly requires reviewer-authored PR feedback, `githubReview` adds one target-bound `submit_pr_review` tool. It reads the mode-600 token at `~/.config/ghtoken` outside model context, verifies the required login, rejects stale head SHAs and paths outside the diff, and idempotently submits one formal review with general and inline comments.
+- The bound review publisher cannot push, merge, label, edit issues, access another repository or PR, or use the chair's personal GitHub identity.
+- Each delegated call has a 10-minute default and 30-minute maximum timeout.
+
+## Overrides
+
+- `CLAUDE_BIN`: absolute path to `claude` for the Codex-to-Claude adapter.
+- `NODE_BIN`: absolute path to Node.js for the adapter launcher.
+- `CODEX_BRIDGE_CODEX_BIN`: absolute path to a working `codex` binary for Claude-to-Codex.
+- `AGY_BIN`: absolute path to the Antigravity CLI executable.
+
+The global Codex CLI is installed and verified. The project MCP wrapper also retains the ChatGPT.app-bundled binary as a fallback.

@@ -1,0 +1,15 @@
+interface:
+  display_name: "Ask Agent"
+  short_description: "Hand off one task to a named peer agent"
+  default_prompt: "Use $ask-agent to send this task to a named peer and show me exactly what is called."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "claude_code"
+      description: "Claude Code peer delegation"
+    - type: "mcp"
+      value: "codex"
+      description: "Codex peer delegation"
+    - type: "mcp"
+      value: "antigravity"
+      description: "Antigravity peer delegation"

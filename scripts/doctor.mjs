@@ -1,0 +1,142 @@
+import { accessSync, constants, existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+
+const root = resolve(import.meta.dirname, "..");
+let failed = false;
+
+function check(label, test, detail = "") {
+  try {
+    if (!test()) throw new Error(detail || "check failed");
+    console.log(`OK   ${label}`);
+  } catch (error) {
+    failed = true;
+    console.error(`FAIL ${label}: ${error.message}`);
+  }
+}
+
+check("Claude Code", () => {
+  const claude = process.env.CLAUDE_BIN || resolve(homedir(), ".local/bin/claude");
+  const result = spawnSync(claude, ["--version"], { encoding: "utf8" });
+  return result.status === 0;
+}, "install or repair Claude Code, or set CLAUDE_BIN");
+
+check("Codex app binary", () => {
+  const codex = process.env.CODEX_BRIDGE_CODEX_BIN || "/Applications/ChatGPT.app/Contents/Resources/codex";
+  const result = spawnSync(codex, ["--version"], { encoding: "utf8" });
+  return result.status === 0;
+}, "ChatGPT/Codex app binary is unavailable; set CODEX_BRIDGE_CODEX_BIN");
+
+check("Codex CLI", () => {
+  const result = spawnSync("codex", ["--version"], { encoding: "utf8" });
+  return result.status === 0;
+}, "install or repair @openai/codex on PATH");
+
+check("Antigravity CLI", () => {
+  const agy = process.env.AGY_BIN || resolve(homedir(), ".local/bin/agy");
+  const result = spawnSync(agy, ["--version"], { encoding: "utf8" });
+  return result.status === 0;
+}, "install or repair Antigravity CLI, or set AGY_BIN");
+
+check("Bridge dependencies", () => existsSync(resolve(root, "node_modules/@modelcontextprotocol/sdk")), "run npm install");
+check("Playwright MCP", () => existsSync(resolve(root, "node_modules/@playwright/mcp/cli.js")), "run npm install");
+check("Codex project config", () => existsSync(resolve(root, ".codex/config.toml")));
+check("Claude project config", () => existsSync(resolve(root, ".mcp.json")));
+check("Antigravity global MCP config", () => {
+  const config = JSON.parse(readFileSync(resolve(homedir(), ".gemini/config/mcp_config.json"), "utf8"));
+  return Boolean(config.mcpServers?.codex && config.mcpServers?.claude_code && config.mcpServers?.collaboration);
+}, "register codex, claude_code, and collaboration in ~/.gemini/config/mcp_config.json");
+check("Claude Desktop collaboration config", () => {
+  const path = resolve(homedir(), "Library/Application Support/Claude/claude_desktop_config.json");
+  const config = JSON.parse(readFileSync(path, "utf8"));
+  return config.mcpServers?.collaboration?.command
+    === resolve(homedir(), ".local/bin/agent-collaboration-mcp");
+}, "point Claude Desktop collaboration at the stable global launcher");
+check("Claude CLI user-scope bridge config", () => {
+  const config = JSON.parse(readFileSync(resolve(homedir(), ".claude.json"), "utf8"));
+  const expected = {
+    codex: "agent-codex-mcp",
+    antigravity: "agent-antigravity-mcp",
+    collaboration: "agent-collaboration-mcp",
+    playwright: "agent-playwright-mcp",
+  };
+  return Object.entries(expected).every(([name, executable]) => (
+    config.mcpServers?.[name]?.command === resolve(homedir(), `.local/bin/${executable}`)
+  ));
+}, "register the bridge MCPs with `claude mcp add --scope user`");
+check("Claude CLI collaboration status line", () => {
+  const settings = JSON.parse(readFileSync(resolve(homedir(), ".claude/settings.json"), "utf8"));
+  const launcher = resolve(homedir(), ".local/bin/agent-bridge-claude-statusline");
+  accessSync(launcher, constants.X_OK);
+  return settings.statusLine?.command === launcher
+    && settings.statusLine?.refreshInterval <= 2;
+}, "point Claude statusLine at agent-bridge-claude-statusline with refreshInterval 2");
+check("GitHub review bot token", () => {
+  const path = resolve(homedir(), ".config/ghtoken");
+  const info = statSync(path);
+  return info.isFile() && (info.mode & 0o077) === 0 && readFileSync(path, "utf8").trim().length > 0;
+}, "install the dedicated review-bot token at ~/.config/ghtoken with mode 600");
+check("Codex user-scope bridge config", () => {
+  const expected = {
+    claude_code: "agent-claude-mcp",
+    antigravity: "agent-antigravity-mcp",
+    collaboration: "agent-collaboration-mcp",
+    playwright: "agent-playwright-mcp",
+  };
+  return Object.entries(expected).every(([name, executable]) => {
+    const result = spawnSync("codex", ["mcp", "get", name], {
+      cwd: "/tmp",
+      encoding: "utf8",
+    });
+    return result.status === 0
+      && result.stdout.includes(resolve(homedir(), `.local/bin/${executable}`));
+  });
+}, "register the bridge MCPs in ~/.codex/config.toml with the stable global launchers");
+check("Codex dialogue skill", () => existsSync(resolve(root, ".agents/skills/agent-dialogue/SKILL.md")));
+check("Claude dialogue skill", () => existsSync(resolve(root, ".claude/skills/agent-dialogue/SKILL.md")));
+check("Bridge launcher executable", () => {
+  accessSync(resolve(root, "scripts/claude-bridge-mcp.sh"), constants.X_OK);
+  return true;
+});
+check("Antigravity launcher executable", () => {
+  accessSync(resolve(root, "scripts/antigravity-bridge-mcp.sh"), constants.X_OK);
+  return true;
+});
+check("Collaboration launcher executable", () => {
+  accessSync(resolve(root, "scripts/collaboration-bridge-mcp.sh"), constants.X_OK);
+  return true;
+});
+check("Global collaboration launcher executable", () => {
+  for (const name of ["claude", "codex", "antigravity", "collaboration", "playwright"]) {
+    accessSync(resolve(homedir(), `.local/bin/agent-${name}-mcp`), constants.X_OK);
+  }
+  return existsSync(resolve(homedir(), ".local/share/agent-bridge/runtime/src/collaboration-bridge.mjs"));
+});
+check("Global bridge operations CLI", () => {
+  accessSync(resolve(homedir(), ".local/bin/bridge"), constants.X_OK);
+  const result = spawnSync(resolve(homedir(), ".local/bin/bridge"), ["capabilities"], { encoding: "utf8" });
+  return result.status === 0 && result.stdout.includes('"claude"') && result.stdout.includes('"codex"');
+}, "run npm run install:global to install ~/.local/bin/bridge");
+check("Global collaboration skills", () => {
+  const names = readdirSync(resolve(root, "skills"), { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name);
+  const roots = [
+    resolve(homedir(), ".codex/skills"),
+    resolve(homedir(), ".claude/skills"),
+    resolve(homedir(), ".gemini/config/skills"),
+  ];
+  return roots.every((skillRoot) => names.every((name) => (
+    existsSync(resolve(skillRoot, name, "SKILL.md"))
+  ))) && names.every((name) => (
+    existsSync(resolve(homedir(), `.gemini/antigravity-cli/skills/${name}.md`))
+  ));
+}, "run npm run install:global to install the bridge skills for all three products");
+check("Browser launcher executable", () => {
+  accessSync(resolve(root, "scripts/playwright-mcp.sh"), constants.X_OK);
+  return true;
+});
+
+if (failed) process.exit(1);
+console.log("\nRun `npm run smoke`, `npm run test:talk`, `npm run test:collaboration`, `npm run test:desktop`, `npm run test:skills`, and `npm run test:models` for model-free validation.");

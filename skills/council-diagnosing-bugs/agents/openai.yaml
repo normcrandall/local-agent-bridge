@@ -1,0 +1,11 @@
+interface:
+  display_name: "Council Diagnosing Bugs"
+  short_description: "Run diagnosing-bugs with a three-model council"
+  default_prompt: "Use $council-diagnosing-bugs with Claude, Codex, and Antigravity for this task."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "collaboration"
+      description: "Persistent Claude, Codex, and Antigravity broker"
+policy:
+  allow_implicit_invocation: true

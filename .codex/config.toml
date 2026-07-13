@@ -1,0 +1,35 @@
+[mcp_servers.claude_code]
+command = "agent-claude-mcp"
+args = []
+startup_timeout_sec = 20
+tool_timeout_sec = 1800
+enabled = true
+required = false
+default_tools_approval_mode = "prompt"
+
+[mcp_servers.playwright]
+command = "agent-playwright-mcp"
+args = []
+startup_timeout_sec = 30
+tool_timeout_sec = 120
+enabled = true
+required = false
+default_tools_approval_mode = "prompt"
+
+[mcp_servers.antigravity]
+command = "agent-antigravity-mcp"
+args = []
+startup_timeout_sec = 20
+tool_timeout_sec = 1800
+enabled = true
+required = false
+default_tools_approval_mode = "prompt"
+
+[mcp_servers.collaboration]
+command = "agent-collaboration-mcp"
+args = []
+startup_timeout_sec = 20
+tool_timeout_sec = 45
+enabled = true
+required = false
+default_tools_approval_mode = "prompt"

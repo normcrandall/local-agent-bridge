@@ -1,0 +1,30 @@
+#!/bin/zsh
+set -eu
+
+ROOT="${0:A:h}"
+COMMAND="${1:-}"
+
+case "$COMMAND" in
+  talk)
+    shift
+    exec node "$ROOT/scripts/bridge-talk.mjs" "$@"
+    ;;
+  doctor)
+    exec npm --prefix "$ROOT" run doctor
+    ;;
+  smoke)
+    exec npm --prefix "$ROOT" run smoke
+    ;;
+  status|capabilities|roles|preflight|recover|worktree|ci|reconcile|usage|bundle)
+    shift
+    exec node "$ROOT/scripts/bridge-ops.mjs" "$COMMAND" "$@"
+    ;;
+  ""|help|--help|-h)
+    print "Usage: ./bridge <talk|doctor|smoke|status|capabilities|roles|preflight|recover|worktree|ci|reconcile|usage|bundle> [options]"
+    print "Run './bridge talk --help' for conversation options."
+    ;;
+  *)
+    print -u2 "Unknown bridge command: $COMMAND"
+    exit 2
+    ;;
+esac

@@ -1,0 +1,11 @@
+interface:
+  display_name: "Goal Loop"
+  short_description: "Build toward verified completion with an AI council"
+  default_prompt: "Use $goal-loop to build this through bounded plan, implement, review, and verification cycles."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "collaboration"
+      description: "Persistent Claude, Codex, and Antigravity broker"
+policy:
+  allow_implicit_invocation: true
