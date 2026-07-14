@@ -156,7 +156,7 @@ for (const name of bridgeSkillNames) {
 }
 
 const councilSkillNames = bridgeSkillNames.filter((name) => name.startsWith("council-"));
-assert.equal(councilSkillNames.length, 24);
+assert.equal(councilSkillNames.length, 25);
 for (const name of [
   "council-loop-me",
   "council-research",
@@ -166,7 +166,8 @@ for (const name of [
   "council-wayfinder",
   "council-wizard",
 ]) assert.ok(councilSkillNames.includes(name), `Missing newly supported council skill ${name}`);
-for (const name of councilSkillNames) {
+const generatedCouncilSkillNames = councilSkillNames.filter((name) => name !== "council-discovery");
+for (const name of generatedCouncilSkillNames) {
   const content = await readFile(resolve(root, "skills", name, "SKILL.md"), "utf8");
   assert.match(content, /\.agents\/skills\/.+\/SKILL\.md/);
   assert.match(content, /Claude, Codex, and Antigravity/);
@@ -185,5 +186,25 @@ for (const name of councilSkillNames) {
   assert.match(content, /provider's user-owned reviewer App/);
   assert.doesNotMatch(content, /required bot login|as <bot login>/);
 }
+
+const councilDiscovery = await readFile(resolve(root, "skills/council-discovery/SKILL.md"), "utf8");
+for (const term of [
+  ".agents/skills/wayfinder/SKILL.md",
+  ".agents/skills/to-tickets/SKILL.md",
+  "Claude, Codex, and Antigravity",
+  "collaboration.start_collaboration",
+  "waitSeconds: 8",
+  "wayfinder:map",
+  "ready-for-agent",
+  "degraded consensus",
+  "single-agent recommendation",
+  "exactly one publisher",
+  "read back and verified",
+]) assert.ok(councilDiscovery.includes(term), `Council discovery is missing ${term}`);
+assert.match(councilDiscovery, /full consensus/i);
+assert.match(councilDiscovery, /Never leave the user at a static/);
+assert.match(councilDiscovery, /Never substitute a long-running Bash, sleep/);
+assert.match(councilDiscovery, /Continue with two models or one model/);
+assert.match(councilDiscovery, /Do not edit product code/);
 
 console.log("Global bridge skills are synchronized across Codex, Claude, Antigravity App, and Antigravity CLI.");
