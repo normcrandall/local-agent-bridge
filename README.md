@@ -186,13 +186,14 @@ Portable collaboration records and JSONL transcripts live under `~/.local/share/
 
 In short: move the repository and `~/.agents`, authenticate providers afresh, run the installer, replace absolute paths, verify, and restart. The remaining portability gap is automatic MCP re-registration; `npm run install:global` does not currently rewrite every application's existing config file.
 
-Four canonical skills provide the same visible vocabulary in Codex, Claude, and Antigravity:
+Six canonical skills provide the same visible vocabulary in Codex, Claude, and Antigravity:
 
 - `ask-agent`: announce and perform one named peer handoff.
 - `run-roundtable`: start and actively monitor a persistent collaboration.
 - `show-collaboration`: render status and turn history as a timeline.
 - `goal-loop`: build toward verified completion through bounded, resumable council cycles.
 - `pair-program`: rotate implementation and review roles with preflight, worktrees, visible progress, recovery, CI, budgets, and review reconciliation.
+- `council-discovery`: inspect an existing product, reach evidence-backed feature consensus, and publish implementation-ready GitHub issues through Wayfinder.
 
 The installer copies them to `~/.codex/skills`, `~/.claude/skills`, and `~/.gemini/config/skills`; it also installs Antigravity CLI-compatible markdown commands under `~/.gemini/antigravity-cli/skills`. Restart or begin a new session in each app after installation.
 
@@ -212,6 +213,7 @@ $ask-agent --to claude --mode review Review the current diff
 $run-roundtable --agents claude,codex,antigravity --writer codex Plan, implement, and review this change
 /show-collaboration bridge-<uuid>
 $goal-loop --writer codex --max-cycles 4 Build the feature and satisfy the verification checklist
+$council-discovery Find and publish the strongest next features for this app
 $council-grill-me Stress-test this architecture before we commit
 /council-review Review the current branch with all three models
 ```
@@ -231,6 +233,7 @@ These skills are supplied by this project and installed across Codex, Claude, an
 | `show-collaboration` | Display collaboration status, skipped providers, turns, and history. |
 | `goal-loop` | Build toward explicit completion criteria through bounded plan, implement, review, fix, and verification cycles. |
 | `pair-program` | Rotate one writer and independent reviewers across tasks, worktrees, CI, and formal PR reviews. |
+| `council-discovery` | Discover, reconcile, and publish evidence-backed product features through a Wayfinder map. |
 | `agent-dialogue` | Run a bounded, chair-hosted Codex–Claude dialogue inside the current CLI. This remains project-scoped rather than part of the global three-product set. |
 
 ### Installed Matt Pocock's AI Hero skills and council options
@@ -287,7 +290,10 @@ Credit for the original skills belongs to Matt Pocock and the upstream contribut
 
 ### Every currently available council companion
 
+`council-discovery` is bridge-native rather than an overlay on one upstream skill. It composes Wayfinder and ticket decomposition into a dedicated feature-discovery workflow.
+
 ```text
+council-discovery
 council-decision-mapping
 council-design-an-interface
 council-diagnosing-bugs

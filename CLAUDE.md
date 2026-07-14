@@ -8,6 +8,7 @@ Prefer the installed collaboration skills as the user-facing interface. Announce
 - Use `/run-roundtable` for a persistent multi-agent collaboration.
 - Use `/show-collaboration` to inspect, monitor, or resume collaboration history.
 - Use `/goal-loop` to build toward explicit completion criteria through bounded plan, implement, review, and verification cycles.
+- Use `/council-discovery` to inspect an existing app, reconcile evidence-backed feature proposals from Claude, Codex, and Antigravity, and publish implementation-ready GitHub issues through Wayfinder.
 - Use a `/council-*` companion when the user wants an installed AI Hero workflow run by Claude, Codex, and Antigravity together. The original skill remains the single-agent option.
 
 The raw MCP tools are the implementation layer behind these skills. Invoke them directly only when a skill is unavailable or the user explicitly asks for the low-level tool.
