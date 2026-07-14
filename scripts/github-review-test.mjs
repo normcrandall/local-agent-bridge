@@ -77,6 +77,16 @@ assert.equal(payload.event, "REQUEST_CHANGES");
 assert.deepEqual(payload.comments, base.comments);
 assert.match(payload.body, /agent-bridge-review/);
 
+const appApi = fakeGitHub({ login: "example-reviewer[bot]" });
+const appSubmitted = await submitBoundReview({
+  ...base,
+  expectedLogin: "example-reviewer[bot]",
+  verifiedLogin: "example-reviewer[bot]",
+  fetchImpl: appApi.fetchImpl,
+});
+assert.equal(appSubmitted.login, "example-reviewer[bot]");
+assert.equal(appApi.calls.some((call) => call.url.endsWith("/user")), false);
+
 await assert.rejects(
   submitBoundReview({ ...base, fetchImpl: fakeGitHub({ login: "wrong-user" }).fetchImpl }),
   /identity mismatch/,
@@ -150,6 +160,7 @@ const transport = new StdioClientTransport({
     GITHUB_REVIEW_EXPECTED_LOGIN: "review-bot",
     GITHUB_REVIEW_HANDOFF_PATH: handoffFile,
     GITHUB_REVIEW_TOKEN_FILE: tokenFile,
+    GITHUB_APP_CONFIG: join(temporary, "not-configured.json"),
     GITHUB_REVIEW_API_URL: `http://127.0.0.1:${port}`,
   },
 });

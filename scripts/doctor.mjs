@@ -1,7 +1,8 @@
 import { accessSync, constants, existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { GITHUB_LOGIN_PATTERN } from "../src/github-app-auth.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 let failed = false;
@@ -72,11 +73,27 @@ check("Claude CLI collaboration status line", () => {
   return settings.statusLine?.command === launcher
     && settings.statusLine?.refreshInterval <= 2;
 }, "point Claude statusLine at agent-bridge-claude-statusline with refreshInterval 2");
-check("GitHub review bot token", () => {
-  const path = resolve(homedir(), ".config/ghtoken");
-  const info = statSync(path);
-  return info.isFile() && (info.mode & 0o077) === 0 && readFileSync(path, "utf8").trim().length > 0;
-}, "install the dedicated review-bot token at ~/.config/ghtoken with mode 600");
+check("GitHub reviewer credential", () => {
+  const configPath = resolve(homedir(), ".config/local-agent-bridge/github-apps.json");
+  if (existsSync(configPath)) {
+    const reviewer = JSON.parse(readFileSync(configPath, "utf8")).roles?.reviewer;
+    if (reviewer) {
+      const keyPath = reviewer.privateKeyPath?.startsWith("~/")
+        ? resolve(homedir(), reviewer.privateKeyPath.slice(2))
+        : isAbsolute(reviewer.privateKeyPath || "")
+          ? reviewer.privateKeyPath
+          : resolve(dirname(configPath), reviewer.privateKeyPath || "");
+      const info = statSync(keyPath);
+      return /^\d+$/.test(String(reviewer.appId || ""))
+        && GITHUB_LOGIN_PATTERN.test(reviewer.expectedLogin || "")
+        && info.isFile()
+        && (info.mode & 0o077) === 0;
+    }
+  }
+  const tokenPath = resolve(homedir(), ".config/ghtoken");
+  const info = statSync(tokenPath);
+  return info.isFile() && (info.mode & 0o077) === 0 && readFileSync(tokenPath, "utf8").trim().length > 0;
+}, "configure a reviewer GitHub App or install ~/.config/ghtoken with mode 600");
 check("Codex user-scope bridge config", () => {
   const expected = {
     claude_code: "agent-claude-mcp",

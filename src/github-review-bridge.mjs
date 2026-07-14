@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 
-import { appendFile, readFile, stat, writeFile } from "node:fs/promises";
+import { appendFile, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { submitBoundReview } from "./github-review-client.mjs";
+import { GITHUB_LOGIN_PATTERN, resolveReviewToken } from "./github-app-auth.mjs";
 
 const repository = process.env.GITHUB_REVIEW_REPOSITORY;
 const prNumber = Number.parseInt(process.env.GITHUB_REVIEW_PR_NUMBER || "", 10);
@@ -21,14 +22,15 @@ if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository || "")) {
 }
 if (!Number.isInteger(prNumber) || prNumber < 1) throw new Error("GITHUB_REVIEW_PR_NUMBER is invalid.");
 if (!/^[0-9a-f]{40}$/i.test(headSha || "")) throw new Error("GITHUB_REVIEW_HEAD_SHA must be a full commit SHA.");
-if (!/^[A-Za-z0-9-]+$/.test(expectedLogin || "")) throw new Error("GITHUB_REVIEW_EXPECTED_LOGIN is invalid.");
+if (!GITHUB_LOGIN_PATTERN.test(expectedLogin || "")) throw new Error("GITHUB_REVIEW_EXPECTED_LOGIN is invalid.");
 if (!handoffPath) throw new Error("GITHUB_REVIEW_HANDOFF_PATH is required.");
 
-const tokenInfo = await stat(tokenFile);
-if (!tokenInfo.isFile()) throw new Error("GitHub review token path must be a file.");
-if ((tokenInfo.mode & 0o077) !== 0) throw new Error("GitHub review token file must not be accessible by group or other users.");
-const token = (await readFile(tokenFile, "utf8")).trim();
-if (!token) throw new Error("GitHub review token file is empty.");
+const credential = await resolveReviewToken({ repository, tokenFile });
+if (credential.expectedLogin && credential.expectedLogin !== expectedLogin) {
+  throw new Error(`Configured reviewer identity ${credential.expectedLogin} does not match authorized identity ${expectedLogin}.`);
+}
+const { token, verifiedLogin } = credential;
+const reviewApiUrl = verifiedLogin ? "https://api.github.com" : apiUrl;
 
 const inlineComment = z.object({
   path: z.string().min(1),
@@ -91,12 +93,13 @@ server.registerTool(
     const handoff = await readFile(handoffPath, "utf8");
     if (!handoff.trim()) throw new Error("The authorized handoff file is empty; write it before posting the review.");
     const result = await submitBoundReview({
-      apiUrl,
+      apiUrl: reviewApiUrl,
       token,
       repository,
       prNumber,
       headSha,
       expectedLogin,
+      verifiedLogin,
       event,
       body,
       comments,

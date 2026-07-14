@@ -9,6 +9,7 @@ import {
   createWorktree,
   exportPortableManifest,
   preflight,
+  providerCapabilities,
   reconcileReviews,
   selectRoles,
   usageDecision,
@@ -39,6 +40,38 @@ const temporary = mkdtempSync(join(tmpdir(), "bridge-operations-test-"));
 const repo = join(temporary, "repo");
 mkdirSync(repo);
 try {
+  const authHome = join(temporary, "home");
+  const authConfigDirectory = join(authHome, ".config/local-agent-bridge");
+  mkdirSync(authConfigDirectory, { recursive: true });
+  mkdirSync(join(authHome, ".config"), { recursive: true });
+  writeFileSync(join(authHome, ".config/ghtoken"), "static-token\n", { mode: 0o600 });
+  writeFileSync(join(authConfigDirectory, "github-apps.json"), JSON.stringify({
+    version: 1,
+    roles: {
+      reviewer: {
+        appId: "123",
+        expectedLogin: "reviewer[bot]",
+        privateKeyPath: "missing.pem",
+        installations: { owner: 456 },
+      },
+    },
+  }));
+  assert.equal(providerCapabilities({ home: authHome }).claude.githubReview, false);
+  writeFileSync(join(authConfigDirectory, "missing-login.pem"), "not-a-real-key\n", { mode: 0o600 });
+  writeFileSync(join(authConfigDirectory, "github-apps.json"), JSON.stringify({
+    version: 1,
+    roles: {
+      reviewer: {
+        appId: "123",
+        privateKeyPath: "missing-login.pem",
+        installations: { owner: 456 },
+      },
+    },
+  }));
+  assert.equal(providerCapabilities({ home: authHome }).claude.githubReview, false);
+  writeFileSync(join(authConfigDirectory, "github-apps.json"), JSON.stringify({ version: 1, roles: {} }));
+  assert.equal(providerCapabilities({ home: authHome }).claude.githubReview, true);
+
   execFileSync("git", ["init"], { cwd: repo });
   execFileSync("git", ["config", "user.name", "Bridge Test"], { cwd: repo });
   execFileSync("git", ["config", "user.email", "bridge@example.invalid"], { cwd: repo });

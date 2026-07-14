@@ -15,6 +15,7 @@ import { delimiter, dirname, isAbsolute, join, relative, resolve } from "node:pa
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { GITHUB_LOGIN_PATTERN } from "./github-app-auth.mjs";
 
 const RUNTIME_ROOT = realpathSync(process.env.BRIDGE_RUNTIME_ROOT || process.env.BRIDGE_ROOT || process.cwd());
 const WORKSPACE_ROOT = realpathSync(process.env.BRIDGE_WORKSPACE_ROOT || process.env.BRIDGE_ROOT || process.cwd());
@@ -373,7 +374,7 @@ const sharedInput = {
     repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
     prNumber: z.number().int().min(1),
     headSha: z.string().regex(/^[0-9a-f]{40}$/i),
-    expectedLogin: z.string().regex(/^[A-Za-z0-9-]+$/),
+    expectedLogin: z.string().regex(GITHUB_LOGIN_PATTERN),
   }).strict().optional().describe(
     "Explicit authorization for Claude to submit one formal review to an exact GitHub PR head using the dedicated review-bot token. Requires handoffPath.",
   ),

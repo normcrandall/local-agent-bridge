@@ -122,7 +122,7 @@ switch (command) {
     const archive = resolve(destination, "agent-bridge-source.tgz");
     const tar = spawnSync("tar", ["--exclude=node_modules", "--exclude=.git", "--exclude=.bridge", "-czf", archive, "-C", root, "."], { encoding: "utf8" });
     if (tar.status !== 0) throw new Error((tar.stderr || tar.stdout).trim());
-    writeFileSync(resolve(destination, "INSTALL.txt"), "Extract agent-bridge-source.tgz, then run: npm ci && npm run install:global && npm run doctor\nNever copy provider credentials or ~/.config/ghtoken between computers.\n");
+    writeFileSync(resolve(destination, "INSTALL.txt"), "Extract agent-bridge-source.tgz, then run: npm ci && npm run install:global && npm run doctor\nProvision provider credentials and GitHub review authentication separately. Never include tokens or GitHub App private keys in this bundle.\n");
     const installer = resolve(destination, "install.sh");
     writeFileSync(installer, `#!/bin/zsh
 set -eu
@@ -133,7 +133,7 @@ tar -xzf "$HERE/agent-bridge-source.tgz" -C "$TARGET"
 npm --prefix "$TARGET" ci
 npm --prefix "$TARGET" run install:global
 npm --prefix "$TARGET" run doctor
-print "Authenticate Claude Code, Codex, Antigravity, and provision ~/.config/ghtoken separately if PR reviews are required."
+print "Authenticate Claude Code, Codex, and Antigravity. Configure your reviewer GitHub App or ~/.config/ghtoken separately if PR reviews are required."
 `, { mode: 0o700 });
     chmodSync(installer, 0o700);
     json({ destination, archive, installer, manifest });

@@ -55,14 +55,21 @@ export async function submitBoundReview({
   prNumber,
   headSha,
   expectedLogin,
+  verifiedLogin = null,
   event,
   body,
   comments = [],
 }) {
-  const userResponse = await fetchImpl(`${apiUrl}/user`, { headers: headers(token) });
-  const user = await responseJson(userResponse, "GitHub identity check");
-  if (user?.login !== expectedLogin) {
-    throw new Error(`GitHub review identity mismatch: expected ${expectedLogin}, received ${user?.login || "unknown"}.`);
+  if (verifiedLogin) {
+    if (verifiedLogin !== expectedLogin) {
+      throw new Error(`GitHub review identity mismatch: expected ${expectedLogin}, received ${verifiedLogin}.`);
+    }
+  } else {
+    const userResponse = await fetchImpl(`${apiUrl}/user`, { headers: headers(token) });
+    const user = await responseJson(userResponse, "GitHub identity check");
+    if (user?.login !== expectedLogin) {
+      throw new Error(`GitHub review identity mismatch: expected ${expectedLogin}, received ${user?.login || "unknown"}.`);
+    }
   }
 
   const prResponse = await fetchImpl(`${apiUrl}/repos/${repository}/pulls/${prNumber}`, {

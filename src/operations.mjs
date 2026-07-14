@@ -1,7 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+import { GITHUB_LOGIN_PATTERN } from "./github-app-auth.mjs";
 
 export const PROVIDERS = ["claude", "codex", "antigravity"];
 
@@ -28,6 +29,25 @@ function executable(command) {
 export function providerCapabilities({ home = homedir() } = {}) {
   const tokenPath = resolve(home, ".config/ghtoken");
   const reviewBot = (() => {
+    const configPath = resolve(home, ".config/local-agent-bridge/github-apps.json");
+    if (existsSync(configPath)) {
+      try {
+        const config = JSON.parse(readFileSync(configPath, "utf8"));
+        const reviewer = config.roles?.reviewer;
+        if (reviewer) {
+          const keyPath = reviewer.privateKeyPath?.startsWith("~/")
+            ? resolve(home, reviewer.privateKeyPath.slice(2))
+            : isAbsolute(reviewer.privateKeyPath || "")
+              ? reviewer.privateKeyPath
+              : resolve(dirname(configPath), reviewer.privateKeyPath || "");
+          const key = statSync(keyPath);
+          return /^\d+$/.test(String(reviewer.appId || ""))
+            && GITHUB_LOGIN_PATTERN.test(reviewer.expectedLogin || "")
+            && key.isFile()
+            && (key.mode & 0o077) === 0;
+        }
+      } catch { return false; }
+    }
     try { return statSync(tokenPath).isFile() && (statSync(tokenPath).mode & 0o077) === 0; } catch { return false; }
   })();
   return {
@@ -146,7 +166,7 @@ export function exportPortableManifest({ destination, sourceRoot }) {
     version: 1,
     createdAt: new Date().toISOString(),
     source: resolve(sourceRoot),
-    excludes: ["node_modules", ".git", ".bridge", "~/.config/ghtoken", "provider credentials", "collaboration state"],
+    excludes: ["node_modules", ".git", ".bridge", "~/.config/ghtoken", "~/.config/local-agent-bridge/github-apps", "provider credentials", "collaboration state"],
     install: ["npm ci", "npm run install:global", "npm run doctor"],
     launchers: ["claude", "codex", "antigravity", "collaboration", "playwright"],
   };
