@@ -41,7 +41,7 @@ PR review: off | <repository>#<number>@<head SHA> as <bot login>
 
 Call `start_collaboration`, then immediately show its `collaborationId`. Explain that the ID works from Codex App, Claude App, Antigravity App, and their CLIs.
 
-While a provider turn is active, read `runtime.activeCall` from every `get_collaboration` result. Show its `agent`, `phase`, `summary`, `heartbeatAt`, and elapsed time. The summary is provider-authored or adapter-observed and must be shown verbatim; never invent an update. A process heartbeat proves liveness even when no fresh model summary exists.
+While a provider turn is active, read `runtime.activeCall` from every `get_collaboration` result. Show its `agent`, `phase`, narrative `summary`, `summaryAt`, `heartbeatAt`, and elapsed time when the narrative or lifecycle changes. The summary is provider-authored or adapter-observed and must be shown verbatim; never invent an update. A process heartbeat proves liveness even when no fresh model summary exists.
 
 The broker preflights requested participants. If one cannot start or later fails, show `PROVIDER SKIPPED`, its concise reason, the remaining participants, and any writer reassignment. Continue with two participants or one; do not retry the failed provider during the same phase. Stop only if none remain. Label a reduced result as degraded, not unanimous full-council consensus.
 
@@ -49,9 +49,9 @@ The broker preflights requested participants. If one cannot start or later fails
 
 Unless the user explicitly asks for background execution, do not finish while status is `queued`, `running`, or `cancelling`.
 
-Call `get_collaboration` repeatedly. For routine polling call `get_collaboration` with `detail: status`, `includeTurns: 0`, the last `updatedAt` as `afterUpdatedAt`, and `waitSeconds` at most 8. Track the last displayed `runtime.turnCount`. Only when that count increases, make one history call with `detail: full`, `includeTurns` equal to the bounded number needed, and `afterTurn` set to the last displayed turn. Never request or repeat the original task and completed turn bodies on heartbeat-only polls. After every poll, including polls with no completed turn, show either a compact transition or heartbeat. Never leave the UI at a static “Calling …” message.
+Call `get_collaboration` repeatedly. For routine polling call `get_collaboration` with `detail: status`, `includeTurns: 0`, the last `updatedAt` as `afterUpdatedAt`, and `waitSeconds` at most 8. Track the last displayed `runtime.turnCount`. Only when that count increases, make one history call with `detail: full`, `includeTurns` equal to the bounded number needed, and `afterTurn` set to the last displayed turn. Never request or repeat the original task and completed turn bodies on heartbeat-only polls. Show a full update when lifecycle or narrative fields change; if only heartbeat time or elapsed time changed, show at most one compact liveness line per 60 seconds. Never leave the UI at a static “Calling …” message.
 
-Never substitute a long-running Bash, sleep, gh, or PR polling loop for broker polling. A blocking shell watcher prevents the host CLI from redrawing its status line. Make each `get_collaboration` call separately, let it return within eight seconds, render the returned heartbeat, and then issue the next poll. Check GitHub only after the broker reports a completed turn or terminal state.
+Never substitute a long-running Bash, sleep, gh, or PR polling loop for broker polling. A blocking shell watcher prevents the host CLI from redrawing its status line. Make each `get_collaboration` call separately and let it return within eight seconds. Poll cadence is not display cadence: do not repeat an unchanged narrative card. Check GitHub only after the broker reports a completed turn or terminal state.
 
 ```text
 ROUND <number>

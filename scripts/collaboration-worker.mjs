@@ -104,7 +104,9 @@ try {
     initialState: state.runtime,
     send: async (call) => {
       const startedAt = new Date().toISOString();
-      let lastSummary = `Starting ${call.agent} ${call.mode} turn.`;
+      let lastSummary = `Waiting for ${call.agent}'s first progress update.`;
+      let summaryAt = null;
+      let summarySource = "broker";
       let livenessMessage = null;
       const writeActiveCall = async (patch = {}) => {
         await updateCollaboration(workspaceRoot, id, (current) => ({
@@ -119,6 +121,8 @@ try {
               startedAt,
               heartbeatAt: new Date().toISOString(),
               summary: lastSummary,
+              summaryAt,
+              summarySource,
               livenessMessage,
               ...patch,
             },
@@ -141,12 +145,18 @@ try {
         const response = await pool.send(call, async (progress) => {
           const incoming = progress.summary?.trim().slice(0, 500);
           if (incoming && isTransportLivenessSummary(incoming)) livenessMessage = incoming;
-          else if (incoming) lastSummary = incoming;
+          else if (incoming) {
+            lastSummary = incoming;
+            summaryAt = progress.at || new Date().toISOString();
+            summarySource = "provider_or_adapter";
+          }
           await writeActiveCall({
             phase: "provider_progress",
             progress: progress.progress,
             total: progress.total,
             summary: lastSummary,
+            summaryAt,
+            summarySource,
             livenessMessage,
           });
           if (incoming) {

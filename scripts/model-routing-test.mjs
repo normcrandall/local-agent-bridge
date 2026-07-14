@@ -115,10 +115,13 @@ const codexReply = codexToolRequest({
   sessionId: "codex-thread",
   model: "ignored-on-existing-thread",
 });
-assert.deepEqual(codexReply, {
-  name: "codex-reply",
-  arguments: { prompt: "continue", threadId: "codex-thread" },
-});
+assert.equal(codexReply.name, "codex-reply");
+assert.equal(codexReply.arguments.prompt, "continue");
+assert.equal(codexReply.arguments.threadId, "codex-thread");
+assert.equal(codexReply.arguments.cwd, "/workspace");
+assert.equal(codexReply.arguments.sandbox, "read-only");
+assert.equal(codexReply.arguments["approval-policy"], "never");
+assert.equal(codexReply.arguments.model, "ignored-on-existing-thread");
 
 const antigravityYolo = antigravityToolRequest({ prompt: "go", mode: "work", permissionProfile: "yolo" });
 assert.equal(antigravityYolo.arguments.permissionProfile, "yolo");

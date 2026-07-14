@@ -11,7 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -50,7 +50,7 @@ function projectDirectory(requested) {
 
   const actual = realpathSync(candidate);
   const fromRoot = relative(WORKSPACE_ROOT, actual);
-  if (fromRoot === ".." || fromRoot.startsWith(`..${delimiter}`) || isAbsolute(fromRoot)) {
+  if (fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)) {
     throw new Error(`Working directory must stay within ${WORKSPACE_ROOT}`);
   }
   return actual;
@@ -61,7 +61,7 @@ function projectFile(cwd, requested) {
   if (isAbsolute(requested)) throw new Error("handoffPath must be relative to the delegated working directory.");
   const candidate = resolve(cwd, requested);
   const fromWorkspace = relative(cwd, candidate);
-  if (fromWorkspace === ".." || fromWorkspace.startsWith(`..${delimiter}`) || isAbsolute(fromWorkspace)) {
+  if (fromWorkspace === ".." || fromWorkspace.startsWith(`..${sep}`) || isAbsolute(fromWorkspace)) {
     throw new Error("handoffPath must stay inside the delegated working directory.");
   }
 
@@ -71,7 +71,7 @@ function projectFile(cwd, requested) {
   const actualFromWorkspace = relative(cwd, actual);
   if (
     actualFromWorkspace === ".."
-    || actualFromWorkspace.startsWith(`..${delimiter}`)
+    || actualFromWorkspace.startsWith(`..${sep}`)
     || isAbsolute(actualFromWorkspace)
   ) {
     throw new Error("handoffPath resolves outside the delegated working directory.");

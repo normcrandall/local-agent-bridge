@@ -4,6 +4,12 @@ import { resolve } from "node:path";
 import { rm } from "node:fs/promises";
 
 const root = resolve(import.meta.dirname, "..");
+const cleanProcessEnv = Object.fromEntries(
+  Object.entries(process.env).filter(([name]) => (
+    !name.startsWith("BRIDGE_")
+    && !["CLAUDE_BRIDGE_ACTIVE", "CODEX_BRIDGE_ACTIVE", "ANTIGRAVITY_BRIDGE_ACTIVE"].includes(name)
+  )),
+);
 
 async function listTools(label, command, args, env) {
   const client = new Client({ name: "bridge-smoke-test", version: "0.1.0" });
@@ -25,7 +31,7 @@ async function callBridgeWithoutModel() {
     command: "/bin/zsh",
     args: [resolve(root, "scripts/claude-bridge-mcp.sh")],
     cwd: root,
-    env: { ...process.env, CLAUDE_BIN: resolve(root, "scripts/fake-claude.mjs") },
+    env: { ...cleanProcessEnv, CLAUDE_BIN: resolve(root, "scripts/fake-claude.mjs") },
   });
   try {
     await client.connect(transport);

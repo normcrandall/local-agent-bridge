@@ -26,7 +26,8 @@ fi
 export CODEX_HOME="$DELEGATED_CODEX_HOME"
 
 if [[ -n "${CODEX_BRIDGE_CODEX_BIN:-}" && -x "$CODEX_BRIDGE_CODEX_BIN" ]]; then
-  exec "$CODEX_BRIDGE_CODEX_BIN" mcp-server
+  export CODEX_BRIDGE_CODEX_BIN
+  exec "$NODE" "$ROOT/src/codex-bridge.mjs"
 fi
 
 for candidate in \
@@ -34,12 +35,14 @@ for candidate in \
   "$HOME/.codex/plugins/.plugin-appserver/codex"
 do
   if [[ -x "$candidate" ]]; then
-    exec "$candidate" mcp-server
+    export CODEX_BRIDGE_CODEX_BIN="$candidate"
+    exec "$NODE" "$ROOT/src/codex-bridge.mjs"
   fi
 done
 
 if command -v codex >/dev/null 2>&1 && codex --version >/dev/null 2>&1; then
-  exec "$(command -v codex)" mcp-server
+  export CODEX_BRIDGE_CODEX_BIN="$(command -v codex)"
+  exec "$NODE" "$ROOT/src/codex-bridge.mjs"
 fi
 
 print -u2 "A working Codex binary was not found. Set CODEX_BRIDGE_CODEX_BIN."
