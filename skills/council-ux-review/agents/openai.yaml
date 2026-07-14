@@ -1,0 +1,14 @@
+interface:
+  display_name: "Council UX Review"
+  short_description: "Challenge app UX with three independent models"
+  default_prompt: "Use $council-ux-review to inspect this application, reconcile verified UI and UX findings, and publish prioritized issues."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "collaboration"
+      description: "Persistent Claude, Codex, and Antigravity broker"
+    - type: "mcp"
+      value: "playwright"
+      description: "Isolated browser for rendered UI and UX inspection"
+policy:
+  allow_implicit_invocation: true
