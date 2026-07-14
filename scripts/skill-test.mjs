@@ -77,6 +77,9 @@ assert.match(askAgent, /Never repeat an unchanged narrative card/);
 assert.match(askAgent, /maxTurns: 1/);
 assert.match(askAgent, /workCommands/);
 assert.match(askAgent, /workProfile/);
+assert.match(askAgent, /Pass the current host as `chair`/);
+assert.match(askAgent, /provider's user-owned reviewer App/);
+assert.doesNotMatch(askAgent, /~\/.config\/ghtoken|required bot login/);
 for (const term of ["detail: status", "includeTurns: 0", "afterTurn"]) assert.ok(askAgent.includes(term));
 assert.match(askAgent, /Never substitute a long-running Bash, sleep, gh, or PR polling loop/);
 
@@ -91,6 +94,8 @@ assert.match(roundtable, /workCommands/);
 assert.match(roundtable, /workProfile/);
 assert.match(roundtable, /activeCall/);
 assert.match(roundtable, /indeterminate/);
+assert.match(roundtable, /provider's user-owned reviewer App/);
+assert.doesNotMatch(roundtable, /~\/.config\/ghtoken|required bot login/);
 for (const term of ["detail: status", "includeTurns: 0", "afterTurn"]) assert.ok(roundtable.includes(term));
 assert.match(roundtable, /Never substitute a long-running Bash, sleep, gh, or PR polling loop/);
 
@@ -99,6 +104,9 @@ assert.match(history, /audit timeline/);
 assert.match(history, /list_collaborations/);
 assert.match(history, /get_collaboration/);
 assert.match(history, /activeCall/);
+assert.match(history, /`\$ask-agent`, roundtable, goal-loop, pair-program, and council calls use the persistent collaboration ledger/);
+assert.match(history, /waitSeconds: 8/);
+assert.doesNotMatch(history, /waitSeconds: 20/);
 for (const term of ["detail: status", "includeTurns: 0", "afterTurn"]) assert.ok(history.includes(term));
 
 const pairProgram = await readFile(resolve(root, "skills/pair-program/SKILL.md"), "utf8");
@@ -107,6 +115,7 @@ for (const term of ["bridge capabilities", "bridge preflight", "bridge roles", "
 }
 for (const term of ["detail: status", "includeTurns: 0", "afterTurn"]) assert.ok(pairProgram.includes(term));
 assert.match(pairProgram, /Never substitute a long-running Bash, sleep, gh, or PR polling loop/);
+assert.match(pairProgram, /provider-specific, user-owned Apps/);
 
 const goalLoop = await readFile(resolve(root, "skills/goal-loop/SKILL.md"), "utf8");
 assert.match(goalLoop, /GOAL LOOP STARTING/);
@@ -123,6 +132,7 @@ assert.match(goalLoop, /workCommands/);
 assert.match(goalLoop, /workProfile/);
 assert.match(goalLoop, /activeCall/);
 assert.match(goalLoop, /indeterminate/);
+assert.match(goalLoop, /provider's user-owned App/);
 for (const term of ["detail: status", "includeTurns: 0", "afterTurn"]) assert.ok(goalLoop.includes(term));
 assert.match(goalLoop, /Never substitute a long-running Bash, sleep, gh, or PR polling loop/);
 
@@ -162,6 +172,9 @@ for (const name of councilSkillNames) {
   assert.match(content, /workCommands/);
   assert.match(content, /workProfile/);
   assert.match(content, /exactly one writer|single writer|one designated writer/);
+  assert.match(content, /Pass the current host as `chair`/);
+  assert.match(content, /provider's user-owned reviewer App/);
+  assert.doesNotMatch(content, /required bot login|as <bot login>/);
 }
 
 console.log("Global bridge skills are synchronized across Codex, Claude, Antigravity App, and Antigravity CLI.");

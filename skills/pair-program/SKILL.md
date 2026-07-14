@@ -40,7 +40,7 @@ Never substitute a long-running Bash, sleep, gh, or PR polling loop for broker p
 
 ## Rotate and review
 
-For task N, let the selected writer implement test-first, verify, commit, and deliver only within its profile. Every other agent remains read-only. Reviewers author the handoff and formal PR review as the configured bot. On task N+1, run role selection again; do not transfer an active task's writer merely to satisfy rotation.
+For task N, let the selected writer implement test-first, verify, commit, and deliver only within its profile. Every other agent remains read-only. Reviewers author the handoff and formal PR review through their provider-specific, user-owned Apps selected from machine-local configuration. Omit identity fields unless repository policy requires strict login pins; never embed App credentials or maintainer-specific identities in the skill. On task N+1, run role selection again; do not transfer an active task's writer merely to satisfy rotation.
 
 After multiple reviews, reconcile evidence rather than vote. Use `bridge reconcile --reviews <json>` for structured findings. Show accepted, disputed, and rejected findings; the writer fixes only validated findings and reviewers re-check the actual new head.
 

@@ -23,7 +23,7 @@ Apply the same profile to a Codex writer: `implement` runs with workspace write 
 
 If the current host is a participant, pass `chair` with provider, optional session ID, exact workspace, and capabilities. The broker must suppress ordinary delegation to that same provider. Host-owned work remains in the native session; use `record_native_chair_turn` after the peer phase so the portable history distinguishes native-chair and delegated turns.
 
-For pull-request work, read repository policy before starting. If it requires reviewer-authored PR feedback, resolve the exact repository, PR number, current head SHA, and required bot login and pass them as `githubReview`. Claude and Codex reviewers receive bound `write_handoff` and `submit_pr_review` tools backed by `~/.config/ghtoken`. Antigravity authors the same handoff/verdict/comment payload in a validated envelope, and the broker publishes it unchanged through the target-bound publisher. No reviewer receives general GitHub or `gh` access, and the writer never receives publication authority. Refresh the head SHA before each re-review phase.
+For pull-request work, read repository policy before starting. If it requires reviewer-authored PR feedback, resolve the exact repository, PR number, and current head SHA and pass them as `githubReview`. Omit identity fields so the broker selects each provider's user-owned reviewer App from machine-local configuration; use `expectedLogin` or `expectedLogins` only for an explicit strict bot policy. Never place App IDs, installation IDs, keys, or tokens in the skill or prompt. Claude and Codex reviewers receive bound `write_handoff` and `submit_pr_review` tools. Antigravity authors the same handoff/verdict/comment payload in a validated envelope, and the broker publishes it unchanged through the target-bound publisher. No reviewer receives general GitHub or `gh` access, and the writer never receives publication authority. Refresh the head SHA before each re-review phase.
 
 When the writer also owns PR lifecycle work, use `githubBuilder` for target-bound builder-App operations and set `allowedOperations` explicitly. Do not grant general `gh api` access. Creating/updating the PR, replying/resolving exact threads, and marking ready may follow the task contract; add `merge` only for an explicit user-approved policy and the exact current head SHA.
 
@@ -45,7 +45,7 @@ Verification commands: none | <exact commands>
 Claude work commands: none | <exact commands>
 Claude work profile: exact | implement | deliver
 Claude handoff: response only | <project-relative path>
-PR review: off | <repository>#<number>@<head SHA> as <bot login>
+PR review: off | <repository>#<number>@<head SHA> using provider-configured identities | strict pins <bot logins>
 ```
 
 Call `start_collaboration`, then immediately show its `collaborationId`. Explain that the ID works from Codex App, Claude App, Antigravity App, and their CLIs.
