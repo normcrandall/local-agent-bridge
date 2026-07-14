@@ -156,7 +156,7 @@ for (const name of bridgeSkillNames) {
 }
 
 const councilSkillNames = bridgeSkillNames.filter((name) => name.startsWith("council-"));
-assert.equal(councilSkillNames.length, 25);
+assert.equal(councilSkillNames.length, 26);
 for (const name of [
   "council-loop-me",
   "council-research",
@@ -166,7 +166,8 @@ for (const name of [
   "council-wayfinder",
   "council-wizard",
 ]) assert.ok(councilSkillNames.includes(name), `Missing newly supported council skill ${name}`);
-const generatedCouncilSkillNames = councilSkillNames.filter((name) => name !== "council-discovery");
+const bridgeNativeCouncilSkillNames = new Set(["council-discovery", "council-ux-review"]);
+const generatedCouncilSkillNames = councilSkillNames.filter((name) => !bridgeNativeCouncilSkillNames.has(name));
 for (const name of generatedCouncilSkillNames) {
   const content = await readFile(resolve(root, "skills", name, "SKILL.md"), "utf8");
   assert.match(content, /\.agents\/skills\/.+\/SKILL\.md/);
@@ -213,5 +214,28 @@ assert.match(councilDiscovery, /Never leave the user at a static/);
 assert.match(councilDiscovery, /Never substitute a long-running Bash, sleep/);
 assert.match(councilDiscovery, /Continue with two models or one model/);
 assert.match(councilDiscovery, /Do not edit product code/);
+
+const councilUxReview = await readFile(resolve(root, "skills/council-ux-review/SKILL.md"), "utf8");
+for (const term of [
+  "Claude, Codex, and Antigravity",
+  "collaboration.start_collaboration",
+  "browser: true",
+  "waitSeconds: 8",
+  "desktop viewport",
+  "mobile viewport",
+  "keyboard-only",
+  "full consensus",
+  "degraded consensus",
+  "single-agent observation",
+  "ready-for-agent",
+  "P0 — blocked or unsafe",
+  "reread every issue from GitHub",
+]) assert.ok(councilUxReview.includes(term), `Council UX review is missing ${term}`);
+assert.match(councilUxReview, /exactly one publisher/i);
+assert.match(councilUxReview, /Never leave the user at a static/);
+assert.match(councilUxReview, /Never substitute a long-running Bash, sleep/);
+assert.match(councilUxReview, /Continue with two models or one model/);
+assert.match(councilUxReview, /no participant edits source code/i);
+assert.match(councilUxReview, /Do not claim consensus, accessibility conformance, or complete coverage/);
 
 console.log("Global bridge skills are synchronized across Codex, Claude, Antigravity App, and Antigravity CLI.");
