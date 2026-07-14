@@ -1,0 +1,11 @@
+interface:
+  display_name: "Council Grill Agents"
+  short_description: "Cross-examine three models for defensible answers"
+  default_prompt: "Use $council-grill-agents to cross-examine the agent council and reach an evidence-backed answer without interviewing me."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "collaboration"
+      description: "Persistent Claude, Codex, and Antigravity broker"
+policy:
+  allow_implicit_invocation: true

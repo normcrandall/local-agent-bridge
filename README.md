@@ -186,7 +186,7 @@ Portable collaboration records and JSONL transcripts live under `~/.local/share/
 
 In short: move the repository and `~/.agents`, authenticate providers afresh, run the installer, replace absolute paths, verify, and restart. The remaining portability gap is automatic MCP re-registration; `npm run install:global` does not currently rewrite every application's existing config file.
 
-Seven canonical skills provide the same visible vocabulary in Codex, Claude, and Antigravity:
+Eight canonical skills provide the same visible vocabulary in Codex, Claude, and Antigravity:
 
 - `ask-agent`: announce and perform one named peer handoff.
 - `run-roundtable`: start and actively monitor a persistent collaboration.
@@ -194,6 +194,7 @@ Seven canonical skills provide the same visible vocabulary in Codex, Claude, and
 - `goal-loop`: build toward verified completion through bounded, resumable council cycles.
 - `pair-program`: rotate implementation and review roles with preflight, worktrees, visible progress, recovery, CI, budgets, and review reconciliation.
 - `council-discovery`: inspect an existing product and relevant competitors, reach evidence-backed feature consensus around retention, acquisition, maintainability, overhead, and ROI, then publish implementation-ready GitHub issues through Wayfinder.
+- `council-grill-agents`: make the chair cross-examine peer LLM answers through rotating answerer, challenger, and verifier roles without interviewing the user.
 - `council-ux-review`: challenge the rendered UI and end-to-end UX with three independent browser reviews, cross-verification, and prioritized GitHub issues.
 
 The installer copies them to `~/.codex/skills`, `~/.claude/skills`, and `~/.gemini/config/skills`; it also installs Antigravity CLI-compatible markdown commands under `~/.gemini/antigravity-cli/skills`. Restart or begin a new session in each app after installation.
@@ -215,6 +216,7 @@ $run-roundtable --agents claude,codex,antigravity --writer codex Plan, implement
 /show-collaboration bridge-<uuid>
 $goal-loop --writer codex --max-cycles 4 Build the feature and satisfy the verification checklist
 $council-discovery Find and publish the strongest next features for this app
+$council-grill-agents Cross-examine the council on whether this architecture will scale
 $council-ux-review Challenge the UI and UX of this application
 $council-grill-me Stress-test this architecture before we commit
 /council-review Review the current branch with all three models
@@ -236,6 +238,7 @@ These skills are supplied by this project and installed across Codex, Claude, an
 | `goal-loop` | Build toward explicit completion criteria through bounded plan, implement, review, fix, and verification cycles. |
 | `pair-program` | Rotate one writer and independent reviewers across tasks, worktrees, CI, and formal PR reviews. |
 | `council-discovery` | Discover and publish Wayfinder-backed features grounded in product, competitive, retention, acquisition, maintainability, overhead, and ROI evidence. |
+| `council-grill-agents` | Cross-examine model answers one question at a time and return the strongest evidence-backed conclusion with dissent. |
 | `council-ux-review` | Inspect rendered journeys across desktop, mobile, and accessibility states, then publish verified UX issues. |
 | `agent-dialogue` | Run a bounded, chair-hosted Codex–Claude dialogue inside the current CLI. This remains project-scoped rather than part of the global three-product set. |
 
@@ -293,7 +296,7 @@ Credit for the original skills belongs to Matt Pocock and the upstream contribut
 
 ### Every currently available council companion
 
-`council-discovery` and `council-ux-review` are bridge-native rather than overlays on one upstream skill. Discovery composes Wayfinder and ticket decomposition; UX review composes isolated browser inspection, independent critique, cross-verification, and issue publication.
+`council-discovery`, `council-grill-agents`, and `council-ux-review` are bridge-native rather than overlays on one upstream skill. Discovery composes Wayfinder and ticket decomposition; agent grilling composes rotating cross-examination and claim verification; UX review composes isolated browser inspection, independent critique, cross-verification, and issue publication.
 
 ```text
 council-discovery
@@ -303,6 +306,7 @@ council-diagnosing-bugs
 council-domain-modeling
 council-edit-article
 council-grill-me
+council-grill-agents
 council-grill-with-docs
 council-implement
 council-improve-codebase-architecture
