@@ -1,5 +1,8 @@
 {
   "version": 1,
+  "compatibility": {
+    "allowPatFallback": false
+  },
   "roles": {
     "builder": {
       "appId": "YOUR_BUILDER_APP_ID",

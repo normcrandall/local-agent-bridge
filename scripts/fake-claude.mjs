@@ -3,6 +3,15 @@
 import { readFileSync } from "node:fs";
 
 const args = process.argv.slice(2);
+if (args.includes("--version")) {
+  process.stdout.write("fake-claude 1.0.0\n");
+  process.exit(0);
+}
+if (args.includes("--help")) {
+  const strict = process.env.FAKE_CLAUDE_NO_STRICT === "1" ? "" : " --strict-mcp-config";
+  process.stdout.write(`-p, --print --output-format --model --fallback-model --resume${strict} --mcp-config --verbose --allowedTools --permission-mode --dangerously-skip-permissions\n`);
+  process.exit(0);
+}
 const configIndex = args.indexOf("--mcp-config");
 const mcpConfig = configIndex >= 0
   ? JSON.parse(readFileSync(args[configIndex + 1], "utf8"))

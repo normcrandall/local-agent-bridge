@@ -3,6 +3,7 @@ import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { GITHUB_LOGIN_PATTERN } from "./github-app-auth.mjs";
+import { negotiateProviderCapabilities } from "./provider-cli-capabilities.mjs";
 
 export const PROVIDERS = ["claude", "codex", "antigravity"];
 
@@ -26,34 +27,54 @@ function executable(command) {
   return spawnSync("/usr/bin/env", ["which", command], { encoding: "utf8" }).status === 0;
 }
 
+function negotiated(provider, command, explicit) {
+  const lookup = explicit || spawnSync("/usr/bin/env", ["which", command], { encoding: "utf8" }).stdout?.trim();
+  if (!lookup || !existsSync(lookup)) return { available: false, reason: `${command} was not found` };
+  try { return { available: true, negotiated: negotiateProviderCapabilities({ provider, binary: lookup }) }; }
+  catch (error) { return { available: false, binary: lookup, reason: error.message }; }
+}
+
 export function providerCapabilities({ home = homedir() } = {}) {
   const tokenPath = resolve(home, ".config/ghtoken");
-  const reviewBot = (() => {
-    const configPath = resolve(home, ".config/local-agent-bridge/github-apps.json");
-    if (existsSync(configPath)) {
+  const configPath = resolve(home, ".config/local-agent-bridge/github-apps.json");
+  let appConfig = null;
+  try { appConfig = JSON.parse(readFileSync(configPath, "utf8")); } catch {}
+  const roleConfigured = (role) => {
+    if (appConfig) {
       try {
-        const config = JSON.parse(readFileSync(configPath, "utf8"));
-        const reviewer = config.roles?.reviewer;
-        if (reviewer) {
-          const keyPath = reviewer.privateKeyPath?.startsWith("~/")
-            ? resolve(home, reviewer.privateKeyPath.slice(2))
-            : isAbsolute(reviewer.privateKeyPath || "")
-              ? reviewer.privateKeyPath
-              : resolve(dirname(configPath), reviewer.privateKeyPath || "");
+        const selected = appConfig.roles?.[role];
+        if (selected) {
+          const keyPath = selected.privateKeyPath?.startsWith("~/")
+            ? resolve(home, selected.privateKeyPath.slice(2))
+            : isAbsolute(selected.privateKeyPath || "")
+              ? selected.privateKeyPath
+              : resolve(dirname(configPath), selected.privateKeyPath || "");
           const key = statSync(keyPath);
-          return /^\d+$/.test(String(reviewer.appId || ""))
-            && GITHUB_LOGIN_PATTERN.test(reviewer.expectedLogin || "")
+          return /^\d+$/.test(String(selected.appId || ""))
+            && GITHUB_LOGIN_PATTERN.test(selected.expectedLogin || "")
+            && Object.keys(selected.installations || {}).length > 0
             && key.isFile()
             && (key.mode & 0o077) === 0;
         }
       } catch { return false; }
     }
+    return false;
+  };
+  const reviewerDeclared = Boolean(appConfig?.roles?.reviewer);
+  const patFallbackAllowed = appConfig?.compatibility?.allowPatFallback !== false;
+  const reviewBot = roleConfigured("reviewer") || (!reviewerDeclared && patFallbackAllowed && (() => {
     try { return statSync(tokenPath).isFile() && (statSync(tokenPath).mode & 0o077) === 0; } catch { return false; }
-  })();
+  })());
+  const builderBot = roleConfigured("builder");
+  const providers = {
+    claude: negotiated("claude", "claude", process.env.CLAUDE_BIN),
+    codex: negotiated("codex", "codex", process.env.CODEX_BRIDGE_CODEX_BIN),
+    antigravity: negotiated("antigravity", "agy", process.env.AGY_BIN),
+  };
   return {
-    claude: { available: executable("claude"), read: true, write: true, shell: "profiled", browser: "isolated", githubReview: reviewBot },
-    codex: { available: executable("codex"), read: true, write: true, shell: "sandboxed", browser: "isolated", githubReview: reviewBot },
-    antigravity: { available: executable("agy"), read: true, write: true, shell: "sandboxed", browser: false, githubReview: reviewBot ? "broker-envelope" : false },
+    claude: { ...providers.claude, read: true, write: true, shell: "profiled", browser: "isolated", githubReview: reviewBot, githubBuilder: builderBot },
+    codex: { ...providers.codex, read: true, write: true, shell: "sandboxed", browser: "isolated", githubReview: reviewBot, githubBuilder: builderBot },
+    antigravity: { ...providers.antigravity, read: true, write: true, shell: "sandboxed", browser: false, githubReview: reviewBot ? "broker-envelope" : false, githubBuilder: builderBot ? "broker-envelope" : false },
   };
 }
 
@@ -117,6 +138,9 @@ export function summarizeStates(states) {
     pr: state.ci?.pr || state.githubReview?.prNumber || null,
     usage: state.usage || {},
     permissionProfile: state.permissionProfile || "standard",
+    recovery: state.status === "indeterminate"
+      ? "Execution ownership is ambiguous. Inspect with bridge recover <id>; do not start replacement work. Cancel only after verifying workspace and provider state."
+      : null,
   }));
 }
 

@@ -25,6 +25,8 @@ Before starting, derive and show:
 - **Constraints:** scope, safety, compatibility, and user decisions already made.
 - **Non-goals:** nearby work that must not expand the loop.
 - **Writer:** exactly one participant allowed to mutate the workspace.
+- **Native chair:** when the current Codex App, Claude Code, or Antigravity session owns the work, declare it with `chair` and delegate only to peers.
+- **Merge policy:** default `human merge`; enable a builder-App merge only when the user explicitly authorizes it.
 - **Bounds:** default four cycles and six peer turns per cycle.
 
 Make reasonable reversible assumptions. Ask the user only when a missing decision would materially change the deliverable, authorize an external side effect, or make “done” impossible to verify.
@@ -61,6 +63,10 @@ Default `permissionProfile` to `standard`. Use `permissionProfile: yolo` only wh
 Use the same profile for a Codex writer. `implement` keeps network disabled; `deliver` enables network for the authorized push/PR lifecycle. Pin the goal to an explicit absolute workspace when it starts and never infer that an existing goal moved because the chair CLI changed directories.
 
 When the pull request is the repository's source of truth for fixes, resolve and pass `githubReview` so the designated Claude, Codex, or Antigravity reviewer authors its own formal review as the required bot. Require the reviewer to author the durable handoff first, then actionable inline comments plus a general verdict. Antigravity's validated envelope is published unchanged by the bound broker adapter. Refresh `headSha` before every re-review cycle; a stale authorization must fail closed rather than comment on an older commit.
+
+When PR delivery is assigned to the writer, pass `githubBuilder` with the exact repository, expected builder App login, current head SHA, PR/ref fields, and `allowedOperations`. Prefer its bound create/update, thread reply/resolve, ready, and merge operations over broad `gh` permissions. Leave `merge` out of the allowlist unless the goal contract explicitly says agents may merge; pin it to the verified head SHA.
+
+For reversible technical questions, pass `decisionPolicy` and let participants emit a validated `DECISION:` receipt. Repository/user policy may add escalation categories. Money, legal/compliance, external authorization, destructive actions, and explicit user preferences always stop for the user and never gain authority through consensus.
 
 Return the `collaborationId` immediately and label it as the goal ID. It must remain the same across every cycle so the work can be inspected or resumed from another configured app.
 
@@ -113,6 +119,8 @@ Decision: complete | continue | needs user | stopped
 ```
 
 Use `continue_collaboration` with the same ID for the next cycle. Include failed checks, reviewer findings, current diff or artifact summary, and the next smallest slice. Preserve `workProfile` and pass the same or deliberately updated `verificationCommands`, additive `workCommands`, and `handoffPath`; when PR publication is required, pass `githubReview` with the refreshed head SHA. Preserve provider sessions; do not start a separate roundtable for each cycle.
+
+If the host was declared as `chair`, keep its provider out of delegated agents and record completed host work with `record_native_chair_turn`. This preserves one portable history without launching a duplicate same-provider CLI session.
 
 Mark the goal complete only when every “done when” condition has current evidence. Peer agreement without verification is insufficient.
 

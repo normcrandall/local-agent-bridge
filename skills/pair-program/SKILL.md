@@ -14,6 +14,7 @@ Use the persistent collaboration broker. Keep exactly one writer and make the PR
 3. Run `bridge roles --task <number> --agents <csv>`. Honor an explicit user-selected writer over rotation.
 4. Default to an isolated worktree. Pass `worktree: { taskId, branch, base }` to `start_collaboration`; omit it only when repository policy forbids worktrees or the task already owns one.
 5. Refuse to start on an indeterminate ownership conflict. Use `bridge recover <id>` to inspect it.
+6. If the active host is the implementer, declare `chair` and call only peer providers. Same-provider delegation requires an explicit opt-in.
 
 ## Start
 
@@ -26,6 +27,7 @@ Call `collaboration.start_collaboration` with:
 - `permissionProfile: standard` unless the user explicitly says `yolo`. If explicit, warn before starting and set `permissionProfile: yolo`; reviewers remain read-only.
 - exact `verificationCommands`, unusual `workCommands`, and repository handoff path.
 - `githubReview` when the PR is the source of truth.
+- `githubBuilder` when the writer owns bounded PR delivery, with an explicit `allowedOperations` list. Merge remains absent unless the user explicitly authorizes the exact-head merge.
 - `ciTracking.prNumber` when a PR exists.
 - optional `budget.maxCostUsd`, `budget.maxTokens`, and `budget.maxMinutes`.
 - optional `modelFallbacks.claude` and `modelFallbacks.codex`, preserving ordered overload-only downgrade chains; omit them to use machine-local policies.
@@ -42,6 +44,8 @@ For task N, let the selected writer implement test-first, verify, commit, and de
 
 After multiple reviews, reconcile evidence rather than vote. Use `bridge reconcile --reviews <json>` for structured findings. Show accepted, disputed, and rejected findings; the writer fixes only validated findings and reviewers re-check the actual new head.
 
+Resolve reversible technical disagreements with `decisionPolicy` and one `DECISION:` receipt containing alternatives, confidence, dissent, rollback, and owner. Always escalate money, legal/compliance, authority expansion, destructive external effects, and user-owned product choices.
+
 ## Recover and stop
 
 - A timeout or lost transport is `indeterminate`, not failed. Preserve writer ownership.
@@ -49,5 +53,6 @@ After multiple reviews, reconcile evidence rather than vote. Use `bridge reconci
 - Use `bridge recover <id> --mark-indeterminate` only when the worker is confirmed dead.
 - Use `bridge recover <id> --cancel` only after inspecting Git state; cancellation terminates the worker group and releases ownership.
 - Stop after the current turn when a configured budget is reached.
+- Archive terminal history with `archive_collaboration` or retention-based `prune_collaborations`; never prune active or indeterminate ownership.
 
 Finish only when acceptance criteria, local gates, hosted CI, durable handoff, formal reviewer publication, and clean ownership state are all verified.

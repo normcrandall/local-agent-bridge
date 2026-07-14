@@ -18,7 +18,8 @@ import {
   summarizeStates,
   usageDecision,
 } from "../src/operations.mjs";
-import { appendEvent, readCollaboration, updateCollaboration } from "../src/collaboration-store.mjs";
+import { appendEvent, archiveCollaboration, pruneTerminalCollaborations, readCollaboration, updateCollaboration } from "../src/collaboration-store.mjs";
+import { clearTerminalRuntime, workerCancellationMatches } from "../src/collaboration-cleanup.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const stateRoot = process.env.BRIDGE_COLLABORATION_DIR || resolve(homedir(), ".local/share/agent-bridge/state");
@@ -67,13 +68,13 @@ switch (command) {
     if (!id) throw new Error("recover requires a collaboration ID.");
     const state = await readCollaboration(root, id);
     if (args.includes("--cancel")) {
-      if (isSafeWorkerPid(state.workerPid)) {
+      if (isSafeWorkerPid(state.workerPid) && inspectRecovery(state).processAlive) {
+        if (!workerCancellationMatches(state)) throw new Error("Refusing to cancel: live PID ownership does not match this collaboration. No process was terminated.");
         try { process.kill(-state.workerPid, "SIGTERM"); } catch (error) { if (error.code !== "ESRCH") throw error; }
       }
-      const cancelled = await updateCollaboration(root, id, (current) => ({
-        ...current, status: "cancelled", cancelRequested: true, workerPid: null,
-        runtime: { ...current.runtime, activeCall: null },
-      }));
+      const cancelled = await updateCollaboration(root, id, (current) => clearTerminalRuntime({
+        ...current, cancelRequested: true,
+      }, { status: "cancelled" }));
       await appendEvent(root, id, { type: "recovery_cancelled", at: new Date().toISOString() });
       json(inspectRecovery(cancelled));
     } else if (args.includes("--mark-indeterminate")) {
@@ -85,6 +86,15 @@ switch (command) {
     } else json(inspectRecovery(state));
     break;
   }
+  case "archive": {
+    const id = args.find((arg) => arg.startsWith("bridge-"));
+    if (!id) throw new Error("archive requires a collaboration ID.");
+    json(await archiveCollaboration(root, id));
+    break;
+  }
+  case "prune":
+    json({ archived: await pruneTerminalCollaborations(root, { olderThanDays: Number(value("--older-than-days", "30")) }) });
+    break;
   case "worktree":
     json(createWorktree({
       workspace: resolve(value("--workspace", process.cwd())),
@@ -140,5 +150,5 @@ print "Authenticate Claude Code, Codex, and Antigravity. Configure your reviewer
     break;
   }
   default:
-    process.stdout.write("Usage: bridge <status|capabilities|roles|preflight|recover|worktree|ci|reconcile|usage|bundle> [options]\n");
+    process.stdout.write("Usage: bridge <status|capabilities|roles|preflight|recover|archive|prune|worktree|ci|reconcile|usage|bundle> [options]\n");
 }

@@ -4,6 +4,9 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { antigravityToolRequest, claudeToolRequest, codexToolRequest } from "./tool-requests.mjs";
 import { parseReviewEnvelope, reviewEnvelopeInstructions } from "./review-envelope.mjs";
 import { loadConfiguredFallbackModels } from "./model-fallbacks.mjs";
+import { builderEnvelopeInstructions, parseBuilderEnvelope } from "./builder-envelope.mjs";
+import { createInstallationToken } from "./github-app-auth.mjs";
+import { createBoundBuilderClient } from "./github-builder-client.mjs";
 
 function textFrom(result) {
   const structured = result.structuredContent || {};
@@ -31,6 +34,7 @@ export function createAgentPool({
   permissionProfile = "standard",
   handoffPath = null,
   githubReview = null,
+  githubBuilder = null,
   requestTimeoutMs = 4 * 60 * 60 * 1000 + 5 * 60 * 1000,
   turnTimeoutSeconds = 600,
 }) {
@@ -74,6 +78,32 @@ export function createAgentPool({
     } finally {
       await publisher.close().catch(() => {});
     }
+  }
+
+  async function boundBuilderClient() {
+    if (!githubBuilder) throw new Error("No bound GitHub builder authorization is configured.");
+    const credential = await createInstallationToken({ role: "builder", repository: githubBuilder.repository });
+    if (credential.expectedLogin !== githubBuilder.expectedLogin) throw new Error("Configured builder identity does not match the bound authorization.");
+    return createBoundBuilderClient({
+      token: credential.token,
+      verifiedLogin: credential.verifiedLogin,
+      ...githubBuilder,
+    });
+  }
+
+  async function publishAntigravityBuilder(message) {
+    const envelope = parseBuilderEnvelope(message);
+    const builder = await boundBuilderClient();
+    const receipts = [];
+    for (const operation of envelope.operations) {
+      const { operation: name, ...input } = operation;
+      if (name === "ensure_pull_request") receipts.push(await builder.ensurePullRequest(input));
+      else if (name === "reply_review_thread") receipts.push(await builder.replyReviewThread(input));
+      else if (name === "resolve_review_thread") receipts.push(await builder.resolveReviewThread(input));
+      else if (name === "mark_ready") receipts.push(await builder.markReady());
+      else if (name === "merge") receipts.push(await builder.merge(input));
+    }
+    return receipts;
   }
 
   async function clientFor(agent) {
@@ -130,6 +160,7 @@ export function createAgentPool({
           permissionProfile: effectivePermissionProfile,
           handoffPath,
           githubReview: mode === "review" ? githubReview : null,
+          githubBuilder: mode === "work" ? githubBuilder : null,
           timeoutSeconds: turnTimeoutSeconds,
         });
       } else if (agent === "codex") {
@@ -147,12 +178,19 @@ export function createAgentPool({
           handoffPath,
           githubReview: mode === "review" ? githubReview : null,
           githubReviewBridgePath: resolve(root, "src/github-review-bridge.mjs"),
+          githubBuilder: mode === "work" ? githubBuilder : null,
+          githubBuilderBridgePath: resolve(root, "src/github-builder-bridge.mjs"),
           playwrightBridgePath: resolve(root, "scripts/playwright-mcp.sh"),
         });
       } else {
-        const antigravityPrompt = githubReview && mode === "review"
+        let antigravityPrompt = githubReview && mode === "review"
           ? `${prompt}${reviewEnvelopeInstructions({ githubReview, handoffPath })}`
           : prompt;
+        if (githubBuilder && mode === "work") {
+          const builder = await boundBuilderClient();
+          const threads = githubBuilder.prNumber ? await builder.reviewThreads() : [];
+          antigravityPrompt += builderEnvelopeInstructions({ githubBuilder, threads });
+        }
         request = antigravityToolRequest({
           prompt: antigravityPrompt,
           sessionId,
@@ -202,6 +240,10 @@ export function createAgentPool({
       if (agent === "antigravity" && githubReview && mode === "review") {
         const receipt = await publishAntigravityReview(message);
         message = `${message}\n\nBound review published as ${receipt.login}: ${receipt.url}`;
+      }
+      if (agent === "antigravity" && githubBuilder && mode === "work") {
+        const receipts = await publishAntigravityBuilder(message);
+        message = `${message}\n\nBound builder operations published: ${JSON.stringify(receipts)}`;
       }
       const structured = result.structuredContent || {};
       return {

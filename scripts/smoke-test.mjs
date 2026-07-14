@@ -278,7 +278,7 @@ async function callAntigravityWithoutModel() {
     command: "/bin/zsh",
     args: [resolve(root, "scripts/antigravity-bridge-mcp.sh")],
     cwd: root,
-    env: { ...process.env, AGY_BIN: "/bin/echo" },
+    env: { ...process.env, AGY_BIN: resolve(root, "scripts/fake-antigravity.mjs") },
   });
   try {
     await client.connect(transport);

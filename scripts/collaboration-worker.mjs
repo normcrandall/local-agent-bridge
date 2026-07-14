@@ -13,6 +13,8 @@ import {
 } from "../src/collaboration-store.mjs";
 import { runConversation } from "../src/talk-protocol.mjs";
 import { isTransportLivenessSummary, refreshCi, usageDecision } from "../src/operations.mjs";
+import { clearTerminalRuntime } from "../src/collaboration-cleanup.mjs";
+import { createDecisionReceipt } from "../src/decision-policy.mjs";
 
 const runtimeRoot = realpathSync(
   process.env.BRIDGE_RUNTIME_ROOT || process.env.BRIDGE_ROOT || fileURLToPath(new URL("..", import.meta.url)),
@@ -39,6 +41,10 @@ try {
     ...current,
     status: "running",
     workerPid: process.pid,
+    workerOwner: {
+      id, pid: process.pid, token: process.env.BRIDGE_WORKER_TOKEN || null,
+      startedAt: new Date().toISOString(), command: "collaboration-worker.mjs",
+    },
     error: null,
     runStartedAt: new Date().toISOString(),
   }));
@@ -57,6 +63,7 @@ try {
     permissionProfile: state.permissionProfile || "standard",
     handoffPath: state.handoffPath || null,
     githubReview: state.githubReview || null,
+    githubBuilder: state.githubBuilder || null,
     turnTimeoutSeconds: state.turnTimeoutSeconds || 600,
     requestTimeoutMs: (state.turnTimeoutSeconds || 600) * 1000 + 5_000,
   });
@@ -207,6 +214,7 @@ try {
     shouldStop: async () => {
       const current = await readCollaboration(workspaceRoot, id);
       if (current.cancelRequested) return "cancelled";
+      if (current.decisionEscalation) return "needs_user";
       if (current.budgetExceeded) return "budget";
       if (current.budget?.maxMinutes && current.runStartedAt
         && Date.now() - Date.parse(current.runStartedAt) >= current.budget.maxMinutes * 60_000) return "budget";
@@ -229,7 +237,23 @@ try {
         const ci = current.ciTracking?.prNumber
           ? refreshCi({ workspace: current.workspace, prNumber: current.ciTracking.prNumber })
           : current.ci;
-        return { ...current, usage, budgetExceeded: decision.exceeded, ci };
+        let decisions = current.decisions || [];
+        let decisionEscalation = current.decisionEscalation || null;
+        if (turn.decision) {
+          try {
+            if (turn.decision.invalid) throw new Error(turn.decision.invalid);
+            const receipt = createDecisionReceipt({
+              ...turn.decision,
+              additionalEscalations: current.decisionPolicy?.additionalEscalations || [],
+            });
+            const recorded = { ...receipt, recordedAt: new Date().toISOString(), sourceAgent: turn.agent, turn: turn.number };
+            decisions = [...decisions, recorded];
+            if (receipt.action === "needs_user") decisionEscalation = recorded;
+          } catch (error) {
+            decisionEscalation = { action: "needs_user", reason: `Invalid decision receipt from ${turn.agent}: ${error.message}` };
+          }
+        }
+        return { ...current, usage, budgetExceeded: decision.exceeded, ci, decisions, decisionEscalation };
       });
     },
     onAgentUnavailable: async (failure) => {
@@ -251,15 +275,11 @@ try {
     },
   });
 
-  await updateCollaboration(workspaceRoot, id, (current) => ({
-    ...current,
-    status: outcome.reason,
-    runtime: outcome.state,
-    writer: outcome.state.writer,
-    workerPid: null,
-    error: outcome.error || null,
+  const finalRuntime = outcome.reason === "indeterminate" ? outcome.state : { ...outcome.state, activeCall: null };
+  await updateCollaboration(workspaceRoot, id, (current) => clearTerminalRuntime({
+    ...current, runtime: finalRuntime, writer: outcome.state.writer,
     cancelRequested: outcome.reason === "cancelled",
-  }));
+  }, { status: outcome.reason, error: outcome.error || null }));
   await appendEvent(workspaceRoot, id, {
     type: "run_finished",
     at: new Date().toISOString(),
@@ -267,12 +287,9 @@ try {
     turnCount: outcome.state.turnCount,
   });
 } catch (error) {
-  await updateCollaboration(workspaceRoot, id, (current) => ({
-    ...current,
-    status: "failed",
-    workerPid: null,
-    error: error.stack || error.message,
-  })).catch(() => {});
+  await updateCollaboration(workspaceRoot, id, (current) => error?.indeterminate
+    ? ({ ...current, status: "indeterminate", error: error.stack || error.message })
+    : clearTerminalRuntime(current, { status: "failed", error: error.stack || error.message })).catch(() => {});
   await appendEvent(workspaceRoot, id, {
     type: "run_failed",
     at: new Date().toISOString(),
@@ -283,4 +300,11 @@ try {
   await pool?.close().catch(() => {});
   await releaseWorkspace?.().catch(() => {});
   await releaseWorker?.().catch(() => {});
+  await updateCollaboration(workspaceRoot, id, (current) => ({
+    ...current,
+    cleanup: {
+      ...(current.cleanup || {}), providerClosed: true, workspaceLeaseReleased: true,
+      workerLeaseReleased: true, finishedAt: new Date().toISOString(),
+    },
+  })).catch(() => {});
 }

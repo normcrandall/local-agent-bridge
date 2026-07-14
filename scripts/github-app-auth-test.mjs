@@ -7,7 +7,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createInstallationToken,
+  assertGitHubAppPermissions,
   GITHUB_LOGIN_PATTERN,
+  inspectGitHubAppRoles,
   listGitHubAppInstallations,
   resolveReviewToken,
 } from "../src/github-app-auth.mjs";
@@ -64,10 +66,10 @@ try {
     if (url.endsWith("/app/installations/222/access_tokens")) {
       assert.equal(options.method, "POST");
       assert.deepEqual(JSON.parse(options.body), { repositories: ["repo"] });
-      return json({ token: "builder-installation-token", expires_at: "2026-07-14T20:00:00Z" }, 201);
+      return json({ token: "builder-installation-token", expires_at: "2026-07-14T20:00:00Z", permissions: { contents: "write", pull_requests: "write", metadata: "read" } }, 201);
     }
     if (url.endsWith("/app/installations/333/access_tokens")) {
-      return json({ token: "reviewer-installation-token", expires_at: "2026-07-14T20:00:00Z" }, 201);
+      return json({ token: "reviewer-installation-token", expires_at: "2026-07-14T20:00:00Z", permissions: { contents: "read", pull_requests: "write", metadata: "read" } }, 201);
     }
     return json({ message: `Unexpected URL ${url}` }, 404);
   };
@@ -92,6 +94,10 @@ try {
   });
   assert.equal(builder.token, "builder-installation-token");
   assert.equal(builder.expectedLogin, "example-builder[bot]");
+  await assert.rejects(
+    createInstallationToken({ role: "builder", repository: "UnknownOwner/repo", configPath, apiUrl: "https://github.test", fetchImpl }),
+    /No builder GitHub App installation is configured for UnknownOwner/,
+  );
 
   const reviewer = await resolveReviewToken({
     repository: "ExampleOrg/repo",
@@ -101,6 +107,12 @@ try {
     fetchImpl,
   });
   assert.equal(reviewer.token, "reviewer-installation-token");
+  assert.equal(assertGitHubAppPermissions("builder", { contents: "write", pull_requests: "write", metadata: "read" }), true);
+  assert.throws(() => assertGitHubAppPermissions("reviewer", { contents: "read", pull_requests: "read", metadata: "read" }), /pull_requests:write/);
+  const inspected = await inspectGitHubAppRoles({ configPath });
+  assert.equal(inspected.roles.builder.privateKeySecure, true);
+  assert.equal(inspected.roles.reviewer.privateKeySecure, true);
+  assert.deepEqual(inspected.roles.builder.installations, ["ExampleOrg"]);
 
   await assert.rejects(
     createInstallationToken({
@@ -122,6 +134,17 @@ try {
     fetchImpl,
   });
   assert.equal(fallback.token, "static-review-token");
+
+  const noFallbackConfig = join(temporary, "no-fallback.json");
+  await writeFile(noFallbackConfig, JSON.stringify({
+    version: 1,
+    compatibility: { allowPatFallback: false },
+    roles: { builder: JSON.parse(await (await import("node:fs/promises")).readFile(configPath, "utf8")).roles.builder },
+  }), { mode: 0o600 });
+  await assert.rejects(
+    resolveReviewToken({ repository: "ExampleOrg/repo", configPath: noFallbackConfig, tokenFile }),
+    /PAT fallback is disabled/,
+  );
 
   await assert.rejects(
     resolveReviewToken({

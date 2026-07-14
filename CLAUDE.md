@@ -16,6 +16,8 @@ For a dialogue hosted in the current Claude Code CLI, use `/agent-dialogue`. Use
 
 For a persistent collaboration that can be inspected or resumed from Claude App, Codex App, or Antigravity App, use the `collaboration` MCP server. Start with `start_collaboration`, keep its returned `collaborationId`, poll with `get_collaboration`, answer or begin another phase with `continue_collaboration`, and cancel with `cancel_collaboration`. The call is asynchronous and survives the chair app closing.
 
+When this Claude Code session is participating, pass `chair: { provider: "claude", workspace: <absolute workspace> }` so the broker calls only peers and records Claude work with `record_native_chair_turn`; do not create a second Claude session unless the user explicitly requests same-provider delegation. Use `decisionPolicy` for bounded reversible technical choices. Money, legal/compliance, authorization expansion, destructive external actions, and explicit user-owned choices always require the user.
+
 Poll with separate `get_collaboration` calls using `detail: status`, `includeTurns: 0`, `afterUpdatedAt`, and `waitSeconds: 8` or less. Never substitute a long-running Bash, sleep, `gh`, or PR polling loop: a blocking shell tool prevents Claude Code from refreshing its status line. Treat `runtime.activeCall.summary` as narrative status and show it with its `summaryAt` age when it changes; `summarySource: broker` is only a placeholder, while `provider_or_adapter` is observed work. Render lifecycle or narrative changes immediately; if only heartbeat or elapsed time changed, emit at most one compact liveness line per 60 seconds. Consult GitHub only after the broker reports a completed turn or terminal state.
 
 - Use the `codex` tool for an independent second opinion, review, or bounded delegated task.
@@ -27,6 +29,7 @@ Poll with separate `get_collaboration` calls using `detail: status`, `includeTur
 - A Claude review delegated through the bridge may run only declared `verificationCommands` and write only its declared `handoffPath`; source edits remain outside review mode, and posting is unavailable unless `githubReview` is explicitly present.
 - A Claude work delegation may edit workspace files. `workProfile: implement` covers normal local development through commit; `workProfile: deliver` additionally covers push and bounded PR lifecycle operations. Exact `workCommands` remain additive for unusual tools.
 - When `githubReview` is present, the delegated Claude reviewer receives one target-bound PR-review tool backed by the dedicated bot token. It must write the handoff first and publish its own general and inline review comments.
+- When a writer is authorized for PR delivery, pass `githubBuilder` bound to the exact repository, builder App login, head SHA, PR/ref, and explicit `allowedOperations`. Use its tools instead of broad `gh` access; omit `merge` unless the user explicitly authorizes the exact-head merge.
 - Continue a session with `codex-reply` and the returned `threadId` when continuity matters.
 - Do not ask Codex to invoke Claude. Circular delegation is prohibited.
 - Do not ask Antigravity to invoke Claude or Codex. The host or external broker owns participant routing.
