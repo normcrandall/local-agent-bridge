@@ -8,7 +8,7 @@ Prefer the installed collaboration skills as the user-facing interface. Announce
 - Use `/run-roundtable` for a persistent multi-agent collaboration.
 - Use `/show-collaboration` to inspect, monitor, or resume collaboration history.
 - Use `/goal-loop` to build toward explicit completion criteria through bounded plan, implement, review, and verification cycles.
-- Use `/council-discovery` to inspect an existing app, reconcile evidence-backed feature proposals from Claude, Codex, and Antigravity, and publish implementation-ready GitHub issues through Wayfinder.
+- Use `/council-discovery` to inspect an existing app and relevant public competitors, reconcile evidence-backed feature proposals from Claude, Codex, and Antigravity, and publish implementation-ready GitHub issues through Wayfinder.
 - Use `/council-ux-review` to challenge a rendered application's UI and end-to-end UX with independent browser passes, cross-verification, and prioritized GitHub issues.
 - Use a `/council-*` companion when the user wants an installed AI Hero workflow run by Claude, Codex, and Antigravity together. The original skill remains the single-agent option.
 
