@@ -208,6 +208,14 @@ for (const term of [
   "Increase ROI",
   "Primary lens",
   "ROI hypothesis",
+  "Direct competitors",
+  "Adjacent substitutes",
+  "Aspirational benchmarks",
+  "browser: true",
+  "observed behavior or a vendor claim",
+  "Strategic posture",
+  "parity | differentiation | substitute response | deliberate non-adoption",
+  "A competitor has it",
 ]) assert.ok(councilDiscovery.includes(term), `Council discovery is missing ${term}`);
 assert.match(councilDiscovery, /full consensus/i);
 assert.match(councilDiscovery, /Never leave the user at a static/);

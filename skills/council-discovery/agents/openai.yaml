@@ -1,11 +1,14 @@
 interface:
   display_name: "Council Discovery"
-  short_description: "Find business-grounded features with three models"
-  default_prompt: "Use $council-discovery to find and publish app enhancements grounded in retention, acquisition, maintainability, overhead, and ROI."
+  short_description: "Find business and competitor-grounded features"
+  default_prompt: "Use $council-discovery to find and publish app enhancements grounded in product evidence, competitive research, retention, acquisition, maintainability, overhead, and ROI."
 dependencies:
   tools:
     - type: "mcp"
       value: "collaboration"
       description: "Persistent Claude, Codex, and Antigravity broker"
+    - type: "mcp"
+      value: "playwright"
+      description: "Isolated browser for public competitive-product research"
 policy:
   allow_implicit_invocation: true

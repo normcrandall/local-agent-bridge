@@ -193,7 +193,7 @@ Seven canonical skills provide the same visible vocabulary in Codex, Claude, and
 - `show-collaboration`: render status and turn history as a timeline.
 - `goal-loop`: build toward verified completion through bounded, resumable council cycles.
 - `pair-program`: rotate implementation and review roles with preflight, worktrees, visible progress, recovery, CI, budgets, and review reconciliation.
-- `council-discovery`: inspect an existing product, reach evidence-backed feature consensus around retention, acquisition, maintainability, overhead, and ROI, then publish implementation-ready GitHub issues through Wayfinder.
+- `council-discovery`: inspect an existing product and relevant competitors, reach evidence-backed feature consensus around retention, acquisition, maintainability, overhead, and ROI, then publish implementation-ready GitHub issues through Wayfinder.
 - `council-ux-review`: challenge the rendered UI and end-to-end UX with three independent browser reviews, cross-verification, and prioritized GitHub issues.
 
 The installer copies them to `~/.codex/skills`, `~/.claude/skills`, and `~/.gemini/config/skills`; it also installs Antigravity CLI-compatible markdown commands under `~/.gemini/antigravity-cli/skills`. Restart or begin a new session in each app after installation.
@@ -235,7 +235,7 @@ These skills are supplied by this project and installed across Codex, Claude, an
 | `show-collaboration` | Display collaboration status, skipped providers, turns, and history. |
 | `goal-loop` | Build toward explicit completion criteria through bounded plan, implement, review, fix, and verification cycles. |
 | `pair-program` | Rotate one writer and independent reviewers across tasks, worktrees, CI, and formal PR reviews. |
-| `council-discovery` | Discover and publish Wayfinder-backed features grounded in retention, acquisition, maintainability, overhead, and ROI. |
+| `council-discovery` | Discover and publish Wayfinder-backed features grounded in product, competitive, retention, acquisition, maintainability, overhead, and ROI evidence. |
 | `council-ux-review` | Inspect rendered journeys across desktop, mobile, and accessibility states, then publish verified UX issues. |
 | `agent-dialogue` | Run a bounded, chair-hosted Codex–Claude dialogue inside the current CLI. This remains project-scoped rather than part of the global three-product set. |
 

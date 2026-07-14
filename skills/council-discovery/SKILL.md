@@ -1,6 +1,6 @@
 ---
 name: council-discovery
-description: Discover valuable new features for an existing application with independent Claude, Codex, and Antigravity analysis, reconcile them into evidence-backed consensus, and publish implementation-ready GitHub issues through a Wayfinder decision map. Ground every recommendation in customer retention, customer acquisition, maintainability, reduced operating overhead, or increased ROI. Use for product discovery, roadmap expansion, feature ideation grounded in an existing codebase, or requests asking what an app should build next.
+description: Discover valuable new features for an existing application with independent Claude, Codex, and Antigravity analysis, optional public competitive-product research, evidence-backed consensus, and implementation-ready GitHub issues through a Wayfinder decision map. Ground every recommendation in customer retention, customer acquisition, maintainability, reduced operating overhead, or increased ROI. Use for product discovery, competitive feature analysis, roadmap expansion, feature ideation grounded in an existing codebase, or requests asking what an app should build next.
 ---
 
 # Council Discovery
@@ -40,6 +40,30 @@ Treat the existing product as evidence, not a blank-page prompt. Before proposin
 
 Do not edit product code. This workflow creates planning artifacts and issues only.
 
+## Add competitive evidence when useful
+
+Use competitive research when the user names competitors, the product category is identifiable, or parity and differentiation materially affect acquisition or retention. Do not force it into an internal-tool or novel-domain review where the comparison would be artificial.
+
+Build a bounded comparison set, normally three to five products:
+
+- **Direct competitors** solve the same core job for a similar customer.
+- **Adjacent substitutes** solve the job through a different workflow or category.
+- **Aspirational benchmarks** demonstrate an unusually effective interaction, operating model, or capability relevant to this product.
+
+Prefer products named by the user. Otherwise infer candidates, verify that they are current and relevant, and explain the classification. Research public product surfaces, official documentation, changelogs, pricing, demos, and first-party case studies. Use public third-party reviews only as attributed signals, never as settled fact. Record the URL, access date, plan or edition, geography when relevant, and whether each statement is an observed behavior or a vendor claim.
+
+Set `browser: true` for competitive phases so peers can inspect public product experiences in isolated browsers. Do not sign up, purchase, bypass access controls, accept legal terms, scrape prohibited surfaces, or use private credentials without explicit authorization. Pricing, packaging, and product capabilities change; verify them during the run instead of relying on model memory.
+
+For each relevant capability, capture:
+
+- which user job it supports and how the competitor implements the outcome;
+- whether our product has an equivalent, a weaker path, a deliberate omission, or a differentiating alternative;
+- evidence that the capability is table stakes, a differentiator, or merely vendor positioning;
+- switching, adoption, maintenance, operating-cost, and ROI implications;
+- what should be learned without copying proprietary expression, content, or visual design.
+
+“A competitor has it” is not evidence that this product should build it. Require a credible customer or business mechanism. Prefer differentiated outcomes over checklist parity; recommend parity only when its absence creates a demonstrated adoption, retention, trust, or interoperability barrier.
+
 ## Chart one Wayfinder decision
 
 Name the destination as: an evidence-backed, prioritized feature portfolio that improves customer retention, acquisition, maintainability, operating overhead, or ROI, with implementation-ready GitHub issues for the selected features.
@@ -68,6 +92,8 @@ Repository: <owner/repo>
 Participants: Claude, Codex, Antigravity
 Chair: <provider>
 Mode: review; no source-code writer
+Competitive research: off | on (<products>)
+Browser: isolated public-product research when competitive research is on
 Tool: collaboration.start_collaboration
 Wayfinder map: <pending or URL>
 Decision ticket: <pending or URL>
@@ -87,6 +113,8 @@ Before seeing peer conclusions, each participant proposes at most five features.
 
 - target user and unmet job;
 - concrete evidence from the app, repository, tracker, or cited primary research;
+- competitive evidence when applicable, labeled as observed behavior, vendor claim, or attributed third-party signal;
+- strategic posture: parity, differentiation, substitute response, or deliberate non-adoption;
 - user outcome and why the feature belongs in this product;
 - primary business lens, secondary lenses, expected mechanism, and metric or proxy;
 - directional benefit, implementation and operating cost, and the assumptions behind the ROI hypothesis;
@@ -101,6 +129,8 @@ Novelty alone is not value. Reject generic AI additions, speculative demand, and
 Reveal the normalized candidate set only after all independent proposals complete. Have every participant challenge every surviving candidate for:
 
 - duplication or conflict with current behavior and issues;
+- cargo-cult parity, stale competitor evidence, or copying that weakens product differentiation;
+- a competitor comparison that targets a different user, plan, geography, or job;
 - weak or fabricated evidence;
 - poor product fit or unclear beneficiary;
 - a business-lens claim that lacks a credible mechanism, evidence, or measurable signal;
@@ -117,6 +147,7 @@ A candidate reaches consensus only when every available participant, after criti
 
 - the problem and beneficiary;
 - the evidence that the problem exists;
+- when competition is material, the relevance and freshness of the comparison plus the chosen parity or differentiation posture;
 - the primary business lens and credible mechanism connecting the enhancement to that outcome;
 - the scoped user outcome;
 - feasibility at the proposed size;
@@ -159,6 +190,13 @@ Create issues in dependency order. Apply `ready-for-agent` only when no unresolv
 - Expected mechanism: <how this enhancement creates the outcome>
 - Metric or proxy: <how the outcome will be measured>
 - ROI hypothesis: <directional benefit, build and ongoing cost, assumptions, and expected time-to-value>
+
+## Competitive context
+
+- Products reviewed: <names, plans or editions, and access dates, or not applicable>
+- Evidence: <links labeled observed behavior, vendor claim, or attributed third-party signal>
+- Strategic posture: parity | differentiation | substitute response | deliberate non-adoption
+- Why this belongs here: <customer and business mechanism; never only “a competitor has it”>
 
 ## User outcome
 
@@ -203,7 +241,7 @@ Report:
 
 1. the Wayfinder map and resolved portfolio decision;
 2. proposals from each provider and the material objections;
-3. accepted, rejected, and deferred candidates with evidence, primary business lens, and ROI hypothesis;
+3. accepted, rejected, and deferred candidates with evidence, primary business lens, ROI hypothesis, and competitive posture when applicable;
 4. consensus level and unavailable providers;
 5. every created GitHub issue in dependency order;
 6. the portable collaboration ID and terminal status.
