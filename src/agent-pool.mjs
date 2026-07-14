@@ -5,7 +5,7 @@ import { antigravityToolRequest, claudeToolRequest, codexToolRequest } from "./t
 import { parseReviewEnvelope, reviewEnvelopeInstructions } from "./review-envelope.mjs";
 import { loadConfiguredFallbackModels } from "./model-fallbacks.mjs";
 import { builderEnvelopeInstructions, parseBuilderEnvelope } from "./builder-envelope.mjs";
-import { createInstallationToken } from "./github-app-auth.mjs";
+import { configuredReviewerLogin, createInstallationToken } from "./github-app-auth.mjs";
 import { createBoundBuilderClient } from "./github-builder-client.mjs";
 
 function textFrom(result) {
@@ -40,7 +40,16 @@ export function createAgentPool({
 }) {
   const clients = {};
 
-  async function publishAntigravityReview(message) {
+  async function reviewBindingFor(agent) {
+    if (!githubReview) return null;
+    const expectedLogin = githubReview.expectedLogins?.[agent]
+      || githubReview.expectedLogin
+      || await configuredReviewerLogin({ provider: agent });
+    const { expectedLogins: _expectedLogins, ...authorization } = githubReview;
+    return { ...authorization, expectedLogin };
+  }
+
+  async function publishAntigravityReview(message, reviewBinding) {
     const envelope = parseReviewEnvelope(message);
     const absoluteHandoffPath = resolve(workspace, handoffPath);
     const fromWorkspace = relative(workspace, absoluteHandoffPath);
@@ -54,10 +63,10 @@ export function createAgentPool({
       cwd: root,
       env: {
         ...process.env,
-        GITHUB_REVIEW_REPOSITORY: githubReview.repository,
-        GITHUB_REVIEW_PR_NUMBER: String(githubReview.prNumber),
-        GITHUB_REVIEW_HEAD_SHA: githubReview.headSha,
-        GITHUB_REVIEW_EXPECTED_LOGIN: githubReview.expectedLogin,
+        GITHUB_REVIEW_REPOSITORY: reviewBinding.repository,
+        GITHUB_REVIEW_PR_NUMBER: String(reviewBinding.prNumber),
+        GITHUB_REVIEW_HEAD_SHA: reviewBinding.headSha,
+        GITHUB_REVIEW_EXPECTED_LOGIN: reviewBinding.expectedLogin,
         GITHUB_REVIEW_HANDOFF_PATH: absoluteHandoffPath,
         GITHUB_REVIEW_TOKEN_FILE: resolve(process.env.HOME, ".config/ghtoken"),
       },
@@ -144,6 +153,7 @@ export function createAgentPool({
     async send({ agent, prompt, sessionId, mode, browser }, onProgress = () => {}) {
       const client = await clientFor(agent);
       const effectivePermissionProfile = mode === "work" ? permissionProfile : "standard";
+      const effectiveGithubReview = mode === "review" ? await reviewBindingFor(agent) : null;
       let request;
       if (agent === "claude") {
         request = claudeToolRequest({
@@ -159,7 +169,7 @@ export function createAgentPool({
           workProfile,
           permissionProfile: effectivePermissionProfile,
           handoffPath,
-          githubReview: mode === "review" ? githubReview : null,
+          githubReview: effectiveGithubReview,
           githubBuilder: mode === "work" ? githubBuilder : null,
           timeoutSeconds: turnTimeoutSeconds,
         });
@@ -176,15 +186,15 @@ export function createAgentPool({
           permissionProfile: effectivePermissionProfile,
           verificationCommands,
           handoffPath,
-          githubReview: mode === "review" ? githubReview : null,
+          githubReview: effectiveGithubReview,
           githubReviewBridgePath: resolve(root, "src/github-review-bridge.mjs"),
           githubBuilder: mode === "work" ? githubBuilder : null,
           githubBuilderBridgePath: resolve(root, "src/github-builder-bridge.mjs"),
           playwrightBridgePath: resolve(root, "scripts/playwright-mcp.sh"),
         });
       } else {
-        let antigravityPrompt = githubReview && mode === "review"
-          ? `${prompt}${reviewEnvelopeInstructions({ githubReview, handoffPath })}`
+        let antigravityPrompt = effectiveGithubReview
+          ? `${prompt}${reviewEnvelopeInstructions({ githubReview: effectiveGithubReview, handoffPath })}`
           : prompt;
         if (githubBuilder && mode === "work") {
           const builder = await boundBuilderClient();
@@ -237,8 +247,8 @@ export function createAgentPool({
       }
       if (result.isError) throw new Error(`${agent} MCP call failed: ${textFrom(result)}`);
       let message = textFrom(result);
-      if (agent === "antigravity" && githubReview && mode === "review") {
-        const receipt = await publishAntigravityReview(message);
+      if (agent === "antigravity" && effectiveGithubReview) {
+        const receipt = await publishAntigravityReview(message, effectiveGithubReview);
         message = `${message}\n\nBound review published as ${receipt.login}: ${receipt.url}`;
       }
       if (agent === "antigravity" && githubBuilder && mode === "work") {

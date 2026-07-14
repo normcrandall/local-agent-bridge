@@ -39,10 +39,9 @@ export function providerCapabilities({ home = homedir() } = {}) {
   const configPath = resolve(home, ".config/local-agent-bridge/github-apps.json");
   let appConfig = null;
   try { appConfig = JSON.parse(readFileSync(configPath, "utf8")); } catch {}
-  const roleConfigured = (role) => {
+  const entryConfigured = (selected) => {
     if (appConfig) {
       try {
-        const selected = appConfig.roles?.[role];
         if (selected) {
           const keyPath = selected.privateKeyPath?.startsWith("~/")
             ? resolve(home, selected.privateKeyPath.slice(2))
@@ -60,11 +59,13 @@ export function providerCapabilities({ home = homedir() } = {}) {
     }
     return false;
   };
-  const reviewerDeclared = Boolean(appConfig?.roles?.reviewer);
+  const roleConfigured = (role) => entryConfigured(appConfig?.roles?.[role]);
+  const reviewerConfigured = (provider) => entryConfigured(appConfig?.roles?.reviewers?.[provider] || appConfig?.roles?.reviewer);
+  const reviewerDeclared = Boolean(appConfig?.roles?.reviewer || Object.keys(appConfig?.roles?.reviewers || {}).length);
   const patFallbackAllowed = appConfig?.compatibility?.allowPatFallback !== false;
-  const reviewBot = roleConfigured("reviewer") || (!reviewerDeclared && patFallbackAllowed && (() => {
+  const patReviewFallback = !reviewerDeclared && patFallbackAllowed && (() => {
     try { return statSync(tokenPath).isFile() && (statSync(tokenPath).mode & 0o077) === 0; } catch { return false; }
-  })());
+  })();
   const builderBot = roleConfigured("builder");
   const providers = {
     claude: negotiated("claude", "claude", process.env.CLAUDE_BIN),
@@ -72,9 +73,9 @@ export function providerCapabilities({ home = homedir() } = {}) {
     antigravity: negotiated("antigravity", "agy", process.env.AGY_BIN),
   };
   return {
-    claude: { ...providers.claude, read: true, write: true, shell: "profiled", browser: "isolated", githubReview: reviewBot, githubBuilder: builderBot },
-    codex: { ...providers.codex, read: true, write: true, shell: "sandboxed", browser: "isolated", githubReview: reviewBot, githubBuilder: builderBot },
-    antigravity: { ...providers.antigravity, read: true, write: true, shell: "sandboxed", browser: false, githubReview: reviewBot ? "broker-envelope" : false, githubBuilder: builderBot ? "broker-envelope" : false },
+    claude: { ...providers.claude, read: true, write: true, shell: "profiled", browser: "isolated", githubReview: reviewerConfigured("claude") || patReviewFallback, githubBuilder: builderBot },
+    codex: { ...providers.codex, read: true, write: true, shell: "sandboxed", browser: "isolated", githubReview: reviewerConfigured("codex") || patReviewFallback, githubBuilder: builderBot },
+    antigravity: { ...providers.antigravity, read: true, write: true, shell: "sandboxed", browser: false, githubReview: (reviewerConfigured("antigravity") || patReviewFallback) ? "broker-envelope" : false, githubBuilder: builderBot ? "broker-envelope" : false },
   };
 }
 
