@@ -30,6 +30,7 @@ Poll with separate `get_collaboration` calls using `detail: status`, `includeTur
 - A Claude work delegation may edit workspace files. `workProfile: implement` covers normal local development through commit; `workProfile: deliver` additionally covers push and bounded PR lifecycle operations. Exact `workCommands` remain additive for unusual tools.
 - When `githubReview` is present, the delegated Claude reviewer receives one target-bound PR-review tool backed by the dedicated bot token. It must write the handoff first and publish its own general and inline review comments.
 - When a writer is authorized for PR delivery, pass `githubBuilder` bound to the exact repository, builder App login, head SHA, PR/ref, and explicit `allowedOperations`. Use its tools instead of broad `gh` access; omit `merge` unless the user explicitly authorizes the exact-head merge.
+- For chair-owned GitHub operations, try the configured App identity first. If GitHub explicitly denies that App for insufficient permission and PAT fallback is enabled, retry the exact same operation once with the configured PAT, announce the identity change, and record which identity completed it. Do not use fallback to broaden the requested operation or bypass a non-permission failure.
 - Continue a session with `codex-reply` and the returned `threadId` when continuity matters.
 - Do not ask Codex to invoke Claude. Circular delegation is prohibited.
 - Do not ask Antigravity to invoke Claude or Codex. The host or external broker owns participant routing.

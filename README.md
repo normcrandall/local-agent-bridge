@@ -94,7 +94,9 @@ The `installations` keys are GitHub account or organization names and the values
 
 The bound PR-review publisher automatically uses the configured `reviewer` App. It falls back to `~/.config/ghtoken` only when no reviewer App is configured; if a configured App fails authentication, it stops rather than silently posting as another identity.
 
-Set `"compatibility": { "allowPatFallback": false }` in the machine-local config (or `GITHUB_REVIEW_ALLOW_PAT_FALLBACK=0`) to make reviewer App identity mandatory. This is the recommended post-migration setting. The bridge validates the minted installation token's role permissions before exposing any operation: builder requires Contents and Pull requests write plus Metadata read; reviewer requires Contents read, Pull requests write, and Metadata read. Missing roles, owners, repositories, permissions, keys, and identity mismatches fail closed with the affected role named.
+The `github-app:run` wrapper also retries the exact same command once with `~/.config/ghtoken` when GitHub explicitly rejects the App for insufficient permission. It prints the identity transition before retrying, never retries ordinary command failures, and never exposes either credential. Set `GITHUB_APP_ALLOW_PAT_FALLBACK=0` or disable `compatibility.allowPatFallback` to require the App identity. Override the mode-600 token path with `AGENT_BRIDGE_GITHUB_PAT_FILE`.
+
+Set `"compatibility": { "allowPatFallback": false }` in the machine-local config (or `GITHUB_REVIEW_ALLOW_PAT_FALLBACK=0`) when a repository requires the reviewer App identity and must never accept the personal fallback. The bridge validates the minted installation token's role permissions before exposing any operation: builder requires Contents and Pull requests write plus Metadata read; reviewer requires Contents read, Pull requests write, and Metadata read. Missing roles, owners, repositories, permissions, keys, and identity mismatches fail closed with the affected role named.
 
 For a bounded builder-side GitHub CLI command, mint a short-lived repository-scoped token at execution time:
 

@@ -1,7 +1,7 @@
 {
   "version": 1,
   "compatibility": {
-    "allowPatFallback": false
+    "allowPatFallback": true
   },
   "roles": {
     "builder": {
