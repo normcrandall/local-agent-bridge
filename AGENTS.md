@@ -38,6 +38,7 @@ Never substitute a long-running Bash, sleep, `gh`, or PR polling loop for broker
 - Do not ask Antigravity to invoke Codex or Claude. The broker owns participant routing.
 - Treat Claude's output as advice until it is verified against the workspace and tests.
 - Omit provider model overrides unless the user explicitly requests one; the persistent broker preserves each provider's configured model by default.
+- Preserve caller-supplied `modelFallbacks.claude` and `modelFallbacks.codex` across collaboration phases. If omitted, let each adapter use the machine-local policy. Claude Code uses its native fallback option; Codex repeats the original ask and preserves an established continuation thread when applicable. A recognized overload stays within the same turn; show any downgrade narrative and do not mark the provider unavailable or reassign its writer unless the ordered chain is exhausted. Never use model fallback for authentication, permission, quota, configuration, timeout, or transport errors.
 
 For implementation followed by review:
 

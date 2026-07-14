@@ -315,6 +315,8 @@ In work mode, `writer` defaults to the starting agent. The designated writer rec
 
 Model fields are optional. Omitting them preserves each provider's configured model. Explicit values pass through unchanged.
 
+`modelFallbacks.claude` and `modelFallbacks.codex` are also optional. Omitting them loads the machine-local overload policy; an explicit provider array replaces that policy for the collaboration. Overload retries happen inside one provider turn, so they do not consume another broker turn or trigger writer reassignment.
+
 ## Pair-programming operations
 
 Use `$pair-program` when Claude, Codex, and optionally Antigravity should alternate implementation and review across tasks. The installed global `bridge` CLI exposes the operational controls used by that skill:
@@ -393,6 +395,31 @@ codex -m <codex-model>
 ```
 
 The peer model override is passed directly through MCP. The host model is selected by its CLI session. A model selected only for an unrelated terminal session is not a saved provider default; pass it explicitly when the bridge starts a separate delegated process.
+
+#### Provider overload fallback
+
+Claude Code and Codex model-capacity failures can fall through an ordered chain inside the same delegated turn without breaking the collaboration or rotating its writer. The caller may pass `fallbackModels` on either provider's direct tools or use `modelFallbacks.claude` and `modelFallbacks.codex` on `start_collaboration` and `continue_collaboration`:
+
+```json
+{
+  "models": {
+    "claude": "claude-opus-4-8",
+    "codex": "gpt-5.6-sol"
+  },
+  "modelFallbacks": {
+    "claude": ["claude-opus-4-6", "claude-sonnet-5"],
+    "codex": ["gpt-5.6-terra"]
+  }
+}
+```
+
+For a machine-wide default, copy [`config/model-fallbacks.example.json`](config/model-fallbacks.example.json) to `~/.config/local-agent-bridge/model-fallbacks.json` and edit the provider lists. Configured primary models remain unchanged. Claude Code receives its ordered chain through the native `--fallback-model` option. After an explicit Codex overload, a new delegated turn retries from a fresh thread with the original task, while `codex-reply` retains the caller's established thread; both forms repeat the original prompt and tell the fallback to preserve completed workspace work. Passing a provider's `[]` disables the machine policy for one collaboration.
+
+```sh
+chmod 600 ~/.config/local-agent-bridge/model-fallbacks.json
+```
+
+Codex emits a visible downgrade narrative and records `requestedModel`, selected `model`, `fallbackUsed`, and `attemptedModels` in turn metadata. Claude Code owns its native retry and session continuity while the bridge records the configured fallback policy in turn metadata. Neither path uses model fallback for authentication, permission, quota, configuration, ordinary command failure, timeout, or lost transport. If the Codex chain is exhausted, the final error names every attempted model so the broker can continue with another available provider.
 
 For example, Fable plans, a selected Codex model implements, and Fable reviews:
 
@@ -529,7 +556,7 @@ The Codex/ChatGPT desktop built-in browser cannot be passed through this bridge:
 - Delegated Claude sessions only receive Playwright when `browser: true`; the browser uses an isolated profile.
 - Claude review mode exposes no general GitHub access. When repository policy explicitly requires reviewer-authored PR feedback, `githubReview` adds one target-bound `submit_pr_review` tool. It obtains a repository-scoped credential from the configured reviewer App, with the mode-600 `~/.config/ghtoken` available only as an unconfigured-App fallback. Outside model context it verifies the required login, rejects stale head SHAs and paths outside the diff, and idempotently submits one formal review with general and inline comments.
 - The bound review publisher cannot push, merge, label, edit issues, access another repository or PR, or use the chair's personal GitHub identity.
-- Each delegated call has a 10-minute default and 30-minute maximum timeout.
+- `turnTimeoutSeconds` is a per-model inactivity limit. Provider progress resets that limit, while a fallback chain remains hard-bounded to the limit multiplied by its permitted model attempts (primary plus at most five fallbacks).
 
 ## Overrides
 

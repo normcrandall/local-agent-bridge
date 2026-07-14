@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "providers": {
+    "claude": {
+      "fallbackModels": [
+        "claude-opus-4-6",
+        "claude-sonnet-5"
+      ]
+    },
+    "codex": {
+      "fallbackModels": [
+        "gpt-5.6-terra"
+      ]
+    }
+  }
+}

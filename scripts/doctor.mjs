@@ -34,6 +34,23 @@ check("Codex CLI", () => {
   return result.status === 0;
 }, "install or repair @openai/codex on PATH");
 
+check("Provider overload fallback policy", () => {
+  const path = process.env.AGENT_BRIDGE_MODEL_FALLBACKS_CONFIG
+    || resolve(homedir(), ".config/local-agent-bridge/model-fallbacks.json");
+  if (!existsSync(path)) return true;
+  const info = statSync(path);
+  const config = JSON.parse(readFileSync(path, "utf8"));
+  const providers = Object.values(config.providers || {});
+  return info.isFile()
+    && (info.mode & 0o077) === 0
+    && config.version === 1
+    && providers.every((provider) => (
+      Array.isArray(provider.fallbackModels)
+      && provider.fallbackModels.length <= 5
+      && provider.fallbackModels.every((model) => typeof model === "string" && model.trim())
+    ));
+}, "fix ~/.config/local-agent-bridge/model-fallbacks.json or remove it to disable machine fallback");
+
 check("Antigravity CLI", () => {
   const agy = process.env.AGY_BIN || resolve(homedir(), ".local/bin/agy");
   const result = spawnSync(agy, ["--version"], { encoding: "utf8" });

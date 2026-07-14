@@ -50,6 +50,8 @@ PR review: off | <repository>#<number>@<head SHA> as <bot login>
 
 Use `$run-roundtable` in work mode with the goal contract embedded in the shared task. If skill composition is unavailable, call `collaboration.start_collaboration` directly. Include all three providers unless the user narrows the set. Omit model fields unless the user explicitly supplies overrides.
 
+Preserve `modelFallbacks.claude` and `modelFallbacks.codex` across every cycle, or omit them so machine-local policies apply. A recognized overload stays inside the provider turn and must not consume a goal cycle, reassign the writer, or mark the provider unavailable. Display any downgrade narrative and retain the routing policy or receipt in turn metadata.
+
 Pass every exact shell gate from the goal contract as `verificationCommands` and the review handoff as `handoffPath`. These fields give Claude enough non-interactive permission to rerun the declared gates and maintain the handoff without allowing source edits or arbitrary shell commands.
 
 If Claude is the designated writer, pass `workProfile: implement` for local ownership through commit or `workProfile: deliver` when the goal contract also assigns push and PR ownership. These profiles cover common TDD, checksum, package-manager, Git, and bounded PR commands across cycles. Use additive `workCommands` only for unusual repository-specific tooling.

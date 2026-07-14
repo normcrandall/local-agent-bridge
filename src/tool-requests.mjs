@@ -8,6 +8,7 @@ export function claudeToolRequest({
   mode = "review",
   browser = false,
   model = null,
+  fallbackModels,
   timeoutSeconds = 7200,
   verificationCommands = [],
   workCommands = [],
@@ -23,6 +24,7 @@ export function claudeToolRequest({
   if (handoffPath) arguments_.handoffPath = handoffPath;
   if (githubReview) arguments_.githubReview = githubReview;
   if (model) arguments_.model = model;
+  if (fallbackModels !== undefined) arguments_.fallbackModels = fallbackModels;
   if (sessionId) {
     arguments_.sessionId = sessionId;
     return { name: "continue_claude", arguments: arguments_ };
@@ -37,6 +39,7 @@ export function codexToolRequest({
   mode = "review",
   browser = false,
   model = null,
+  fallbackModels,
   workProfile = "exact",
   permissionProfile = "standard",
   verificationCommands = [],
@@ -69,6 +72,7 @@ export function codexToolRequest({
     "approval-policy": "never",
   };
   if (model) arguments_.model = model;
+  if (fallbackModels !== undefined) arguments_.fallbackModels = fallbackModels;
   arguments_.config = {};
   if (mode === "work" && !yolo) {
     arguments_.config["sandbox_workspace_write.network_access"] = workProfile === "deliver";
