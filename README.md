@@ -62,14 +62,16 @@ On another computer, generate a new private key for the same App when possible, 
 
 ### Optional: use your own GitHub Apps
 
-GitHub Apps give builder and reviewer activity distinct bot identities without storing a long-lived personal access token. This repository does not require, create, or ship any Veliqon-specific App. Its checked-in configuration is a generic role-based template; each user creates and installs their own Apps and keeps the real IDs and private-key paths under `~/.config/local-agent-bridge`.
+GitHub Apps give builder and reviewer activity distinct bot identities without storing a long-lived personal access token. This repository does not provide shared hosted identities: the Veliqon Apps used by the maintainers are private infrastructure and are not intended for installation by other users. The checked-in configuration is a generic template; each user creates and installs Apps owned by their own GitHub account or organization and keeps the real IDs and private-key paths under `~/.config/local-agent-bridge`.
 
-Use role identities rather than model identities because Claude, Codex, and Antigravity can rotate between roles. A common setup is two Apps, such as `your-project-builder` and `your-project-reviewer`; six model-by-role Apps are unnecessary. You can point both roles at one App, but separate Apps make permissions and PR history clearer.
+The recommended setup for one GitHub account owner is four Apps: one builder plus one reviewer for each provider, for example `your-project-builder`, `your-project-claude-reviewer`, `your-project-codex-reviewer`, and `your-project-gemini-reviewer`. Provider-specific reviewers make the PR history show which model authored each review. A legacy shared reviewer App is supported, but it loses that distinction.
+
+Make each App private by selecting **Only on this account**. A private App can be installed only on the personal account or organization that owns it. If the bridge must work across repositories owned by different accounts, create an owner-local App set for each account and keep their credentials/configuration separate. Select **Any account** only when you deliberately want a public App that other accounts can install. Never instruct users to install the maintainers' Apps or copy the maintainers' App IDs, installation IDs, or keys.
 
 Create each App from **GitHub Settings → Developer settings → GitHub Apps → New GitHub App**:
 
 - Turn off webhooks and OAuth unless another part of your system needs them.
-- Select **Any account** only if the App must be installable on both personal accounts and organizations.
+- Select **Only on this account** by default. Treat **Any account** as an explicit public-distribution decision, not a portability shortcut.
 - Builder repository permissions: **Contents: Read and write**, **Pull requests: Read and write**, **Issues: Read and write**, and **Metadata: Read-only**. Grant **Workflows: Read and write** only if the builder must intentionally modify workflow files.
 - Reviewer repository permissions: **Contents: Read-only**, **Pull requests: Read and write**, and **Metadata: Read-only**.
 - Generate a private key, move it outside the repository, and restrict it with `chmod 600`.
@@ -93,6 +95,20 @@ chmod 600 ~/.config/local-agent-bridge/github-apps/*.pem
 The `installations` keys are GitHub account or organization names and the values are the installation IDs printed by the discovery command. Role selection is based on the repository owner, so one config can cover personal and organization repositories.
 
 The bound PR-review publisher automatically selects `roles.reviewers.claude`, `.codex`, or `.antigravity` for the active reviewer. A legacy singular `roles.reviewer` entry remains supported. It falls back to `~/.config/ghtoken` only when no reviewer App is configured; if a configured App fails authentication, it stops rather than silently posting as another identity.
+
+Identity configuration belongs in the machine-local JSON file, not in a collaboration skill. Skills should normally pass only the repository, PR number, and exact head SHA:
+
+```json
+{
+  "githubReview": {
+    "repository": "owner/repository",
+    "prNumber": 123,
+    "headSha": "0123456789abcdef0123456789abcdef01234567"
+  }
+}
+```
+
+The broker then selects the active provider's locally configured reviewer App. Use `expectedLogin` for one strict identity, or `expectedLogins.claude`, `.codex`, and `.antigravity` for strict provider-specific pins, only when repository policy requires exact bot names. These fields are policy assertions, not credentials. When moving a skill to another computer or sharing it publicly, leave them out so the receiving user supplies their own identities through `~/.config/local-agent-bridge/github-apps.json`.
 
 The `github-app:run` wrapper also retries the exact same command once with `~/.config/ghtoken` when GitHub explicitly rejects the App for insufficient permission. It prints the identity transition before retrying, never retries ordinary command failures, and never exposes either credential. Set `GITHUB_APP_ALLOW_PAT_FALLBACK=0` or disable `compatibility.allowPatFallback` to require the App identity. Override the mode-600 token path with `AGENT_BRIDGE_GITHUB_PAT_FILE`.
 

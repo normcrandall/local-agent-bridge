@@ -21,7 +21,7 @@ Before starting, derive and show:
 - **Done when:** a finite checklist of independently verifiable conditions.
 - **Verification:** commands, inspections, or artifact checks for each condition.
 - **Review handoff:** one project-relative file that Claude may write while source remains read-only; follow a repository-specified handoff path, otherwise use `.bridge/handoffs/`.
-- **PR source of truth:** when repository policy requires it, the exact PR head and bot identity that must receive each review phase.
+- **PR source of truth:** when repository policy requires it, the exact PR head; let machine-local configuration select each provider's user-owned reviewer App unless policy pins exact logins.
 - **Constraints:** scope, safety, compatibility, and user decisions already made.
 - **Non-goals:** nearby work that must not expand the loop.
 - **Writer:** exactly one participant allowed to mutate the workspace.
@@ -45,7 +45,7 @@ Models: provider configured
 Browser: <on or off>
 Tool: collaboration.start_collaboration
 Claude handoff: <project-relative path>
-PR review: off | <repository>#<number>@<head SHA> as <bot login>
+PR review: off | <repository>#<number>@<head SHA> using provider-configured identities | strict pins <bot logins>
 ```
 
 ## Start the durable loop
@@ -62,7 +62,7 @@ Default `permissionProfile` to `standard`. Use `permissionProfile: yolo` only wh
 
 Use the same profile for a Codex writer. `implement` keeps network disabled; `deliver` enables network for the authorized push/PR lifecycle. Pin the goal to an explicit absolute workspace when it starts and never infer that an existing goal moved because the chair CLI changed directories.
 
-When the pull request is the repository's source of truth for fixes, resolve and pass `githubReview` so the designated Claude, Codex, or Antigravity reviewer authors its own formal review as the required bot. Require the reviewer to author the durable handoff first, then actionable inline comments plus a general verdict. Antigravity's validated envelope is published unchanged by the bound broker adapter. Refresh `headSha` before every re-review cycle; a stale authorization must fail closed rather than comment on an older commit.
+When the pull request is the repository's source of truth for fixes, resolve and pass `githubReview` so the designated Claude, Codex, or Antigravity reviewer authors its own formal review. Omit identity fields to select the provider's user-owned App from machine-local configuration; use strict login pins only when repository policy requires them. Never embed App credentials or maintainer-specific identities in the skill. Require the reviewer to author the durable handoff first, then actionable inline comments plus a general verdict. Antigravity's validated envelope is published unchanged by the bound broker adapter. Refresh `headSha` before every re-review cycle; a stale authorization must fail closed rather than comment on an older commit.
 
 When PR delivery is assigned to the writer, pass `githubBuilder` with the exact repository, expected builder App login, current head SHA, PR/ref fields, and `allowedOperations`. Prefer its bound create/update, thread reply/resolve, ready, and merge operations over broad `gh` permissions. Leave `merge` out of the allowlist unless the goal contract explicitly says agents may merge; pin it to the verified head SHA.
 

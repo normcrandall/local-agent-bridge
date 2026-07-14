@@ -13,7 +13,7 @@ Read `~/.agents/skills/writing-shape/SKILL.md` completely before acting. Follow 
 
 ## Start visibly
 
-Use `$run-roundtable` as the collaboration protocol. If skill composition is unavailable, call the equivalent `collaboration` MCP operations directly. Include Claude, Codex, and Antigravity unless the user explicitly excludes one. Omit model overrides so every provider uses the model currently configured by the user.
+Use `$run-roundtable` as the collaboration protocol. If skill composition is unavailable, call the equivalent `collaboration` MCP operations directly. Include Claude, Codex, and Antigravity unless the user explicitly excludes one. Pass the current host as `chair` with its provider and absolute workspace, keep its work in the native session, and delegate only to peers; same-provider delegation requires an explicit user request. Omit model overrides so every provider uses the model currently configured by the user.
 
 Resolve exact repository gates and a project-relative Claude handoff file, normally under `.bridge/handoffs/`. Pass them as `verificationCommands` and `handoffPath` to every collaboration phase. Claude's review session may run only those gates and write only that handoff file; source edits and arbitrary shell commands remain denied.
 
@@ -21,7 +21,7 @@ When Claude is the designated work-mode writer, select `workProfile: implement` 
 
 Use the same profile distinction for a Codex writer: `implement` keeps network disabled and `deliver` enables the authorized push/PR lifecycle. Pin every council run to an explicit absolute workspace; changing the chair CLI directory does not migrate stored collaboration state.
 
-For pull-request work, read repository policy. When it requires the reviewer to mirror findings to the PR, resolve the repository, PR number, current head SHA, and required bot login and pass them as `githubReview`. The designated Claude, Codex, or Antigravity reviewer must author the handoff first, then one formal review with a general verdict and inline actionable findings. Claude/Codex use pre-bound tools; Antigravity returns a validated envelope published unchanged by the bound broker adapter. The writer never receives review publication authority. Refresh the head SHA for each re-review; never fall back to the chair's personal GitHub identity.
+For pull-request work, read repository policy. When it requires the reviewer to mirror findings to the PR, resolve the repository, PR number, and current head SHA and pass them as `githubReview`. Omit identity fields so the broker selects each provider's user-owned reviewer App from machine-local configuration. Use `expectedLogin` or `expectedLogins` only when repository policy explicitly pins exact bots. Never embed App IDs, installation IDs, keys, tokens, or maintainer-specific identities in the skill. The designated Claude, Codex, or Antigravity reviewer must author the handoff first, then one formal review with a general verdict and inline actionable findings. Claude/Codex use pre-bound tools; Antigravity returns a validated envelope published unchanged by the bound broker adapter. The writer never receives review publication authority. Refresh the head SHA for each re-review; never fall back to the chair's personal GitHub identity.
 
 Before starting, display:
 
@@ -37,7 +37,7 @@ Progress: heartbeat every 8 seconds while a peer is working
 Progress summary: latest provider-authored summary plus independent process heartbeat
 Verification commands: none | <exact commands>
 Claude handoff: <project-relative path>
-PR review: off | <repository>#<number>@<head SHA> as <bot login>
+PR review: off | <repository>#<number>@<head SHA> using provider-configured identities | strict pins <bot logins>
 ```
 
 Return the `collaborationId` immediately. Routine polls must use `detail: status`, `includeTurns: 0`, the last `updatedAt` as `afterUpdatedAt`, and at most `waitSeconds: 8`. Track the last displayed `runtime.turnCount`; only when it increases, make one history call with `detail: full` and `afterTurn` set to the last displayed turn. Never repeat the original task or old turn bodies on heartbeat polls. Treat `runtime.activeCall.summary` as narrative status and show it with its `summaryAt` age when the narrative or lifecycle changes; `summarySource: broker` is a placeholder and `provider_or_adapter` is observed work. If only heartbeat or elapsed time changes, emit at most one compact liveness line per 60 seconds. Never invent a summary or expose chain-of-thought. Never leave the user at a static “Calling …” message.

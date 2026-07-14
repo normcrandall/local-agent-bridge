@@ -23,6 +23,8 @@ If the required tool is unavailable, stop and identify the missing server. Never
 
 Use the persistent `collaboration.start_collaboration` interface with `agents: [<peer>]` and `maxTurns: 1` for the actual handoff, including reviews. This returns immediately with a durable collaboration ID and makes `runtime.activeCall`, provider-authored summaries, automatic heartbeats, cancellation, and history available to every chair. The one-turn bound prevents the broker from starting a redundant second call to the same peer. The provider adapter tools in the table are the implementation layer used by the detached worker; do not block the chair inside a raw direct tool call.
 
+Pass the current host as `chair` with its provider and absolute workspace. Do not delegate to that same provider unless the user explicitly requests same-provider delegation; otherwise keep the native chair and call only the named peer.
+
 Default to read-only review. Permit work mode only when the user requested edits. Omit `model` unless the user explicitly supplied an override. Use browser access only when required by the task.
 
 Pass caller-supplied downgrade chains through `modelFallbacks.claude` and `modelFallbacks.codex`. Otherwise omit them so `~/.config/local-agent-bridge/model-fallbacks.json` applies. Claude Code handles its chain natively; the Codex adapter repeats the original ask, preserves an established continuation thread when applicable, and emits a downgrade narrative. Fallback applies only to recognized model overload, never authentication, permission, quota, configuration, or transport failures.
@@ -35,7 +37,7 @@ For Claude work mode, use `workProfile: implement` when Claude owns local implem
 
 Use the same `workProfile` distinction when Codex is the delegated writer. `implement` keeps delegated Codex network-disabled and instructs it to stop after local verification/commit. `deliver` enables workspace network access and authorizes the requested push and PR lifecycle. Do not assume moving the chair CLI changes an existing session or collaboration's stored workspace, writer, or profile.
 
-If repository instructions require the reviewer to mirror findings to the pull request, treat that as standing authorization for the review publication only. Resolve the repository, PR number, exact current head SHA, and required bot login from the repository and connected GitHub state. Pass them as `githubReview` for Claude, Codex, or Antigravity. Do not pass a token; the bound publisher reads `~/.config/ghtoken` outside model context and verifies the login. The reviewer must author the durable handoff first, then one formal PR review with a general verdict and inline comments for actionable line-specific findings. Claude and Codex use the bound review tools directly. Antigravity authors a validated review envelope that the broker sends unchanged through the same target-bound publisher because `agy` lacks per-session MCP injection. Do not substitute the chair's personal `gh` identity.
+If repository instructions require the reviewer to mirror findings to the pull request, treat that as standing authorization for the review publication only. Resolve the repository, PR number, and exact current head SHA, then pass them as `githubReview` for Claude, Codex, or Antigravity. Omit identity fields so the broker selects the active provider's user-owned reviewer App from machine-local configuration. Set `expectedLogin` or a provider entry in `expectedLogins` only when repository policy explicitly pins an exact bot. Never embed App IDs, installation IDs, private keys, or tokens in a skill. The reviewer must author the durable handoff first, then one formal PR review with a general verdict and inline comments for actionable line-specific findings. Claude and Codex use the bound review tools directly. Antigravity authors a validated review envelope that the broker sends unchanged through the target-bound publisher because `agy` lacks per-session MCP injection. Do not substitute the chair's personal `gh` identity.
 
 ## Show the handoff receipt
 
@@ -57,7 +59,7 @@ Verification commands: none | <exact commands>
 Work commands: none | <exact commands>
 Work profile: exact | implement | deliver
 Handoff file: response only | <project-relative path>
-PR review: off | <repository>#<number>@<head SHA> as <bot login>
+PR review: off | <repository>#<number>@<head SHA> using provider-configured identity | strict pin <bot login>
 ```
 
 Then send a self-contained prompt containing the objective, constraints, relevant paths or diff, acceptance criteria, and expected output. Tell the peer not to invoke another agent.
