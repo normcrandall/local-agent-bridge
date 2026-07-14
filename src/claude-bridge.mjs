@@ -94,25 +94,39 @@ function clipped(value) {
 }
 
 const IMPLEMENT_WORK_TOOLS = [
-  "Bash(git status*)", "Bash(git diff*)", "Bash(git log*)", "Bash(git show*)",
-  "Bash(git rev-parse*)", "Bash(git branch*)", "Bash(git switch*)", "Bash(git checkout*)",
-  "Bash(git add *)", "Bash(git commit *)",
-  "Bash(pnpm *)", "Bash(npm *)", "Bash(npx *)", "Bash(yarn *)", "Bash(bun *)",
-  "Bash(node *)", "Bash(python *)", "Bash(python3 *)", "Bash(pytest *)", "Bash(uv *)",
-  "Bash(cargo *)", "Bash(go *)", "Bash(make *)",
-  "Bash(shasum *)", "Bash(sha256sum *)",
+  "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
+  "Bash(git rev-parse:*)", "Bash(git branch:*)", "Bash(git switch:*)", "Bash(git checkout:*)",
+  "Bash(git add:*)", "Bash(git commit:*)",
+  "Bash(pnpm:*)", "Bash(npm:*)", "Bash(npx:*)", "Bash(yarn:*)", "Bash(bun:*)",
+  "Bash(node:*)", "Bash(python:*)", "Bash(python3:*)", "Bash(pytest:*)", "Bash(uv:*)",
+  "Bash(cargo:*)", "Bash(go:*)", "Bash(make:*)",
+  "Bash(shasum:*)", "Bash(sha256sum:*)",
 ];
 const DELIVER_WORK_TOOLS = [
   ...IMPLEMENT_WORK_TOOLS,
-  "Bash(git push *)",
-  "Bash(gh pr create *)", "Bash(gh pr edit *)", "Bash(gh pr view *)",
-  "Bash(gh pr checks *)", "Bash(gh pr status*)",
+  "Bash(git push:*)",
+  "Bash(gh repo view:*)",
+  "Bash(gh pr create:*)", "Bash(gh pr edit:*)", "Bash(gh pr view:*)",
+  "Bash(gh pr checks:*)", "Bash(gh pr status:*)", "Bash(gh pr review:*)",
+  "Bash(gh pr comment:*)", "Bash(gh pr ready:*)",
+  "Bash(gh pr close:*)", "Bash(gh pr reopen:*)",
 ];
 
 function profileTools(workProfile) {
   if (workProfile === "deliver") return DELIVER_WORK_TOOLS;
   if (workProfile === "implement") return IMPLEMENT_WORK_TOOLS;
   return [];
+}
+
+function validatePinnedMergeCommands(commands) {
+  for (const command of commands) {
+    if (!/\bgh\s+pr\s+merge(?:\s|$)/.test(command)) continue;
+    if (!/^gh pr merge [1-9]\d* --(?:merge|rebase|squash) --match-head-commit [0-9a-fA-F]{40}(?: --delete-branch)?$/.test(command)) {
+      throw new Error(
+        "Exact gh pr merge commands must use: gh pr merge <number> --<merge|rebase|squash> --match-head-commit <40-character SHA> [--delete-branch]",
+      );
+    }
+  }
 }
 
 function runClaude({
@@ -136,6 +150,9 @@ function runClaude({
   }
   if (permissionProfile === "yolo" && mode !== "work") {
     throw new Error("permissionProfile yolo is available only in work mode.");
+  }
+  if (mode === "work" && permissionProfile !== "yolo") {
+    validatePinnedMergeCommands(workCommands);
   }
 
   const actualCwd = projectDirectory(cwd);

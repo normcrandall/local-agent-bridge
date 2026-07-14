@@ -69,6 +69,8 @@ try {
   assert.ok(invocations[1].includes('sandbox_mode="read-only"'));
   assert.ok(invocations[1].includes('approval_policy="never"'));
   assert.ok(invocations[1].includes("example.flag=true"));
+  assert.equal(invocations[0].includes("--color"), false);
+  assert.equal(invocations[1].includes("--color"), false);
 
   const escaped = await client.callTool({
     name: "codex",

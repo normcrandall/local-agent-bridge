@@ -129,6 +129,7 @@ async function callBridgeWithoutModel() {
           "git add src/task-08.mjs",
           "git commit -m 'feat: complete task 8'",
           "git push -u origin task-08",
+          `gh pr merge 42 --squash --match-head-commit ${"a".repeat(40)}`,
         ],
       },
     });
@@ -147,16 +148,102 @@ async function callBridgeWithoutModel() {
       "Bash(git add src/task-08.mjs)",
       "Bash(git commit -m 'feat: complete task 8')",
       "Bash(git push -u origin task-08)",
-      "Bash(pnpm *)",
-      "Bash(shasum *)",
-      "Bash(git commit *)",
-      "Bash(git push *)",
-      "Bash(gh pr create *)",
+      `Bash(gh pr merge 42 --squash --match-head-commit ${"a".repeat(40)})`,
+      "Bash(pnpm:*)",
+      "Bash(shasum:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(gh pr create:*)",
+      "Bash(gh pr comment:*)",
+      "Bash(gh pr review:*)",
     ]) {
       if (!workAllowed.includes(rule)) throw new Error(`Claude work permission is missing: ${rule}`);
     }
+    const exactWorkRules = new Set([
+      "git switch -c task-08",
+      "npm test",
+      "git add src/task-08.mjs",
+      "git commit -m 'feat: complete task 8'",
+      "git push -u origin task-08",
+      `gh pr merge 42 --squash --match-head-commit ${"a".repeat(40)}`,
+    ].map((command) => `Bash(${command})`));
+    const reusableBashRules = workAllowed.filter((rule) => (
+      rule.startsWith("Bash(") && !exactWorkRules.has(rule)
+    ));
+    if (reusableBashRules.some((rule) => !/^Bash\([^)*]+:\*\)$/.test(rule))) {
+      throw new Error("Claude work permissions contain an invalid reusable Bash prefix");
+    }
+    const expectedGitHubRules = new Set([
+      "Bash(gh repo view:*)",
+      "Bash(gh pr create:*)", "Bash(gh pr edit:*)", "Bash(gh pr view:*)",
+      "Bash(gh pr checks:*)", "Bash(gh pr status:*)", "Bash(gh pr review:*)",
+      "Bash(gh pr comment:*)", "Bash(gh pr ready:*)", "Bash(gh pr close:*)",
+      "Bash(gh pr reopen:*)",
+    ]);
+    if (reusableBashRules.some((rule) => /^Bash\(gh(?::| )/.test(rule) && !expectedGitHubRules.has(rule))) {
+      throw new Error("Claude deliver profile grants an unexpected broad GitHub command family");
+    }
+    if (workAllowed.includes("Bash(gh pr merge:*)")) {
+      throw new Error("Claude deliver profile grants unbound pull-request merge access");
+    }
+    const rejectedUnpinnedMerge = await client.callTool({
+      name: "ask_claude",
+      arguments: {
+        prompt: "must reject unpinned merge",
+        mode: "work",
+        workProfile: "deliver",
+        workCommands: ["gh pr merge 42 --squash"],
+      },
+    });
+    if (!rejectedUnpinnedMerge.isError) {
+      throw new Error("Claude deliver profile accepted an unpinned pull-request merge");
+    }
+    const rejectedCrossRepositoryMerge = await client.callTool({
+      name: "ask_claude",
+      arguments: {
+        prompt: "must reject cross-repository merge",
+        mode: "work",
+        workProfile: "deliver",
+        workCommands: [`gh pr merge 42 --repo other/repo --squash --match-head-commit ${"a".repeat(40)}`],
+      },
+    });
+    if (!rejectedCrossRepositoryMerge.isError) {
+      throw new Error("Claude deliver profile accepted a cross-repository pull-request merge");
+    }
+    const rejectedComposedMerge = await client.callTool({
+      name: "ask_claude",
+      arguments: {
+        prompt: "must reject shell-composed merge",
+        mode: "work",
+        workProfile: "deliver",
+        workCommands: [`echo preparing && gh pr merge 42 --squash --match-head-commit ${"a".repeat(40)}`],
+      },
+    });
+    if (!rejectedComposedMerge.isError) {
+      throw new Error("Claude deliver profile accepted a shell-composed pull-request merge");
+    }
     if (!workInvocation.args.at(-1).includes("git push -u origin task-08")) {
       throw new Error("Claude work prompt did not identify the exact authorized commands");
+    }
+    const implement = await client.callTool({
+      name: "ask_claude",
+      arguments: { prompt: "implement without delivery", mode: "work", workProfile: "implement" },
+    });
+    if (implement.isError) throw new Error("Claude implement-profile bridge tool returned an error");
+    const implementInvocation = JSON.parse(implement.structuredContent.result);
+    const implementPermissionIndex = implementInvocation.args.indexOf("--permission-mode");
+    const implementAllowedIndex = implementInvocation.args.indexOf("--allowedTools");
+    const implementAllowed = implementInvocation.args.slice(
+      implementAllowedIndex + 1,
+      implementPermissionIndex,
+    );
+    for (const rule of ["Bash(git status:*)", "Bash(git commit:*)", "Bash(pnpm:*)", "Bash(shasum:*)"]) {
+      if (!implementAllowed.includes(rule)) {
+        throw new Error(`Claude implement profile is missing its local permission: ${rule}`);
+      }
+    }
+    if (implementAllowed.includes("Bash(git push:*)") || implementAllowed.some((rule) => /^Bash\(gh(?::| )/.test(rule))) {
+      throw new Error("Claude implement profile unexpectedly grants delivery permissions");
     }
     console.log("Claude bridge call paths: explicit model forwarded; configured default preserved");
   } finally {

@@ -79,7 +79,7 @@ function runCodex({ prompt, cwd, sandbox, approvalPolicy, config = {}, model, th
   const actualCwd = projectDirectory(cwd);
   const args = ["exec"];
   if (threadId) args.push("resume");
-  args.push("--json", "--skip-git-repo-check", "--color", "never");
+  args.push("--json", "--skip-git-repo-check");
   if (!threadId) args.push("--sandbox", sandbox, "--cd", actualCwd);
   else args.push("--config", `sandbox_mode=${tomlValue(sandbox)}`);
   args.push("--config", `approval_policy=${tomlValue(approvalPolicy)}`);
