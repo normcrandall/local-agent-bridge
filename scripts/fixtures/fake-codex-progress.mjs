@@ -2,11 +2,18 @@
 
 import { appendFileSync } from "node:fs";
 
-if (process.env.FAKE_CODEX_ARGS_FILE) {
-  appendFileSync(process.env.FAKE_CODEX_ARGS_FILE, `${JSON.stringify(process.argv.slice(2))}\n`);
-}
-
 const args = process.argv.slice(2);
+if (args[0] === "--version") {
+  process.stdout.write("fake-codex 1.0.0\n");
+  process.exit(0);
+}
+if (args.includes("--help")) {
+  process.stdout.write("--json --model --sandbox --cd --skip-git-repo-check --config\n");
+  process.exit(0);
+}
+if (process.env.FAKE_CODEX_ARGS_FILE) {
+  appendFileSync(process.env.FAKE_CODEX_ARGS_FILE, `${JSON.stringify(args)}\n`);
+}
 if (args[0] === "exec" && args[1] === "resume" && args.includes("--color")) {
   process.stderr.write("error: unexpected argument '--color' found\n");
   process.exit(2);

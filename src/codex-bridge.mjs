@@ -8,6 +8,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { loadConfiguredFallbackModels, normalizeFallbackModels } from "./model-fallbacks.mjs";
+import { negotiateProviderCapabilities } from "./provider-cli-capabilities.mjs";
 
 const WORKSPACE_ROOT = realpathSync(process.env.BRIDGE_WORKSPACE_ROOT || process.env.BRIDGE_ROOT || process.cwd());
 const MAX_OUTPUT_CHARS = 200_000;
@@ -30,6 +31,7 @@ function findCodex() {
 }
 
 const CODEX_BIN = findCodex();
+const CODEX_CAPABILITIES = negotiateProviderCapabilities({ provider: "codex", binary: CODEX_BIN });
 
 function projectDirectory(requested) {
   const candidate = resolve(WORKSPACE_ROOT, requested || ".");
@@ -96,11 +98,21 @@ function runCodexAttempt({ prompt, cwd, sandbox, approvalPolicy, config = {}, mo
     throw new Error("Nested Codex bridge invocation blocked to prevent an agent loop.");
   }
   const actualCwd = projectDirectory(cwd);
+  const capabilities = threadId ? CODEX_CAPABILITIES.resume : CODEX_CAPABILITIES.newSession;
+  if (!capabilities.json) throw new Error(`Installed Codex ${CODEX_CAPABILITIES.version} does not support required JSON event output on ${threadId ? "exec resume" : "exec"}.`);
+  if (!capabilities.config) throw new Error(`Installed Codex ${CODEX_CAPABILITIES.version} does not support required --config overrides on ${threadId ? "exec resume" : "exec"}.`);
+  if (model && !capabilities.model) throw new Error(`Installed Codex ${CODEX_CAPABILITIES.version} cannot select a model on ${threadId ? "exec resume" : "exec"}.`);
   const args = ["exec"];
   if (threadId) args.push("resume");
-  args.push("--json", "--skip-git-repo-check");
-  if (!threadId) args.push("--sandbox", sandbox, "--cd", actualCwd);
-  else args.push("--config", `sandbox_mode=${tomlValue(sandbox)}`);
+  args.push("--json");
+  if (capabilities.skipGitRepoCheck) args.push("--skip-git-repo-check");
+  if (!threadId) {
+    if (capabilities.sandbox) args.push("--sandbox", sandbox);
+    else args.push("--config", `sandbox_mode=${tomlValue(sandbox)}`);
+    if (capabilities.cd) args.push("--cd", actualCwd);
+  } else {
+    args.push("--config", `sandbox_mode=${tomlValue(sandbox)}`);
+  }
   args.push("--config", `approval_policy=${tomlValue(approvalPolicy)}`);
   for (const [key, value] of Object.entries(config || {})) {
     args.push("--config", `${key}=${tomlValue(value)}`);

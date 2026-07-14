@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { negotiateProviderCapabilities } from "./provider-cli-capabilities.mjs";
 
 const WORKSPACE_ROOT = realpathSync(process.env.BRIDGE_WORKSPACE_ROOT || process.env.BRIDGE_ROOT || process.cwd());
 const DEFAULT_TIMEOUT_MS = 2 * 60 * 60 * 1000;
@@ -27,6 +28,7 @@ function findExecutable(name, candidates) {
 }
 
 const AGY_BIN = findExecutable("agy", [process.env.AGY_BIN, join(homedir(), ".local/bin/agy")]);
+const AGY_CAPABILITIES = negotiateProviderCapabilities({ provider: "antigravity", binary: AGY_BIN });
 
 function projectDirectory(requested) {
   const candidate = resolve(WORKSPACE_ROOT, requested || ".");
@@ -60,6 +62,14 @@ function cachedConversation(cwd) {
   }
 }
 
+function loggedConversation(path) {
+  try {
+    const content = readFileSync(path, "utf8");
+    const matches = [...content.matchAll(/(?:conversation(?:Id|_id)?["'=:\s]+)([0-9a-f]{8}-[0-9a-f-]{27,})/gi)];
+    return matches.at(-1)?.[1] || null;
+  } catch { return null; }
+}
+
 function runAntigravity({ prompt, cwd, mode, model, timeoutSeconds, permissionProfile = "standard", conversationId, onProgress = () => {} }) {
   if (process.env.ANTIGRAVITY_BRIDGE_ACTIVE === "1") {
     throw new Error("Nested Antigravity bridge invocation blocked to prevent an agent loop.");
@@ -70,6 +80,13 @@ function runAntigravity({ prompt, cwd, mode, model, timeoutSeconds, permissionPr
 
   const actualCwd = projectDirectory(cwd);
   const duration = timeoutMs(timeoutSeconds);
+  const temporaryDirectory = AGY_CAPABILITIES.logFile ? mkdtempSync(join(tmpdir(), "antigravity-agent-bridge-")) : null;
+  const logFile = temporaryDirectory ? join(temporaryDirectory, "session.log") : null;
+  for (const [feature, supported] of [
+    ["--print", AGY_CAPABILITIES.print], ["--print-timeout", AGY_CAPABILITIES.printTimeout], ["--mode", AGY_CAPABILITIES.mode],
+  ]) if (!supported) throw new Error(`Installed Antigravity ${AGY_CAPABILITIES.version} lacks required ${feature} support.`);
+  if (model && !AGY_CAPABILITIES.model) throw new Error(`Installed Antigravity ${AGY_CAPABILITIES.version} cannot select a model.`);
+  if (conversationId && !AGY_CAPABILITIES.conversation) throw new Error(`Installed Antigravity ${AGY_CAPABILITIES.version} cannot resume a conversation.`);
   const args = [
     "--print",
     prompt,
@@ -78,8 +95,11 @@ function runAntigravity({ prompt, cwd, mode, model, timeoutSeconds, permissionPr
     "--mode",
     mode === "work" ? "accept-edits" : "plan",
   ];
-  if (mode === "work" && permissionProfile === "yolo") args.push("--dangerously-skip-permissions");
-  else args.push("--sandbox");
+  if (logFile) args.push("--log-file", logFile);
+  if (mode === "work" && permissionProfile === "yolo") {
+    if (!AGY_CAPABILITIES.yolo) throw new Error(`Installed Antigravity ${AGY_CAPABILITIES.version} cannot enable YOLO mode.`);
+    args.push("--dangerously-skip-permissions");
+  } else if (AGY_CAPABILITIES.sandbox) args.push("--sandbox");
   if (model) args.push("--model", model);
   if (conversationId) args.push("--conversation", conversationId);
 
@@ -108,21 +128,29 @@ function runAntigravity({ prompt, cwd, mode, model, timeoutSeconds, permissionPr
     child.stderr.on("data", (chunk) => { stderr += chunk; });
     child.on("error", (error) => {
       clearTimeout(timer);
+      if (temporaryDirectory) rmSync(temporaryDirectory, { recursive: true, force: true });
       rejectPromise(error);
     });
     child.on("close", (code, signal) => {
       clearTimeout(timer);
       if (timedOut) {
+        if (temporaryDirectory) rmSync(temporaryDirectory, { recursive: true, force: true });
         rejectPromise(new Error("Antigravity delegation timed out."));
         return;
       }
       if (code !== 0) {
+        if (temporaryDirectory) rmSync(temporaryDirectory, { recursive: true, force: true });
         rejectPromise(new Error(clipped(stderr || `Antigravity exited with ${code ?? signal}.`)));
         return;
       }
+      const fromLog = logFile ? loggedConversation(logFile) : null;
+      const resolvedConversation = conversationId || fromLog || cachedConversation(actualCwd);
+      if (temporaryDirectory) rmSync(temporaryDirectory, { recursive: true, force: true });
       resolvePromise({
         result: clipped(stdout.trim()),
-        conversationId: conversationId || cachedConversation(actualCwd),
+        conversationId: resolvedConversation,
+        conversationSource: conversationId ? "caller" : fromLog ? "log-file" : "cwd-cache",
+        resumeReliability: fromLog || conversationId ? "session-bound" : "best-effort-cwd-cache",
         isError: false,
       });
     });

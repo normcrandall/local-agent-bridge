@@ -5,6 +5,21 @@ import { dirname, isAbsolute, resolve } from "node:path";
 
 export const DEFAULT_GITHUB_APPS_CONFIG = resolve(homedir(), ".config/local-agent-bridge/github-apps.json");
 export const GITHUB_LOGIN_PATTERN = /^[A-Za-z0-9-]+(?:\[bot\])?$/;
+export const GITHUB_APP_ROLE_PERMISSIONS = {
+  builder: { contents: "write", pull_requests: "write", metadata: "read" },
+  reviewer: { contents: "read", pull_requests: "write", metadata: "read" },
+};
+
+export function assertGitHubAppPermissions(role, permissions = {}) {
+  const required = GITHUB_APP_ROLE_PERMISSIONS[role];
+  if (!required) throw new Error(`Unknown GitHub App role: ${role}`);
+  const rank = { read: 1, write: 2 };
+  const missing = Object.entries(required).filter(([name, level]) => (rank[permissions[name]] || 0) < rank[level]);
+  if (missing.length) {
+    throw new Error(`${role} GitHub App lacks required permissions: ${missing.map(([name, level]) => `${name}:${level}`).join(", ")}.`);
+  }
+  return true;
+}
 
 function base64url(value) {
   return Buffer.from(value).toString("base64url");
@@ -29,6 +44,42 @@ async function readConfig(configPath) {
     if (error?.code === "ENOENT") return { config: null, exists: false };
     throw new Error(`Unable to read GitHub Apps config at ${resolvedPath}: ${error.message}`);
   }
+}
+
+export async function inspectGitHubAppRoles({ configPath = DEFAULT_GITHUB_APPS_CONFIG } = {}) {
+  const { config, exists } = await readConfig(configPath);
+  if (!exists) return { configured: false, configPath: expandHome(configPath), version: null, roles: {} };
+  if (config.version !== 1) throw new Error("Unsupported GitHub Apps config version.");
+  const roles = {};
+  for (const role of ["builder", "reviewer"]) {
+    const selected = config.roles?.[role];
+    if (!selected) {
+      roles[role] = { configured: false, installations: [] };
+      continue;
+    }
+    let keySecure = false;
+    let keyError = null;
+    try {
+      await securePrivateKey(resolveConfiguredPath(selected.privateKeyPath, configPath));
+      keySecure = true;
+    } catch (error) { keyError = error.message; }
+    roles[role] = {
+      configured: true,
+      appIdValid: /^\d+$/.test(String(selected.appId || "")),
+      expectedLogin: selected.expectedLogin || null,
+      expectedLoginValid: GITHUB_LOGIN_PATTERN.test(selected.expectedLogin || ""),
+      installations: Object.keys(selected.installations || {}),
+      privateKeySecure: keySecure,
+      privateKeyError: keyError,
+    };
+  }
+  return {
+    configured: true,
+    configPath: expandHome(configPath),
+    version: config.version,
+    allowPatFallback: config.compatibility?.allowPatFallback !== false,
+    roles,
+  };
 }
 
 async function securePrivateKey(path) {
@@ -139,12 +190,14 @@ export async function createInstallationToken({
     fetchImpl,
   });
   if (!result.token) throw new Error("GitHub did not return an installation token.");
+  assertGitHubAppPermissions(role, result.permissions || {});
   return {
     token: result.token,
     expiresAt: result.expires_at,
     expectedLogin: selected.expectedLogin,
     verifiedLogin,
     installationId: selected.installationId,
+    permissions: result.permissions,
   };
 }
 
@@ -160,9 +213,11 @@ export async function resolveReviewToken({
     return createInstallationToken({ role: "reviewer", repository, configPath, apiUrl: appApiUrl, fetchImpl });
   }
 
-  if (!tokenFile) {
+  const environmentAllowsFallback = process.env.GITHUB_REVIEW_ALLOW_PAT_FALLBACK !== "0";
+  const configAllowsFallback = config?.compatibility?.allowPatFallback !== false;
+  if (!tokenFile || !environmentAllowsFallback || !configAllowsFallback) {
     throw new Error(exists
-      ? "GitHub App role is not configured: reviewer"
+      ? "GitHub App role is not configured: reviewer (PAT fallback is disabled)"
       : `GitHub Apps config does not exist: ${expandHome(configPath)}`);
   }
 

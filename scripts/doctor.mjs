@@ -90,27 +90,35 @@ check("Claude CLI collaboration status line", () => {
   return settings.statusLine?.command === launcher
     && settings.statusLine?.refreshInterval <= 2;
 }, "point Claude statusLine at agent-bridge-claude-statusline with refreshInterval 2");
+function configuredGitHubRole(role) {
+  const configPath = resolve(homedir(), ".config/local-agent-bridge/github-apps.json");
+  if (!existsSync(configPath)) return false;
+  const selected = JSON.parse(readFileSync(configPath, "utf8")).roles?.[role];
+  if (!selected) return false;
+  const keyPath = selected.privateKeyPath?.startsWith("~/")
+    ? resolve(homedir(), selected.privateKeyPath.slice(2))
+    : isAbsolute(selected.privateKeyPath || "")
+      ? selected.privateKeyPath
+      : resolve(dirname(configPath), selected.privateKeyPath || "");
+  const info = statSync(keyPath);
+  return /^\d+$/.test(String(selected.appId || ""))
+    && GITHUB_LOGIN_PATTERN.test(selected.expectedLogin || "")
+    && Object.keys(selected.installations || {}).length > 0
+    && info.isFile()
+    && (info.mode & 0o077) === 0;
+}
+check("GitHub builder App", () => configuredGitHubRole("builder"), "configure the builder role in ~/.config/local-agent-bridge/github-apps.json");
 check("GitHub reviewer credential", () => {
+  if (configuredGitHubRole("reviewer")) return true;
   const configPath = resolve(homedir(), ".config/local-agent-bridge/github-apps.json");
   if (existsSync(configPath)) {
-    const reviewer = JSON.parse(readFileSync(configPath, "utf8")).roles?.reviewer;
-    if (reviewer) {
-      const keyPath = reviewer.privateKeyPath?.startsWith("~/")
-        ? resolve(homedir(), reviewer.privateKeyPath.slice(2))
-        : isAbsolute(reviewer.privateKeyPath || "")
-          ? reviewer.privateKeyPath
-          : resolve(dirname(configPath), reviewer.privateKeyPath || "");
-      const info = statSync(keyPath);
-      return /^\d+$/.test(String(reviewer.appId || ""))
-        && GITHUB_LOGIN_PATTERN.test(reviewer.expectedLogin || "")
-        && info.isFile()
-        && (info.mode & 0o077) === 0;
-    }
+    const config = JSON.parse(readFileSync(configPath, "utf8"));
+    if (config.compatibility?.allowPatFallback === false) return false;
   }
   const tokenPath = resolve(homedir(), ".config/ghtoken");
   const info = statSync(tokenPath);
   return info.isFile() && (info.mode & 0o077) === 0 && readFileSync(tokenPath, "utf8").trim().length > 0;
-}, "configure a reviewer GitHub App or install ~/.config/ghtoken with mode 600");
+}, "configure a reviewer GitHub App, or explicitly allow the mode-600 PAT compatibility fallback");
 check("Codex user-scope bridge config", () => {
   const expected = {
     claude_code: "agent-claude-mcp",

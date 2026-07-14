@@ -16,6 +16,7 @@ export function claudeToolRequest({
   permissionProfile = "standard",
   handoffPath = null,
   githubReview = null,
+  githubBuilder = null,
 }) {
   const arguments_ = { prompt, cwd, mode, browser, timeoutSeconds, permissionProfile };
   if (verificationCommands.length) arguments_.verificationCommands = verificationCommands;
@@ -23,6 +24,7 @@ export function claudeToolRequest({
   if (workProfile !== "exact") arguments_.workProfile = workProfile;
   if (handoffPath) arguments_.handoffPath = handoffPath;
   if (githubReview) arguments_.githubReview = githubReview;
+  if (githubBuilder) arguments_.githubBuilder = githubBuilder;
   if (model) arguments_.model = model;
   if (fallbackModels !== undefined) arguments_.fallbackModels = fallbackModels;
   if (sessionId) {
@@ -46,12 +48,16 @@ export function codexToolRequest({
   handoffPath = null,
   githubReview = null,
   githubReviewBridgePath = null,
+  githubBuilder = null,
+  githubBuilderBridgePath = null,
   playwrightBridgePath = null,
 }) {
   if (githubReview && mode !== "review") throw new Error("githubReview is available only in Codex review mode.");
   if (githubReview && (!handoffPath || !githubReviewBridgePath)) {
     throw new Error("Codex githubReview requires handoffPath and githubReviewBridgePath.");
   }
+  if (githubBuilder && mode !== "work") throw new Error("githubBuilder is available only in Codex work mode.");
+  if (githubBuilder && !githubBuilderBridgePath) throw new Error("Codex githubBuilder requires githubBuilderBridgePath.");
   const absoluteHandoffPath = handoffPath ? resolve(cwd, handoffPath) : null;
   if (absoluteHandoffPath) {
     const fromWorkspace = relative(cwd, absoluteHandoffPath);
@@ -60,7 +66,7 @@ export function codexToolRequest({
     }
   }
   const workContract = mode === "work"
-    ? `\n\nDelegated Codex work contract:\n- You are the designated writer for this bounded task.\n- Work profile: ${workProfile}.\n- Permission profile: ${permissionProfile}.${permissionProfile === "yolo" ? " The user explicitly authorized danger-full-access with approvals disabled." : " Standard sandbox protections remain active."}\n- ${workProfile === "deliver" ? "Repository delivery is authorized, including push and pull-request creation when requested by the task." : "Work locally through verification and commit. Do not push, create or modify pull requests, or mutate other external systems."}\n- Preserve branch ownership, report verification and Git/PR results, and do not delegate to another agent.`
+    ? `\n\nDelegated Codex work contract:\n- You are the designated writer for this bounded task.\n- Work profile: ${workProfile}.\n- Permission profile: ${permissionProfile}.${permissionProfile === "yolo" ? " The user explicitly authorized danger-full-access with approvals disabled." : " Standard sandbox protections remain active."}\n- ${githubBuilder ? `Use only the github_builder tools for GitHub mutation. They are bound to ${githubBuilder.repository}${githubBuilder.prNumber ? ` PR #${githubBuilder.prNumber}` : ""} at ${githubBuilder.headSha} as ${githubBuilder.expectedLogin}. Do not use gh or general GitHub tools.` : workProfile === "deliver" ? "Repository delivery is authorized, including push and pull-request creation when requested by the task." : "Work locally through verification and commit. Do not push, create or modify pull requests, or mutate other external systems."}\n- Preserve branch ownership, report verification and Git/PR results, and do not delegate to another agent.`
     : githubReview
       ? `\n\nDelegated Codex review contract:\n- Treat workspace source and Git state as read-only.\n- Run only the requested verification commands when permitted by the sandbox.\n- Write the durable review only through github_review.write_handoff, which is bound to ${absoluteHandoffPath}.\n- Then submit exactly one formal review through github_review.submit_pr_review to ${githubReview.repository} PR #${githubReview.prNumber} at ${githubReview.headSha} as ${githubReview.expectedLogin}.\n- Do not use general GitHub, shell mutation, commit, push, or another agent.`
       : "";
@@ -88,6 +94,21 @@ export function codexToolRequest({
     arguments_.config["mcp_servers.github_review.env.GITHUB_REVIEW_HANDOFF_PATH"] = absoluteHandoffPath;
     arguments_.config["mcp_servers.github_review.env.GITHUB_REVIEW_TOKEN_FILE"] = resolve(homedir(), ".config/ghtoken");
     arguments_.config["mcp_servers.github_review.default_tools_approval_mode"] = "approve";
+  }
+  if (githubBuilder) {
+    arguments_.config["mcp_servers.github_builder.enabled"] = true;
+    arguments_.config["mcp_servers.github_builder.command"] = process.execPath;
+    arguments_.config["mcp_servers.github_builder.args"] = [githubBuilderBridgePath];
+    for (const [key, value] of Object.entries({
+      GITHUB_BUILDER_REPOSITORY: githubBuilder.repository,
+      GITHUB_BUILDER_PR_NUMBER: githubBuilder.prNumber ? String(githubBuilder.prNumber) : null,
+      GITHUB_BUILDER_HEAD_SHA: githubBuilder.headSha,
+      GITHUB_BUILDER_EXPECTED_LOGIN: githubBuilder.expectedLogin,
+      GITHUB_BUILDER_HEAD_REF: githubBuilder.headRef || null,
+      GITHUB_BUILDER_BASE_REF: githubBuilder.baseRef || null,
+      GITHUB_BUILDER_ALLOWED_OPERATIONS: githubBuilder.allowedOperations?.join(",") || null,
+    })) if (value) arguments_.config[`mcp_servers.github_builder.env.${key}`] = value;
+    arguments_.config["mcp_servers.github_builder.default_tools_approval_mode"] = "approve";
   }
   if (browser) {
     if (!playwrightBridgePath) throw new Error("Codex browser mode requires playwrightBridgePath.");

@@ -17,6 +17,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { GITHUB_LOGIN_PATTERN } from "./github-app-auth.mjs";
 import { loadConfiguredFallbackModels, normalizeFallbackModels } from "./model-fallbacks.mjs";
+import { negotiateProviderCapabilities } from "./provider-cli-capabilities.mjs";
 
 const RUNTIME_ROOT = realpathSync(process.env.BRIDGE_RUNTIME_ROOT || process.env.BRIDGE_ROOT || process.cwd());
 const WORKSPACE_ROOT = realpathSync(process.env.BRIDGE_WORKSPACE_ROOT || process.env.BRIDGE_ROOT || process.cwd());
@@ -42,6 +43,7 @@ const CLAUDE_BIN = findExecutable("claude", [
   process.env.CLAUDE_BIN,
   resolve(homedir(), ".local/bin/claude"),
 ]);
+const CLAUDE_CAPABILITIES = negotiateProviderCapabilities({ provider: "claude", binary: CLAUDE_BIN });
 
 function projectDirectory(requested) {
   const candidate = resolve(WORKSPACE_ROOT, requested || ".");
@@ -145,6 +147,7 @@ function runClaude({
   permissionProfile = "standard",
   handoffPath,
   githubReview,
+  githubBuilder,
   onProgress = () => {},
 }) {
   if (process.env.CLAUDE_BRIDGE_ACTIVE === "1") {
@@ -176,6 +179,30 @@ function runClaude({
   if (githubReview && !actualHandoffPath) {
     throw new Error("githubReview requires handoffPath so the durable review is written before posting.");
   }
+  if (githubBuilder && mode !== "work") throw new Error("githubBuilder is available only in work mode.");
+  if (!CLAUDE_CAPABILITIES.print || !CLAUDE_CAPABILITIES.streamJson) {
+    throw new Error(`Installed Claude ${CLAUDE_CAPABILITIES.version} lacks required non-interactive stream-json output.`);
+  }
+  if (!CLAUDE_CAPABILITIES.mcpConfig) {
+    throw new Error(`Installed Claude ${CLAUDE_CAPABILITIES.version} lacks required --mcp-config support.`);
+  }
+  if (!CLAUDE_CAPABILITIES.strictMcpConfig) {
+    throw new Error(`Installed Claude ${CLAUDE_CAPABILITIES.version} lacks required --strict-mcp-config isolation; upgrade Claude Code before delegation.`);
+  }
+  if (model && !CLAUDE_CAPABILITIES.model) throw new Error(`Installed Claude ${CLAUDE_CAPABILITIES.version} cannot select a model.`);
+  if (resume && !CLAUDE_CAPABILITIES.resume) throw new Error(`Installed Claude ${CLAUDE_CAPABILITIES.version} cannot resume a session.`);
+  if (resolvedFallbackModels.length && !CLAUDE_CAPABILITIES.fallbackModel) {
+    throw new Error(`Installed Claude ${CLAUDE_CAPABILITIES.version} cannot use the configured fallback model chain; upgrade Claude Code or remove the chain.`);
+  }
+  if (mode === "review" && (!CLAUDE_CAPABILITIES.allowedTools || !CLAUDE_CAPABILITIES.permissionMode)) {
+    throw new Error(`Installed Claude ${CLAUDE_CAPABILITIES.version} lacks required bounded review permission flags.`);
+  }
+  if (mode === "work" && permissionProfile === "standard" && (!CLAUDE_CAPABILITIES.allowedTools || !CLAUDE_CAPABILITIES.permissionMode)) {
+    throw new Error(`Installed Claude ${CLAUDE_CAPABILITIES.version} lacks required bounded work permission flags.`);
+  }
+  if (mode === "work" && permissionProfile === "yolo" && !CLAUDE_CAPABILITIES.yolo) {
+    throw new Error(`Installed Claude ${CLAUDE_CAPABILITIES.version} cannot enable YOLO mode.`);
+  }
   const delegatedMcpConfig = { mcpServers: {} };
   if (browser) {
     delegatedMcpConfig.mcpServers.playwright = {
@@ -198,6 +225,21 @@ function runClaude({
       },
     };
   }
+  if (githubBuilder) {
+    delegatedMcpConfig.mcpServers.github_builder = {
+      command: process.execPath,
+      args: [join(RUNTIME_ROOT, "src/github-builder-bridge.mjs")],
+      env: Object.fromEntries(Object.entries({
+        GITHUB_BUILDER_REPOSITORY: githubBuilder.repository,
+        GITHUB_BUILDER_PR_NUMBER: githubBuilder.prNumber ? String(githubBuilder.prNumber) : null,
+        GITHUB_BUILDER_HEAD_SHA: githubBuilder.headSha,
+        GITHUB_BUILDER_EXPECTED_LOGIN: githubBuilder.expectedLogin,
+        GITHUB_BUILDER_HEAD_REF: githubBuilder.headRef || null,
+        GITHUB_BUILDER_BASE_REF: githubBuilder.baseRef || null,
+        GITHUB_BUILDER_ALLOWED_OPERATIONS: githubBuilder.allowedOperations?.join(",") || null,
+      }).filter(([, value]) => value)),
+    };
+  }
   const temporaryDirectory = mkdtempSync(join(tmpdir(), "claude-agent-bridge-"));
   const delegatedMcpPath = join(temporaryDirectory, "mcp.json");
   writeFileSync(delegatedMcpPath, `${JSON.stringify(delegatedMcpConfig)}\n`, { mode: 0o600 });
@@ -206,8 +248,8 @@ function runClaude({
     "-p",
     "--output-format",
     "stream-json",
-    "--verbose",
   ];
+  if (CLAUDE_CAPABILITIES.verbose) args.push("--verbose");
   if (model) args.push("--model", model);
   if (resolvedFallbackModels.length) args.push("--fallback-model", resolvedFallbackModels.join(","));
   if (mode === "review") {
@@ -235,13 +277,10 @@ function runClaude({
       ...[...new Set([...workCommands, ...verificationCommands])].map((command) => `Bash(${command})`),
     ];
     if (browser) allowedTools.push("mcp__playwright__*");
+    if (githubBuilder) allowedTools.push("mcp__github_builder__*");
     args.push("--allowedTools", ...allowedTools, "--permission-mode", "dontAsk");
   }
-  args.push(
-    "--strict-mcp-config",
-    "--mcp-config",
-    delegatedMcpPath,
-  );
+  args.push("--strict-mcp-config", "--mcp-config", delegatedMcpPath);
   if (resume) args.push("--resume", resume);
   const permissionContract = mode === "review"
     ? `
@@ -257,7 +296,7 @@ ${githubReview ? `- After writing the handoff, submit one formal PR review to \`
 Work permission contract:
 - You are the designated writer for this bounded task and may create or edit workspace files with the file tools.
 - Permission profile: ${permissionProfile}.${permissionProfile === "yolo" ? " YOLO was explicitly selected by the user; Claude Code permission checks are bypassed for this turn." : " Standard provider restrictions remain active."}
-- Work profile: ${workProfile}. ${workProfile === "deliver" ? "Repository delivery is authorized, including push and PR lifecycle commands covered by the profile." : workProfile === "implement" ? "Local implementation through commit is authorized; pushing and PR mutation are not." : "Only exact commands are authorized."}
+- Work profile: ${workProfile}. ${githubBuilder ? `GitHub mutation is authorized only through the target-bound github_builder tools for ${githubBuilder.repository}${githubBuilder.prNumber ? ` PR #${githubBuilder.prNumber}` : ""} at ${githubBuilder.headSha} as ${githubBuilder.expectedLogin}; do not use gh or general GitHub tools.` : workProfile === "deliver" ? "Repository delivery is authorized, including push and PR lifecycle commands covered by the profile." : workProfile === "implement" ? "Local implementation through commit is authorized; pushing and PR mutation are not." : "Only exact commands are authorized."}
 - You may run only these exact shell commands: ${[...new Set([...workCommands, ...verificationCommands])].length ? [...new Set([...workCommands, ...verificationCommands])].map((command) => `\`${command}\``).join(", ") : "none"}.
 - You may also use commands covered by the selected work profile. Uncovered external mutations remain denied.
 - Do not substitute, combine, wrap, or broaden the commands. If another command is needed, stop and report it for explicit authorization.
@@ -424,6 +463,18 @@ const sharedInput = {
     expectedLogin: z.string().regex(GITHUB_LOGIN_PATTERN),
   }).strict().optional().describe(
     "Explicit authorization for Claude to submit one formal review to an exact GitHub PR head using the dedicated review-bot token. Requires handoffPath.",
+  ),
+  githubBuilder: z.object({
+    repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
+    prNumber: z.number().int().min(1).optional(),
+    headSha: z.string().regex(/^[0-9a-f]{40}$/i),
+    expectedLogin: z.string().regex(GITHUB_LOGIN_PATTERN),
+    headRef: z.string().min(1).optional(),
+    baseRef: z.string().min(1).optional(),
+    allowedOperations: z.array(z.enum(["ensure_pull_request", "read_review_threads", "reply_review_thread", "resolve_review_thread", "mark_ready", "merge"])).min(1).max(6)
+      .default(["ensure_pull_request", "read_review_threads", "reply_review_thread", "resolve_review_thread", "mark_ready"]),
+  }).strict().optional().describe(
+    "Explicit work-mode authorization for target-bound GitHub builder operations at one repository and head SHA.",
   ),
 };
 

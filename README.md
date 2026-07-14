@@ -94,6 +94,8 @@ The `installations` keys are GitHub account or organization names and the values
 
 The bound PR-review publisher automatically uses the configured `reviewer` App. It falls back to `~/.config/ghtoken` only when no reviewer App is configured; if a configured App fails authentication, it stops rather than silently posting as another identity.
 
+Set `"compatibility": { "allowPatFallback": false }` in the machine-local config (or `GITHUB_REVIEW_ALLOW_PAT_FALLBACK=0`) to make reviewer App identity mandatory. This is the recommended post-migration setting. The bridge validates the minted installation token's role permissions before exposing any operation: builder requires Contents and Pull requests write plus Metadata read; reviewer requires Contents read, Pull requests write, and Metadata read. Missing roles, owners, repositories, permissions, keys, and identity mismatches fail closed with the affected role named.
+
 For a bounded builder-side GitHub CLI command, mint a short-lived repository-scoped token at execution time:
 
 ```sh
@@ -209,6 +211,7 @@ These skills are supplied by this project and installed across Codex, Claude, an
 | `run-roundtable` | Run and monitor a persistent Claude–Codex–Antigravity collaboration. |
 | `show-collaboration` | Display collaboration status, skipped providers, turns, and history. |
 | `goal-loop` | Build toward explicit completion criteria through bounded plan, implement, review, fix, and verification cycles. |
+| `pair-program` | Rotate one writer and independent reviewers across tasks, worktrees, CI, and formal PR reviews. |
 | `agent-dialogue` | Run a bounded, chair-hosted Codex–Claude dialogue inside the current CLI. This remains project-scoped rather than part of the global three-product set. |
 
 ### Installed Matt Pocock's AI Hero skills and council options
@@ -300,6 +303,9 @@ The common tools are:
 - `continue_collaboration`: resumes the exact Claude, Codex, and Antigravity sessions.
 - `cancel_collaboration`: terminates the detached worker process group, including the active provider adapter.
 - `list_collaborations`: finds recent portable IDs.
+- `record_native_chair_turn`: records work performed in the current host session without spawning the same provider again.
+- `record_decision`: records or escalates a bounded decision receipt.
+- `archive_collaboration` / `prune_collaborations`: retain terminal history without leaving live-looking status groups.
 
 State and JSONL transcripts live under `~/.local/share/agent-bridge/state`. A collaboration records provider session IDs, next speaker, agreement streak, selected agents, models, workspace, cumulative turn count, and an `activeCall` record. While a provider works, `activeCall` contains the provider, phase, automatic liveness heartbeat, elapsed time, and latest provider-authored or adapter-observed summary.
 
@@ -310,6 +316,10 @@ Make every heartbeat poll a separate `get_collaboration` call with `waitSeconds:
 A timeout or lost transport becomes `indeterminate`, not unavailable. The broker preserves writer ownership and blocks replacement work in that workspace until the user inspects the provider/workspace and explicitly cancels. Only a confirmed provider failure permits removal from the rotation; cancellation terminates the detached process group.
 
 Delegated peer processes inherit a recursion marker. If a participant tries to start or continue another persistent collaboration through its own MCP tools, the nested mutation is rejected; only the active broker routes turns.
+
+When Codex App, Claude Code, or Antigravity is already doing the primary work, pass `chair` with its provider, optional session ID, exact workspace, and exposed capabilities. The broker records that participant as `native-chair` and removes the same provider from delegated agents by default. Set `allowSameProviderDelegation: true` only for an intentional second session. Chair-owned implementation stays in the host; the broker phase calls peers for review, and `record_native_chair_turn` attaches the host's artifact and verification receipt to the same portable history.
+
+For reversible technical uncertainty, enable `decisionPolicy`. Participants may emit a validated `DECISION:` envelope containing alternatives, selection, confidence, dissent, rollback path, and owner. The policy bounds the dialogue and records one concise receipt. Money, legal/compliance, external authorization, destructive/irreversible actions, and explicit user-owned choices always become `needs_user`; repository policy may add escalation categories but can never remove the baseline or expand permissions.
 
 In work mode, `writer` defaults to the starting agent. The designated writer receives edit permissions; every other participant is forced into review mode at both the prompt and provider-tool layers. A workspace lease prevents two persistent work-mode collaborations from editing this project simultaneously. Review-only collaborations may still run concurrently.
 
@@ -327,6 +337,8 @@ bridge preflight --workspace /path/to/repo --agents claude,codex --mode work --p
 bridge roles --task 12 --agents claude,codex # --task-number is also accepted
 bridge status
 bridge recover bridge-<uuid>
+bridge archive bridge-<uuid>
+bridge prune --older-than-days 30
 bridge worktree --workspace /path/to/repo --task task-12 --branch task-12 --base main
 bridge ci --workspace /path/to/repo --pr 12
 bridge reconcile --reviews reviews.json
@@ -337,12 +349,14 @@ bridge bundle --output ~/agent-bridge-transfer # --destination is also accepted
 - Role rotation is deterministic but never overrides an explicit writer or transfers an active task.
 - Work-mode collaborations can create an isolated task worktree before any provider starts.
 - Preflight records provider capabilities, repository state, work profile, branch, and remote readiness.
+- Provider capability preflight probes each installed binary and its relevant subcommands, caches by absolute path/version/size/mtime, and builds new-session and resume argv independently. `bridge capabilities` shows the negotiated matrix and whether it came from a live probe or cache; required missing features stop before model invocation and optional flags are omitted.
 - Status combines provider heartbeat/summary, writer, branch, PR/CI, and known usage.
 - Recovery is inspect-first; marking indeterminate or cancelling requires an explicit flag.
 - `ciTracking.prNumber` refreshes hosted checks after completed turns.
 - Structured reviews reconcile into accepted, disputed, and rejected evidence rather than majority vote.
 - Optional cost, token, and elapsed-time budgets stop after the current turn.
 - Portable bundles exclude credentials, tokens, collaboration state, `.git`, `.bridge`, and `node_modules`; authenticate providers fresh on the destination computer.
+- Terminal transitions atomically clear active-call and worker metadata. Restart reconciliation never kills a process: it clears proven terminal leftovers, retains ambiguous ownership as `indeterminate`, and explains the safe inspect/cancel path. Archive/prune operations touch terminal records only.
 
 ## Let them talk
 
@@ -538,6 +552,8 @@ Codex resolves and passes an explicit authorization object:
 
 The delegated tool mints a short-lived token from the configured `reviewer` App, or reads the backward-compatible `~/.config/ghtoken` fallback when no reviewer App is configured. Credentials never enter the prompt, skill, transcript, or MCP response. Before posting it verifies the token login, exact current PR head, and every inline-comment path. It submits a formal GitHub review (`APPROVE`, `REQUEST_CHANGES`, or `COMMENT`) with a general body and optional inline comments, records the returned URL in the handoff, and uses a content marker to avoid duplicate reviews. A re-review must refresh `headSha`.
 
+Writer-side PR delivery uses a separate `githubBuilder` authorization bound to one repository, expected bot login, current head SHA, optional PR, and an explicit `allowedOperations` list. Claude and Codex receive only `github_builder` tools; Antigravity returns a validated operation envelope that the broker executes unchanged outside model context. Supported actions are create/update the designated PR, read/reply/resolve exact review threads, mark ready, and merge the exact PR at the exact head SHA. Every mutation rechecks the per-operation allowlist, identity, and head state and returns an idempotent receipt. The default allowlist excludes `merge`; normal goal-loop and pair-program runs stop at a green reviewed PR unless the user explicitly adds `merge` and authorizes the SHA-pinned merge.
+
 ## Browser boundary
 
 The Codex/ChatGPT desktop built-in browser cannot be passed through this bridge: it is not available to Codex CLI, and `codex mcp-server` is a CLI surface. The configured Playwright MCP server gives both agents an isolated Chrome instance instead. It does not inherit cookies, accounts, or tabs from the Codex browser or your normal Chrome profile.
@@ -551,7 +567,7 @@ The Codex/ChatGPT desktop built-in browser cannot be passed through this bridge:
 - Delegated `codex mcp-server` processes run with an isolated bridge-owned `CODEX_HOME`. The bridge links the existing Codex authentication file, atomically reconciles provider credential rotation, and mirrors only safe model defaults; it does not inherit global MCP servers, plugins, notifications, hooks, project trust entries, app tooling, or skills. This prevents completed collaborations from leaving recursive bridge adapter groups behind while preserving the user-configured model. Requested browser and bound GitHub-review servers are injected as complete, task-scoped definitions.
 - An explicit `permissionProfile: yolo` is available only in work mode. It maps to Claude Code permission bypass, Codex `danger-full-access` with approvals disabled, and Antigravity auto-approval without its terminal sandbox. It is never inferred, is recorded in collaboration status/history, and does not apply to reviewers. The default remains `standard`.
 - Nested MCP is disabled in delegated Claude sessions.
-- Antigravity continuations use the exact per-project `conversationId`, never the global `--continue` shortcut.
+- Antigravity continuations use the exact `conversationId`, never the global `--continue` shortcut. When supported, a per-call `--log-file` supplies session-bound recovery; older CLIs fall back to the cwd cache and report continuation as best effort.
 - Antigravity delegation always uses its terminal sandbox; review maps to `plan`, work maps to `accept-edits`.
 - Delegated Claude sessions only receive Playwright when `browser: true`; the browser uses an isolated profile.
 - Claude review mode exposes no general GitHub access. When repository policy explicitly requires reviewer-authored PR feedback, `githubReview` adds one target-bound `submit_pr_review` tool. It obtains a repository-scoped credential from the configured reviewer App, with the mode-600 `~/.config/ghtoken` available only as an unconfigured-App fallback. Outside model context it verifies the required login, rejects stale head SHAs and paths outside the diff, and idempotently submits one formal review with general and inline comments.

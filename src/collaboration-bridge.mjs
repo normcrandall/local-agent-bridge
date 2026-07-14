@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { delimiter, isAbsolute, relative, resolve, sep } from "node:path";
@@ -9,15 +10,20 @@ import { z } from "zod";
 import { GITHUB_LOGIN_PATTERN } from "./github-app-auth.mjs";
 import {
   appendEvent,
+  archiveCollaboration,
   collaborationView,
   createCollaboration,
   listCollaborations,
+  pruneTerminalCollaborations,
   readCollaboration,
   updateCollaboration,
   waitForCollaborationChange,
 } from "./collaboration-store.mjs";
 import { KNOWN_AGENTS, validateAgents } from "./talk-protocol.mjs";
 import { createWorktree, isSafeWorkerPid, preflight, selectRoles } from "./operations.mjs";
+import { createDecisionReceipt, DECISION_CATEGORIES } from "./decision-policy.mjs";
+import { resolveNativeChair } from "./native-chair.mjs";
+import { clearTerminalRuntime, legacyWorkerCommandMatches, reconciliationAction, workerCancellationMatches, workerCommandMatches } from "./collaboration-cleanup.mjs";
 
 const RUNTIME_ROOT = realpathSync(process.env.BRIDGE_RUNTIME_ROOT || process.env.BRIDGE_ROOT || process.cwd());
 const WORKSPACE_ROOT = realpathSync(process.env.BRIDGE_WORKSPACE_ROOT || process.env.BRIDGE_ROOT || process.cwd());
@@ -45,13 +51,15 @@ function projectDirectory(requested) {
 }
 
 function startWorker(id) {
+  const workerToken = randomUUID();
   const child = spawn(process.execPath, [WORKER, id], {
     cwd: RUNTIME_ROOT,
-    env: { ...process.env, BRIDGE_RUNTIME_ROOT: RUNTIME_ROOT, BRIDGE_WORKSPACE_ROOT: WORKSPACE_ROOT },
+    env: { ...process.env, BRIDGE_RUNTIME_ROOT: RUNTIME_ROOT, BRIDGE_WORKSPACE_ROOT: WORKSPACE_ROOT, BRIDGE_WORKER_TOKEN: workerToken },
     detached: true,
     stdio: "ignore",
   });
   child.unref();
+  return { pid: child.pid, token: workerToken };
 }
 
 function summary(view) {
@@ -91,6 +99,7 @@ function summary(view) {
     );
   }
   if (view.rotation) lines.push(`Rotation: task ${view.rotation.taskNumber}; writer ${view.rotation.writer}; reviewers ${view.rotation.reviewers.join(", ")}`);
+  if (view.chair) lines.push(`Chair: ${view.chair.provider} (${view.chair.source || "native-chair"}); same-provider delegation ${view.chair.allowSameProviderDelegation ? "allowed" : "suppressed"}.`);
   if (view.worktree) lines.push(`Worktree: ${view.worktree.path} (${view.worktree.branch} from ${view.worktree.base})`);
   if (view.ciTracking) {
     const checks = view.ci?.checks || [];
@@ -100,6 +109,12 @@ function summary(view) {
     lines.push(`Budget: ${JSON.stringify(view.budget)}${view.budgetExceeded ? " — reached" : ""}`);
   }
   if (view.usage && Object.keys(view.usage).length) lines.push(`Usage: ${JSON.stringify(view.usage)}`);
+  if (view.decisions?.length) {
+    const decision = view.decisions.at(-1);
+    lines.push(decision.action === "resolved"
+      ? `Decision: ${decision.decision} (${Math.round(decision.confidence * 100)}% confidence; owner ${decision.owner}; rollback: ${decision.rollbackPath})`
+      : `Decision needs user: ${decision.reason}`);
+  }
   if (view.permissionProfile === "yolo") lines.push("Permissions: YOLO — provider approvals and sandbox protections are bypassed for the writer.");
   if (lastTurn) {
     const excerpt = lastTurn.message.length > 4_000
@@ -121,10 +136,48 @@ function summary(view) {
 }
 
 function toolResponse(view) {
+  if (!view?.id || !Array.isArray(view.agents)) {
+    return { content: [{ type: "text", text: JSON.stringify(view, null, 2) }], structuredContent: view };
+  }
   return {
     content: [{ type: "text", text: summary(view) }],
     structuredContent: view,
   };
+}
+
+function processAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 1) return false;
+  try { process.kill(pid, 0); return true; } catch (error) { return error.code === "EPERM"; }
+}
+
+async function reconcileInterruptedCleanup() {
+  const summaries = await listCollaborations(WORKSPACE_ROOT, { limit: 10_000 });
+  for (const summaryState of summaries) {
+    const state = await readCollaboration(WORKSPACE_ROOT, summaryState.id);
+    if (TERMINAL_STATUSES.has(state.status) && (state.runtime?.activeCall || state.workerPid || state.workerOwner)) {
+      await updateCollaboration(WORKSPACE_ROOT, state.id, (current) => clearTerminalRuntime(current));
+      await appendEvent(WORKSPACE_ROOT, state.id, { type: "cleanup_reconciled", at: new Date().toISOString(), action: "clear-terminal-metadata" });
+      continue;
+    }
+    if (!["queued", "running", "cancelling"].includes(state.status)) continue;
+    const ageMs = Date.now() - Date.parse(state.updatedAt || state.createdAt);
+    if (!state.workerPid && ageMs < 30_000) continue;
+    const alive = processAlive(state.workerPid);
+    if (alive && !state.workerOwner && legacyWorkerCommandMatches(state)) continue;
+    const ownershipMatches = workerCommandMatches(state);
+    const action = reconciliationAction(state, { processAlive: alive, commandMatches: ownershipMatches });
+    if (action === "mark-indeterminate" || action === "retain-indeterminate-owner-mismatch") {
+      await updateCollaboration(WORKSPACE_ROOT, state.id, (current) => ({
+        ...current, status: "indeterminate",
+        error: !alive ? "Broker restart found no owned worker process." : "Worker PID exists but ownership command did not match; no process was terminated.",
+        runtime: {
+          ...(current.runtime || {}),
+          activeCall: current.runtime?.activeCall ? { ...current.runtime.activeCall, status: "indeterminate", phase: "unknown" } : null,
+        },
+      }));
+      await appendEvent(WORKSPACE_ROOT, state.id, { type: "cleanup_reconciled", at: new Date().toISOString(), action });
+    }
+  }
 }
 
 function compactStatusView(view) {
@@ -184,6 +237,18 @@ const githubReviewSchema = z.object({
 }).strict().optional().describe(
   "Explicitly authorize the delegated Claude or Codex reviewer to write its handoff and submit one formal review to this exact PR head with the dedicated bot identity. Requires handoffPath.",
 );
+const githubBuilderSchema = z.object({
+  repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
+  prNumber: z.number().int().min(1).optional(),
+  headSha: z.string().regex(/^[0-9a-f]{40}$/i),
+  expectedLogin: z.string().regex(GITHUB_LOGIN_PATTERN),
+  headRef: z.string().min(1).optional(),
+  baseRef: z.string().min(1).optional(),
+  allowedOperations: z.array(z.enum(["ensure_pull_request", "read_review_threads", "reply_review_thread", "resolve_review_thread", "mark_ready", "merge"])).min(1).max(6)
+    .default(["ensure_pull_request", "read_review_threads", "reply_review_thread", "resolve_review_thread", "mark_ready"]),
+}).strict().optional().describe(
+  "Authorize only target-bound builder GitHub operations for one repository and head SHA. Available only to the work-mode writer.",
+);
 const budgetSchema = z.object({
   maxCostUsd: z.number().positive().optional(),
   maxTokens: z.number().int().positive().optional(),
@@ -198,6 +263,17 @@ const worktreeSchema = z.object({
   base: z.string().min(1).default("HEAD"),
   root: z.string().optional(),
 }).strict().optional().describe("Explicitly create and pin this work collaboration to an isolated Git worktree.");
+const decisionPolicySchema = z.object({
+  additionalEscalations: z.array(z.enum(DECISION_CATEGORIES)).max(6).default([]),
+  maxDialogueTurns: z.number().int().min(1).max(12).default(4),
+}).strict().optional().describe("Optional policy that can tighten, but never weaken, the human escalation boundary.");
+const chairSchema = z.object({
+  provider: z.enum(KNOWN_AGENTS),
+  sessionId: z.string().min(1).optional(),
+  workspace: z.string().min(1).optional(),
+  capabilities: z.record(z.string(), z.unknown()).default({}),
+  allowSameProviderDelegation: z.boolean().default(false),
+}).strict().optional().describe("Declare the active host as a native participant. Its provider is not delegated again unless explicitly allowed.");
 
 const server = new McpServer(
   { name: "desktop-agent-collaboration", version: "0.2.0" },
@@ -233,29 +309,42 @@ server.registerTool(
       permissionProfile: permissionProfileSchema,
       handoffPath: handoffPathSchema,
       githubReview: githubReviewSchema,
+      githubBuilder: githubBuilderSchema,
       taskNumber: z.number().int().nonnegative().optional().describe("When supplied, rotate the writer deterministically across the selected agents unless writer is explicit."),
       rotationOffset: z.number().int().default(0),
       worktree: worktreeSchema,
       budget: budgetSchema,
       ciTracking: ciTrackingSchema,
+      decisionPolicy: decisionPolicySchema,
+      chair: chairSchema,
     },
   },
   async (input) => {
     blockNestedCollaboration();
-    const rotated = input.taskNumber === undefined ? null : selectRoles({
+    const participantRotation = input.taskNumber === undefined ? null : selectRoles({
       taskNumber: input.taskNumber, agents: input.agents, offset: input.rotationOffset,
     });
-    const startAgent = input.startAgent || rotated?.writer || input.agents[0];
-    validateAgents(input.agents, startAgent);
-    const writer = input.mode === "work" ? (input.writer || rotated?.writer || startAgent) : null;
+    const requestedWriter = input.mode === "work" ? (input.writer || participantRotation?.writer || input.startAgent || input.agents[0]) : null;
+    const native = resolveNativeChair({
+      chair: input.chair || null, agents: input.agents, startAgent: input.startAgent,
+      writer: requestedWriter, mode: input.mode,
+    });
+    const delegatedAgents = native.agents;
+    const effectiveMode = native.chairOwnsWork ? "review" : input.mode;
+    const effectivePermissionProfile = effectiveMode === "review" ? "standard" : (input.permissionProfile || "standard");
+    const rotated = participantRotation;
+    const startAgent = delegatedAgents.includes(rotated?.writer) ? rotated.writer : native.startAgent;
+    validateAgents(delegatedAgents, startAgent);
+    const writer = effectiveMode === "work" ? (native.writer || startAgent) : null;
     if (input.githubReview && !input.handoffPath) throw new Error("githubReview requires handoffPath.");
-    if (input.githubReview && input.mode === "work" && input.agents.every((agent) => agent === writer)) {
+    if (input.githubBuilder && effectiveMode !== "work") throw new Error("githubBuilder cannot be delegated when the native chair owns the work; the host must perform its own bound delivery phase.");
+    if (input.githubReview && effectiveMode === "work" && delegatedAgents.every((agent) => agent === writer)) {
       throw new Error("githubReview requires at least one reviewer distinct from the work-mode writer.");
     }
     if (input.permissionProfile === "yolo" && input.mode !== "work") {
       throw new Error("permissionProfile yolo is available only in work mode.");
     }
-    if (writer && !input.agents.includes(writer)) throw new Error("writer must be included in agents.");
+    if (writer && !delegatedAgents.includes(writer)) throw new Error("writer must be included in delegated agents.");
     const requestedWorkspace = projectDirectory(input.workspace);
     const worktree = input.worktree
       ? createWorktree({
@@ -267,7 +356,10 @@ server.registerTool(
       })
       : null;
     const workspace = worktree?.path || requestedWorkspace;
-    const readiness = preflight({ workspace, agents: input.agents, mode: input.mode, workProfile: input.workProfile || "exact", permissionProfile: input.permissionProfile || "standard" });
+    if (input.chair?.workspace && projectDirectory(input.chair.workspace) !== realpathSync(workspace)) {
+      throw new Error("Native chair workspace must match the collaboration workspace.");
+    }
+    const readiness = preflight({ workspace, agents: delegatedAgents, mode: effectiveMode, workProfile: input.workProfile || "exact", permissionProfile: effectivePermissionProfile });
     if (!readiness.checks.find((check) => check.name === "workspace")?.ok
       || !readiness.checks.find((check) => check.name === "git-repository")?.ok) {
       throw new Error("Collaboration preflight failed: workspace must exist and be a Git repository.");
@@ -280,9 +372,13 @@ server.registerTool(
     const state = await createCollaboration(WORKSPACE_ROOT, {
       task: input.task,
       workspace,
-      agents: input.agents,
+      agents: delegatedAgents,
+      participants: input.chair ? [input.chair.provider, ...delegatedAgents.filter((agent) => agent !== input.chair.provider)] : delegatedAgents,
+      chair: native.chair,
       startAgent,
-      mode: input.mode,
+      mode: effectiveMode,
+      requestedMode: input.mode,
+      chairOwnsWork: native.chairOwnsWork,
       writer,
       browser: input.browser,
       models: input.models || {},
@@ -290,9 +386,11 @@ server.registerTool(
       verificationCommands: input.verificationCommands || [],
       workCommands: input.workCommands || [],
       workProfile: input.workProfile || "exact",
-      permissionProfile: input.permissionProfile || "standard",
+      permissionProfile: effectivePermissionProfile,
+      requestedPermissionProfile: input.permissionProfile || "standard",
       handoffPath: input.handoffPath || null,
       githubReview: input.githubReview || null,
+      githubBuilder: input.githubBuilder || null,
       rotation: rotated ? { taskNumber: input.taskNumber, offset: input.rotationOffset, ...rotated } : null,
       worktree,
       preflight: readiness,
@@ -301,16 +399,20 @@ server.registerTool(
       usage: {},
       ciTracking: input.ciTracking || null,
       ci: null,
+      decisionPolicy: input.decisionPolicy || { additionalEscalations: [], maxDialogueTurns: 4 },
+      decisionPolicyEnabled: Boolean(input.decisionPolicy),
+      decisions: [],
+      nativeChairTurns: [],
       turnTimeoutSeconds: input.turnTimeoutSeconds,
-      run: { maxTurns: input.maxTurns },
+      run: { maxTurns: input.decisionPolicy ? Math.min(input.maxTurns, input.decisionPolicy.maxDialogueTurns) : input.maxTurns },
       runtime: {
-        sessions: Object.fromEntries(input.agents.map((agent) => [agent, null])),
+        sessions: Object.fromEntries(delegatedAgents.map((agent) => [agent, null])),
         nextAgent: startAgent,
         previousMessage: null,
         previousAgent: null,
         agreementStreak: 0,
         turnCount: 0,
-        availableAgents: input.agents,
+        availableAgents: delegatedAgents,
         unavailableAgents: {},
         writer,
       },
@@ -345,6 +447,37 @@ server.registerTool(
 );
 
 server.registerTool(
+  "record_native_chair_turn",
+  {
+    title: "Record native chair turn",
+    description: "Attach a durable receipt for work completed by the current host session without launching another CLI instance of that provider.",
+    inputSchema: {
+      collaborationId,
+      summary: z.string().min(1).max(20_000),
+      artifacts: z.array(z.string().min(1).max(2_000)).max(50).default([]),
+      verification: z.array(z.string().min(1).max(2_000)).max(50).default([]),
+    },
+  },
+  async ({ collaborationId: id, summary: chairSummary, artifacts, verification }) => {
+    blockNestedCollaboration();
+    const current = await readCollaboration(WORKSPACE_ROOT, id);
+    if (!current.chair) throw new Error(`Collaboration ${id} has no declared native chair.`);
+    if (["queued", "running", "cancelling", "indeterminate"].includes(current.status)) {
+      throw new Error(`Collaboration ${id} is ${current.status}; record the native chair receipt after the delegated phase stops.`);
+    }
+    const receipt = {
+      source: "native-chair", provider: current.chair.provider, sessionId: current.chair.sessionId || null,
+      workspace: current.workspace, summary: chairSummary, artifacts, verification, recordedAt: new Date().toISOString(),
+    };
+    await updateCollaboration(WORKSPACE_ROOT, id, (previous) => ({
+      ...previous, nativeChairTurns: [...(previous.nativeChairTurns || []), receipt],
+    }));
+    await appendEvent(WORKSPACE_ROOT, id, { type: "native_chair_turn", at: receipt.recordedAt, receipt });
+    return toolResponse({ collaborationId: id, receipt, status: current.status });
+  },
+);
+
+server.registerTool(
   "continue_collaboration",
   {
     title: "Continue agent collaboration",
@@ -362,9 +495,11 @@ server.registerTool(
       permissionProfile: permissionProfileSchema.optional(),
       handoffPath: handoffPathSchema,
       githubReview: githubReviewSchema,
+      githubBuilder: githubBuilderSchema,
       budget: budgetSchema,
       ciTracking: ciTrackingSchema,
       turnTimeoutSeconds: z.number().int().min(30).max(7200).optional(),
+      decisionPolicy: decisionPolicySchema,
     },
   },
   async ({
@@ -379,9 +514,11 @@ server.registerTool(
     permissionProfile,
     handoffPath,
     githubReview,
+    githubBuilder,
     budget,
     ciTracking,
     turnTimeoutSeconds,
+    decisionPolicy,
   }) => {
     blockNestedCollaboration();
     const current = await readCollaboration(WORKSPACE_ROOT, id);
@@ -391,6 +528,7 @@ server.registerTool(
     if (githubReview && !(handoffPath || current.handoffPath)) {
       throw new Error("githubReview requires handoffPath.");
     }
+    if (githubBuilder && current.mode !== "work") throw new Error("githubBuilder is available only in work mode.");
     if ((permissionProfile || current.permissionProfile) === "yolo" && current.mode !== "work") {
       throw new Error("permissionProfile yolo is available only in work mode.");
     }
@@ -399,6 +537,7 @@ server.registerTool(
       status: "queued",
       cancelRequested: false,
       error: null,
+      cleanup: null,
       models: models ? { ...previous.models, ...models } : previous.models,
       modelFallbacks: modelFallbacks
         ? { ...(previous.modelFallbacks || {}), ...modelFallbacks }
@@ -409,11 +548,17 @@ server.registerTool(
       permissionProfile: permissionProfile || previous.permissionProfile || "standard",
       handoffPath: handoffPath || previous.handoffPath || null,
       githubReview: githubReview || previous.githubReview || null,
+      githubBuilder: githubBuilder || previous.githubBuilder || null,
       budget: budget || previous.budget || {},
       ciTracking: ciTracking || previous.ciTracking || null,
       turnTimeoutSeconds: turnTimeoutSeconds || previous.turnTimeoutSeconds || 600,
+      decisionPolicy: decisionPolicy || previous.decisionPolicy || { additionalEscalations: [], maxDialogueTurns: 4 },
+      decisionPolicyEnabled: decisionPolicy ? true : previous.decisionPolicyEnabled || false,
       budgetExceeded: false,
-      run: { maxTurns: additionalTurns },
+      decisionEscalation: null,
+      run: { maxTurns: (decisionPolicy || previous.decisionPolicyEnabled)
+        ? Math.min(additionalTurns, (decisionPolicy || previous.decisionPolicy).maxDialogueTurns)
+        : additionalTurns },
       runtime: {
         ...previous.runtime,
         previousMessage: message,
@@ -430,6 +575,47 @@ server.registerTool(
 );
 
 server.registerTool(
+  "record_decision",
+  {
+    title: "Record bounded collaboration decision",
+    description: "Record a reversible technical decision receipt or escalate a protected human decision without expanding authority.",
+    inputSchema: {
+      collaborationId,
+      question: z.string().min(1).max(10_000),
+      category: z.enum(DECISION_CATEGORIES),
+      alternatives: z.array(z.string().min(1).max(5_000)).max(20).default([]),
+      decision: z.string().min(1).max(10_000).optional(),
+      confidence: z.number().min(0).max(1).optional(),
+      dissent: z.array(z.string().min(1).max(5_000)).max(20).default([]),
+      rollbackPath: z.string().min(1).max(10_000).optional(),
+      owner: z.string().min(1).max(200),
+    },
+  },
+  async ({ collaborationId: id, ...input }) => {
+    blockNestedCollaboration();
+    const current = await readCollaboration(WORKSPACE_ROOT, id);
+    if (["queued", "running", "cancelling", "indeterminate"].includes(current.status)) {
+      throw new Error(`Collaboration ${id} is ${current.status}; record the decision only after the bounded dialogue stops.`);
+    }
+    const receipt = createDecisionReceipt({
+      ...input,
+      additionalEscalations: current.decisionPolicy?.additionalEscalations || [],
+    });
+    const recordedAt = new Date().toISOString();
+    const state = await updateCollaboration(WORKSPACE_ROOT, id, (previous) => ({
+      ...previous,
+      status: receipt.action === "needs_user" ? "needs_user" : previous.status,
+      decisions: [...(previous.decisions || []), { ...receipt, recordedAt }],
+      runtime: receipt.action === "needs_user"
+        ? { ...previous.runtime, activeCall: null, previousMessage: receipt.reason }
+        : previous.runtime,
+    }));
+    await appendEvent(WORKSPACE_ROOT, id, { type: "decision_recorded", at: recordedAt, receipt });
+    return toolResponse({ collaborationId: id, receipt, status: state.status });
+  },
+);
+
+server.registerTool(
   "cancel_collaboration",
   {
     title: "Cancel agent collaboration",
@@ -438,26 +624,45 @@ server.registerTool(
   },
   async ({ collaborationId: id }) => {
     const before = await readCollaboration(WORKSPACE_ROOT, id);
-    if (isSafeWorkerPid(before.workerPid)) {
-      try {
-        process.kill(-before.workerPid, "SIGTERM");
-      } catch (error) {
-        if (error.code !== "ESRCH") throw error;
+    if (isSafeWorkerPid(before.workerPid) && processAlive(before.workerPid)) {
+      if (!workerCancellationMatches(before)) {
+        throw new Error("Refusing to cancel: the live PID does not match this collaboration's owned worker metadata. Inspect with bridge recover; no process was terminated.");
       }
+      try { process.kill(-before.workerPid, "SIGTERM"); } catch (error) { if (error.code !== "ESRCH") throw error; }
     }
-    const state = await updateCollaboration(WORKSPACE_ROOT, id, (previous) => ({
+    const state = await updateCollaboration(WORKSPACE_ROOT, id, (previous) => clearTerminalRuntime({
       ...previous,
       cancelRequested: true,
-      status: "cancelled",
-      workerPid: null,
-      runtime: { ...previous.runtime, activeCall: null },
-    }));
+    }, { status: "cancelled" }));
     await appendEvent(WORKSPACE_ROOT, id, {
       type: "cancelled",
       at: new Date().toISOString(),
       terminatedWorkerPid: before.workerPid || null,
     });
     return toolResponse({ ...state, turns: [] });
+  },
+);
+
+server.registerTool(
+  "archive_collaboration",
+  {
+    title: "Archive collaboration",
+    description: "Move one terminal collaboration state and JSONL history into the local archive. Running and indeterminate work is retained.",
+    inputSchema: { collaborationId },
+  },
+  async ({ collaborationId: id }) => toolResponse(await archiveCollaboration(WORKSPACE_ROOT, id)),
+);
+
+server.registerTool(
+  "prune_collaborations",
+  {
+    title: "Prune old collaborations",
+    description: "Archive terminal collaborations older than the retention period; never touches active or indeterminate work.",
+    inputSchema: { olderThanDays: z.number().int().min(1).max(3650).default(30) },
+  },
+  async ({ olderThanDays }) => {
+    const archived = await pruneTerminalCollaborations(WORKSPACE_ROOT, { olderThanDays });
+    return toolResponse({ archived, count: archived.length });
   },
 );
 
@@ -485,4 +690,5 @@ server.registerTool(
   },
 );
 
+await reconcileInterruptedCleanup();
 await server.connect(new StdioServerTransport());

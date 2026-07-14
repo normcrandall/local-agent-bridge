@@ -18,6 +18,16 @@ export function parseStatus(message) {
   return STATUSES.has(status) ? status : "CONTINUE";
 }
 
+export function parseDecisionEnvelope(message) {
+  const lines = String(message || "").split("\n").filter((line) => /^DECISION:\s*/i.test(line));
+  if (!lines.length) return null;
+  const raw = lines.at(-1).replace(/^DECISION:\s*/i, "");
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch { throw new Error("DECISION must contain valid single-line JSON."); }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("DECISION must be a JSON object.");
+  return parsed;
+}
+
 export function validateAgents(agents, startAgent) {
   if (!Array.isArray(agents) || agents.length < 1 || agents.length > KNOWN_AGENTS.length) {
     throw new Error("agents must contain one to three supported agents.");
@@ -57,6 +67,7 @@ Conversation rules:
 - Before each long-running phase, emit a brief user-visible progress sentence stating the phase, what you are doing, and what comes next. Keep it factual and do not expose private reasoning.
 - Do not invoke another participant through MCP; the broker delivers each message.
 - Keep each turn focused and under 700 words.
+- When resolving a concrete choice, emit one single-line receipt before STATUS using: DECISION: {"question":"...","category":"reversible_technical","alternatives":["..."],"decision":"...","confidence":0.8,"dissent":[],"rollbackPath":"...","owner":"agent-name"}. Protected categories are escalated; this never grants new authority.
 - End with exactly one status line:
   STATUS: CONTINUE — more useful discussion or work remains.
   STATUS: AGREED — the task has a sufficiently verified shared conclusion.
@@ -195,6 +206,9 @@ export async function runConversation({
     sessions[agent] = response.sessionId || sessions[agent];
 
     const status = parseStatus(response.message);
+    let decision = null;
+    try { decision = parseDecisionEnvelope(response.message); }
+    catch (error) { decision = { invalid: error.message }; }
     const turn = {
       number,
       agent,
@@ -202,6 +216,7 @@ export async function runConversation({
       status,
       sessionId: sessions[agent],
       metadata: response.metadata || null,
+      decision,
     };
     turns.push(turn);
     agreementStreak = status === "AGREED" ? agreementStreak + 1 : 0;
@@ -215,6 +230,8 @@ export async function runConversation({
     await onState(state, turn);
 
     if (status === "NEEDS_USER") return { reason: "needs_user", turns, sessions, state };
+    const afterTurnStop = await shouldStop();
+    if (afterTurnStop) return { reason: afterTurnStop === true ? "cancelled" : afterTurnStop, turns, sessions, state };
     if (agreementStreak >= activeAgents.length) return { reason: "agreed", turns, sessions, state };
   }
 

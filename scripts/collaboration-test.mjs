@@ -22,6 +22,13 @@ const env = {
   CLAUDE_BIN: resolve(root, "scripts/fake-claude.mjs"),
   AGY_BIN: "/bin/echo",
 };
+const terminalReconcileId = "bridge-00000000-0000-4000-8000-000000000001";
+await writeFile(join(stateDirectory, `${terminalReconcileId}.json`), `${JSON.stringify({
+  id: terminalReconcileId, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:01.000Z",
+  status: "turn_limit", task: "stale terminal metadata", workspace: root, agents: ["claude"],
+  workerPid: 999999, workerOwner: { id: terminalReconcileId, pid: 999999 },
+  runtime: { turnCount: 1, activeCall: { agent: "claude", status: "running" } },
+})}\n`);
 
 async function connect(name, extraEnv = {}) {
   const client = new Client({ name, version: "0.2.0" });
@@ -63,12 +70,21 @@ try {
   const tools = await firstClient.listTools();
   const names = tools.tools.map((tool) => tool.name).sort();
   assert.deepEqual(names, [
+    "archive_collaboration",
     "cancel_collaboration",
     "continue_collaboration",
     "get_collaboration",
     "list_collaborations",
+    "prune_collaborations",
+    "record_decision",
+    "record_native_chair_turn",
     "start_collaboration",
   ]);
+  const reconciledTerminal = await firstClient.callTool({
+    name: "get_collaboration", arguments: { collaborationId: terminalReconcileId, detail: "full", includeTurns: 0 },
+  });
+  assert.equal(reconciledTerminal.structuredContent.runtime.activeCall, null);
+  assert.equal(reconciledTerminal.structuredContent.workerPid, null);
 
   const started = await firstClient.callTool({
     name: "start_collaboration",
@@ -100,6 +116,43 @@ try {
   assert.match(firstRun.turns[0].message, /claude-opus-4-6,claude-sonnet-5/);
   assert.match(firstRun.turns[0].message, /Bash\(npm test\)/);
   assert.match(firstRun.turns[0].message, /collaboration-review\.md/);
+
+  const chaired = await secondClient.callTool({
+    name: "start_collaboration",
+    arguments: {
+      task: "Review work owned by the native Codex chair",
+      agents: ["codex", "claude"],
+      startAgent: "codex",
+      chair: { provider: "codex", sessionId: "native-thread-1", workspace: root },
+      maxTurns: 1,
+    },
+  });
+  assert.notEqual(chaired.isError, true);
+  assert.deepEqual(chaired.structuredContent.agents, ["claude"]);
+  assert.equal(chaired.structuredContent.chair.source, "native-chair");
+  const chairedDone = await waitForStop(secondClient, chaired.structuredContent.id);
+  assert.equal(chairedDone.status, "turn_limit");
+  const nativeReceipt = await secondClient.callTool({
+    name: "record_native_chair_turn",
+    arguments: { collaborationId: chairedDone.id, summary: "Codex implemented locally.", artifacts: ["src/example.mjs"], verification: ["tests passed"] },
+  });
+  assert.equal(nativeReceipt.structuredContent.receipt.source, "native-chair");
+  const archivedChair = await secondClient.callTool({ name: "archive_collaboration", arguments: { collaborationId: chairedDone.id } });
+  assert.equal(archivedChair.structuredContent.archived, true);
+  const rotatedNative = await secondClient.callTool({
+    name: "start_collaboration",
+    arguments: {
+      task: "Review task zero after the native Codex chair implements it",
+      agents: ["codex", "claude"], taskNumber: 0, mode: "work",
+      chair: { provider: "codex", sessionId: "native-thread-2", workspace: root },
+      maxTurns: 1,
+    },
+  });
+  assert.notEqual(rotatedNative.isError, true);
+  assert.equal(rotatedNative.structuredContent.chairOwnsWork, true);
+  assert.equal(rotatedNative.structuredContent.mode, "review");
+  assert.equal(rotatedNative.structuredContent.rotation.writer, "codex");
+  await waitForStop(secondClient, rotatedNative.structuredContent.id);
 
   const compactPoll = await secondClient.callTool({
     name: "get_collaboration",
@@ -133,6 +186,7 @@ try {
     },
   });
   assert.notEqual(continued.isError, true);
+  assert.equal(continued.structuredContent.cleanup, null);
   const secondRun = await waitForStop(secondClient, id);
   assert.equal(secondRun.status, "turn_limit", secondRun.error || "second run failed");
   assert.equal(secondRun.runtime.turnCount, 4);
