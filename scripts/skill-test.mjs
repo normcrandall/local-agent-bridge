@@ -200,6 +200,13 @@ for (const term of [
   "single-agent recommendation",
   "exactly one publisher",
   "read back and verified",
+  "Keep customers",
+  "Win customers",
+  "Improve maintainability",
+  "Reduce overhead",
+  "Increase ROI",
+  "Primary lens",
+  "ROI hypothesis",
 ]) assert.ok(councilDiscovery.includes(term), `Council discovery is missing ${term}`);
 assert.match(councilDiscovery, /full consensus/i);
 assert.match(councilDiscovery, /Never leave the user at a static/);

@@ -1,11 +1,23 @@
 ---
 name: council-discovery
-description: Discover valuable new features for an existing application with independent Claude, Codex, and Antigravity analysis, reconcile them into evidence-backed consensus, and publish implementation-ready GitHub issues through a Wayfinder decision map. Use for product discovery, roadmap expansion, feature ideation grounded in an existing codebase, or requests asking what an app should build next.
+description: Discover valuable new features for an existing application with independent Claude, Codex, and Antigravity analysis, reconcile them into evidence-backed consensus, and publish implementation-ready GitHub issues through a Wayfinder decision map. Ground every recommendation in customer retention, customer acquisition, maintainability, reduced operating overhead, or increased ROI. Use for product discovery, roadmap expansion, feature ideation grounded in an existing codebase, or requests asking what an app should build next.
 ---
 
 # Council Discovery
 
-Find the strongest next features for an existing app. Use Wayfinder as the decision record, keep the three model passes independent until critique, and publish only candidates that survive evidence, duplication, feasibility, and consensus checks.
+Find the strongest next features for an existing app. Use Wayfinder as the decision record, keep the three model passes independent until critique, and publish only candidates that survive evidence, business-outcome, duplication, feasibility, and consensus checks.
+
+## Use the five business lenses
+
+Evaluate every enhancement against these outcomes:
+
+1. **Keep customers** — improve activation, successful use, trust, reliability, engagement, renewal, or switching resistance for customers the product should retain.
+2. **Win customers** — remove adoption barriers, strengthen differentiation, shorten time-to-value, improve conversion, or reach a valuable new segment.
+3. **Improve maintainability** — reduce complexity, fragility, cognitive load, defect risk, or time required to change and operate the product safely.
+4. **Reduce overhead** — remove recurring manual work, support burden, infrastructure waste, operational toil, or avoidable delivery cost.
+5. **Increase ROI** — increase measurable value or revenue relative to build and ongoing cost, including faster payback and better use of existing capabilities.
+
+Require one primary lens for every candidate and list any secondary lenses. A feature may support multiple lenses, but do not double-count the same benefit. Reject a candidate that cannot make a credible, evidence-backed contribution to at least one lens. Do not invent financial values, conversion rates, churn, or usage data. When measurements are unavailable, state assumptions, use a directional hypothesis, and define the metric needed to validate it.
 
 ## Load the governing workflows
 
@@ -24,20 +36,20 @@ Treat the existing product as evidence, not a blank-page prompt. Before proposin
 2. Inspect open and recently closed issues and pull requests so proposals do not duplicate planned, rejected, or shipped work.
 3. Inspect the rendered app when a safe runnable target exists. Use an isolated browser unless the user explicitly authorizes a signed-in profile.
 4. Use analytics, feedback, support notes, or research only when present or accessible. Never invent demand, usage, or customer quotes.
-5. Summarize current users, core jobs, strengths, gaps, constraints, and known roadmap items as the shared evidence packet.
+5. Summarize current users, core jobs, strengths, gaps, constraints, known roadmap items, and available signals for retention, acquisition, maintainability, operating overhead, and ROI as the shared evidence packet.
 
 Do not edit product code. This workflow creates planning artifacts and issues only.
 
 ## Chart one Wayfinder decision
 
-Name the destination as: an evidence-backed, prioritized feature portfolio with implementation-ready GitHub issues for the selected features.
+Name the destination as: an evidence-backed, prioritized feature portfolio that improves customer retention, acquisition, maintainability, operating overhead, or ROI, with implementation-ready GitHub issues for the selected features.
 
 Create one `wayfinder:map` issue using the base template. Create one child decision ticket named for the portfolio question, such as **Choose the next product features**, with:
 
 ```markdown
 ## Question
 
-Which new features should this application build next, based on current product evidence, user value, strategic fit, feasibility, and non-duplication?
+Which new features should this application build next, based on current product evidence and their ability to keep customers, win customers, improve maintainability, reduce overhead, or increase ROI?
 ```
 
 Put uncertain areas that cannot yet be phrased as decisions in **Not yet specified**. Create separate Wayfinder research tickets only for facts that genuinely block the portfolio decision. Do not create one decision ticket per feature: the portfolio selection is the single decision resolved in this session.
@@ -76,6 +88,8 @@ Before seeing peer conclusions, each participant proposes at most five features.
 - target user and unmet job;
 - concrete evidence from the app, repository, tracker, or cited primary research;
 - user outcome and why the feature belongs in this product;
+- primary business lens, secondary lenses, expected mechanism, and metric or proxy;
+- directional benefit, implementation and operating cost, and the assumptions behind the ROI hypothesis;
 - smallest coherent version;
 - likely implementation seams and dependencies, without brittle file-level design;
 - primary risk, disconfirming evidence, and how success would be measured.
@@ -89,6 +103,8 @@ Reveal the normalized candidate set only after all independent proposals complet
 - duplication or conflict with current behavior and issues;
 - weak or fabricated evidence;
 - poor product fit or unclear beneficiary;
+- a business-lens claim that lacks a credible mechanism, evidence, or measurable signal;
+- likely gains that are outweighed by implementation cost, ongoing cost, or harm to another lens;
 - disproportionate complexity, security, privacy, accessibility, or operational cost;
 - missing prerequisite decisions;
 - a smaller or stronger alternative.
@@ -101,14 +117,16 @@ A candidate reaches consensus only when every available participant, after criti
 
 - the problem and beneficiary;
 - the evidence that the problem exists;
+- the primary business lens and credible mechanism connecting the enhancement to that outcome;
 - the scoped user outcome;
 - feasibility at the proposed size;
 - measurable acceptance criteria;
+- a validation metric or proxy and a bounded ROI hypothesis without fabricated numbers;
 - absence of unresolved blocking objections or duplicate issues.
 
 Resolve reversible technical tradeoffs through the configured decision policy. Ask the user only for money, legal or compliance exposure, missing authorization or credentials, destructive external action, or an explicitly user-owned product choice.
 
-Do not average scores into false agreement. A blocking objection must be resolved with evidence or the feature remains in Wayfinder fog/research; it is not published as ready work. Rank accepted features by user value, confidence, strategic fit, effort, and dependency order.
+Do not average scores into false agreement. A blocking objection must be resolved with evidence or the feature remains in Wayfinder fog/research; it is not published as ready work. Rank accepted features by primary business outcome, expected magnitude, confidence, time-to-value, implementation cost, ongoing cost, strategic fit, and dependency order. Prefer the smallest feature that creates a measurable outcome. Record material tradeoffs when a gain in one lens may weaken another.
 
 Full consensus requires all three providers. Two providers may produce **degraded consensus**. One provider may produce a **single-agent recommendation**. Continue with the available providers, but never relabel either degraded state as three-model consensus.
 
@@ -134,6 +152,14 @@ Create issues in dependency order. Apply `ready-for-agent` only when no unresolv
 
 <Who has what problem, with links or repository evidence.>
 
+## Business outcome
+
+- Primary lens: keep customers | win customers | maintainability | reduce overhead | increase ROI
+- Secondary lenses: <none or list>
+- Expected mechanism: <how this enhancement creates the outcome>
+- Metric or proxy: <how the outcome will be measured>
+- ROI hypothesis: <directional benefit, build and ongoing cost, assumptions, and expected time-to-value>
+
 ## User outcome
 
 <Externally observable result, not an implementation mechanism.>
@@ -156,7 +182,7 @@ Create issues in dependency order. Apply `ready-for-agent` only when no unresolv
 
 ## Validation
 
-<How product behavior and success will be checked.>
+<How product behavior and the stated business outcome will be checked.>
 
 ## Risks and constraints
 
@@ -177,7 +203,7 @@ Report:
 
 1. the Wayfinder map and resolved portfolio decision;
 2. proposals from each provider and the material objections;
-3. accepted, rejected, and deferred candidates with evidence;
+3. accepted, rejected, and deferred candidates with evidence, primary business lens, and ROI hypothesis;
 4. consensus level and unavailable providers;
 5. every created GitHub issue in dependency order;
 6. the portable collaboration ID and terminal status.
