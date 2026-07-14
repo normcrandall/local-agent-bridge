@@ -19,6 +19,8 @@ For a persistent collaboration that can be inspected or resumed from Codex App, 
 
 Poll compactly: use `detail: status`, `includeTurns: 0`, `afterUpdatedAt`, and a bounded `waitSeconds`. Track `runtime.turnCount`; only when it advances, fetch new completed output once with `detail: full`, a bounded `includeTurns`, and `afterTurn` set to the last displayed turn. Do not repeat the original task or old turn bodies on heartbeat-only polls.
 
+Treat `runtime.activeCall.summary` as narrative status and show it with its `summaryAt` age when it changes. `summarySource: broker` is a placeholder, while `provider_or_adapter` is observed work; do not present the placeholder as agent-authored progress. Poll every eight seconds or less for detection, but do not print on every poll: render lifecycle or narrative changes immediately, and rate-limit liveness-only output to one compact line per 60 seconds. A fresh heartbeat with an old summary means the process is alive but its narrative is stale; say that plainly instead of repeating the old card.
+
 Never substitute a long-running Bash, sleep, `gh`, or PR polling loop for broker polling. Make separate `get_collaboration` calls that return within eight seconds so the host CLI can redraw between heartbeats. Consult GitHub only after the broker reports a completed turn or terminal state.
 
 - Use `ask_claude` for an independent second opinion, review, or bounded delegated task.

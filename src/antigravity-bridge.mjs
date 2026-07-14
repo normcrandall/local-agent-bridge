@@ -3,7 +3,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, isAbsolute, join, relative, resolve } from "node:path";
+import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -35,7 +35,7 @@ function projectDirectory(requested) {
   }
   const actual = realpathSync(candidate);
   const fromRoot = relative(WORKSPACE_ROOT, actual);
-  if (fromRoot === ".." || fromRoot.startsWith(`..${delimiter}`) || isAbsolute(fromRoot)) {
+  if (fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)) {
     throw new Error(`Working directory must stay within ${WORKSPACE_ROOT}`);
   }
   return actual;

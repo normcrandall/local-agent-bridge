@@ -103,8 +103,8 @@ export async function runConversation({
   shouldStop = async () => false,
 }) {
   if (!task?.trim()) throw new Error("A task is required.");
-  if (!Number.isInteger(maxTurns) || maxTurns < 2 || maxTurns > 20) {
-    throw new Error("maxTurns must be an integer from 2 to 20.");
+  if (!Number.isInteger(maxTurns) || maxTurns < 1 || maxTurns > 20) {
+    throw new Error("maxTurns must be an integer from 1 to 20.");
   }
   validateAgents(agents, startAgent);
   if (!["review", "work"].includes(mode)) throw new Error("mode must be review or work.");

@@ -22,6 +22,7 @@
     "test:statusline": "node scripts/statusline-test.mjs",
     "test:models": "node scripts/model-routing-test.mjs",
     "test:codex-isolation": "node scripts/codex-isolation-test.mjs",
+    "test:codex-progress": "node scripts/codex-progress-test.mjs",
     "test:operations": "node scripts/operations-test.mjs"
   },
   "dependencies": {

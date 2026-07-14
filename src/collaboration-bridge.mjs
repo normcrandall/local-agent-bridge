@@ -2,7 +2,7 @@
 
 import { spawn } from "node:child_process";
 import { existsSync, realpathSync, statSync } from "node:fs";
-import { delimiter, isAbsolute, relative, resolve } from "node:path";
+import { delimiter, isAbsolute, relative, resolve, sep } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -38,7 +38,7 @@ function projectDirectory(requested) {
   }
   const actual = realpathSync(candidate);
   const fromRoot = relative(WORKSPACE_ROOT, actual);
-  if (fromRoot === ".." || fromRoot.startsWith(`..${delimiter}`) || isAbsolute(fromRoot)) {
+  if (fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)) {
     throw new Error(`Working directory must stay within ${WORKSPACE_ROOT}`);
   }
   return actual;
@@ -78,6 +78,8 @@ function summary(view) {
       `Active: ${active.agent} — ${active.status || "running"}`,
       `Phase: ${active.phase || "working"}`,
       `Summary: ${active.summary || "No provider-authored summary yet."}`,
+      `Narrative updated: ${active.summaryAt || "no provider narrative yet"}`,
+      `Narrative source: ${active.summarySource || "unknown"}`,
       active.livenessMessage ? `Liveness: ${active.livenessMessage}` : null,
       `Heartbeat: ${active.heartbeatAt || "unknown"}`,
       elapsedSeconds === null ? null : `Elapsed: ${elapsedSeconds}s`,
@@ -214,7 +216,7 @@ server.registerTool(
         "The only agent allowed to edit in work mode. Defaults to startAgent and must be selected in agents.",
       ),
       browser: z.boolean().default(false).describe("Enable isolated browser access where supported."),
-      maxTurns: z.number().int().min(2).max(20).default(6),
+      maxTurns: z.number().int().min(1).max(20).default(6),
       turnTimeoutSeconds: z.number().int().min(30).max(7200).default(600).describe("Hard wall-clock limit for each provider turn; heartbeats do not extend it."),
       models: modelsSchema,
       verificationCommands: verificationCommandsSchema,
@@ -342,7 +344,7 @@ server.registerTool(
     inputSchema: {
       collaborationId,
       message: z.string().min(1).describe("User answer, correction, or next-phase instruction."),
-      additionalTurns: z.number().int().min(2).max(20).default(6),
+      additionalTurns: z.number().int().min(1).max(20).default(6),
       models: modelsSchema,
       verificationCommands: verificationCommandsSchema,
       workCommands: workCommandsSchema,

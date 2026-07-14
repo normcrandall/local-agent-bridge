@@ -45,10 +45,6 @@ export function codexToolRequest({
   githubReviewBridgePath = null,
   playwrightBridgePath = null,
 }) {
-  if (sessionId) {
-    return { name: "codex-reply", arguments: { prompt, threadId: sessionId } };
-  }
-
   if (githubReview && mode !== "review") throw new Error("githubReview is available only in Codex review mode.");
   if (githubReview && (!handoffPath || !githubReviewBridgePath)) {
     throw new Error("Codex githubReview requires handoffPath and githubReviewBridgePath.");
@@ -95,6 +91,10 @@ export function codexToolRequest({
     arguments_.config["mcp_servers.playwright.command"] = "/bin/zsh";
     arguments_.config["mcp_servers.playwright.args"] = [playwrightBridgePath];
     arguments_.config["mcp_servers.playwright.default_tools_approval_mode"] = "approve";
+  }
+  if (sessionId) {
+    arguments_.threadId = sessionId;
+    return { name: "codex-reply", arguments: arguments_ };
   }
   return { name: "codex", arguments: arguments_ };
 }

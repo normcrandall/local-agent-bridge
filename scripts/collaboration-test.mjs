@@ -8,7 +8,10 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const root = resolve(import.meta.dirname, "..");
 const stateDirectory = await mkdtemp(join(tmpdir(), "agent-collaboration-test-"));
 const cleanProcessEnv = Object.fromEntries(
-  Object.entries(process.env).filter(([name]) => !name.startsWith("BRIDGE_")),
+  Object.entries(process.env).filter(([name]) => (
+    !name.startsWith("BRIDGE_")
+    && !["CLAUDE_BRIDGE_ACTIVE", "CODEX_BRIDGE_ACTIVE", "ANTIGRAVITY_BRIDGE_ACTIVE"].includes(name)
+  )),
 );
 const env = {
   ...cleanProcessEnv,
@@ -159,6 +162,20 @@ try {
   assert.deepEqual(fallbackRun.runtime.availableAgents, ["claude"]);
   assert.match(fallbackRun.runtime.unavailableAgents.antigravity, /exited|failed/i);
   assert.deepEqual(fallbackRun.turns.map((turn) => turn.agent), ["claude", "claude"]);
+
+  const singleTurnStarted = await fallbackClient.callTool({
+    name: "start_collaboration",
+    arguments: {
+      task: "Run exactly one bounded peer handoff",
+      agents: ["claude"],
+      maxTurns: 1,
+    },
+  });
+  assert.notEqual(singleTurnStarted.isError, true);
+  const singleTurnRun = await waitForStop(fallbackClient, singleTurnStarted.structuredContent.id);
+  assert.equal(singleTurnRun.status, "turn_limit", singleTurnRun.error || "single-turn run failed");
+  assert.equal(singleTurnRun.runtime.turnCount, 1);
+  assert.equal(singleTurnRun.turns.length, 1);
 
   heartbeatClient = await connect("collaboration-test-heartbeat", { FAKE_CLAUDE_DELAY_MS: "1200" });
   const heartbeatStarted = await heartbeatClient.callTool({
