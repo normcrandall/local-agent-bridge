@@ -69,6 +69,24 @@ try {
     },
   }));
   assert.equal(providerCapabilities({ home: authHome }).claude.githubReview, false);
+  writeFileSync(join(authConfigDirectory, "reviewer.pem"), "not-a-real-key\n", { mode: 0o600 });
+  writeFileSync(join(authConfigDirectory, "github-apps.json"), JSON.stringify({
+    version: 1,
+    roles: {
+      reviewers: {
+        codex: {
+          appId: "789",
+          expectedLogin: "codex-reviewer[bot]",
+          privateKeyPath: "reviewer.pem",
+          installations: { owner: 456 },
+        },
+      },
+    },
+  }));
+  const providerSpecific = providerCapabilities({ home: authHome });
+  assert.equal(providerSpecific.claude.githubReview, false);
+  assert.equal(providerSpecific.codex.githubReview, true);
+  assert.equal(providerSpecific.antigravity.githubReview, false);
   writeFileSync(join(authConfigDirectory, "github-apps.json"), JSON.stringify({ version: 1, roles: {} }));
   assert.equal(providerCapabilities({ home: authHome }).claude.githubReview, true);
 

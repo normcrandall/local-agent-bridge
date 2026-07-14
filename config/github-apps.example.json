@@ -13,13 +13,33 @@
         "your-organization": 22222222
       }
     },
-    "reviewer": {
-      "appId": "YOUR_REVIEWER_APP_ID",
-      "expectedLogin": "your-reviewer-app[bot]",
-      "privateKeyPath": "~/.config/local-agent-bridge/github-apps/your-reviewer-app.pem",
-      "installations": {
-        "your-personal-account": 33333333,
-        "your-organization": 44444444
+    "reviewers": {
+      "claude": {
+        "appId": "YOUR_CLAUDE_REVIEWER_APP_ID",
+        "expectedLogin": "your-claude-reviewer[bot]",
+        "privateKeyPath": "~/.config/local-agent-bridge/github-apps/your-claude-reviewer.pem",
+        "installations": {
+          "your-personal-account": 33333333,
+          "your-organization": 44444444
+        }
+      },
+      "codex": {
+        "appId": "YOUR_CODEX_REVIEWER_APP_ID",
+        "expectedLogin": "your-codex-reviewer[bot]",
+        "privateKeyPath": "~/.config/local-agent-bridge/github-apps/your-codex-reviewer.pem",
+        "installations": {
+          "your-personal-account": 55555555,
+          "your-organization": 66666666
+        }
+      },
+      "antigravity": {
+        "appId": "YOUR_GEMINI_REVIEWER_APP_ID",
+        "expectedLogin": "your-gemini-reviewer[bot]",
+        "privateKeyPath": "~/.config/local-agent-bridge/github-apps/your-gemini-reviewer.pem",
+        "installations": {
+          "your-personal-account": 77777777,
+          "your-organization": 88888888
+        }
       }
     }
   }

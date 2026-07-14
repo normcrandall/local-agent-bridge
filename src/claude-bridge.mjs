@@ -15,7 +15,7 @@ import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "no
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { GITHUB_LOGIN_PATTERN } from "./github-app-auth.mjs";
+import { configuredReviewerLogin, GITHUB_LOGIN_PATTERN } from "./github-app-auth.mjs";
 import { loadConfiguredFallbackModels, normalizeFallbackModels } from "./model-fallbacks.mjs";
 import { negotiateProviderCapabilities } from "./provider-cli-capabilities.mjs";
 
@@ -460,9 +460,9 @@ const sharedInput = {
     repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
     prNumber: z.number().int().min(1),
     headSha: z.string().regex(/^[0-9a-f]{40}$/i),
-    expectedLogin: z.string().regex(GITHUB_LOGIN_PATTERN),
+    expectedLogin: z.string().regex(GITHUB_LOGIN_PATTERN).optional().describe("Omit to use the configured Claude reviewer App."),
   }).strict().optional().describe(
-    "Explicit authorization for Claude to submit one formal review to an exact GitHub PR head using the dedicated review-bot token. Requires handoffPath.",
+    "Explicit authorization for Claude to submit one formal review to an exact GitHub PR head using its configured reviewer App by default. Requires handoffPath.",
   ),
   githubBuilder: z.object({
     repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
@@ -482,11 +482,20 @@ const server = new McpServer(
   { name: "codex-claude-bridge", version: "0.1.0" },
   {
     instructions:
-      "Use ask_claude for a bounded independent review or delegated task. Use continue_claude only with the returned sessionId. In review mode, pass exact verificationCommands and an optional project-relative handoffPath. In work mode, choose workProfile implement for local ownership through commit or deliver when Claude also owns push and PR delivery; use exact workCommands only for unusual additions. File edits are allowed but commands outside the profile and additions are denied. When project policy requires the reviewer to post to the PR, pass githubReview with the exact repository, PR number, head SHA, and expected bot login. Omit model to honor the user's configured Claude Code model. Never ask Claude to call Codex from a delegated session.",
+      "Use ask_claude for a bounded independent review or delegated task. Use continue_claude only with the returned sessionId. In review mode, pass exact verificationCommands and an optional project-relative handoffPath. In work mode, choose workProfile implement for local ownership through commit or deliver when Claude also owns push and PR delivery; use exact workCommands only for unusual additions. File edits are allowed but commands outside the profile and additions are denied. When project policy requires the reviewer to post to the PR, pass githubReview with the exact repository, PR number, and head SHA; the configured Claude reviewer App is selected when expectedLogin is omitted. Omit model to honor the user's configured Claude Code model. Never ask Claude to call Codex from a delegated session.",
   },
 );
 
 async function runWithProgress(input, extra, resume) {
+  const effectiveInput = input.githubReview && !input.githubReview.expectedLogin
+    ? {
+      ...input,
+      githubReview: {
+        ...input.githubReview,
+        expectedLogin: await configuredReviewerLogin({ provider: "claude" }),
+      },
+    }
+    : input;
   const token = extra?._meta?.progressToken;
   let progress = 0;
   const notify = async (message) => {
@@ -504,7 +513,7 @@ async function runWithProgress(input, extra, resume) {
   timer.unref?.();
   try {
     return await runClaude({
-      ...input,
+      ...effectiveInput,
       resume,
       onProgress: (summary) => notify(summary).catch(() => {}),
     });

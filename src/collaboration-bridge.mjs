@@ -95,7 +95,7 @@ function summary(view) {
   }
   if (view.githubReview) {
     lines.push(
-      `PR review: ${view.githubReview.repository}#${view.githubReview.prNumber}@${view.githubReview.headSha.slice(0, 12)} as ${view.githubReview.expectedLogin}`,
+      `PR review: ${view.githubReview.repository}#${view.githubReview.prNumber}@${view.githubReview.headSha.slice(0, 12)} as ${view.githubReview.expectedLogin || "the active provider reviewer App"}`,
     );
   }
   if (view.rotation) lines.push(`Rotation: task ${view.rotation.taskNumber}; writer ${view.rotation.writer}; reviewers ${view.rotation.reviewers.join(", ")}`);
@@ -233,9 +233,14 @@ const githubReviewSchema = z.object({
   repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
   prNumber: z.number().int().min(1),
   headSha: z.string().regex(/^[0-9a-f]{40}$/i),
-  expectedLogin: z.string().regex(GITHUB_LOGIN_PATTERN),
+  expectedLogin: z.string().regex(GITHUB_LOGIN_PATTERN).optional().describe("Legacy single reviewer identity. Omit to select the active provider's configured reviewer App."),
+  expectedLogins: z.object({
+    claude: z.string().regex(GITHUB_LOGIN_PATTERN).optional(),
+    codex: z.string().regex(GITHUB_LOGIN_PATTERN).optional(),
+    antigravity: z.string().regex(GITHUB_LOGIN_PATTERN).optional(),
+  }).strict().optional(),
 }).strict().optional().describe(
-  "Explicitly authorize the delegated Claude or Codex reviewer to write its handoff and submit one formal review to this exact PR head with the dedicated bot identity. Requires handoffPath.",
+  "Explicitly authorize reviewers to write their handoff and submit one formal review to this exact PR head. The active provider's configured reviewer App is selected by default. Requires handoffPath.",
 );
 const githubBuilderSchema = z.object({
   repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),

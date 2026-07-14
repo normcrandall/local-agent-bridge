@@ -6,12 +6,13 @@ import { dirname, isAbsolute, resolve } from "node:path";
 export const DEFAULT_GITHUB_APPS_CONFIG = resolve(homedir(), ".config/local-agent-bridge/github-apps.json");
 export const GITHUB_LOGIN_PATTERN = /^[A-Za-z0-9-]+(?:\[bot\])?$/;
 export const GITHUB_APP_ROLE_PERMISSIONS = {
-  builder: { contents: "write", pull_requests: "write", metadata: "read" },
+  builder: { contents: "write", pull_requests: "write", issues: "write", metadata: "read" },
   reviewer: { contents: "read", pull_requests: "write", metadata: "read" },
 };
 
 export function assertGitHubAppPermissions(role, permissions = {}) {
-  const required = GITHUB_APP_ROLE_PERMISSIONS[role];
+  const permissionRole = role.startsWith("reviewer") ? "reviewer" : role;
+  const required = GITHUB_APP_ROLE_PERMISSIONS[permissionRole];
   if (!required) throw new Error(`Unknown GitHub App role: ${role}`);
   const rank = { read: 1, write: 2 };
   const missing = Object.entries(required).filter(([name, level]) => (rank[permissions[name]] || 0) < rank[level]);
@@ -19,6 +20,26 @@ export function assertGitHubAppPermissions(role, permissions = {}) {
     throw new Error(`${role} GitHub App lacks required permissions: ${missing.map(([name, level]) => `${name}:${level}`).join(", ")}.`);
   }
   return true;
+}
+
+function reviewerEntries(config) {
+  return Object.entries(config?.roles?.reviewers || {});
+}
+
+function configuredRole(config, { role, reviewerProvider, expectedLogin }) {
+  if (role !== "reviewer") return { selected: config?.roles?.[role], label: role };
+  const reviewers = reviewerEntries(config);
+  if (expectedLogin) {
+    const match = reviewers.find(([, selected]) => selected?.expectedLogin === expectedLogin);
+    if (match) return { selected: match[1], label: `reviewer:${match[0]}` };
+    if (config?.roles?.reviewer?.expectedLogin === expectedLogin) {
+      return { selected: config.roles.reviewer, label: "reviewer" };
+    }
+  }
+  if (reviewerProvider && config?.roles?.reviewers?.[reviewerProvider]) {
+    return { selected: config.roles.reviewers[reviewerProvider], label: `reviewer:${reviewerProvider}` };
+  }
+  return { selected: config?.roles?.reviewer, label: "reviewer" };
 }
 
 function base64url(value) {
@@ -64,6 +85,24 @@ export async function inspectGitHubAppRoles({ configPath = DEFAULT_GITHUB_APPS_C
       keySecure = true;
     } catch (error) { keyError = error.message; }
     roles[role] = {
+      configured: true,
+      appIdValid: /^\d+$/.test(String(selected.appId || "")),
+      expectedLogin: selected.expectedLogin || null,
+      expectedLoginValid: GITHUB_LOGIN_PATTERN.test(selected.expectedLogin || ""),
+      installations: Object.keys(selected.installations || {}),
+      privateKeySecure: keySecure,
+      privateKeyError: keyError,
+    };
+  }
+  roles.reviewers = {};
+  for (const [provider, selected] of reviewerEntries(config)) {
+    let keySecure = false;
+    let keyError = null;
+    try {
+      await securePrivateKey(resolveConfiguredPath(selected.privateKeyPath, configPath));
+      keySecure = true;
+    } catch (error) { keyError = error.message; }
+    roles.reviewers[provider] = {
       configured: true,
       appIdValid: /^\d+$/.test(String(selected.appId || "")),
       expectedLogin: selected.expectedLogin || null,
@@ -139,7 +178,7 @@ export async function listGitHubAppInstallations({ appId, privateKeyPath, apiUrl
   }));
 }
 
-export async function loadGitHubAppRole({ role, repository, configPath = DEFAULT_GITHUB_APPS_CONFIG }) {
+export async function loadGitHubAppRole({ role, repository, reviewerProvider, expectedLogin, configPath = DEFAULT_GITHUB_APPS_CONFIG }) {
   if (!/^[a-z][a-z0-9_-]*$/i.test(role || "")) throw new Error("GitHub App role is invalid.");
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository || "")) {
     throw new Error("repository must be owner/name.");
@@ -148,34 +187,51 @@ export async function loadGitHubAppRole({ role, repository, configPath = DEFAULT
   const { config, exists } = await readConfig(configPath);
   if (!exists) throw new Error(`GitHub Apps config does not exist: ${expandHome(configPath)}`);
   if (config.version !== 1) throw new Error("Unsupported GitHub Apps config version.");
-  const selected = config.roles?.[role];
-  if (!selected) throw new Error(`GitHub App role is not configured: ${role}`);
-  if (!/^\d+$/.test(String(selected.appId || ""))) throw new Error(`GitHub App appId is invalid for role: ${role}`);
-  if (!GITHUB_LOGIN_PATTERN.test(selected.expectedLogin || "")) throw new Error(`GitHub App expectedLogin is invalid for role: ${role}`);
+  const resolvedRole = configuredRole(config, { role, reviewerProvider, expectedLogin });
+  const selected = resolvedRole.selected;
+  const roleLabel = resolvedRole.label;
+  if (!selected) throw new Error(`GitHub App role is not configured: ${roleLabel}`);
+  if (!/^\d+$/.test(String(selected.appId || ""))) throw new Error(`GitHub App appId is invalid for role: ${roleLabel}`);
+  if (!GITHUB_LOGIN_PATTERN.test(selected.expectedLogin || "")) throw new Error(`GitHub App expectedLogin is invalid for role: ${roleLabel}`);
   if (typeof selected.privateKeyPath !== "string" || !selected.privateKeyPath) {
-    throw new Error(`GitHub App privateKeyPath is invalid for role: ${role}`);
+    throw new Error(`GitHub App privateKeyPath is invalid for role: ${roleLabel}`);
   }
   const installationId = Object.entries(selected.installations || {})
     .find(([account]) => account.toLowerCase() === owner.toLowerCase())?.[1];
   if (!Number.isInteger(installationId) || installationId < 1) {
-    throw new Error(`No ${role} GitHub App installation is configured for ${owner}.`);
+    throw new Error(`No ${roleLabel} GitHub App installation is configured for ${owner}.`);
   }
   return {
     appId: String(selected.appId),
     expectedLogin: selected.expectedLogin || null,
     installationId,
     privateKeyPath: resolveConfiguredPath(selected.privateKeyPath, configPath),
+    roleLabel,
   };
+}
+
+export async function configuredReviewerLogin({ provider, configPath = DEFAULT_GITHUB_APPS_CONFIG } = {}) {
+  const { config, exists } = await readConfig(configPath);
+  if (!exists) throw new Error(`GitHub Apps config does not exist: ${expandHome(configPath)}`);
+  if (!provider || !config?.roles?.reviewers?.[provider]) {
+    if (config?.roles?.reviewer?.expectedLogin) return config.roles.reviewer.expectedLogin;
+    throw new Error(`GitHub reviewer App is not configured for provider: ${provider || "unknown"}`);
+  }
+  const login = config.roles.reviewers[provider].expectedLogin;
+  if (!GITHUB_LOGIN_PATTERN.test(login || "")) throw new Error(`GitHub reviewer expectedLogin is invalid for provider: ${provider}`);
+  return login;
 }
 
 export async function createInstallationToken({
   role,
   repository,
+  reviewerProvider,
+  expectedLogin,
   configPath = DEFAULT_GITHUB_APPS_CONFIG,
   apiUrl = "https://api.github.com",
   fetchImpl = fetch,
 }) {
-  const selected = await loadGitHubAppRole({ role, repository, configPath });
+  const selected = await loadGitHubAppRole({ role, repository, reviewerProvider, expectedLogin, configPath });
   const { privateKey } = await securePrivateKey(selected.privateKeyPath);
   const jwt = createAppJwt({ appId: selected.appId, privateKey });
   const app = await githubJson(`${apiUrl}/app`, { token: jwt, fetchImpl });
@@ -203,14 +259,20 @@ export async function createInstallationToken({
 
 export async function resolveReviewToken({
   repository,
+  reviewerProvider,
+  expectedLogin,
   tokenFile,
   configPath = process.env.GITHUB_APP_CONFIG || DEFAULT_GITHUB_APPS_CONFIG,
   appApiUrl = "https://api.github.com",
   fetchImpl = fetch,
 }) {
   const { config, exists } = await readConfig(configPath);
-  if (exists && config?.roles?.reviewer) {
-    return createInstallationToken({ role: "reviewer", repository, configPath, apiUrl: appApiUrl, fetchImpl });
+  const hasConfiguredReviewer = Boolean(config?.roles?.reviewer || reviewerEntries(config).length);
+  if (exists && hasConfiguredReviewer) {
+    return createInstallationToken({
+      role: "reviewer", repository, reviewerProvider, expectedLogin,
+      configPath, apiUrl: appApiUrl, fetchImpl,
+    });
   }
 
   return loadPatFallbackToken({ tokenFile, configPath, environmentVariable: "GITHUB_REVIEW_ALLOW_PAT_FALLBACK" });

@@ -25,7 +25,7 @@ if (!/^[0-9a-f]{40}$/i.test(headSha || "")) throw new Error("GITHUB_REVIEW_HEAD_
 if (!GITHUB_LOGIN_PATTERN.test(expectedLogin || "")) throw new Error("GITHUB_REVIEW_EXPECTED_LOGIN is invalid.");
 if (!handoffPath) throw new Error("GITHUB_REVIEW_HANDOFF_PATH is required.");
 
-const credential = await resolveReviewToken({ repository, tokenFile });
+const credential = await resolveReviewToken({ repository, tokenFile, expectedLogin });
 if (credential.expectedLogin && credential.expectedLogin !== expectedLogin) {
   throw new Error(`Configured reviewer identity ${credential.expectedLogin} does not match authorized identity ${expectedLogin}.`);
 }

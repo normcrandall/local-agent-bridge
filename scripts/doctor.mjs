@@ -90,10 +90,9 @@ check("Claude CLI collaboration status line", () => {
   return settings.statusLine?.command === launcher
     && settings.statusLine?.refreshInterval <= 2;
 }, "point Claude statusLine at agent-bridge-claude-statusline with refreshInterval 2");
-function configuredGitHubRole(role) {
+function configuredGitHubEntry(selected) {
   const configPath = resolve(homedir(), ".config/local-agent-bridge/github-apps.json");
   if (!existsSync(configPath)) return false;
-  const selected = JSON.parse(readFileSync(configPath, "utf8")).roles?.[role];
   if (!selected) return false;
   const keyPath = selected.privateKeyPath?.startsWith("~/")
     ? resolve(homedir(), selected.privateKeyPath.slice(2))
@@ -107,9 +106,23 @@ function configuredGitHubRole(role) {
     && info.isFile()
     && (info.mode & 0o077) === 0;
 }
+function configuredGitHubRole(role) {
+  const configPath = resolve(homedir(), ".config/local-agent-bridge/github-apps.json");
+  if (!existsSync(configPath)) return false;
+  return configuredGitHubEntry(JSON.parse(readFileSync(configPath, "utf8")).roles?.[role]);
+}
+function configuredGitHubReviewer(provider) {
+  const configPath = resolve(homedir(), ".config/local-agent-bridge/github-apps.json");
+  if (!existsSync(configPath)) return false;
+  const roles = JSON.parse(readFileSync(configPath, "utf8")).roles || {};
+  return configuredGitHubEntry(roles.reviewers?.[provider] || roles.reviewer);
+}
 check("GitHub builder App", () => configuredGitHubRole("builder"), "configure the builder role in ~/.config/local-agent-bridge/github-apps.json");
+for (const provider of ["claude", "codex", "antigravity"]) {
+  check(`GitHub ${provider} reviewer App`, () => configuredGitHubReviewer(provider), `configure roles.reviewers.${provider} in ~/.config/local-agent-bridge/github-apps.json`);
+}
 check("GitHub reviewer credential", () => {
-  if (configuredGitHubRole("reviewer")) return true;
+  if (["claude", "codex", "antigravity"].every((provider) => configuredGitHubReviewer(provider))) return true;
   const configPath = resolve(homedir(), ".config/local-agent-bridge/github-apps.json");
   if (existsSync(configPath)) {
     const config = JSON.parse(readFileSync(configPath, "utf8"));

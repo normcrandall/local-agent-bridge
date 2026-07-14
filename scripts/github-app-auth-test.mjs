@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createInstallationToken,
+  configuredReviewerLogin,
   assertGitHubAppPermissions,
   GITHUB_LOGIN_PATTERN,
   inspectGitHubAppRoles,
@@ -39,11 +40,19 @@ try {
         privateKeyPath,
         installations: { ExampleOrg: 222 },
       },
-      reviewer: {
-        appId: "654321",
-        expectedLogin: "example-reviewer[bot]",
-        privateKeyPath,
-        installations: { ExampleOrg: 333 },
+      reviewers: {
+        claude: {
+          appId: "654321", expectedLogin: "example-claude-reviewer[bot]", privateKeyPath,
+          installations: { ExampleOrg: 333 },
+        },
+        codex: {
+          appId: "777777", expectedLogin: "example-codex-reviewer[bot]", privateKeyPath,
+          installations: { ExampleOrg: 444 },
+        },
+        antigravity: {
+          appId: "888888", expectedLogin: "example-gemini-reviewer[bot]", privateKeyPath,
+          installations: { ExampleOrg: 555 },
+        },
       },
     },
   }), { mode: 0o600 });
@@ -61,15 +70,20 @@ try {
       ]);
     }
     if (url.endsWith("/app")) {
-      return json({ slug: jwtPayload.iss === "123456" ? "example-builder" : "example-reviewer" });
+      const slugs = {
+        123456: "example-builder", 654321: "example-claude-reviewer",
+        777777: "example-codex-reviewer", 888888: "example-gemini-reviewer",
+      };
+      return json({ slug: slugs[jwtPayload.iss] });
     }
     if (url.endsWith("/app/installations/222/access_tokens")) {
       assert.equal(options.method, "POST");
       assert.deepEqual(JSON.parse(options.body), { repositories: ["repo"] });
-      return json({ token: "builder-installation-token", expires_at: "2026-07-14T20:00:00Z", permissions: { contents: "write", pull_requests: "write", metadata: "read" } }, 201);
+      return json({ token: "builder-installation-token", expires_at: "2026-07-14T20:00:00Z", permissions: { contents: "write", pull_requests: "write", issues: "write", metadata: "read" } }, 201);
     }
-    if (url.endsWith("/app/installations/333/access_tokens")) {
-      return json({ token: "reviewer-installation-token", expires_at: "2026-07-14T20:00:00Z", permissions: { contents: "read", pull_requests: "write", metadata: "read" } }, 201);
+    if (/\/app\/installations\/(333|444|555)\/access_tokens$/.test(url)) {
+      const installation = url.match(/installations\/(\d+)/)[1];
+      return json({ token: `reviewer-${installation}-installation-token`, expires_at: "2026-07-14T20:00:00Z", permissions: { contents: "read", pull_requests: "write", metadata: "read" } }, 201);
     }
     return json({ message: `Unexpected URL ${url}` }, 404);
   };
@@ -101,17 +115,26 @@ try {
 
   const reviewer = await resolveReviewToken({
     repository: "ExampleOrg/repo",
+    expectedLogin: "example-claude-reviewer[bot]",
     configPath,
     tokenFile,
     appApiUrl: "https://github.test",
     fetchImpl,
   });
-  assert.equal(reviewer.token, "reviewer-installation-token");
-  assert.equal(assertGitHubAppPermissions("builder", { contents: "write", pull_requests: "write", metadata: "read" }), true);
+  assert.equal(reviewer.token, "reviewer-333-installation-token");
+  const codexReviewer = await createInstallationToken({
+    role: "reviewer", reviewerProvider: "codex", repository: "ExampleOrg/repo",
+    configPath, apiUrl: "https://github.test", fetchImpl,
+  });
+  assert.equal(codexReviewer.token, "reviewer-444-installation-token");
+  assert.equal(await configuredReviewerLogin({ provider: "antigravity", configPath }), "example-gemini-reviewer[bot]");
+  assert.equal(assertGitHubAppPermissions("builder", { contents: "write", pull_requests: "write", issues: "write", metadata: "read" }), true);
+  assert.throws(() => assertGitHubAppPermissions("builder", { contents: "write", pull_requests: "write", metadata: "read" }), /issues:write/);
   assert.throws(() => assertGitHubAppPermissions("reviewer", { contents: "read", pull_requests: "read", metadata: "read" }), /pull_requests:write/);
   const inspected = await inspectGitHubAppRoles({ configPath });
   assert.equal(inspected.roles.builder.privateKeySecure, true);
-  assert.equal(inspected.roles.reviewer.privateKeySecure, true);
+  assert.equal(inspected.roles.reviewers.claude.privateKeySecure, true);
+  assert.equal(inspected.roles.reviewers.codex.expectedLogin, "example-codex-reviewer[bot]");
   assert.deepEqual(inspected.roles.builder.installations, ["ExampleOrg"]);
 
   await assert.rejects(
@@ -151,6 +174,7 @@ try {
       repository: "ExampleOrg/repo",
       configPath,
       tokenFile,
+      expectedLogin: "example-claude-reviewer[bot]",
       appApiUrl: "https://github.test",
       fetchImpl: async () => json({ message: "installation revoked" }, 401),
     }),
