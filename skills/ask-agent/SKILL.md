@@ -25,6 +25,8 @@ Use the persistent `collaboration.start_collaboration` interface with `agents: [
 
 Default to read-only review. Permit work mode only when the user requested edits. Omit `model` unless the user explicitly supplied an override. Use browser access only when required by the task.
 
+Pass caller-supplied downgrade chains through `modelFallbacks.claude` and `modelFallbacks.codex`. Otherwise omit them so `~/.config/local-agent-bridge/model-fallbacks.json` applies. Claude Code handles its chain natively; the Codex adapter repeats the original ask, preserves an established continuation thread when applicable, and emits a downgrade narrative. Fallback applies only to recognized model overload, never authentication, permission, quota, configuration, or transport failures.
+
 For a Claude review, identify the exact repository verification commands and one project-relative handoff file before calling. Pass them as `verificationCommands` and `handoffPath`. Claude may read the workspace, run only those commands, and create or edit only that handoff file; arbitrary Bash, source edits, posting, commits, pushes, and other writes remain denied. Reuse the same fields with `continue_claude`.
 
 For work mode, default `permissionProfile` to `standard`. Set `permissionProfile: yolo` only when the user explicitly says `yolo`; never infer it from urgency or broad implementation language. Before calling, warn that the designated writer will bypass provider approvals and sandbox protections. YOLO never applies to reviewers.
@@ -49,6 +51,7 @@ Broker: collaboration.start_collaboration
 Mode: <review or work>
 Workspace: <path>
 Model: provider configured | <explicit override>
+Model fallbacks: machine configured | none | Claude <chain>; Codex <chain>
 Browser: off | isolated
 Verification commands: none | <exact commands>
 Work commands: none | <exact commands>

@@ -9,8 +9,14 @@ const claudeDefault = claudeToolRequest({ prompt: "test" });
 assert.equal(claudeDefault.name, "ask_claude");
 assert.equal(Object.hasOwn(claudeDefault.arguments, "model"), false);
 
-const claudeExplicit = claudeToolRequest({ prompt: "test", model: "user-claude-model" });
+const claudeExplicit = claudeToolRequest({
+  prompt: "test",
+  model: "user-claude-model",
+  fallbackModels: ["user-claude-fallback"],
+});
 assert.equal(claudeExplicit.arguments.model, "user-claude-model");
+assert.deepEqual(claudeExplicit.arguments.fallbackModels, ["user-claude-fallback"]);
+assert.equal(Object.hasOwn(claudeDefault.arguments, "fallbackModels"), false);
 const claudeReply = claudeToolRequest({
   prompt: "continue",
   sessionId: "claude-session",
@@ -57,8 +63,11 @@ const codexExplicit = codexToolRequest({
   prompt: "test",
   cwd: "/workspace",
   model: "user-codex-model",
+  fallbackModels: ["user-codex-fallback"],
 });
 assert.equal(codexExplicit.arguments.model, "user-codex-model");
+assert.deepEqual(codexExplicit.arguments.fallbackModels, ["user-codex-fallback"]);
+assert.equal(Object.hasOwn(codexDefault.arguments, "fallbackModels"), false);
 const codexImplement = codexToolRequest({
   prompt: "implement",
   cwd: "/workspace",

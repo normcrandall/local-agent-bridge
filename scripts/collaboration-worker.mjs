@@ -50,6 +50,7 @@ try {
     root: runtimeRoot,
     workspace: state.workspace,
     models: state.models,
+    modelFallbacks: state.modelFallbacks || {},
     verificationCommands: state.verificationCommands || [],
     workCommands: state.workCommands || [],
     workProfile: state.workProfile || "exact",

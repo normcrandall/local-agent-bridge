@@ -59,6 +59,8 @@ Collaboration: <id>
 
 Do not repeatedly retry an unavailable provider in the same phase. Continue with two models or one model; clearly label the result as degraded rather than full council consensus. If the work-mode writer is unavailable before its next turn, reassign the single-writer role to an available participant and disclose the change. Stop only when no requested provider is available, or when the base workflow itself requires user input.
 
+A recognized model overload is not provider unavailability. Preserve caller-supplied `modelFallbacks.claude` and `modelFallbacks.codex`, or omit them so machine-local policies apply. Claude Code uses native fallback; Codex retries through the bridge. Keep the same turn and writer, and only treat a provider as unavailable after its ordered chain is exhausted.
+
 ## Apply the council pattern
 
 Use work mode with exactly one writer. Default the writer to the model corresponding to the chair app unless the user selects another. All other participants remain read-only reviewers. Plan and validate first, let the writer make the change once, then have the other participants inspect the actual diff and test evidence. Never allow concurrent overlapping edits.

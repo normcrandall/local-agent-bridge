@@ -13,6 +13,8 @@ Accept natural language or an explicit form such as `$run-roundtable --agents cl
 
 Resolve participants, order, mode, maximum turns, and roles. Default to all three agents, review mode, and six turns. In work mode select exactly one writer; default the writer to the starting agent. Omit all model fields unless the user explicitly overrides them.
 
+Pass user-provided downgrade chains as `modelFallbacks.claude` and `modelFallbacks.codex`; otherwise omit them so the machine-local policy applies. Claude Code advances natively and Codex advances through the bridge only for recognized overload. Render any downgrade narrative immediately and never classify authentication, quota, permission, configuration, or transport errors as overload.
+
 Extract exact verification commands from the task or repository guidance and choose one project-relative handoff file for Claude, normally under `.bridge/handoffs/`. Pass both `verificationCommands` and `handoffPath` to `start_collaboration` and every `continue_collaboration` phase. Claude reviewers may run only those commands and write only that handoff file.
 
 When Claude is the work-mode writer, select `workProfile: implement` for local ownership through commit or `workProfile: deliver` when repository policy also assigns push and pull-request ownership. The profile avoids mid-task permission extensions for discovered tests, checksums, and normal Git/PR variants. Use additive `workCommands` only for unusual repository-specific tools.
@@ -31,6 +33,7 @@ Mode: <review or work>
 Writer: none | <agent>
 Turns: <maximum>
 Models: provider configured | <overrides>
+Model fallbacks: machine configured | none | Claude <chain>; Codex <chain>
 Tool: collaboration.start_collaboration
 Verification commands: none | <exact commands>
 Claude work commands: none | <exact commands>

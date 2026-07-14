@@ -41,6 +41,7 @@ async function callBridgeWithoutModel() {
         prompt: "bridge smoke test",
         browser: true,
         model: "custom-claude-model-id",
+        fallbackModels: ["claude-opus-4-6", "claude-sonnet-5"],
         mode: "review",
         verificationCommands: ["npm test", "git diff --check"],
         handoffPath: ".bridge/test-handoffs/smoke-review.md",
@@ -59,10 +60,15 @@ async function callBridgeWithoutModel() {
       || !serialized.includes("playwright")
       || !serialized.includes("--model")
       || !serialized.includes("custom-claude-model-id")
+      || !serialized.includes("--fallback-model")
+      || !serialized.includes("claude-opus-4-6,claude-sonnet-5")
     ) {
       throw new Error("Delegated browser or model configuration was not forwarded to Claude");
     }
     const invocation = JSON.parse(result.structuredContent.result);
+    if (result.structuredContent.model !== "claude-opus-4-6") {
+      throw new Error("Claude modelUsage was not surfaced in the routing receipt");
+    }
     const permissionIndex = invocation.args.indexOf("--permission-mode");
     if (invocation.args[permissionIndex + 1] !== "dontAsk") {
       throw new Error("Claude review mode is not locked to dontAsk permissions");
@@ -80,6 +86,20 @@ async function callBridgeWithoutModel() {
       "mcp__github_review__submit_pr_review",
     ]) {
       if (!allowed.includes(rule)) throw new Error(`Claude review permission is missing: ${rule}`);
+    }
+
+    const noFallbackResult = await client.callTool({
+      name: "ask_claude",
+      arguments: {
+        prompt: "bridge smoke test without fallback",
+        fallbackModels: [],
+        mode: "review",
+      },
+    });
+    if (noFallbackResult.isError) throw new Error("Bridge no-fallback tool returned an error");
+    const noFallbackInvocation = JSON.parse(noFallbackResult.structuredContent.result);
+    if (noFallbackInvocation.args.includes("--fallback-model")) {
+      throw new Error("An explicit empty Claude fallback list did not disable the machine policy");
     }
     const yolo = await client.callTool({
       name: "ask_claude",
@@ -382,7 +402,7 @@ if (!names(browserTools).includes("browser_navigate")) {
 }
 
 const codexSchema = codexTools.find((tool) => tool.name === "codex")?.inputSchema?.properties || {};
-for (const property of ["prompt", "cwd", "sandbox", "approval-policy", "config", "model"]) {
+for (const property of ["prompt", "cwd", "sandbox", "approval-policy", "config", "model", "fallbackModels"]) {
   if (!(property in codexSchema)) throw new Error(`Codex tool schema is missing: ${property}`);
 }
 const replySchema = codexTools.find((tool) => tool.name === "codex-reply")?.inputSchema?.properties || {};
@@ -395,6 +415,7 @@ for (const property of [
   "mode",
   "browser",
   "model",
+  "fallbackModels",
   "verificationCommands",
   "workCommands",
   "workProfile",
@@ -417,6 +438,7 @@ for (const property of [
   "writer",
   "maxTurns",
   "models",
+  "modelFallbacks",
   "verificationCommands",
   "workCommands",
   "workProfile",

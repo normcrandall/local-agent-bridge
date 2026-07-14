@@ -12,6 +12,22 @@ if (args[0] === "exec" && args[1] === "resume" && args.includes("--color")) {
   process.exit(2);
 }
 
+const modelIndex = args.indexOf("--model");
+const model = modelIndex >= 0 ? args[modelIndex + 1] : "default";
+const prompt = args.at(-1) || "";
+if (prompt === "FAKE_NON_OVERLOAD_FAILURE") {
+  process.stdout.write(`${JSON.stringify({ type: "error", message: "Codex authentication failed." })}\n`);
+  process.exit(1);
+}
+const overloadedModels = new Set(
+  (process.env.FAKE_CODEX_OVERLOAD_MODELS || "").split(",").map((value) => value.trim()).filter(Boolean),
+);
+if (overloadedModels.has(model)) {
+  process.stdout.write(`${JSON.stringify({ type: "thread.started", thread_id: "22222222-2222-4222-8222-222222222222" })}\n`);
+  process.stdout.write(`${JSON.stringify({ type: "error", message: "We're experiencing high demand right now; please retry." })}\n`);
+  process.exit(1);
+}
+
 const events = [
   { type: "thread.started", thread_id: "11111111-1111-4111-8111-111111111111" },
   { type: "turn.started" },

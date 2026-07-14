@@ -16,6 +16,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { GITHUB_LOGIN_PATTERN } from "./github-app-auth.mjs";
+import { loadConfiguredFallbackModels, normalizeFallbackModels } from "./model-fallbacks.mjs";
 
 const RUNTIME_ROOT = realpathSync(process.env.BRIDGE_RUNTIME_ROOT || process.env.BRIDGE_ROOT || process.cwd());
 const WORKSPACE_ROOT = realpathSync(process.env.BRIDGE_WORKSPACE_ROOT || process.env.BRIDGE_ROOT || process.cwd());
@@ -135,6 +136,7 @@ function runClaude({
   mode,
   browser,
   model,
+  fallbackModels,
   timeoutSeconds,
   resume,
   verificationCommands = [],
@@ -156,6 +158,17 @@ function runClaude({
   }
 
   const actualCwd = projectDirectory(cwd);
+  let resolvedFallbackModels;
+  if (fallbackModels === undefined) {
+    try {
+      resolvedFallbackModels = loadConfiguredFallbackModels("claude");
+    } catch (error) {
+      resolvedFallbackModels = [];
+      onProgress(`Ignoring invalid machine model-fallback policy: ${error.message}`);
+    }
+  } else {
+    resolvedFallbackModels = normalizeFallbackModels(fallbackModels, "fallbackModels");
+  }
   const actualHandoffPath = mode === "review" ? projectFile(actualCwd, handoffPath) : null;
   if (githubReview && mode !== "review") {
     throw new Error("githubReview is available only in review mode.");
@@ -196,6 +209,7 @@ function runClaude({
     "--verbose",
   ];
   if (model) args.push("--model", model);
+  if (resolvedFallbackModels.length) args.push("--fallback-model", resolvedFallbackModels.join(","));
   if (mode === "review") {
     const allowedTools = [
       "Read",
@@ -266,7 +280,7 @@ Work permission contract:
       timedOut = true;
       child.kill("SIGTERM");
       setTimeout(() => child.kill("SIGKILL"), 2_000).unref();
-    }, timeoutMs(timeoutSeconds));
+    }, timeoutMs(timeoutSeconds) * (1 + resolvedFallbackModels.length));
 
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
@@ -319,6 +333,7 @@ Work permission contract:
           })
           .filter(Boolean);
         const parsed = parsedLines.findLast((event) => event.type === "result") || parsedLines.at(-1) || JSON.parse(stdout);
+        const modelsUsed = Object.keys(parsed.modelUsage || {});
         resolvePromise({
           result: parsed.result ?? "",
           sessionId: parsed.session_id ?? null,
@@ -331,6 +346,12 @@ Work permission contract:
               + (parsed.usage?.cache_creation_input_tokens || 0)
               + (parsed.usage?.cache_read_input_tokens || 0),
           },
+          requestedModel: model || null,
+          model: modelsUsed.length === 1 ? modelsUsed[0] : null,
+          modelsUsed,
+          fallbackUsed: null,
+          modelFallbacks: resolvedFallbackModels,
+          fallbackManagedBy: resolvedFallbackModels.length ? "claude-cli" : null,
           handoffPath: actualHandoffPath,
         });
       } catch {
@@ -340,6 +361,12 @@ Work permission contract:
           isError: false,
           durationMs: null,
           usage: { costUsd: 0, tokens: 0 },
+          requestedModel: model || null,
+          model: null,
+          modelsUsed: [],
+          fallbackUsed: null,
+          modelFallbacks: resolvedFallbackModels,
+          fallbackManagedBy: resolvedFallbackModels.length ? "claude-cli" : null,
           handoffPath: actualHandoffPath,
         });
       }
@@ -366,6 +393,9 @@ const sharedInput = {
   ),
   model: z.string().min(1).optional().describe(
     "Optional Claude Code model alias or full model ID. Omit it to use the model from the user's Claude Code settings or environment.",
+  ),
+  fallbackModels: z.array(z.string().trim().min(1)).max(5).optional().describe(
+    "Ordered Claude models passed to Claude Code's native --fallback-model overload handling. Omit to use ~/.config/local-agent-bridge/model-fallbacks.json; pass [] to disable configured fallbacks.",
   ),
   timeoutSeconds: z.number().int().min(10).max(14400).optional(),
   verificationCommands: z.array(

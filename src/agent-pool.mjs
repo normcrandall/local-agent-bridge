@@ -3,6 +3,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { antigravityToolRequest, claudeToolRequest, codexToolRequest } from "./tool-requests.mjs";
 import { parseReviewEnvelope, reviewEnvelopeInstructions } from "./review-envelope.mjs";
+import { loadConfiguredFallbackModels } from "./model-fallbacks.mjs";
 
 function textFrom(result) {
   const structured = result.structuredContent || {};
@@ -23,6 +24,7 @@ export function createAgentPool({
   root,
   workspace = root,
   models = {},
+  modelFallbacks = {},
   verificationCommands = [],
   workCommands = [],
   workProfile = "exact",
@@ -121,6 +123,7 @@ export function createAgentPool({
           mode,
           browser,
           model: models.claude,
+          fallbackModels: modelFallbacks.claude,
           verificationCommands,
           workCommands,
           workProfile,
@@ -137,6 +140,7 @@ export function createAgentPool({
           mode,
           browser,
           model: models.codex,
+          fallbackModels: modelFallbacks.codex,
           workProfile,
           permissionProfile: effectivePermissionProfile,
           verificationCommands,
@@ -160,11 +164,26 @@ export function createAgentPool({
         });
       }
       request._meta = { progressToken: `${agent}-${Date.now()}` };
+      let fallbackSlots = 0;
+      if (["claude", "codex"].includes(agent)) {
+        if (Array.isArray(modelFallbacks[agent])) {
+          fallbackSlots = modelFallbacks[agent].length;
+        } else {
+          try {
+            fallbackSlots = loadConfiguredFallbackModels(agent).length;
+          } catch {
+            // The provider adapter emits the visible warning and fails open.
+            fallbackSlots = 0;
+          }
+        }
+      }
+      const maxTotalTimeoutMs = requestTimeoutMs * (1 + fallbackSlots);
       let result;
       try {
         result = await client.callTool(request, undefined, {
           timeout: requestTimeoutMs,
-          resetTimeoutOnProgress: false,
+          maxTotalTimeout: maxTotalTimeoutMs,
+          resetTimeoutOnProgress: true,
           onprogress: (progress) => onProgress({
             at: new Date().toISOString(),
             progress: progress.progress,
@@ -191,6 +210,14 @@ export function createAgentPool({
         metadata: {
           usage: structured.usage || structured.tokenUsage || null,
           durationMs: structured.durationMs || structured.duration_ms || null,
+          modelRouting: ["claude", "codex"].includes(agent) ? {
+            requestedModel: structured.requestedModel ?? null,
+            model: structured.model ?? null,
+            fallbackUsed: structured.fallbackUsed ?? null,
+            attemptedModels: structured.attemptedModels || structured.modelsUsed || [],
+            fallbackModels: structured.modelFallbacks || modelFallbacks[agent] || [],
+            fallbackManagedBy: structured.fallbackManagedBy ?? null,
+          } : null,
         },
       };
     },

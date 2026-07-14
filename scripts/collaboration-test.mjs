@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -7,6 +7,9 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 
 const root = resolve(import.meta.dirname, "..");
 const stateDirectory = await mkdtemp(join(tmpdir(), "agent-collaboration-test-"));
+const fakeCodex = join(stateDirectory, "codex");
+await writeFile(fakeCodex, `#!/bin/sh\nexec "${process.execPath}" "${resolve(root, "scripts/fixtures/fake-codex-progress.mjs")}" "$@"\n`);
+await chmod(fakeCodex, 0o700);
 const cleanProcessEnv = Object.fromEntries(
   Object.entries(process.env).filter(([name]) => (
     !name.startsWith("BRIDGE_")
@@ -38,7 +41,7 @@ async function waitForStop(client, id, timeoutMs = 10_000) {
   while (Date.now() < deadline) {
     const result = await client.callTool({
       name: "get_collaboration",
-      arguments: { collaborationId: id, includeTurns: 20 },
+      arguments: { collaborationId: id, detail: "full", includeTurns: 20 },
     });
     if (result.isError) throw new Error(JSON.stringify(result.content));
     view = result.structuredContent;
@@ -54,6 +57,7 @@ let nestedClient;
 let fallbackClient;
 let heartbeatClient;
 let cancellationClient;
+let codexFallbackClient;
 try {
   firstClient = await connect("collaboration-test-app-one");
   const tools = await firstClient.listTools();
@@ -72,6 +76,7 @@ try {
       task: "Verify portable collaboration state",
       agents: ["claude"],
       maxTurns: 2,
+      modelFallbacks: { claude: ["claude-opus-4-6", "claude-sonnet-5"], codex: ["5.6 terra"] },
       verificationCommands: ["npm test"],
       handoffPath: ".bridge/test-handoffs/collaboration-review.md",
     },
@@ -87,6 +92,12 @@ try {
   assert.equal(firstRun.status, "turn_limit", firstRun.error || "first run failed");
   assert.equal(firstRun.runtime.turnCount, 2);
   assert.equal(firstRun.turns.length, 2);
+  assert.deepEqual(firstRun.modelFallbacks, {
+    claude: ["claude-opus-4-6", "claude-sonnet-5"],
+    codex: ["5.6 terra"],
+  });
+  assert.match(firstRun.turns[0].message, /--fallback-model/);
+  assert.match(firstRun.turns[0].message, /claude-opus-4-6,claude-sonnet-5/);
   assert.match(firstRun.turns[0].message, /Bash\(npm test\)/);
   assert.match(firstRun.turns[0].message, /collaboration-review\.md/);
 
@@ -118,6 +129,7 @@ try {
       collaborationId: id,
       message: "Continue from this second app with the same collaboration.",
       additionalTurns: 2,
+      modelFallbacks: { codex: ["5.6 base"] },
     },
   });
   assert.notEqual(continued.isError, true);
@@ -125,6 +137,10 @@ try {
   assert.equal(secondRun.status, "turn_limit", secondRun.error || "second run failed");
   assert.equal(secondRun.runtime.turnCount, 4);
   assert.equal(secondRun.turns.length, 4);
+  assert.deepEqual(secondRun.modelFallbacks, {
+    claude: ["claude-opus-4-6", "claude-sonnet-5"],
+    codex: ["5.6 base"],
+  });
   assert.match(secondRun.turns[2].message, /Continue from this second app/);
   assert.match(secondRun.turns[2].message, /Bash\(npm test\)/);
   assert.match(secondRun.turns[2].message, /collaboration-review\.md/);
@@ -176,6 +192,34 @@ try {
   assert.equal(singleTurnRun.status, "turn_limit", singleTurnRun.error || "single-turn run failed");
   assert.equal(singleTurnRun.runtime.turnCount, 1);
   assert.equal(singleTurnRun.turns.length, 1);
+
+  codexFallbackClient = await connect("collaboration-test-codex-model-fallback", {
+    CODEX_BRIDGE_CODEX_BIN: fakeCodex,
+    BRIDGE_CODEX_HOME: join(stateDirectory, "codex-home"),
+    FAKE_CODEX_OVERLOAD_MODELS: "5.6 sol",
+  });
+  const codexFallbackStarted = await codexFallbackClient.callTool({
+    name: "start_collaboration",
+    arguments: {
+      task: "Finish the Codex turn after a model overload",
+      agents: ["codex"],
+      maxTurns: 1,
+      models: { codex: "5.6 sol" },
+      modelFallbacks: { codex: ["5.6 terra"] },
+    },
+  });
+  assert.notEqual(codexFallbackStarted.isError, true);
+  const codexFallbackRun = await waitForStop(codexFallbackClient, codexFallbackStarted.structuredContent.id);
+  assert.equal(codexFallbackRun.status, "turn_limit", codexFallbackRun.error || "Codex fallback run failed");
+  assert.equal(codexFallbackRun.runtime.turnCount, 1);
+  assert.deepEqual(codexFallbackRun.turns[0].metadata.modelRouting, {
+    requestedModel: "5.6 sol",
+    model: "5.6 terra",
+    fallbackUsed: true,
+    attemptedModels: ["5.6 sol", "5.6 terra"],
+    fallbackModels: ["5.6 terra"],
+    fallbackManagedBy: "bridge",
+  });
 
   heartbeatClient = await connect("collaboration-test-heartbeat", { FAKE_CLAUDE_DELAY_MS: "1200" });
   const heartbeatStarted = await heartbeatClient.callTool({
@@ -245,6 +289,7 @@ try {
   await fallbackClient?.close().catch(() => {});
   await heartbeatClient?.close().catch(() => {});
   await cancellationClient?.close().catch(() => {});
+  await codexFallbackClient?.close().catch(() => {});
   await rm(stateDirectory, { recursive: true, force: true });
   await rm(resolve(root, ".bridge/test-handoffs"), { recursive: true, force: true });
 }

@@ -131,6 +131,7 @@ function compactStatusView(view) {
   const {
     task: _task,
     models: _models,
+    modelFallbacks: _modelFallbacks,
     verificationCommands: _verificationCommands,
     workCommands: _workCommands,
     preflight: _preflight,
@@ -149,6 +150,12 @@ const modelsSchema = z.object({
   antigravity: z.string().min(1).optional(),
 }).optional().describe(
   "Optional exact model overrides. Omit a provider to use that provider's configured model.",
+);
+const modelFallbacksSchema = z.object({
+  claude: z.array(z.string().trim().min(1)).max(5).optional(),
+  codex: z.array(z.string().trim().min(1)).max(5).optional(),
+}).strict().optional().describe(
+  "Ordered provider models to try after an overload response. Claude uses its native fallback flag; Codex retries through the bridge. Omit to use the machine-local config; pass a provider's [] to disable it for this collaboration.",
 );
 const verificationCommandsSchema = z.array(
   z.string().trim().min(1).max(500).refine((command) => !/[\r\n]/.test(command), "Commands must be single-line."),
@@ -196,7 +203,7 @@ const server = new McpServer(
   { name: "desktop-agent-collaboration", version: "0.2.0" },
   {
     instructions:
-      "Use start_collaboration for an asynchronous durable job with one provider or a bounded roundtable with multiple providers. It returns immediately with a portable collaborationId. Unavailable providers are skipped and the run continues with any remaining participant. Pass verificationCommands and handoffPath for independently verified reviews. Choose workProfile implement for local ownership through commit or deliver when the writer also owns push and PR delivery; use workCommands only for unusual additions. When repository policy requires reviewer-authored PR feedback, pass githubReview so the delegated Claude or Codex reviewer receives target-bound handoff and formal-review tools. Use get_collaboration to poll or inspect it, continue_collaboration for another phase, and cancel_collaboration to stop. Omit model overrides to preserve configured models. The broker owns routing; never ask a peer to call another peer.",
+      "Use start_collaboration for an asynchronous durable job with one provider or a bounded roundtable with multiple providers. It returns immediately with a portable collaborationId. Unavailable providers are skipped and the run continues with any remaining participant. Pass verificationCommands and handoffPath for independently verified reviews. Choose workProfile implement for local ownership through commit or deliver when the writer also owns push and PR delivery; use workCommands only for unusual additions. When repository policy requires reviewer-authored PR feedback, pass githubReview so the delegated Claude or Codex reviewer receives target-bound handoff and formal-review tools. Use modelFallbacks.claude or modelFallbacks.codex for ordered overload-only downgrade chains. Use get_collaboration to poll or inspect it, continue_collaboration for another phase, and cancel_collaboration to stop. Omit model overrides to preserve configured models. The broker owns routing; never ask a peer to call another peer.",
   },
 );
 
@@ -217,8 +224,9 @@ server.registerTool(
       ),
       browser: z.boolean().default(false).describe("Enable isolated browser access where supported."),
       maxTurns: z.number().int().min(1).max(20).default(6),
-      turnTimeoutSeconds: z.number().int().min(30).max(7200).default(600).describe("Hard wall-clock limit for each provider turn; heartbeats do not extend it."),
+      turnTimeoutSeconds: z.number().int().min(30).max(7200).default(600).describe("Per-model inactivity limit. Progress resets it; ordered fallback chains have a hard total bound of this limit multiplied by the number of permitted model attempts."),
       models: modelsSchema,
+      modelFallbacks: modelFallbacksSchema,
       verificationCommands: verificationCommandsSchema,
       workCommands: workCommandsSchema,
       workProfile: workProfileSchema,
@@ -278,6 +286,7 @@ server.registerTool(
       writer,
       browser: input.browser,
       models: input.models || {},
+      modelFallbacks: input.modelFallbacks || {},
       verificationCommands: input.verificationCommands || [],
       workCommands: input.workCommands || [],
       workProfile: input.workProfile || "exact",
@@ -346,6 +355,7 @@ server.registerTool(
       message: z.string().min(1).describe("User answer, correction, or next-phase instruction."),
       additionalTurns: z.number().int().min(1).max(20).default(6),
       models: modelsSchema,
+      modelFallbacks: modelFallbacksSchema,
       verificationCommands: verificationCommandsSchema,
       workCommands: workCommandsSchema,
       workProfile: workProfileSchema.optional(),
@@ -362,6 +372,7 @@ server.registerTool(
     message,
     additionalTurns,
     models,
+    modelFallbacks,
     verificationCommands,
     workCommands,
     workProfile,
@@ -389,6 +400,9 @@ server.registerTool(
       cancelRequested: false,
       error: null,
       models: models ? { ...previous.models, ...models } : previous.models,
+      modelFallbacks: modelFallbacks
+        ? { ...(previous.modelFallbacks || {}), ...modelFallbacks }
+        : previous.modelFallbacks || {},
       verificationCommands: verificationCommands || previous.verificationCommands || [],
       workCommands: workCommands || previous.workCommands || [],
       workProfile: workProfile || previous.workProfile || "exact",

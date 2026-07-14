@@ -28,6 +28,9 @@ Call `collaboration.start_collaboration` with:
 - `githubReview` when the PR is the source of truth.
 - `ciTracking.prNumber` when a PR exists.
 - optional `budget.maxCostUsd`, `budget.maxTokens`, and `budget.maxMinutes`.
+- optional `modelFallbacks.claude` and `modelFallbacks.codex`, preserving ordered overload-only downgrade chains; omit them to use machine-local policies.
+
+A recognized provider model overload advances inside the active turn without rotating or reassigning the writer. Claude Code owns its native fallback; the Codex bridge records attempted and selected models. Show any downgrade narrative. Treat authentication, quota, permission, configuration, and transport errors through their existing failure or indeterminate paths instead of model fallback.
 
 Return the collaboration ID immediately. For routine polling call `get_collaboration` with `detail: status`, `includeTurns: 0`, the last `updatedAt` as `afterUpdatedAt`, and `waitSeconds: 8` (or less). Track the last displayed `runtime.turnCount`. Only when that count increases, make one history call with `detail: full`, `includeTurns` equal to the bounded number needed, and `afterTurn` set to the last displayed turn. Never request or repeat the original task and completed turn bodies on heartbeat-only polls. Show the narrative `runtime.activeCall.summary` with its age, heartbeat age, writer, worktree/branch, CI, and usage when those fields change. Never expose private reasoning.
 

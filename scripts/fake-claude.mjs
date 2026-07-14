@@ -23,4 +23,5 @@ process.stdout.write(`${JSON.stringify({
   session_id: "fake-claude-session",
   is_error: false,
   duration_ms: 1,
+  modelUsage: { "claude-opus-4-6": { inputTokens: 1, outputTokens: 1 } },
 })}\n`);

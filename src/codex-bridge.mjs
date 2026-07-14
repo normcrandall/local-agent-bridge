@@ -7,9 +7,13 @@ import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { loadConfiguredFallbackModels, normalizeFallbackModels } from "./model-fallbacks.mjs";
 
 const WORKSPACE_ROOT = realpathSync(process.env.BRIDGE_WORKSPACE_ROOT || process.env.BRIDGE_ROOT || process.cwd());
 const MAX_OUTPUT_CHARS = 200_000;
+function overloadRetryPrompt(originalPrompt) {
+  return `A previous model attempt failed because that model was overloaded. Inspect the workspace before acting so you preserve any completed work, then complete this original request:\n\n${originalPrompt}`;
+}
 
 function findCodex() {
   const candidates = [
@@ -51,6 +55,21 @@ function tomlValue(value) {
   return JSON.stringify(value);
 }
 
+function isModelOverload(message) {
+  return /(?:^|[^a-z0-9])overloaded(?:[^a-z0-9]|$)|\bmodel[_ -]?overload(?:ed)?\b|\bover[_ -]?capacity\b|\bmodel\b[^\n]{0,80}\bat capacity\b|\bno capacity\b[^\n]{0,80}\bmodel\b|\bmodel\b[^\n]{0,80}\bhigh demand\b|\bhigh demand\b[^\n]{0,80}\bmodel\b|\bexperiencing high demand\b/i.test(message);
+}
+
+function eventErrorText(event) {
+  return [
+    event.message,
+    event.code,
+    event.error?.message,
+    event.error?.code,
+    event.error?.type,
+    typeof event.error === "string" ? event.error : null,
+  ].filter((value) => typeof value === "string" && value.trim()).join(" — ") || "Codex reported an error.";
+}
+
 function eventSummary(event) {
   if (event.type === "thread.started") return "Codex session started.";
   if (event.type === "turn.started") return "Codex is analyzing the task.";
@@ -72,7 +91,7 @@ function eventSummary(event) {
   return null;
 }
 
-function runCodex({ prompt, cwd, sandbox, approvalPolicy, config = {}, model, threadId, onProgress }) {
+function runCodexAttempt({ prompt, cwd, sandbox, approvalPolicy, config = {}, model, threadId, onProgress }) {
   if (process.env.CODEX_BRIDGE_ACTIVE === "1") {
     throw new Error("Nested Codex bridge invocation blocked to prevent an agent loop.");
   }
@@ -115,7 +134,7 @@ function runCodex({ prompt, cwd, sandbox, approvalPolicy, config = {}, model, th
         finalMessage = event.item.text.trim();
       }
       if (event.type === "error" || event.type === "turn.failed") {
-        eventError = event.message || event.error?.message || "Codex reported an error.";
+        eventError = eventErrorText(event);
       }
       const summary = eventSummary(event);
       if (summary) onProgress(summary);
@@ -134,12 +153,88 @@ function runCodex({ prompt, cwd, sandbox, approvalPolicy, config = {}, model, th
     child.on("close", (code, signal) => {
       consume(buffer);
       if (code !== 0 || eventError) {
-        rejectPromise(new Error(clipped(eventError || stderr.trim() || `Codex exited with ${code ?? signal}.`)));
+        const error = new Error(clipped(eventError || stderr.trim() || `Codex exited with ${code ?? signal}.`));
+        error.modelOverloaded = isModelOverload(error.message);
+        rejectPromise(error);
         return;
       }
       resolvePromise({ content: clipped(finalMessage || "Codex returned no text."), threadId: sessionId, isError: false });
     });
   });
+}
+
+async function runCodex({
+  prompt,
+  cwd,
+  sandbox,
+  approvalPolicy,
+  config = {},
+  model,
+  fallbackModels,
+  threadId,
+  onProgress,
+}) {
+  let configured;
+  if (fallbackModels === undefined) {
+    try {
+      configured = loadConfiguredFallbackModels("codex");
+    } catch (error) {
+      configured = [];
+      onProgress(`Ignoring invalid machine model-fallback policy: ${error.message}`);
+    }
+  } else {
+    configured = normalizeFallbackModels(fallbackModels, "fallbackModels");
+  }
+  const candidates = [model || null, ...configured]
+    .filter((candidate, index, values) => values.indexOf(candidate) === index);
+  const attemptedModels = [];
+  const originalThreadId = threadId || null;
+  let activeThreadId = originalThreadId;
+  let attemptPrompt = prompt;
+
+  for (let index = 0; index < candidates.length; index += 1) {
+    const candidate = candidates[index];
+    const label = candidate || "configured default";
+    attemptedModels.push(label);
+    try {
+      const result = await runCodexAttempt({
+        prompt: attemptPrompt,
+        cwd,
+        sandbox,
+        approvalPolicy,
+        config,
+        model: candidate,
+        threadId: activeThreadId,
+        onProgress,
+      });
+      return {
+        ...result,
+        requestedModel: model || null,
+        model: candidate,
+        fallbackUsed: index > 0,
+        attemptedModels,
+        modelFallbacks: configured,
+        fallbackManagedBy: configured.length ? "bridge" : null,
+      };
+    } catch (error) {
+      const next = candidates[index + 1];
+      if (!error.modelOverloaded) throw error;
+      if (next === undefined) {
+        const suffix = configured.length
+          ? `Codex model fallback chain exhausted: ${attemptedModels.join(" -> ")}.`
+          : "No Codex model fallback was configured.";
+        throw new Error(`${error.message}\n${suffix}`);
+      }
+      const nextLabel = next || "configured default";
+      onProgress(`Codex model ${label} is overloaded; retrying with ${nextLabel} (${index + 1}/${candidates.length - 1}).`);
+      // A newly-created failed thread may not contain the original user turn. Start a
+      // fresh attempt in that case. For codex-reply, retain only the caller's established
+      // thread and repeat the prompt so the fallback cannot silently lose the new ask.
+      activeThreadId = originalThreadId;
+      attemptPrompt = overloadRetryPrompt(prompt);
+    }
+  }
+  throw new Error("Codex model fallback chain was empty.");
 }
 
 const server = new McpServer(
@@ -155,6 +250,9 @@ const newTurnInput = {
   "approval-policy": z.enum(["untrusted", "on-failure", "on-request", "never"]).default("never"),
   config: configSchema,
   model: z.string().min(1).optional(),
+  fallbackModels: z.array(z.string().trim().min(1)).max(5).optional().describe(
+    "Ordered models to try only when Codex reports that the current model is overloaded. Omit to use ~/.config/local-agent-bridge/model-fallbacks.json; pass [] to disable configured fallbacks.",
+  ),
 };
 
 async function runWithProgress(input, extra, threadId) {
@@ -175,6 +273,7 @@ async function runWithProgress(input, extra, threadId) {
     approvalPolicy: input["approval-policy"] || "never",
     config: input.config,
     model: input.model,
+    fallbackModels: input.fallbackModels,
     threadId,
     onProgress: notify,
   });
