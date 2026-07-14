@@ -1,7 +1,7 @@
 interface:
   display_name: "Council Discovery"
-  short_description: "Find and issue app features with three models"
-  default_prompt: "Use $council-discovery to discover and publish the best next features for this app."
+  short_description: "Find business-grounded features with three models"
+  default_prompt: "Use $council-discovery to find and publish app enhancements grounded in retention, acquisition, maintainability, overhead, and ROI."
 dependencies:
   tools:
     - type: "mcp"
