@@ -6,6 +6,7 @@ import { delimiter, isAbsolute, relative, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { GITHUB_LOGIN_PATTERN } from "./github-app-auth.mjs";
 import {
   appendEvent,
   collaborationView,
@@ -170,7 +171,7 @@ const githubReviewSchema = z.object({
   repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
   prNumber: z.number().int().min(1),
   headSha: z.string().regex(/^[0-9a-f]{40}$/i),
-  expectedLogin: z.string().regex(/^[A-Za-z0-9-]+$/),
+  expectedLogin: z.string().regex(GITHUB_LOGIN_PATTERN),
 }).strict().optional().describe(
   "Explicitly authorize the delegated Claude or Codex reviewer to write its handoff and submit one formal review to this exact PR head with the dedicated bot identity. Requires handoffPath.",
 );

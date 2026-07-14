@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "roles": {
+    "builder": {
+      "appId": "YOUR_BUILDER_APP_ID",
+      "expectedLogin": "your-builder-app[bot]",
+      "privateKeyPath": "~/.config/local-agent-bridge/github-apps/your-builder-app.pem",
+      "installations": {
+        "your-personal-account": 11111111,
+        "your-organization": 22222222
+      }
+    },
+    "reviewer": {
+      "appId": "YOUR_REVIEWER_APP_ID",
+      "expectedLogin": "your-reviewer-app[bot]",
+      "privateKeyPath": "~/.config/local-agent-bridge/github-apps/your-reviewer-app.pem",
+      "installations": {
+        "your-personal-account": 33333333,
+        "your-organization": 44444444
+      }
+    }
+  }
+}

@@ -37,10 +37,10 @@ The bridge repository is the portable source of truth for its runtime and `counc
 
 ### 1. Move the repository
 
-Put this directory in a private Git repository, copy it with AirDrop or external storage, or transfer it with `rsync`. Preserve executable bits and hidden directories such as `.codex`, `.claude`, and `.agents`.
+Put this directory in a Git repository, copy it with AirDrop or external storage, or transfer it with `rsync`. Preserve executable bits and hidden directories such as `.codex`, `.claude`, and `.agents`.
 
 ```sh
-git clone <private-bridge-repository> agent-bridge
+git clone <bridge-repository> agent-bridge
 cd agent-bridge
 ```
 
@@ -50,13 +50,57 @@ Do not copy `node_modules`; recreate it on the destination.
 
 Install Node.js, Codex, Claude Code, and Antigravity on the new computer. Launch each provider directly and sign in there. Do not move authentication tokens by copying all of `~/.codex`, `~/.claude`, or `~/.gemini`; those directories contain unrelated machine-local state and may contain credentials.
 
-If reviewer-authored GitHub reviews are required, securely provision the dedicated bot token separately at `~/.config/ghtoken` and restrict it to the user:
+If reviewer-authored GitHub reviews are required, either configure your own GitHub App as described below or securely provision a dedicated bot token separately at `~/.config/ghtoken`. Restrict static tokens to the user:
 
 ```sh
 chmod 600 ~/.config/ghtoken
 ```
 
-Do not commit this token or place it in the bridge repository.
+Do not commit tokens, GitHub App private keys, or the populated machine-local App config to the bridge repository.
+
+On another computer, generate a new private key for the same App when possible, install the App on the required accounts, rerun the installation discovery command, and recreate the machine-local config. A securely transferred existing key also works, but it must remain outside the repository with mode `600`.
+
+### Optional: use your own GitHub Apps
+
+GitHub Apps give builder and reviewer activity distinct bot identities without storing a long-lived personal access token. This repository does not require, create, or ship any Veliqon-specific App. Its checked-in configuration is a generic role-based template; each user creates and installs their own Apps and keeps the real IDs and private-key paths under `~/.config/local-agent-bridge`.
+
+Use role identities rather than model identities because Claude, Codex, and Antigravity can rotate between roles. A common setup is two Apps, such as `your-project-builder` and `your-project-reviewer`; six model-by-role Apps are unnecessary. You can point both roles at one App, but separate Apps make permissions and PR history clearer.
+
+Create each App from **GitHub Settings → Developer settings → GitHub Apps → New GitHub App**:
+
+- Turn off webhooks and OAuth unless another part of your system needs them.
+- Select **Any account** only if the App must be installable on both personal accounts and organizations.
+- Builder repository permissions: **Contents: Read and write**, **Pull requests: Read and write**, and **Metadata: Read-only**. Grant **Workflows: Read and write** only if the builder must intentionally modify workflow files.
+- Reviewer repository permissions: **Contents: Read-only**, **Pull requests: Read and write**, and **Metadata: Read-only**.
+- Generate a private key, move it outside the repository, and restrict it with `chmod 600`.
+- Install the App on each account or organization, preferably for selected repositories.
+
+Discover the installation IDs after installing an App:
+
+```sh
+npm run github-app:installations -- \
+  --app-id YOUR_APP_ID \
+  --private-key ~/.config/local-agent-bridge/github-apps/your-app.pem
+```
+
+Copy [`config/github-apps.example.json`](config/github-apps.example.json) to `~/.config/local-agent-bridge/github-apps.json`, replace every placeholder, and run:
+
+```sh
+chmod 600 ~/.config/local-agent-bridge/github-apps.json
+chmod 600 ~/.config/local-agent-bridge/github-apps/*.pem
+```
+
+The `installations` keys are GitHub account or organization names and the values are the installation IDs printed by the discovery command. Role selection is based on the repository owner, so one config can cover personal and organization repositories.
+
+The bound PR-review publisher automatically uses the configured `reviewer` App. It falls back to `~/.config/ghtoken` only when no reviewer App is configured; if a configured App fails authentication, it stops rather than silently posting as another identity.
+
+For a bounded builder-side GitHub CLI command, mint a short-lived repository-scoped token at execution time:
+
+```sh
+npm run github-app:run -- builder owner/repository -- gh pr view 123
+```
+
+The wrapper injects `GH_TOKEN` and `GITHUB_TOKEN` into only that child process and never prints the token. This authenticates `gh` and tools that honor those variables; it does not replace SSH credentials for a raw `git push`.
 
 ### 3. Restore Matt Pocock's original AI Hero skills
 
@@ -457,15 +501,15 @@ Codex resolves and passes an explicit authorization object:
 ```json
 {
   "githubReview": {
-    "repository": "veliqon/nolvaren-next",
+    "repository": "owner/repository",
     "prNumber": 4,
     "headSha": "0123456789abcdef0123456789abcdef01234567",
-    "expectedLogin": "veliqon-bot"
+    "expectedLogin": "your-reviewer-app[bot]"
   }
 }
 ```
 
-The delegated tool reads `~/.config/ghtoken` itself; the token never enters the prompt, skill, transcript, or MCP response. Before posting it verifies the token login, exact current PR head, and every inline-comment path. It submits a formal GitHub review (`APPROVE`, `REQUEST_CHANGES`, or `COMMENT`) with a general body and optional inline comments, records the returned URL in the handoff, and uses a content marker to avoid duplicate reviews. A re-review must refresh `headSha`.
+The delegated tool mints a short-lived token from the configured `reviewer` App, or reads the backward-compatible `~/.config/ghtoken` fallback when no reviewer App is configured. Credentials never enter the prompt, skill, transcript, or MCP response. Before posting it verifies the token login, exact current PR head, and every inline-comment path. It submits a formal GitHub review (`APPROVE`, `REQUEST_CHANGES`, or `COMMENT`) with a general body and optional inline comments, records the returned URL in the handoff, and uses a content marker to avoid duplicate reviews. A re-review must refresh `headSha`.
 
 ## Browser boundary
 
@@ -483,7 +527,7 @@ The Codex/ChatGPT desktop built-in browser cannot be passed through this bridge:
 - Antigravity continuations use the exact per-project `conversationId`, never the global `--continue` shortcut.
 - Antigravity delegation always uses its terminal sandbox; review maps to `plan`, work maps to `accept-edits`.
 - Delegated Claude sessions only receive Playwright when `browser: true`; the browser uses an isolated profile.
-- Claude review mode exposes no general GitHub access. When repository policy explicitly requires reviewer-authored PR feedback, `githubReview` adds one target-bound `submit_pr_review` tool. It reads the mode-600 token at `~/.config/ghtoken` outside model context, verifies the required login, rejects stale head SHAs and paths outside the diff, and idempotently submits one formal review with general and inline comments.
+- Claude review mode exposes no general GitHub access. When repository policy explicitly requires reviewer-authored PR feedback, `githubReview` adds one target-bound `submit_pr_review` tool. It obtains a repository-scoped credential from the configured reviewer App, with the mode-600 `~/.config/ghtoken` available only as an unconfigured-App fallback. Outside model context it verifies the required login, rejects stale head SHAs and paths outside the diff, and idempotently submits one formal review with general and inline comments.
 - The bound review publisher cannot push, merge, label, edit issues, access another repository or PR, or use the chair's personal GitHub identity.
 - Each delegated call has a 10-minute default and 30-minute maximum timeout.
 

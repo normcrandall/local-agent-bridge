@@ -4,3 +4,5 @@ npm-debug.log*
 !CLAUDE.md
 .playwright-mcp/
 .bridge/
+config/github-apps.json
+config/github-apps/*.pem
