@@ -156,7 +156,7 @@ for (const name of bridgeSkillNames) {
 }
 
 const councilSkillNames = bridgeSkillNames.filter((name) => name.startsWith("council-"));
-assert.equal(councilSkillNames.length, 26);
+assert.equal(councilSkillNames.length, 27);
 for (const name of [
   "council-loop-me",
   "council-research",
@@ -166,7 +166,7 @@ for (const name of [
   "council-wayfinder",
   "council-wizard",
 ]) assert.ok(councilSkillNames.includes(name), `Missing newly supported council skill ${name}`);
-const bridgeNativeCouncilSkillNames = new Set(["council-discovery", "council-ux-review"]);
+const bridgeNativeCouncilSkillNames = new Set(["council-discovery", "council-grill-agents", "council-ux-review"]);
 const generatedCouncilSkillNames = councilSkillNames.filter((name) => !bridgeNativeCouncilSkillNames.has(name));
 for (const name of generatedCouncilSkillNames) {
   const content = await readFile(resolve(root, "skills", name, "SKILL.md"), "utf8");
@@ -222,6 +222,29 @@ assert.match(councilDiscovery, /Never leave the user at a static/);
 assert.match(councilDiscovery, /Never substitute a long-running Bash, sleep/);
 assert.match(councilDiscovery, /Continue with two models or one model/);
 assert.match(councilDiscovery, /Do not edit product code/);
+
+const councilGrillAgents = await readFile(resolve(root, "skills/council-grill-agents/SKILL.md"), "utf8");
+for (const term of [
+  "Claude, Codex, and Antigravity",
+  "collaboration.start_collaboration",
+  "waitSeconds: 8",
+  "Grill the models, not the user",
+  "Answerer",
+  "Challenger",
+  "Verifier",
+  "asks exactly one specific, falsifiable question",
+  "Claim:",
+  "supported | revised | rejected | unresolved",
+  "degraded consensus",
+  "single-agent conclusion",
+  "at most nine cross-examination questions",
+  "make no code, documentation, issue, or pull-request changes",
+]) assert.ok(councilGrillAgents.includes(term), `Council agent grill is missing ${term}`);
+assert.match(councilGrillAgents, /full consensus/i);
+assert.match(councilGrillAgents, /Never leave the user at a static/);
+assert.match(councilGrillAgents, /Never substitute a long-running Bash, sleep/);
+assert.match(councilGrillAgents, /Continue with two models or one model/);
+assert.match(councilGrillAgents, /exactly one writer or publisher/);
 
 const councilUxReview = await readFile(resolve(root, "skills/council-ux-review/SKILL.md"), "utf8");
 for (const term of [
