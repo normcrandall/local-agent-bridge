@@ -213,11 +213,21 @@ export async function resolveReviewToken({
     return createInstallationToken({ role: "reviewer", repository, configPath, apiUrl: appApiUrl, fetchImpl });
   }
 
-  const environmentAllowsFallback = process.env.GITHUB_REVIEW_ALLOW_PAT_FALLBACK !== "0";
+  return loadPatFallbackToken({ tokenFile, configPath, environmentVariable: "GITHUB_REVIEW_ALLOW_PAT_FALLBACK" });
+}
+
+export async function loadPatFallbackToken({
+  tokenFile = process.env.AGENT_BRIDGE_GITHUB_PAT_FILE || resolve(homedir(), ".config/ghtoken"),
+  configPath = process.env.GITHUB_APP_CONFIG || DEFAULT_GITHUB_APPS_CONFIG,
+  environmentVariable = "GITHUB_APP_ALLOW_PAT_FALLBACK",
+} = {}) {
+  const { config, exists } = await readConfig(configPath);
+
+  const environmentAllowsFallback = process.env[environmentVariable] !== "0";
   const configAllowsFallback = config?.compatibility?.allowPatFallback !== false;
   if (!tokenFile || !environmentAllowsFallback || !configAllowsFallback) {
     throw new Error(exists
-      ? "GitHub App role is not configured: reviewer (PAT fallback is disabled)"
+      ? "GitHub PAT fallback is disabled"
       : `GitHub Apps config does not exist: ${expandHome(configPath)}`);
   }
 
@@ -227,5 +237,5 @@ export async function resolveReviewToken({
   if ((info.mode & 0o077) !== 0) throw new Error("GitHub review token file must not be accessible by group or other users.");
   const token = (await readFile(resolvedTokenFile, "utf8")).trim();
   if (!token) throw new Error("GitHub review token file is empty.");
-  return { token, expiresAt: null, expectedLogin: null, verifiedLogin: null, installationId: null };
+  return { token, expiresAt: null, expectedLogin: null, verifiedLogin: null, installationId: null, credentialSource: "pat-fallback" };
 }

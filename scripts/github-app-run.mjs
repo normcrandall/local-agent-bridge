@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
-import { spawn } from "node:child_process";
-import { createInstallationToken } from "../src/github-app-auth.mjs";
+import { createInstallationToken, loadPatFallbackToken } from "../src/github-app-auth.mjs";
+import { executeWithPermissionFallback, isGitHubAppPermissionError, runCredentialCommand } from "../src/github-command-fallback.mjs";
 
 const separator = process.argv.indexOf("--");
 const role = process.argv[2];
@@ -12,15 +12,22 @@ if (!role || !repository || !command.length) {
   process.exit(2);
 }
 
-const credential = await createInstallationToken({ role, repository });
-const child = spawn(command[0], command.slice(1), {
-  stdio: "inherit",
-  env: { ...process.env, GH_TOKEN: credential.token, GITHUB_TOKEN: credential.token },
-});
-child.on("error", (error) => {
-  console.error(error.message);
-  process.exitCode = 1;
-});
-child.on("close", (code, signal) => {
-  process.exitCode = code ?? (signal ? 1 : 0);
-});
+let credential;
+try {
+  credential = await createInstallationToken({ role, repository });
+} catch (error) {
+  if (!isGitHubAppPermissionError(error.message)) throw error;
+  const fallback = await loadPatFallbackToken();
+  console.error("GitHub App permission check failed; running the same command with the configured PAT fallback.");
+  const result = await runCredentialCommand({ command, token: fallback.token });
+  process.exitCode = result.code;
+}
+
+if (credential) {
+  const result = await executeWithPermissionFallback({
+    command,
+    appToken: credential.token,
+    loadFallbackToken: () => loadPatFallbackToken(),
+  });
+  process.exitCode = result.code;
+}
