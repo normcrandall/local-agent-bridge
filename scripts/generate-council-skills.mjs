@@ -17,6 +17,11 @@ export const councilSkills = [
     kind: "interview",
   },
   {
+    base: "loop-me",
+    description: "Discover and specify recurring workflows through a stateful interview challenged by Claude, Codex, and Antigravity. Use when the user wants multi-model scrutiny while turning life or work loops into implementation-ready workflow specs.",
+    kind: "interview",
+  },
+  {
     base: "decision-mapping",
     description: "Turn a loose idea into a sequenced investigation map using independent Claude, Codex, and Antigravity analysis. Use when decisions, unknowns, and ticket ordering need multi-model challenge.",
     kind: "analysis",
@@ -52,6 +57,11 @@ export const councilSkills = [
     kind: "execute",
   },
   {
+    base: "research",
+    description: "Research a question against primary sources with independent Claude, Codex, and Antigravity investigation, then reconcile the evidence into one cited Markdown artifact. Use when source quality or competing interpretations merit multi-model verification.",
+    kind: "analysis",
+  },
+  {
     base: "review",
     description: "Review a branch, diff, or pull request independently with Claude, Codex, and Antigravity, then reconcile findings by evidence and severity. Use for cross-model standards and specification review.",
     kind: "analysis",
@@ -67,8 +77,23 @@ export const councilSkills = [
     kind: "publish",
   },
   {
+    base: "to-questionnaire",
+    description: "Turn a knowledge gap into a decision-ready questionnaire challenged by Claude, Codex, and Antigravity before one writer creates the Markdown artifact. Use when another person holds facts or decisions the user needs to extract asynchronously.",
+    kind: "publish",
+  },
+  {
     base: "to-prd",
     description: "Synthesize a PRD from the current conversation and cross-review it with Claude, Codex, and Antigravity before publishing. Use when assumptions, requirements, or acceptance criteria need multi-model verification.",
+    kind: "publish",
+  },
+  {
+    base: "to-spec",
+    description: "Synthesize the current conversation into a specification cross-reviewed by Claude, Codex, and Antigravity before one writer publishes it. Use when testing seams, requirements, or implementation decisions need multi-model challenge without restarting the interview.",
+    kind: "publish",
+  },
+  {
+    base: "to-tickets",
+    description: "Break a plan or specification into tracer-bullet tickets and reconcile blocking edges with Claude, Codex, and Antigravity before one writer publishes them. Use when slice boundaries, sequencing, or expand-contract migrations need multi-model review.",
     kind: "publish",
   },
   {
@@ -80,6 +105,16 @@ export const councilSkills = [
     base: "ubiquitous-language",
     description: "Extract and reconcile domain terminology with Claude, Codex, and Antigravity before updating the ubiquitous-language glossary. Use for DDD language, ambiguous terms, or canonical naming.",
     kind: "publish",
+  },
+  {
+    base: "wayfinder",
+    description: "Chart and resolve a large decision map with independent Claude, Codex, and Antigravity investigation while preserving the one-ticket-per-session frontier. Use when a destination spans more than one agent context and the route is still obscured by unresolved decisions.",
+    kind: "analysis",
+  },
+  {
+    base: "wizard",
+    description: "Design and verify an interactive setup or migration wizard with Claude, Codex, and Antigravity review and exactly one script writer. Use when a human procedure needs precise browser steps, secret handling, confirmations, and a reusable Bash guide.",
+    kind: "execute",
   },
   {
     base: "edit-article",

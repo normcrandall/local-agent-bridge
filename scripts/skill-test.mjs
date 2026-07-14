@@ -156,7 +156,16 @@ for (const name of bridgeSkillNames) {
 }
 
 const councilSkillNames = bridgeSkillNames.filter((name) => name.startsWith("council-"));
-assert.equal(councilSkillNames.length, 17);
+assert.equal(councilSkillNames.length, 24);
+for (const name of [
+  "council-loop-me",
+  "council-research",
+  "council-to-questionnaire",
+  "council-to-spec",
+  "council-to-tickets",
+  "council-wayfinder",
+  "council-wizard",
+]) assert.ok(councilSkillNames.includes(name), `Missing newly supported council skill ${name}`);
 for (const name of councilSkillNames) {
   const content = await readFile(resolve(root, "skills", name, "SKILL.md"), "utf8");
   assert.match(content, /\.agents\/skills\/.+\/SKILL\.md/);

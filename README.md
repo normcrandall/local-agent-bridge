@@ -196,11 +196,11 @@ Four canonical skills provide the same visible vocabulary in Codex, Claude, and 
 
 The installer copies them to `~/.codex/skills`, `~/.claude/skills`, and `~/.gemini/config/skills`; it also installs Antigravity CLI-compatible markdown commands under `~/.gemini/antigravity-cli/skills`. Restart or begin a new session in each app after installation.
 
-Seventeen additive `council-*` companions bring Claude, Codex, and Antigravity into selected workflows from [Matt Pocock's skills](https://github.com/mattpocock/skills) without changing the originals:
+Twenty-four additive `council-*` companions bring Claude, Codex, and Antigravity into selected workflows from [Matt Pocock's skills](https://github.com/mattpocock/skills) without changing the originals:
 
-- Planning and design: `council-grill-me`, `council-grill-with-docs`, `council-decision-mapping`, `council-design-an-interface`, `council-domain-modeling`, `council-improve-codebase-architecture`, and `council-prototype`.
-- Engineering: `council-diagnosing-bugs`, `council-implement`, `council-review`, `council-tdd`, and `council-triage`.
-- Artifacts and writing: `council-to-issues`, `council-to-prd`, `council-ubiquitous-language`, `council-edit-article`, and `council-writing-shape`.
+- Planning and design: `council-grill-me`, `council-grill-with-docs`, `council-loop-me`, `council-decision-mapping`, `council-design-an-interface`, `council-domain-modeling`, `council-improve-codebase-architecture`, `council-prototype`, and `council-wayfinder`.
+- Engineering and research: `council-diagnosing-bugs`, `council-implement`, `council-research`, `council-review`, `council-tdd`, `council-triage`, and `council-wizard`.
+- Artifacts and writing: `council-to-issues`, `council-to-prd`, `council-to-questionnaire`, `council-to-spec`, `council-to-tickets`, `council-ubiquitous-language`, `council-edit-article`, and `council-writing-shape`.
 
 Each companion loads the corresponding original from `~/.agents/skills`, preserves its gates and output contract, then adds independent model passes, one-writer enforcement, a portable collaboration ID, and an eight-second progress heartbeat. The broker preflights providers and skips failures instead of failing the collaboration: three, two, or one available model can finish the phase, with degraded results and writer reassignment shown explicitly. Only zero available providers stops the run. Run the original name for the unchanged single-agent workflow or the `council-` name for the multi-model version.
 
@@ -240,6 +240,8 @@ Credit for the original skills belongs to Matt Pocock and the upstream contribut
 | Original skill | What it does | Multi-model option |
 | --- | --- | --- |
 | `ask-matt` | Routes a request to the appropriate AI Hero workflow. | Candidate: council-aware routing |
+| `claude-handoff` | Hands a bounded task directly to Claude Code. | Single-agent routing utility |
+| `code-review` | Aliases the review workflow for discoverability. | Covered by `council-review` |
 | `codebase-design` | Designs deeper module interfaces, seams, and testable boundaries. | Candidate: `council-codebase-design` |
 | `decision-mapping` | Turns a loose idea into sequenced investigation tickets. | Available: `council-decision-mapping` |
 | `design-an-interface` | Produces radically different API or module-interface designs. | Available: `council-design-an-interface` |
@@ -254,22 +256,30 @@ Credit for the original skills belongs to Matt Pocock and the upstream contribut
 | `handoff` | Compacts a conversation into a document another agent can resume. | Candidate: `council-handoff` |
 | `implement` | Implements work from a PRD or issue set. | Available: `council-implement` |
 | `improve-codebase-architecture` | Finds architectural deepening opportunities and produces a visual report. | Available: `council-improve-codebase-architecture` |
+| `loop-me` | Discovers recurring loops and turns them into implementation-ready workflow specs. | Available: `council-loop-me` |
 | `migrate-to-shoehorn` | Mechanically migrates test fixtures to `@total-typescript/shoehorn`. | Single-agent utility |
 | `obsidian-vault` | Searches and maintains an Obsidian vault. | Single-agent utility |
 | `prototype` | Builds a throwaway prototype to resolve design uncertainty. | Available: `council-prototype` |
 | `qa` | Runs conversational QA and files discovered issues. | Candidate: `council-qa` |
 | `request-refactor-plan` | Interviews for and publishes a small-commit refactor plan. | Candidate: `council-request-refactor-plan` |
+| `research` | Investigates a question against primary sources and writes a cited Markdown artifact. | Available: `council-research` |
 | `resolving-merge-conflicts` | Resolves an active merge or rebase conflict. | Candidate: `council-resolving-merge-conflicts` with one writer |
 | `review` | Reviews changes against repository standards and the originating specification. | Available: `council-review` |
 | `scaffold-exercises` | Creates course exercise, solution, and explainer structures. | Candidate: `council-scaffold-exercises` |
 | `setup-matt-pocock-skills` | Configures issue tracking, triage labels, and domain-document conventions. | Single-agent setup utility |
 | `setup-pre-commit` | Installs formatting, type-checking, and test hooks. | Single-agent setup utility |
+| `setup-ts-deep-modules` | Configures TypeScript deep-module conventions. | Single-agent setup utility |
 | `tdd` | Implements features or fixes through red–green–refactor. | Available: `council-tdd` |
 | `teach` | Teaches a concept within the current workspace. | Candidate: `council-teach` |
 | `to-issues` | Decomposes a plan or PRD into tracer-bullet issues. | Available: `council-to-issues` |
 | `to-prd` | Turns the current conversation into a publishable PRD. | Available: `council-to-prd` |
+| `to-questionnaire` | Produces an async discovery questionnaire for a knowledgeable recipient. | Available: `council-to-questionnaire` |
+| `to-spec` | Synthesizes the current conversation into a specification for the issue tracker. | Available: `council-to-spec` |
+| `to-tickets` | Decomposes a plan into tracer-bullet tickets with explicit blocking edges. | Available: `council-to-tickets` |
 | `triage` | Moves issues and external PRs through the configured triage state machine. | Available: `council-triage` |
 | `ubiquitous-language` | Creates and hardens a DDD-style terminology glossary. | Available: `council-ubiquitous-language` |
+| `wayfinder` | Maps and resolves decision tickets for work larger than one agent context. | Available: `council-wayfinder` |
+| `wizard` | Authors an interactive Bash guide for manual setup or migrations. | Available: `council-wizard` |
 | `writing-beats` | Builds an article as a choose-your-own-path sequence of beats. | Candidate: `council-writing-beats` |
 | `writing-fragments` | Interviews for raw claims, vignettes, and ideas before structuring them. | Candidate: `council-writing-fragments` |
 | `writing-great-skills` | Provides reference guidance for authoring predictable skills. | Single-agent reference |
@@ -287,13 +297,20 @@ council-grill-me
 council-grill-with-docs
 council-implement
 council-improve-codebase-architecture
+council-loop-me
 council-prototype
+council-research
 council-review
 council-tdd
 council-to-issues
 council-to-prd
+council-to-questionnaire
+council-to-spec
+council-to-tickets
 council-triage
 council-ubiquitous-language
+council-wayfinder
+council-wizard
 council-writing-shape
 ```
 
