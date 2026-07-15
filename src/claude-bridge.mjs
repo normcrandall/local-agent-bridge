@@ -219,6 +219,7 @@ function runClaude({
         GITHUB_REVIEW_PR_NUMBER: String(githubReview.prNumber),
         GITHUB_REVIEW_HEAD_SHA: githubReview.headSha,
         GITHUB_REVIEW_EXPECTED_LOGIN: githubReview.expectedLogin,
+        GITHUB_REVIEW_PUBLISH_STATUS_GATE: githubReview.publishStatusGate ? "1" : "0",
         GITHUB_REVIEW_HANDOFF_PATH: actualHandoffPath,
         GITHUB_REVIEW_TOKEN_FILE: process.env.GITHUB_REVIEW_TOKEN_FILE || join(homedir(), ".config/ghtoken"),
         GITHUB_REVIEW_API_URL: process.env.GITHUB_REVIEW_API_URL || "https://api.github.com",
@@ -289,7 +290,7 @@ Review permission contract:
 - Treat the workspace source as read-only. Do not modify source, configuration, Git state, or external systems.
 - You may run only these exact verification commands: ${verificationCommands.length ? verificationCommands.map((command) => `\`${command}\``).join(", ") : "none"}.
 ${actualHandoffPath ? `- Write the final handoff to exactly \`${actualHandoffPath}\`. This is the only file you may create or edit.` : "- Return the handoff in your response; no file write was authorized."}
-${githubReview ? `- After writing the handoff, submit one formal PR review to \`${githubReview.repository}\` PR #${githubReview.prNumber} at \`${githubReview.headSha}\` using \`github_review.submit_pr_review\`. Include a general verdict and inline comments for actionable line-specific findings. The tool is pre-bound to \`${githubReview.expectedLogin}\` and this exact PR head; a reviewer App publishes the exact-head agent-review gate with the verdict.` : "- Do not post comments or send messages."}
+${githubReview ? `- After writing the handoff, submit one formal PR review to \`${githubReview.repository}\` PR #${githubReview.prNumber} at \`${githubReview.headSha}\` using \`github_review.submit_pr_review\`. Include a general verdict and inline comments for actionable line-specific findings. The tool is pre-bound to \`${githubReview.expectedLogin}\` and this exact PR head${githubReview.publishStatusGate ? "; it also publishes the exact-head agent-review status" : "; the formal App review is the configured review gate"}.` : "- Do not post comments or send messages."}
 - Do not push, commit, deploy, or perform any other external mutation.`
     : `
 
@@ -461,6 +462,7 @@ const sharedInput = {
     prNumber: z.number().int().min(1),
     headSha: z.string().regex(/^[0-9a-f]{40}$/i),
     expectedLogin: z.string().regex(GITHUB_LOGIN_PATTERN).optional().describe("Omit to use the configured Claude reviewer App."),
+    publishStatusGate: z.boolean().optional().default(true),
   }).strict().optional().describe(
     "Explicit authorization for Claude to submit one formal review to an exact GitHub PR head using its configured reviewer App by default. Requires handoffPath.",
   ),

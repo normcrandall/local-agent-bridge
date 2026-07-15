@@ -20,13 +20,21 @@ export async function resolveReviewPublication({
       || await configuredLogin({ provider: agent });
     const { expectedLogins: _expectedLogins, ...authorization } = githubReview;
     const binding = { ...authorization, expectedLogin };
-    await createCredential({
+    const credential = await createCredential({
       role: "reviewer",
       reviewerProvider: agent,
       repository: binding.repository,
       expectedLogin,
     });
-    return { available: true, binding, reason: null };
+    return {
+      available: true,
+      binding: {
+        ...binding,
+        publishStatusGate: canPublishReviewStatus(credential.permissions),
+      },
+      reason: null,
+      statusGateAvailable: canPublishReviewStatus(credential.permissions),
+    };
   } catch (error) {
     return { available: false, binding: null, reason: error?.message || String(error) };
   }
@@ -106,3 +114,4 @@ export function recordReviewPublicationResult(publication, {
 export function localReviewPrompt(prompt, reason) {
   return `${prompt}\n\nREVIEW PUBLICATION DEGRADED: ${reason} Complete the independent review and durable handoff, but do not claim that a formal GitHub review or agent-review status was published. A configured trusted human must approve the exact head before merge. Continue the review instead of stopping solely because the reviewer App is unavailable.`;
 }
+import { canPublishReviewStatus } from "./github-app-auth.mjs";

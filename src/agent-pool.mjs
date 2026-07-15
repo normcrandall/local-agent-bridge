@@ -72,6 +72,7 @@ export function createAgentPool({
         GITHUB_REVIEW_PR_NUMBER: String(reviewBinding.prNumber),
         GITHUB_REVIEW_HEAD_SHA: reviewBinding.headSha,
         GITHUB_REVIEW_EXPECTED_LOGIN: reviewBinding.expectedLogin,
+        GITHUB_REVIEW_PUBLISH_STATUS_GATE: reviewBinding.publishStatusGate ? "1" : "0",
         GITHUB_REVIEW_HANDOFF_PATH: absoluteHandoffPath,
         GITHUB_REVIEW_TOKEN_FILE: resolve(process.env.HOME, ".config/ghtoken"),
       },
@@ -163,7 +164,11 @@ export function createAgentPool({
           agent,
           available: true,
           reviewPublication: githubReview
-            ? { available: publication.available, reason: publication.reason }
+            ? {
+              available: publication.available,
+              reason: publication.reason,
+              statusGateAvailable: publication.statusGateAvailable ?? false,
+            }
             : null,
         };
       } catch (error) {
@@ -298,6 +303,7 @@ export function createAgentPool({
             available: publication.available,
             login: effectiveGithubReview?.expectedLogin || null,
             reason: publication.reason,
+            statusGateAvailable: publication.statusGateAvailable ?? false,
             humanApprovalRequired: !publication.available,
           } : null,
         },

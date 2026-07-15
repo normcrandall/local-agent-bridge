@@ -244,6 +244,27 @@ export function createBoundBuilderClient({
     }
     let reviewGate = null;
     let machineStatus = null;
+    let reviews = null;
+    const effectiveReviewsFor = async (trustedLogins) => {
+      if (!reviews) {
+        reviews = await requestPages({
+          ...context,
+          path: `/repos/${repository}/pulls/${prNumber}/reviews?per_page=100`,
+        });
+      }
+      const decisiveStates = new Set(["APPROVED", "CHANGES_REQUESTED", "DISMISSED"]);
+      const latestByLogin = new Map();
+      const chronological = [...reviews].sort((left, right) => (
+        String(left.submitted_at || "").localeCompare(String(right.submitted_at || ""))
+        || Number(left.id || 0) - Number(right.id || 0)
+      ));
+      for (const review of chronological) {
+        const login = review.user?.login;
+        if (review.commit_id !== headSha || !trustedLogins.includes(login) || !decisiveStates.has(review.state)) continue;
+        latestByLogin.set(login, review);
+      }
+      return [...latestByLogin.values()];
+    };
     if (requiredReviewStatusContext && trustedReviewLogins.length) {
       const statuses = await requestPages({
         ...context,
@@ -260,23 +281,22 @@ export function createBoundBuilderClient({
         };
       }
     }
-    if (!reviewGate && trustedHumanReviewLogins.length) {
-      const reviews = await requestPages({
-        ...context,
-        path: `/repos/${repository}/pulls/${prNumber}/reviews?per_page=100`,
-      });
-      const decisiveStates = new Set(["APPROVED", "CHANGES_REQUESTED", "DISMISSED"]);
-      const latestByLogin = new Map();
-      const chronological = [...reviews].sort((left, right) => (
-        String(left.submitted_at || "").localeCompare(String(right.submitted_at || ""))
-        || Number(left.id || 0) - Number(right.id || 0)
-      ));
-      for (const review of chronological) {
-        const login = review.user?.login;
-        if (review.commit_id !== headSha || !trustedHumanReviewLogins.includes(login) || !decisiveStates.has(review.state)) continue;
-        latestByLogin.set(login, review);
+    if (!reviewGate && trustedReviewLogins.length) {
+      const effectiveReviews = await effectiveReviewsFor(trustedReviewLogins);
+      const changesRequested = effectiveReviews.find((review) => review.state === "CHANGES_REQUESTED");
+      const approval = effectiveReviews.find((review) => review.state === "APPROVED");
+      if (approval && !changesRequested) {
+        reviewGate = {
+          type: "trusted_app_review",
+          state: "APPROVED",
+          login: approval.user.login,
+          reviewId: approval.id,
+          submittedAt: approval.submitted_at,
+        };
       }
-      const effectiveReviews = [...latestByLogin.values()];
+    }
+    if (!reviewGate && trustedHumanReviewLogins.length) {
+      const effectiveReviews = await effectiveReviewsFor(trustedHumanReviewLogins);
       const changesRequested = effectiveReviews.find((review) => review.state === "CHANGES_REQUESTED");
       const approval = effectiveReviews.find((review) => review.state === "APPROVED");
       if (approval && !changesRequested) {
@@ -291,10 +311,10 @@ export function createBoundBuilderClient({
     }
     if (!reviewGate) {
       if (!trustedHumanReviewLogins.length && machineStatus?.state !== "success") {
-        throw new Error(`Required machine-review status ${requiredReviewStatusContext} is not successful on ${headSha}.`);
+        throw new Error(`No exact-head approval from a configured reviewer App was found, and machine-review status ${requiredReviewStatusContext} is not successful on ${headSha}.`);
       }
       if (!trustedHumanReviewLogins.length && !trustedReviewLogins.includes(machineStatus?.creator?.login)) {
-        throw new Error(`Required machine-review status was not authored by a configured reviewer App: ${machineStatus?.creator?.login || "unknown"}.`);
+        throw new Error(`No exact-head approval from a configured reviewer App was found, and machine-review status was not authored by a configured reviewer App: ${machineStatus?.creator?.login || "unknown"}.`);
       }
       throw new Error(`Merge authorization found neither a trusted machine review nor a trusted human approval on exact head ${headSha}.`);
     }

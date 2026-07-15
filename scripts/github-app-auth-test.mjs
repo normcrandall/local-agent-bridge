@@ -9,6 +9,7 @@ import {
   createInstallationToken,
   configuredReviewerLogin,
   assertGitHubAppPermissions,
+  canPublishReviewStatus,
   GITHUB_LOGIN_PATTERN,
   inspectGitHubAppRoles,
   listGitHubAppInstallations,
@@ -132,7 +133,9 @@ try {
   assert.equal(assertGitHubAppPermissions("builder", { contents: "write", pull_requests: "write", issues: "write", metadata: "read" }), true);
   assert.throws(() => assertGitHubAppPermissions("builder", { contents: "write", pull_requests: "write", metadata: "read" }), /issues:write/);
   assert.throws(() => assertGitHubAppPermissions("reviewer", { contents: "read", pull_requests: "read", metadata: "read" }), /pull_requests:write/);
-  assert.throws(() => assertGitHubAppPermissions("reviewer", { contents: "read", pull_requests: "write", metadata: "read" }), /statuses:write/);
+  assert.equal(assertGitHubAppPermissions("reviewer", { contents: "read", pull_requests: "write", metadata: "read" }), true);
+  assert.equal(canPublishReviewStatus({ contents: "read", pull_requests: "write", metadata: "read" }), false);
+  assert.equal(canPublishReviewStatus({ statuses: "write" }), true);
   const inspected = await inspectGitHubAppRoles({ configPath });
   assert.equal(inspected.roles.builder.privateKeySecure, true);
   assert.equal(inspected.roles.reviewers.claude.privateKeySecure, true);

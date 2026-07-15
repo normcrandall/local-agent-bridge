@@ -7,8 +7,12 @@ export const DEFAULT_GITHUB_APPS_CONFIG = resolve(homedir(), ".config/local-agen
 export const GITHUB_LOGIN_PATTERN = /^[A-Za-z0-9-]+(?:\[bot\])?$/;
 export const GITHUB_APP_ROLE_PERMISSIONS = {
   builder: { contents: "write", pull_requests: "write", issues: "write", metadata: "read" },
-  reviewer: { contents: "read", pull_requests: "write", statuses: "write", metadata: "read" },
+  reviewer: { contents: "read", pull_requests: "write", metadata: "read" },
 };
+
+export function canPublishReviewStatus(permissions = {}) {
+  return permissions.statuses === "write";
+}
 
 export function assertGitHubAppPermissions(role, permissions = {}) {
   const permissionRole = role.startsWith("reviewer") ? "reviewer" : role;

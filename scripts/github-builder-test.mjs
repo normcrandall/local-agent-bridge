@@ -117,6 +117,36 @@ await assert.rejects(
   createBoundBuilderClient({ ...base, fetchImpl: fakeGitHub({ reviewLogin: "owner" }).fetchImpl }).merge({ method: "squash" }),
   /not authored by a configured reviewer App/i,
 );
+const appApprovalApi = fakeGitHub({
+  reviewStatus: "pending",
+  reviews: [{ id: 9, state: "APPROVED", commit_id: headSha, submitted_at: "2026-07-15T11:00:00Z", user: { login: "reviewer[bot]" } }],
+});
+const appApproved = await createBoundBuilderClient({ ...base, fetchImpl: appApprovalApi.fetchImpl }).merge({ method: "squash" });
+assert.equal(appApproved.reviewGate.type, "trusted_app_review");
+assert.equal(appApproved.reviewGate.login, "reviewer[bot]");
+await assert.rejects(
+  createBoundBuilderClient({
+    ...base,
+    fetchImpl: fakeGitHub({
+      reviewStatus: "pending",
+      reviews: [
+        { id: 9, state: "APPROVED", commit_id: headSha, submitted_at: "2026-07-15T11:00:00Z", user: { login: "reviewer[bot]" } },
+        { id: 10, state: "DISMISSED", commit_id: headSha, submitted_at: "2026-07-15T11:01:00Z", user: { login: "reviewer[bot]" } },
+      ],
+    }).fetchImpl,
+  }).merge({ method: "squash" }),
+  /No exact-head approval.*machine-review status.*not successful/i,
+);
+await assert.rejects(
+  createBoundBuilderClient({
+    ...base,
+    fetchImpl: fakeGitHub({
+      reviewStatus: "pending",
+      reviews: [{ id: 8, state: "APPROVED", commit_id: "c".repeat(40), submitted_at: "2026-07-15T10:00:00Z", user: { login: "reviewer[bot]" } }],
+    }).fetchImpl,
+  }).merge({ method: "squash" }),
+  /No exact-head approval.*machine-review status.*not successful/i,
+);
 const humanApprovalApi = fakeGitHub({
   reviewStatus: "pending",
   reviews: [{ id: 10, state: "APPROVED", commit_id: headSha, submitted_at: "2026-07-15T12:00:00Z", user: { login: "owner" } }],
