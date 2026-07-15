@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { reviewMarker, submitBoundReview } from "../src/github-review-client.mjs";
+import { reviewGateState, reviewMarker, submitBoundReview } from "../src/github-review-client.mjs";
 import { parseReviewEnvelope, reviewEnvelopeInstructions } from "../src/review-envelope.mjs";
 
 const base = {
@@ -52,6 +52,11 @@ function fakeGitHub({ login = "review-bot", headSha = base.headSha, files = ["sr
     if (url.endsWith("/user")) return json({ login });
     if (url.includes("/pulls/42/files")) return json(files.map((filename) => ({ filename })));
     if (url.includes("/pulls/42/reviews") && options.method !== "POST") return json(reviews);
+    if (url.includes(`/commits/${base.headSha}/statuses`) && options.method !== "POST") return json([]);
+    if (url.endsWith(`/statuses/${base.headSha}`) && options.method === "POST") {
+      const payload = JSON.parse(options.body);
+      return json({ id: 501, ...payload, creator: { login } }, 201);
+    }
     if (url.endsWith("/pulls/42") && options.method !== "POST") return json({ head: { sha: headSha } });
     if (url.endsWith("/pulls/42/reviews") && options.method === "POST") {
       return json({
@@ -70,12 +75,23 @@ const successApi = fakeGitHub();
 const submitted = await submitBoundReview({ ...base, fetchImpl: successApi.fetchImpl });
 assert.equal(submitted.login, "review-bot");
 assert.equal(submitted.idempotent, false);
+assert.equal(submitted.gate.context, "agent-review");
+assert.equal(submitted.gate.state, "failure");
 const post = successApi.calls.find((call) => call.options.method === "POST");
 const payload = JSON.parse(post.options.body);
 assert.equal(payload.commit_id, base.headSha);
 assert.equal(payload.event, "REQUEST_CHANGES");
 assert.deepEqual(payload.comments, base.comments);
 assert.match(payload.body, /agent-bridge-review/);
+const statusPost = successApi.calls.find((call) => call.url.endsWith(`/statuses/${base.headSha}`));
+assert.deepEqual(JSON.parse(statusPost.options.body), {
+  state: "failure",
+  context: "agent-review",
+  description: "Independent agent review requested changes.",
+  target_url: "https://github.test/review/99",
+});
+assert.equal(reviewGateState("APPROVED").state, "success");
+assert.equal(reviewGateState("COMMENTED").state, "pending");
 
 const appApi = fakeGitHub({ login: "example-reviewer[bot]" });
 const appSubmitted = await submitBoundReview({
@@ -112,32 +128,45 @@ const idempotentApi = fakeGitHub({ reviews: [prior] });
 const idempotent = await submitBoundReview({ ...base, fetchImpl: idempotentApi.fetchImpl });
 assert.equal(idempotent.id, 77);
 assert.equal(idempotent.idempotent, true);
-assert.equal(idempotentApi.calls.some((call) => call.options.method === "POST"), false);
+assert.equal(idempotentApi.calls.filter((call) => call.options.method === "POST").length, 1);
+assert.equal(idempotentApi.calls.find((call) => call.options.method === "POST").url.endsWith(`/statuses/${base.headSha}`), true);
 
 const temporary = await mkdtemp(join(tmpdir(), "github-review-mcp-test-"));
 const tokenFile = join(temporary, "token");
 const handoffFile = join(temporary, "handoff.md");
 await writeFile(tokenFile, "test-token\n", { mode: 0o600 });
 await writeFile(handoffFile, "", { mode: 0o600 });
-let postedPayload = null;
-let postCount = 0;
+let reviewPayload = null;
+let statusPayload = null;
+let reviewPostCount = 0;
+let statusPostCount = 0;
 const httpServer = createServer(async (request, response) => {
   const chunks = [];
   for await (const chunk of request) chunks.push(chunk);
-  if (request.method === "POST") {
-    postCount += 1;
-    postedPayload = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-  }
+  const payload = request.method === "POST" ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : null;
   response.setHeader("content-type", "application/json");
   if (request.url === "/user") response.end(JSON.stringify({ login: "review-bot" }));
   else if (request.url === "/repos/owner/repo/pulls/42") response.end(JSON.stringify({ head: { sha: base.headSha } }));
   else if (request.url.startsWith("/repos/owner/repo/pulls/42/reviews?") && request.method === "GET") response.end("[]");
+  else if (request.url.startsWith(`/repos/owner/repo/commits/${base.headSha}/statuses?`) && request.method === "GET") response.end("[]");
+  else if (request.url === `/repos/owner/repo/statuses/${base.headSha}` && request.method === "POST") {
+    statusPostCount += 1;
+    statusPayload = payload;
+    response.statusCode = 201;
+    response.end(JSON.stringify({
+      id: 502,
+      ...statusPayload,
+      creator: { login: "review-bot" },
+    }));
+  }
   else if (request.url === "/repos/owner/repo/pulls/42/reviews" && request.method === "POST") {
+    reviewPostCount += 1;
+    reviewPayload = payload;
     response.statusCode = 201;
     response.end(JSON.stringify({
       id: 123,
       html_url: "https://github.test/review/123",
-      state: "APPROVED",
+      state: reviewPayload.event === "COMMENT" ? "COMMENTED" : "APPROVED",
       user: { login: "review-bot" },
     }));
   } else {
@@ -173,21 +202,30 @@ try {
   assert.notEqual(handoffResult.isError, true);
   assert.equal(handoffResult.structuredContent.handoffPath, handoffFile);
   assert.match(await readFile(handoffFile, "utf8"), /Verified independently/);
-  const result = await mcpClient.callTool({
+  const rejectedApproval = await mcpClient.callTool({
     name: "submit_pr_review",
     arguments: { event: "APPROVE", body: "Approved after independent verification.", comments: [] },
   });
+  assert.equal(rejectedApproval.isError, true);
+  assert.match(rejectedApproval.content[0].text, /PAT fallback.*cannot APPROVE/i);
+  const result = await mcpClient.callTool({
+    name: "submit_pr_review",
+    arguments: { event: "COMMENT", body: "Compatibility review comment.", comments: [] },
+  });
   assert.notEqual(result.isError, true);
   assert.equal(result.structuredContent.login, "review-bot");
-  assert.equal(postedPayload.commit_id, base.headSha);
-  assert.equal(postedPayload.event, "APPROVE");
+  assert.equal(result.structuredContent.gate, null);
+  assert.equal(reviewPayload.commit_id, base.headSha);
+  assert.equal(reviewPayload.event, "COMMENT");
+  assert.equal(statusPayload, null);
   assert.match(await readFile(handoffFile, "utf8"), /github\.test\/review\/123/);
   const duplicate = await mcpClient.callTool({
     name: "submit_pr_review",
     arguments: { event: "COMMENT", body: "A second payload must not create another review.", comments: [] },
   });
   assert.equal(duplicate.structuredContent.idempotent, true);
-  assert.equal(postCount, 1);
+  assert.equal(reviewPostCount, 1);
+  assert.equal(statusPostCount, 0);
 } finally {
   await mcpClient.close().catch(() => {});
   httpServer.close();
@@ -195,4 +233,4 @@ try {
   await rm(temporary, { recursive: true, force: true });
 }
 
-console.log("Bound GitHub review tests passed: identity, SHA, inline scope, payload, idempotency, and MCP receipt.");
+console.log("Bound GitHub review tests passed: identity, exact SHA, App status gate, PAT comment-only mode, and idempotency.");

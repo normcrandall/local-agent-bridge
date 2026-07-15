@@ -1,7 +1,10 @@
 {
   "version": 1,
   "compatibility": {
-    "allowPatFallback": true
+    "allowPatFallback": false
+  },
+  "mergePolicy": {
+    "trustedHumanReviewers": ["your-github-login"]
   },
   "roles": {
     "builder": {

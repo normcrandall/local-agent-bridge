@@ -9,6 +9,17 @@ export function reviewMarker(payload) {
   return `<!-- agent-bridge-review:${payload.headSha}:${digest} -->`;
 }
 
+export function reviewGateState(reviewState) {
+  const normalized = String(reviewState || "").toUpperCase();
+  if (["APPROVE", "APPROVED"].includes(normalized)) {
+    return { state: "success", description: "Independent agent review approved this exact commit." };
+  }
+  if (["REQUEST_CHANGES", "CHANGES_REQUESTED"].includes(normalized)) {
+    return { state: "failure", description: "Independent agent review requested changes." };
+  }
+  return { state: "pending", description: "Independent agent review did not approve this commit." };
+}
+
 async function responseJson(response, label) {
   const text = await response.text();
   let parsed = null;
@@ -47,6 +58,40 @@ async function getAllPages({ fetchImpl, apiUrl, path, token }) {
   throw new Error(`GitHub GET ${path} exceeded the pagination safety limit.`);
 }
 
+async function publishReviewGate({
+  fetchImpl, apiUrl, token, repository, headSha, expectedLogin, reviewState, reviewUrl, context,
+}) {
+  const gate = reviewGateState(reviewState);
+  const priorStatuses = await getAllPages({
+    fetchImpl,
+    apiUrl,
+    path: `/repos/${repository}/commits/${headSha}/statuses`,
+    token,
+  });
+  const existing = priorStatuses.find((status) => (
+    status.context === context
+    && status.state === gate.state
+    && status.target_url === reviewUrl
+    && status.creator?.login === expectedLogin
+  ));
+  if (existing) return { ...gate, context, targetUrl: reviewUrl, id: existing.id, idempotent: true };
+  const response = await fetchImpl(`${apiUrl}/repos/${repository}/statuses/${headSha}`, {
+    method: "POST",
+    headers: headers(token),
+    body: JSON.stringify({
+      state: gate.state,
+      context,
+      description: gate.description,
+      target_url: reviewUrl,
+    }),
+  });
+  const status = await responseJson(response, "GitHub review gate status");
+  if (status?.creator?.login !== expectedLogin || status?.context !== context || status?.state !== gate.state) {
+    throw new Error("GitHub returned an invalid review gate status receipt.");
+  }
+  return { ...gate, context, targetUrl: reviewUrl, id: status.id, idempotent: false };
+}
+
 export async function submitBoundReview({
   fetchImpl = fetch,
   apiUrl = "https://api.github.com",
@@ -59,6 +104,8 @@ export async function submitBoundReview({
   event,
   body,
   comments = [],
+  statusContext = "agent-review",
+  publishGate = true,
 }) {
   if (verifiedLogin) {
     if (verifiedLogin !== expectedLogin) {
@@ -106,6 +153,10 @@ export async function submitBoundReview({
     review.user?.login === expectedLogin && review.body?.includes(marker)
   ));
   if (existing) {
+    const gate = publishGate ? await publishReviewGate({
+      fetchImpl, apiUrl, token, repository, headSha, expectedLogin,
+      reviewState: existing.state || event, reviewUrl: existing.html_url, context: statusContext,
+    }) : null;
     return {
       id: existing.id,
       url: existing.html_url,
@@ -114,6 +165,7 @@ export async function submitBoundReview({
       headSha,
       marker,
       idempotent: true,
+      gate,
     };
   }
 
@@ -131,6 +183,10 @@ export async function submitBoundReview({
   if (review?.user?.login !== expectedLogin) {
     throw new Error(`GitHub posted with unexpected identity: ${review?.user?.login || "unknown"}.`);
   }
+  const gate = publishGate ? await publishReviewGate({
+    fetchImpl, apiUrl, token, repository, headSha, expectedLogin,
+    reviewState: review.state || event, reviewUrl: review.html_url, context: statusContext,
+  }) : null;
   return {
     id: review.id,
     url: review.html_url,
@@ -139,5 +195,6 @@ export async function submitBoundReview({
     headSha,
     marker,
     idempotent: false,
+    gate,
   };
 }

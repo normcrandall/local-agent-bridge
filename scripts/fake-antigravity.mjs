@@ -6,7 +6,7 @@ if (args.includes("--version")) {
   process.exit(0);
 }
 if (args.includes("--help")) {
-  process.stdout.write("--print --print-timeout --mode --model --sandbox --dangerously-skip-permissions --conversation --log-file\n");
+  process.stdout.write("--print --print-timeout --mode --model --sandbox --dangerously-skip-permissions --conversation --log-file --add-dir\n");
   process.exit(0);
 }
 process.stdout.write(`${JSON.stringify(args)}\n`);

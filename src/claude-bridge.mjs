@@ -289,7 +289,7 @@ Review permission contract:
 - Treat the workspace source as read-only. Do not modify source, configuration, Git state, or external systems.
 - You may run only these exact verification commands: ${verificationCommands.length ? verificationCommands.map((command) => `\`${command}\``).join(", ") : "none"}.
 ${actualHandoffPath ? `- Write the final handoff to exactly \`${actualHandoffPath}\`. This is the only file you may create or edit.` : "- Return the handoff in your response; no file write was authorized."}
-${githubReview ? `- After writing the handoff, submit one formal PR review to \`${githubReview.repository}\` PR #${githubReview.prNumber} at \`${githubReview.headSha}\` using \`github_review.submit_pr_review\`. Include a general verdict and inline comments for actionable line-specific findings. The tool is pre-bound to \`${githubReview.expectedLogin}\` and this exact PR head.` : "- Do not post comments or send messages."}
+${githubReview ? `- After writing the handoff, submit one formal PR review to \`${githubReview.repository}\` PR #${githubReview.prNumber} at \`${githubReview.headSha}\` using \`github_review.submit_pr_review\`. Include a general verdict and inline comments for actionable line-specific findings. The tool is pre-bound to \`${githubReview.expectedLogin}\` and this exact PR head; a reviewer App publishes the exact-head agent-review gate with the verdict.` : "- Do not post comments or send messages."}
 - Do not push, commit, deploy, or perform any other external mutation.`
     : `
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { realpathSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
 import { createAgentPool } from "../src/agent-pool.mjs";
@@ -16,6 +17,11 @@ import { isTransportLivenessSummary, refreshCi, usageDecision } from "../src/ope
 import { clearTerminalRuntime } from "../src/collaboration-cleanup.mjs";
 import { createDecisionReceipt } from "../src/decision-policy.mjs";
 import { completionAfterHandoff } from "../src/handoff-protocol.mjs";
+import {
+  assertReviewWorkspaceHead,
+  orderReviewProbes,
+  recordReviewPublicationResult,
+} from "../src/review-publication.mjs";
 
 const runtimeRoot = realpathSync(
   process.env.BRIDGE_RUNTIME_ROOT || process.env.BRIDGE_ROOT || fileURLToPath(new URL("..", import.meta.url)),
@@ -53,6 +59,15 @@ try {
 
   if (state.mode === "work") releaseWorkspace = await acquireWorkspaceLock(workspaceRoot, state.workspace);
 
+  if (state.githubReview) {
+    const head = spawnSync("git", ["rev-parse", "HEAD"], { cwd: state.workspace, encoding: "utf8" });
+    if (head.status !== 0) throw new Error(`Unable to verify review workspace head: ${(head.stderr || head.stdout || "git failed").trim()}`);
+    assertReviewWorkspaceHead({
+      expectedHeadSha: state.githubReview.headSha,
+      observedHeadSha: head.stdout.trim(),
+    });
+  }
+
   pool = createAgentPool({
     root: runtimeRoot,
     workspace: state.workspace,
@@ -69,7 +84,12 @@ try {
     requestTimeoutMs: (state.turnTimeoutSeconds || 600) * 1000 + 5_000,
   });
   const probes = await Promise.all(state.agents.map((agent) => pool.probe(agent)));
-  const availableAgents = probes.filter((probe) => probe.available).map((probe) => probe.agent);
+  const reviewOrder = orderReviewProbes({
+    probes,
+    requestedStartAgent: state.startAgent,
+    githubReview: state.mode === "review" ? state.githubReview : null,
+  });
+  const availableAgents = reviewOrder.agents;
   const unavailableAgents = Object.fromEntries(
     probes.filter((probe) => !probe.available).map((probe) => [probe.agent, probe.reason]),
   );
@@ -82,13 +102,23 @@ try {
       phase: "preflight",
     });
   }
-  const startAgent = availableAgents.includes(state.startAgent) ? state.startAgent : availableAgents[0] || null;
+  for (const probe of probes.filter((candidate) => candidate.available && candidate.reviewPublication?.available === false)) {
+    await appendEvent(workspaceRoot, id, {
+      type: "review_publication_unavailable",
+      at: new Date().toISOString(),
+      agent: probe.agent,
+      reason: probe.reviewPublication.reason,
+      fallback: "local_handoff_and_trusted_human_approval",
+    });
+  }
+  const startAgent = reviewOrder.startAgent;
   const writer = state.mode === "work" && availableAgents.length
     ? (availableAgents.includes(state.writer) ? state.writer : availableAgents[0])
     : null;
   state = await updateCollaboration(workspaceRoot, id, (current) => ({
     ...current,
     writer,
+    reviewPublication: reviewOrder.publication,
     runtime: {
       ...current.runtime,
       nextAgent: availableAgents.includes(current.runtime?.nextAgent)
@@ -264,7 +294,13 @@ try {
           });
           handoffs = [...handoffs, completion.lastHandoff];
         }
-        return { ...current, usage, budgetExceeded: decision.exceeded, ci, decisions, decisionEscalation, completion, handoffs };
+        const reviewPublication = turn.metadata?.reviewPublication?.available
+          ? recordReviewPublicationResult(current.reviewPublication, { agent: turn.agent, published: true })
+          : current.reviewPublication;
+        return {
+          ...current, usage, budgetExceeded: decision.exceeded, ci, decisions, decisionEscalation,
+          completion, handoffs, reviewPublication,
+        };
       });
     },
     onAgentUnavailable: async (failure) => {
@@ -274,6 +310,13 @@ try {
         phase: "turn",
         ...failure,
       });
+      await updateCollaboration(workspaceRoot, id, (current) => ({
+        ...current,
+        reviewPublication: recordReviewPublicationResult(current.reviewPublication, {
+          agent: failure.agent,
+          unavailableReason: failure.reason,
+        }),
+      }));
     },
     onState: async (runtime) => {
       await updateCollaboration(workspaceRoot, id, (current) => ({

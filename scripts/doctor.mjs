@@ -117,11 +117,11 @@ function configuredGitHubReviewer(provider) {
   const roles = JSON.parse(readFileSync(configPath, "utf8")).roles || {};
   return configuredGitHubEntry(roles.reviewers?.[provider] || roles.reviewer);
 }
-check("GitHub builder App", () => configuredGitHubRole("builder"), "configure the builder role in ~/.config/local-agent-bridge/github-apps.json");
+check("GitHub builder App config", () => configuredGitHubRole("builder"), "configure the builder role in ~/.config/local-agent-bridge/github-apps.json");
 for (const provider of ["claude", "codex", "antigravity"]) {
-  check(`GitHub ${provider} reviewer App`, () => configuredGitHubReviewer(provider), `configure roles.reviewers.${provider} in ~/.config/local-agent-bridge/github-apps.json`);
+  check(`GitHub ${provider} reviewer App config`, () => configuredGitHubReviewer(provider), `configure roles.reviewers.${provider} in ~/.config/local-agent-bridge/github-apps.json`);
 }
-check("GitHub reviewer credential", () => {
+check("GitHub reviewer credential config", () => {
   if (["claude", "codex", "antigravity"].every((provider) => configuredGitHubReviewer(provider))) return true;
   const configPath = resolve(homedir(), ".config/local-agent-bridge/github-apps.json");
   if (existsSync(configPath)) {
@@ -200,4 +200,5 @@ check("Browser launcher executable", () => {
 });
 
 if (failed) process.exit(1);
-console.log("\nRun `npm run smoke`, `npm run test:talk`, `npm run test:collaboration`, `npm run test:desktop`, `npm run test:skills`, and `npm run test:models` for model-free validation.");
+console.log("\nConfig checks do not prove live GitHub installation permissions. Run `npm run github-app:verify -- OWNER/REPO` for that repository.");
+console.log("Run `npm run smoke`, `npm run test:talk`, `npm run test:collaboration`, `npm run test:desktop`, `npm run test:skills`, and `npm run test:models` for model-free validation.");

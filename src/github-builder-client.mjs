@@ -26,6 +26,18 @@ async function request({ fetchImpl, apiUrl, token, path, method = "GET", body })
   }), `GitHub ${method} ${path}`);
 }
 
+async function requestPages({ fetchImpl, apiUrl, token, path, maxPages = 20 }) {
+  const values = [];
+  for (let page = 1; page <= maxPages; page += 1) {
+    const separator = path.includes("?") ? "&" : "?";
+    const batch = await request({ fetchImpl, apiUrl, token, path: `${path}${separator}page=${page}` });
+    if (!Array.isArray(batch)) throw new Error("GitHub returned an invalid paginated response.");
+    values.push(...batch);
+    if (batch.length < 100) return values;
+  }
+  throw new Error(`GitHub pagination exceeded the ${maxPages}-page safety limit.`);
+}
+
 function assertRepository(repository) {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository || "")) {
     throw new Error("repository must be owner/name.");
@@ -71,12 +83,21 @@ export function createBoundBuilderClient({
   prNumber = null,
   headRef = null,
   baseRef = null,
+  requiredReviewStatusContext = "agent-review",
+  trustedReviewLogins = [],
+  trustedHumanReviewLogins = [],
   allowedOperations = ["ensure_pull_request", "read_review_threads", "reply_review_thread", "resolve_review_thread", "mark_ready"],
 }) {
   assertRepository(repository);
   assertSha(headSha);
   if (!expectedLogin) throw new Error("expectedLogin is required.");
   if (prNumber !== null && (!Number.isInteger(prNumber) || prNumber < 1)) throw new Error("prNumber is invalid.");
+  if (trustedHumanReviewLogins.includes(expectedLogin)) {
+    throw new Error("The builder identity cannot be a trusted human reviewer.");
+  }
+  if (trustedHumanReviewLogins.some((login) => typeof login !== "string" || !login || login.endsWith("[bot]"))) {
+    throw new Error("Trusted human reviewer logins must be non-bot GitHub logins.");
+  }
   const context = { fetchImpl, apiUrl, token, repository, expectedLogin, verifiedLogin, headSha, prNumber };
   const allowed = new Set(allowedOperations);
   const authorize = (operation) => {
@@ -214,9 +235,69 @@ export function createBoundBuilderClient({
 
   async function merge({ method = "squash" }) {
     authorize("merge");
+    if (!prNumber) throw new Error("Merge requires a builder session bound to a pull request.");
     await identity();
     const pull = await boundPullRequest(context);
     if (pull.merged) return { operation: "merge", prNumber, url: pull.html_url, idempotent: true, login: expectedLogin, headSha };
+    if (!trustedReviewLogins.length && !trustedHumanReviewLogins.length) {
+      throw new Error("No trusted reviewer App or human reviewer identities are configured for merge authorization.");
+    }
+    let reviewGate = null;
+    let machineStatus = null;
+    if (requiredReviewStatusContext && trustedReviewLogins.length) {
+      const statuses = await requestPages({
+        ...context,
+        path: `/repos/${repository}/commits/${headSha}/statuses?per_page=100`,
+      });
+      if (!Array.isArray(statuses)) throw new Error("GitHub returned an invalid machine-review status history.");
+      machineStatus = statuses.find((candidate) => candidate.context === requiredReviewStatusContext);
+      if (machineStatus?.state === "success" && trustedReviewLogins.includes(machineStatus.creator?.login)) {
+        reviewGate = {
+          type: "machine_status",
+          context: machineStatus.context,
+          state: machineStatus.state,
+          login: machineStatus.creator.login,
+        };
+      }
+    }
+    if (!reviewGate && trustedHumanReviewLogins.length) {
+      const reviews = await requestPages({
+        ...context,
+        path: `/repos/${repository}/pulls/${prNumber}/reviews?per_page=100`,
+      });
+      const decisiveStates = new Set(["APPROVED", "CHANGES_REQUESTED", "DISMISSED"]);
+      const latestByLogin = new Map();
+      const chronological = [...reviews].sort((left, right) => (
+        String(left.submitted_at || "").localeCompare(String(right.submitted_at || ""))
+        || Number(left.id || 0) - Number(right.id || 0)
+      ));
+      for (const review of chronological) {
+        const login = review.user?.login;
+        if (review.commit_id !== headSha || !trustedHumanReviewLogins.includes(login) || !decisiveStates.has(review.state)) continue;
+        latestByLogin.set(login, review);
+      }
+      const effectiveReviews = [...latestByLogin.values()];
+      const changesRequested = effectiveReviews.find((review) => review.state === "CHANGES_REQUESTED");
+      const approval = effectiveReviews.find((review) => review.state === "APPROVED");
+      if (approval && !changesRequested) {
+        reviewGate = {
+          type: "human_approval",
+          state: "APPROVED",
+          login: approval.user.login,
+          reviewId: approval.id,
+          submittedAt: approval.submitted_at,
+        };
+      }
+    }
+    if (!reviewGate) {
+      if (!trustedHumanReviewLogins.length && machineStatus?.state !== "success") {
+        throw new Error(`Required machine-review status ${requiredReviewStatusContext} is not successful on ${headSha}.`);
+      }
+      if (!trustedHumanReviewLogins.length && !trustedReviewLogins.includes(machineStatus?.creator?.login)) {
+        throw new Error(`Required machine-review status was not authored by a configured reviewer App: ${machineStatus?.creator?.login || "unknown"}.`);
+      }
+      throw new Error(`Merge authorization found neither a trusted machine review nor a trusted human approval on exact head ${headSha}.`);
+    }
     const merged = await request({
       ...context,
       path: `/repos/${repository}/pulls/${prNumber}/merge`,
@@ -224,7 +305,10 @@ export function createBoundBuilderClient({
       body: { sha: headSha, merge_method: method },
     });
     if (!merged?.merged) throw new Error(`GitHub did not merge the bound pull request: ${merged?.message || "unknown error"}`);
-    return { operation: "merge", prNumber, sha: merged.sha, idempotent: false, login: expectedLogin, headSha };
+    return {
+      operation: "merge", prNumber, sha: merged.sha, idempotent: false, login: expectedLogin, headSha,
+      reviewGate,
+    };
   }
 
   return { identity, ensurePullRequest, reviewThreads, replyReviewThread, resolveReviewThread, markReady, merge };

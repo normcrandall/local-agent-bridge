@@ -7,7 +7,7 @@ export const DEFAULT_GITHUB_APPS_CONFIG = resolve(homedir(), ".config/local-agen
 export const GITHUB_LOGIN_PATTERN = /^[A-Za-z0-9-]+(?:\[bot\])?$/;
 export const GITHUB_APP_ROLE_PERMISSIONS = {
   builder: { contents: "write", pull_requests: "write", issues: "write", metadata: "read" },
-  reviewer: { contents: "read", pull_requests: "write", metadata: "read" },
+  reviewer: { contents: "read", pull_requests: "write", statuses: "write", metadata: "read" },
 };
 
 export function assertGitHubAppPermissions(role, permissions = {}) {
@@ -71,6 +71,12 @@ export async function inspectGitHubAppRoles({ configPath = DEFAULT_GITHUB_APPS_C
   const { config, exists } = await readConfig(configPath);
   if (!exists) return { configured: false, configPath: expandHome(configPath), version: null, roles: {} };
   if (config.version !== 1) throw new Error("Unsupported GitHub Apps config version.");
+  const trustedHumanReviewers = config.mergePolicy?.trustedHumanReviewers || [];
+  if (!Array.isArray(trustedHumanReviewers) || trustedHumanReviewers.some((login) => (
+    !GITHUB_LOGIN_PATTERN.test(login || "") || login.endsWith("[bot]")
+  ))) {
+    throw new Error("mergePolicy.trustedHumanReviewers must contain only non-bot GitHub logins.");
+  }
   const roles = {};
   for (const role of ["builder", "reviewer"]) {
     const selected = config.roles?.[role];
@@ -117,6 +123,7 @@ export async function inspectGitHubAppRoles({ configPath = DEFAULT_GITHUB_APPS_C
     configPath: expandHome(configPath),
     version: config.version,
     allowPatFallback: config.compatibility?.allowPatFallback !== false,
+    mergePolicy: { trustedHumanReviewers: [...new Set(trustedHumanReviewers)] },
     roles,
   };
 }
@@ -254,6 +261,7 @@ export async function createInstallationToken({
     verifiedLogin,
     installationId: selected.installationId,
     permissions: result.permissions,
+    credentialSource: "github-app",
   };
 }
 

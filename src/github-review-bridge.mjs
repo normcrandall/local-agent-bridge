@@ -16,6 +16,7 @@ const expectedLogin = process.env.GITHUB_REVIEW_EXPECTED_LOGIN;
 const handoffPath = process.env.GITHUB_REVIEW_HANDOFF_PATH;
 const tokenFile = process.env.GITHUB_REVIEW_TOKEN_FILE || resolve(homedir(), ".config/ghtoken");
 const apiUrl = process.env.GITHUB_REVIEW_API_URL || "https://api.github.com";
+const statusContext = process.env.GITHUB_REVIEW_STATUS_CONTEXT || "agent-review";
 
 if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository || "")) {
   throw new Error("GITHUB_REVIEW_REPOSITORY must be owner/name.");
@@ -30,6 +31,7 @@ if (credential.expectedLogin && credential.expectedLogin !== expectedLogin) {
   throw new Error(`Configured reviewer identity ${credential.expectedLogin} does not match authorized identity ${expectedLogin}.`);
 }
 const { token, verifiedLogin } = credential;
+const appCredential = credential.credentialSource === "github-app";
 const reviewApiUrl = verifiedLogin ? "https://api.github.com" : apiUrl;
 
 const inlineComment = z.object({
@@ -45,7 +47,7 @@ const server = new McpServer(
   { name: "bounded-github-review", version: "0.1.0" },
   {
     instructions:
-      `Submit exactly one formal review to ${repository} PR #${prNumber} at ${headSha} as ${expectedLogin}. Write the durable handoff first. This server cannot access any other repository, PR, commit, or GitHub mutation.`,
+      `Submit exactly one formal review to ${repository} PR #${prNumber} at ${headSha} as ${expectedLogin}. Write the durable handoff first. A reviewer App also publishes the exact-head ${statusContext} status; a PAT compatibility credential is comment-only. This server cannot access any other repository, PR, commit, or GitHub mutation.`,
   },
 );
 let submittedReview = null;
@@ -73,7 +75,7 @@ server.registerTool(
   {
     title: "Submit bound pull request review",
     description:
-      `Submit the completed review to ${repository} PR #${prNumber}. The token identity, PR, and head commit are pre-bound outside the model context.`,
+      `Submit the completed review to ${repository} PR #${prNumber} and publish its exact-head machine-review status when using a reviewer App. The token identity, PR, and head commit are pre-bound outside the model context.`,
     inputSchema: {
       event: z.enum(["COMMENT", "APPROVE", "REQUEST_CHANGES"]),
       body: z.string().min(1).max(60_000),
@@ -92,6 +94,9 @@ server.registerTool(
     }
     const handoff = await readFile(handoffPath, "utf8");
     if (!handoff.trim()) throw new Error("The authorized handoff file is empty; write it before posting the review.");
+    if (!appCredential && event !== "COMMENT") {
+      throw new Error("A PAT fallback may post an attributed comment but cannot APPROVE or REQUEST_CHANGES; configure the reviewer GitHub App.");
+    }
     const result = await submitBoundReview({
       apiUrl: reviewApiUrl,
       token,
@@ -103,9 +108,14 @@ server.registerTool(
       event,
       body,
       comments,
+      statusContext,
+      publishGate: appCredential,
     });
     submittedReview = result;
-    const receipt = `- **PR review:** [${result.state || event}](${result.url}) as \`${result.login}\` at \`${headSha.slice(0, 12)}\``;
+    const gateReceipt = result.gate
+      ? `gate \`${result.gate.context}\` = \`${result.gate.state}\``
+      : "no machine gate (PAT compatibility comment only)";
+    const receipt = `- **PR review:** [${result.state || event}](${result.url}) as \`${result.login}\` at \`${headSha.slice(0, 12)}\`; ${gateReceipt}`;
     if (!handoff.includes(result.url)) await appendFile(handoffPath, `\n\n${receipt}\n`);
     return {
       content: [{

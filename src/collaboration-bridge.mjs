@@ -114,6 +114,24 @@ function summary(view) {
       `PR review: ${view.githubReview.repository}#${view.githubReview.prNumber}@${view.githubReview.headSha.slice(0, 12)} as ${view.githubReview.expectedLogin || "the active provider reviewer App"}`,
     );
   }
+  if (view.reviewPublication?.status && view.reviewPublication.status !== "available") {
+    lines.push(`Review publication: ${view.reviewPublication.status}`);
+    if (view.reviewPublication.publishableAgents?.length) {
+      lines.push(`Publishable reviewers: ${view.reviewPublication.publishableAgents.join(", ")}`);
+    }
+    if (view.reviewPublication.publishedAgents?.length) {
+      lines.push(`Completed publications: ${view.reviewPublication.publishedAgents.join(", ")}`);
+    }
+    for (const [agent, reason] of Object.entries(view.reviewPublication.localOnlyAgents || {})) {
+      lines.push(`Local-only reviewer: ${agent} — ${reason}`);
+    }
+    for (const [agent, reason] of Object.entries(view.reviewPublication.unavailableAgents || {})) {
+      lines.push(`Reviewer failed after preflight: ${agent} — ${reason}`);
+    }
+    if (view.reviewPublication.humanApprovalRequired) {
+      lines.push("Merge gate: exact-head approval from a configured trusted human is required.");
+    }
+  }
   if (view.rotation) lines.push(`Rotation: task ${view.rotation.taskNumber}; writer ${view.rotation.writer}; reviewers ${view.rotation.reviewers.join(", ")}`);
   if (view.chair) lines.push(`Chair: ${view.chair.provider} (${view.chair.source || "native-chair"}); same-provider delegation ${view.chair.allowSameProviderDelegation ? "allowed" : "suppressed"}.`);
   if (view.worktree) lines.push(`Worktree: ${view.worktree.path} (${view.worktree.branch} from ${view.worktree.base})`);
