@@ -16,6 +16,7 @@ import { isTransportLivenessSummary, refreshCi, usageDecision } from "../src/ope
 import { clearTerminalRuntime } from "../src/collaboration-cleanup.mjs";
 import { createDecisionReceipt } from "../src/decision-policy.mjs";
 import { completionAfterHandoff } from "../src/handoff-protocol.mjs";
+import { orderReviewProbes } from "../src/review-publication.mjs";
 
 const runtimeRoot = realpathSync(
   process.env.BRIDGE_RUNTIME_ROOT || process.env.BRIDGE_ROOT || fileURLToPath(new URL("..", import.meta.url)),
@@ -69,7 +70,12 @@ try {
     requestTimeoutMs: (state.turnTimeoutSeconds || 600) * 1000 + 5_000,
   });
   const probes = await Promise.all(state.agents.map((agent) => pool.probe(agent)));
-  const availableAgents = probes.filter((probe) => probe.available).map((probe) => probe.agent);
+  const reviewOrder = orderReviewProbes({
+    probes,
+    requestedStartAgent: state.startAgent,
+    githubReview: state.mode === "review" ? state.githubReview : null,
+  });
+  const availableAgents = reviewOrder.agents;
   const unavailableAgents = Object.fromEntries(
     probes.filter((probe) => !probe.available).map((probe) => [probe.agent, probe.reason]),
   );
@@ -82,13 +88,23 @@ try {
       phase: "preflight",
     });
   }
-  const startAgent = availableAgents.includes(state.startAgent) ? state.startAgent : availableAgents[0] || null;
+  for (const probe of probes.filter((candidate) => candidate.available && candidate.reviewPublication?.available === false)) {
+    await appendEvent(workspaceRoot, id, {
+      type: "review_publication_unavailable",
+      at: new Date().toISOString(),
+      agent: probe.agent,
+      reason: probe.reviewPublication.reason,
+      fallback: "local_handoff_and_trusted_human_approval",
+    });
+  }
+  const startAgent = reviewOrder.startAgent;
   const writer = state.mode === "work" && availableAgents.length
     ? (availableAgents.includes(state.writer) ? state.writer : availableAgents[0])
     : null;
   state = await updateCollaboration(workspaceRoot, id, (current) => ({
     ...current,
     writer,
+    reviewPublication: reviewOrder.publication,
     runtime: {
       ...current.runtime,
       nextAgent: availableAgents.includes(current.runtime?.nextAgent)

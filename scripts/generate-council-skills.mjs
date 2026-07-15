@@ -168,6 +168,8 @@ Use the same profile distinction for a Codex writer: \`implement\` keeps network
 
 For pull-request work, read repository policy. When it requires the reviewer to mirror findings to the PR, resolve the repository, PR number, and current head SHA and pass them as \`githubReview\`. Omit identity fields so the broker selects each provider's user-owned reviewer App from machine-local configuration. Use \`expectedLogin\` or \`expectedLogins\` only when repository policy explicitly pins exact bots. Never embed App IDs, installation IDs, keys, tokens, or maintainer-specific identities in the skill. The designated Claude, Codex, or Antigravity reviewer must author the handoff first, then one formal review with a general verdict and inline actionable findings. Claude/Codex use pre-bound tools; Antigravity returns a validated envelope published unchanged by the bound broker adapter. The writer never receives review publication authority. Refresh the head SHA for each re-review; never fall back to the chair's personal GitHub identity.
 
+For an autonomous PR-review leg, keep all eligible non-writer providers in one ordered roster and set \`maxTurns\` to the number of successful reviews required. A failed provider does not consume a turn. The broker preflights reviewer-App publication, runs publishable identities first, and treats an unbound reviewer as local-only rather than discarding its model review. If every App is unavailable, preserve the durable local findings and require an exact-head approval from a configured trusted human instead of terminating. Use a single candidate only when the user explicitly pins that provider.
+
 Before starting, display:
 
 \`\`\`text

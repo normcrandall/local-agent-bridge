@@ -30,6 +30,8 @@ Call `collaboration.start_collaboration` with:
 - `githubBuilder` when the writer owns bounded PR delivery, with an explicit `allowedOperations` list. Merge remains absent unless the user explicitly authorizes the exact-head merge.
 
 For an autonomous merge, require either the exact-head `agent-review=success` status from a configured reviewer App or an exact-head `APPROVED` review from a machine-locally configured trusted human, plus GitHub's required CI and rules. A bot verdict does not satisfy a nonzero human-approval count. If GitHub requires a human approval, pause for the person's real review; never replace the App with a personal PAT, manufacture the human approval, or use owner bypass.
+
+For every autonomous review leg, pass an ordered roster containing the preferred reviewer plus every eligible non-writer fallback in the same collaboration. Set `maxTurns` to the number of successful reviews required; a provider failure does not consume a turn, so the broker advances to the next candidate. Never launch a critical review with one candidate unless the user explicitly pins that provider. The broker checks reviewer-App publication before the turn, prefers publishable identities, and degrades an unbound participant to a local durable handoff. If no bot can publish, continue the review and require an exact-head approval from a configured trusted human instead of terminating the pipeline.
 - `ciTracking.prNumber` when a PR exists.
 - optional `budget.maxCostUsd`, `budget.maxTokens`, and `budget.maxMinutes`.
 - optional `modelFallbacks.claude` and `modelFallbacks.codex`, preserving ordered overload-only downgrade chains; omit them to use machine-local policies.

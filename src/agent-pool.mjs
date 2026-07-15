@@ -7,6 +7,7 @@ import { loadConfiguredFallbackModels } from "./model-fallbacks.mjs";
 import { builderEnvelopeInstructions, parseBuilderEnvelope } from "./builder-envelope.mjs";
 import { configuredReviewerLogin, createInstallationToken, inspectGitHubAppRoles } from "./github-app-auth.mjs";
 import { createBoundBuilderClient } from "./github-builder-client.mjs";
+import { localReviewPrompt, resolveReviewPublication } from "./review-publication.mjs";
 
 function textFrom(result) {
   const structured = result.structuredContent || {};
@@ -39,14 +40,18 @@ export function createAgentPool({
   turnTimeoutSeconds = 600,
 }) {
   const clients = {};
+  const reviewPublication = new Map();
 
-  async function reviewBindingFor(agent) {
-    if (!githubReview) return null;
-    const expectedLogin = githubReview.expectedLogins?.[agent]
-      || githubReview.expectedLogin
-      || await configuredReviewerLogin({ provider: agent });
-    const { expectedLogins: _expectedLogins, ...authorization } = githubReview;
-    return { ...authorization, expectedLogin };
+  async function reviewPublicationFor(agent) {
+    if (reviewPublication.has(agent)) return reviewPublication.get(agent);
+    const result = await resolveReviewPublication({
+      agent,
+      githubReview,
+      configuredLogin: configuredReviewerLogin,
+      createCredential: createInstallationToken,
+    });
+    reviewPublication.set(agent, result);
+    return result;
   }
 
   async function publishAntigravityReview(message, reviewBinding) {
@@ -153,7 +158,14 @@ export function createAgentPool({
         const client = await clientFor(agent);
         const tools = await client.listTools({}, { timeout: 5_000 });
         if (!tools.tools?.length) throw new Error(`${agent} MCP server exposed no tools.`);
-        return { agent, available: true };
+        const publication = await reviewPublicationFor(agent);
+        return {
+          agent,
+          available: true,
+          reviewPublication: githubReview
+            ? { available: publication.available, reason: publication.reason }
+            : null,
+        };
       } catch (error) {
         return { agent, available: false, reason: error?.message || String(error) };
       }
@@ -161,11 +173,15 @@ export function createAgentPool({
     async send({ agent, prompt, sessionId, mode, browser }, onProgress = () => {}) {
       const client = await clientFor(agent);
       const effectivePermissionProfile = mode === "work" ? permissionProfile : "standard";
-      const effectiveGithubReview = mode === "review" ? await reviewBindingFor(agent) : null;
+      const publication = mode === "review" ? await reviewPublicationFor(agent) : { available: true, binding: null, reason: null };
+      const effectiveGithubReview = publication.available ? publication.binding : null;
+      const effectivePrompt = mode === "review" && githubReview && !publication.available
+        ? localReviewPrompt(prompt, publication.reason)
+        : prompt;
       let request;
       if (agent === "claude") {
         request = claudeToolRequest({
-          prompt,
+          prompt: effectivePrompt,
           sessionId,
           cwd: workspace,
           mode,
@@ -183,7 +199,7 @@ export function createAgentPool({
         });
       } else if (agent === "codex") {
         request = codexToolRequest({
-          prompt,
+          prompt: effectivePrompt,
           sessionId,
           cwd: workspace,
           mode,
@@ -202,8 +218,8 @@ export function createAgentPool({
         });
       } else {
         let antigravityPrompt = effectiveGithubReview
-          ? `${prompt}${reviewEnvelopeInstructions({ githubReview: effectiveGithubReview, handoffPath })}`
-          : prompt;
+          ? `${effectivePrompt}${reviewEnvelopeInstructions({ githubReview: effectiveGithubReview, handoffPath })}`
+          : effectivePrompt;
         if (githubBuilder && mode === "work") {
           const builder = await boundBuilderClient();
           const threads = githubBuilder.prNumber ? await builder.reviewThreads() : [];
@@ -277,6 +293,12 @@ export function createAgentPool({
             attemptedModels: structured.attemptedModels || structured.modelsUsed || [],
             fallbackModels: structured.modelFallbacks || modelFallbacks[agent] || [],
             fallbackManagedBy: structured.fallbackManagedBy ?? null,
+          } : null,
+          reviewPublication: mode === "review" && githubReview ? {
+            available: publication.available,
+            login: effectiveGithubReview?.expectedLogin || null,
+            reason: publication.reason,
+            humanApprovalRequired: !publication.available,
           } : null,
         },
       };

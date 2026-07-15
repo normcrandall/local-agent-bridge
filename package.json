@@ -27,6 +27,7 @@
     "test:github-command-fallback": "node scripts/github-command-fallback-test.mjs",
     "test:github-builder": "node scripts/github-builder-test.mjs",
     "test:github-review": "node scripts/github-review-test.mjs",
+    "test:review-publication": "node scripts/review-publication-test.mjs",
     "test:skills": "node scripts/skill-test.mjs",
     "test:statusline": "node scripts/statusline-test.mjs",
     "test:models": "node scripts/model-routing-test.mjs",
