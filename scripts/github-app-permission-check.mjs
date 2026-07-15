@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { createInstallationToken } from "../src/github-app-auth.mjs";
+import { canPublishReviewStatus, createInstallationToken } from "../src/github-app-auth.mjs";
 
 const repository = process.argv[2];
 if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository || "")) {
@@ -25,6 +25,9 @@ for (const entry of roles) {
       repository,
     });
     console.log(`OK   ${entry.label} as ${credential.expectedLogin}`);
+    if (entry.role === "reviewer" && !canPublishReviewStatus(credential.permissions)) {
+      console.log(`WARN ${entry.label}: formal reviews are enabled; agent-review status publication is unavailable (statuses:write).`);
+    }
   } catch (error) {
     failed = true;
     console.error(`FAIL ${entry.label}: ${error.message}`);

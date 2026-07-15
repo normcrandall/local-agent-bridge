@@ -103,6 +103,18 @@ const appSubmitted = await submitBoundReview({
 assert.equal(appSubmitted.login, "example-reviewer[bot]");
 assert.equal(appApi.calls.some((call) => call.url.endsWith("/user")), false);
 
+const formalReviewOnlyApi = fakeGitHub({ login: "example-reviewer[bot]" });
+const formalReviewOnly = await submitBoundReview({
+  ...base,
+  expectedLogin: "example-reviewer[bot]",
+  verifiedLogin: "example-reviewer[bot]",
+  publishGate: false,
+  fetchImpl: formalReviewOnlyApi.fetchImpl,
+});
+assert.equal(formalReviewOnly.login, "example-reviewer[bot]");
+assert.equal(formalReviewOnly.gate, null);
+assert.equal(formalReviewOnlyApi.calls.some((call) => call.url.endsWith(`/statuses/${base.headSha}`)), false);
+
 await assert.rejects(
   submitBoundReview({ ...base, fetchImpl: fakeGitHub({ login: "wrong-user" }).fetchImpl }),
   /identity mismatch/,

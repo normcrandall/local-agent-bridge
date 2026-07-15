@@ -19,26 +19,37 @@ const bound = await resolveReviewPublication({
   configuredLogin: async () => "claude-reviewer[bot]",
   createCredential: async (input) => {
     assert.equal(input.expectedLogin, "claude-reviewer[bot]");
-    return { token: "short-lived" };
+    return { token: "short-lived", permissions: { contents: "read", pull_requests: "write", metadata: "read" } };
   },
 });
 assert.equal(bound.available, true);
 assert.equal(bound.binding.expectedLogin, "claude-reviewer[bot]");
+assert.equal(bound.binding.publishStatusGate, false);
+assert.equal(bound.statusGateAvailable, false);
+
+const boundWithStatus = await resolveReviewPublication({
+  agent: "claude",
+  githubReview,
+  configuredLogin: async () => "claude-reviewer[bot]",
+  createCredential: async () => ({ token: "short-lived", permissions: { statuses: "write" } }),
+});
+assert.equal(boundWithStatus.available, true);
+assert.equal(boundWithStatus.binding.publishStatusGate, true);
 
 const unbound = await resolveReviewPublication({
   agent: "claude",
   githubReview,
   configuredLogin: async () => "claude-reviewer[bot]",
-  createCredential: async () => { throw new Error("reviewer GitHub App lacks required permissions: statuses:write"); },
+  createCredential: async () => { throw new Error("reviewer GitHub App lacks required permissions: pull_requests:write"); },
 });
 assert.equal(unbound.available, false);
-assert.match(unbound.reason, /statuses:write/);
+assert.match(unbound.reason, /pull_requests:write/);
 
 const partial = orderReviewProbes({
   requestedStartAgent: "claude",
   githubReview: { repository: "owner/repo", prNumber: 1, headSha: "a".repeat(40) },
   probes: [
-    { agent: "claude", available: true, reviewPublication: { available: false, reason: "reviewer App lacks statuses:write" } },
+    { agent: "claude", available: true, reviewPublication: { available: false, reason: "reviewer App lacks pull_requests:write" } },
     { agent: "antigravity", available: true, reviewPublication: { available: true, reason: null } },
     { agent: "codex", available: false, reason: "transport closed" },
   ],
@@ -47,7 +58,7 @@ assert.deepEqual(partial.agents, ["antigravity", "claude"]);
 assert.equal(partial.startAgent, "antigravity");
 assert.equal(partial.publication.status, "partial");
 assert.equal(partial.publication.humanApprovalRequired, false);
-assert.match(partial.publication.localOnlyAgents.claude, /statuses:write/);
+assert.match(partial.publication.localOnlyAgents.claude, /pull_requests:write/);
 
 const degraded = orderReviewProbes({
   requestedStartAgent: "claude",
