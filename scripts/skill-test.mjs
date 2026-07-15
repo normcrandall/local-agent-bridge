@@ -212,10 +212,21 @@ for (const term of [
   "Adjacent substitutes",
   "Aspirational benchmarks",
   "browser: true",
-  "observed behavior or a vendor claim",
+  "observed behavior, a vendor claim, or an attributed external signal",
   "Strategic posture",
   "parity | differentiation | substitute response | deliberate non-adoption",
   "A competitor has it",
+  "Category lane",
+  "Substitute lane",
+  "Signal lane",
+  "at least eight credible products",
+  "at least two materially different query families",
+  "two consecutive materially different query families",
+  "search saturation",
+  "landscape ledger",
+  "Search-result snippets and rankings",
+  "SEO comparison pages",
+  "Landscape coverage",
 ]) assert.ok(councilDiscovery.includes(term), `Council discovery is missing ${term}`);
 assert.match(councilDiscovery, /full consensus/i);
 assert.match(councilDiscovery, /Never leave the user at a static/);

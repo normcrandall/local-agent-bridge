@@ -1,7 +1,7 @@
 interface:
   display_name: "Council Discovery"
-  short_description: "Find business and competitor-grounded features"
-  default_prompt: "Use $council-discovery to find and publish app enhancements grounded in product evidence, competitive research, retention, acquisition, maintainability, overhead, and ROI."
+  short_description: "Find features through web-wide market discovery"
+  default_prompt: "Use $council-discovery to scan the competitive web landscape and publish app enhancements grounded in product, customer, business, and current market evidence."
 dependencies:
   tools:
     - type: "mcp"
