@@ -1,0 +1,11 @@
+interface:
+  display_name: "Take the Helm"
+  short_description: "Let the council autonomously drive work to done"
+  default_prompt: "Use $take-the-helm to take ownership of this objective, resolve routine decisions with the agent council, and work through the queue without asking me unless a true escalation boundary is reached."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "collaboration"
+      description: "Persistent Claude, Codex, and Antigravity broker"
+policy:
+  allow_implicit_invocation: true

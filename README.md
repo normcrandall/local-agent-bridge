@@ -186,13 +186,14 @@ Portable collaboration records and JSONL transcripts live under `~/.local/share/
 
 In short: move the repository and `~/.agents`, authenticate providers afresh, run the installer, replace absolute paths, verify, and restart. The remaining portability gap is automatic MCP re-registration; `npm run install:global` does not currently rewrite every application's existing config file.
 
-Eight canonical skills provide the same visible vocabulary in Codex, Claude, and Antigravity:
+Nine canonical skills provide the same visible vocabulary in Codex, Claude, and Antigravity:
 
 - `ask-agent`: announce and perform one named peer handoff.
 - `run-roundtable`: start and actively monitor a persistent collaboration.
 - `show-collaboration`: render status and turn history as a timeline.
 - `goal-loop`: build toward verified completion through bounded, resumable council cycles.
 - `pair-program`: rotate implementation and review roles with preflight, worktrees, visible progress, recovery, CI, budgets, and review reconciliation.
+- `take-the-helm`: give the council operational ownership of a goal or queue, with autonomous decisions and narrowly defined human-escalation boundaries.
 - `council-discovery`: inspect an existing product and systematically scan competitors and substitutes across the web, reach evidence-backed feature consensus around retention, acquisition, maintainability, overhead, and ROI, then publish implementation-ready GitHub issues through Wayfinder.
 - `council-grill-agents`: make the chair cross-examine peer LLM answers through rotating answerer, challenger, and verifier roles without interviewing the user.
 - `council-ux-review`: challenge the rendered UI and end-to-end UX with three independent browser reviews, cross-verification, and prioritized GitHub issues.
@@ -215,6 +216,7 @@ $ask-agent --to claude --mode review Review the current diff
 $run-roundtable --agents claude,codex,antigravity --writer codex Plan, implement, and review this change
 /show-collaboration bridge-<uuid>
 $goal-loop --writer codex --max-cycles 4 Build the feature and satisfy the verification checklist
+$take-the-helm Own this milestone and work every ready issue to its authorized completion boundary
 $council-discovery Find and publish the strongest next features for this app
 $council-grill-agents Cross-examine the council on whether this architecture will scale
 $council-ux-review Challenge the UI and UX of this application
@@ -237,6 +239,7 @@ These skills are supplied by this project and installed across Codex, Claude, an
 | `show-collaboration` | Display collaboration status, skipped providers, turns, and history. |
 | `goal-loop` | Build toward explicit completion criteria through bounded plan, implement, review, fix, and verification cycles. |
 | `pair-program` | Rotate one writer and independent reviewers across tasks, worktrees, CI, and formal PR reviews. |
+| `take-the-helm` | Autonomously drive a goal or work queue while escalating only finance, legal, authority, irreversible, owner-only, or genuinely unanswerable decisions. |
 | `council-discovery` | Scan the web-wide competitive landscape and publish Wayfinder-backed features grounded in product, market, retention, acquisition, maintainability, overhead, and ROI evidence. |
 | `council-grill-agents` | Cross-examine model answers one question at a time and return the strongest evidence-backed conclusion with dissent. |
 | `council-ux-review` | Inspect rendered journeys across desktop, mobile, and accessibility states, then publish verified UX issues. |
