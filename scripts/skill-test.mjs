@@ -280,4 +280,32 @@ assert.match(councilUxReview, /Continue with two models or one model/);
 assert.match(councilUxReview, /no participant edits source code/i);
 assert.match(councilUxReview, /Do not claim consensus, accessibility conformance, or complete coverage/);
 
+const takeTheHelm = await readFile(resolve(root, "skills/take-the-helm/SKILL.md"), "utf8");
+for (const term of [
+  "goal-loop",
+  "pair-program",
+  "council-grill-agents",
+  "show-collaboration",
+  "Claude, Codex, and Antigravity",
+  "collaboration.start_collaboration",
+  "waitSeconds: 8",
+  "Material financial exposure",
+  "Legal or potentially illegal activity",
+  "Missing authority",
+  "Destructive or irreversible external action",
+  "Explicitly user-owned choice",
+  "Genuinely unanswerable",
+  "Exhaust the resolution ladder",
+  "Assign exactly one writer",
+  "full consensus",
+  "degraded consensus",
+  "single-agent provisional result",
+  "Do not ask “what next?”",
+]) assert.ok(takeTheHelm.includes(term), `Take the helm is missing ${term}`);
+assert.match(takeTheHelm, /Never leave the user at a static/);
+assert.match(takeTheHelm, /Never substitute a long-running Bash, sleep/);
+assert.match(takeTheHelm, /Merge only when repository policy contains standing auto-merge authority or the exact head SHA has been explicitly authorized/);
+assert.match(takeTheHelm, /Routine uncertainty.*is not an escalation/);
+assert.match(takeTheHelm, /Continue with two models or one model/);
+
 console.log("Global bridge skills are synchronized across Codex, Claude, Antigravity App, and Antigravity CLI.");
