@@ -3,7 +3,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { createInstallationToken, GITHUB_LOGIN_PATTERN } from "./github-app-auth.mjs";
+import { createInstallationToken, GITHUB_LOGIN_PATTERN, inspectGitHubAppRoles } from "./github-app-auth.mjs";
 import { createBoundBuilderClient } from "./github-builder-client.mjs";
 
 const repository = process.env.GITHUB_BUILDER_REPOSITORY;
@@ -26,6 +26,11 @@ const credential = await createInstallationToken({ role: "builder", repository }
 if (credential.expectedLogin !== expectedLogin) {
   throw new Error(`Configured builder identity ${credential.expectedLogin} does not match authorized identity ${expectedLogin}.`);
 }
+const appRoles = await inspectGitHubAppRoles();
+const trustedReviewLogins = [
+  appRoles.roles?.reviewer?.expectedLogin,
+  ...Object.values(appRoles.roles?.reviewers || {}).map((reviewer) => reviewer.expectedLogin),
+].filter(Boolean);
 const client = createBoundBuilderClient({
   apiUrl,
   token: credential.token,
@@ -37,6 +42,8 @@ const client = createBoundBuilderClient({
   headRef,
   baseRef,
   allowedOperations,
+  requiredReviewStatusContext: process.env.GITHUB_BUILDER_REVIEW_STATUS_CONTEXT || "agent-review",
+  trustedReviewLogins,
 });
 
 const server = new McpServer(

@@ -1,7 +1,12 @@
 #!/usr/bin/env node
 
 import { createInstallationToken, loadPatFallbackToken } from "../src/github-app-auth.mjs";
-import { executeWithPermissionFallback, isGitHubAppPermissionError, runCredentialCommand } from "../src/github-command-fallback.mjs";
+import {
+  executeWithPermissionFallback,
+  isGitHubAppPermissionError,
+  patFallbackPolicy,
+  runCredentialCommand,
+} from "../src/github-command-fallback.mjs";
 
 const separator = process.argv.indexOf("--");
 const roleArgument = process.argv[2];
@@ -26,6 +31,10 @@ try {
   credential = await createInstallationToken({ role, reviewerProvider, repository });
 } catch (error) {
   if (!isGitHubAppPermissionError(error.message)) throw error;
+  const policy = patFallbackPolicy(command);
+  if (!policy.allowed) {
+    throw new Error(`GitHub App permission check failed; PAT fallback blocked: ${policy.reason}`);
+  }
   const fallback = await loadPatFallbackToken();
   console.error("GitHub App permission check failed; running the same command with the configured PAT fallback.");
   const result = await runCredentialCommand({ command, token: fallback.token });

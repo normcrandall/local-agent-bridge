@@ -71,6 +71,8 @@ export function createBoundBuilderClient({
   prNumber = null,
   headRef = null,
   baseRef = null,
+  requiredReviewStatusContext = "agent-review",
+  trustedReviewLogins = [],
   allowedOperations = ["ensure_pull_request", "read_review_threads", "reply_review_thread", "resolve_review_thread", "mark_ready"],
 }) {
   assertRepository(repository);
@@ -217,6 +219,20 @@ export function createBoundBuilderClient({
     await identity();
     const pull = await boundPullRequest(context);
     if (pull.merged) return { operation: "merge", prNumber, url: pull.html_url, idempotent: true, login: expectedLogin, headSha };
+    if (!requiredReviewStatusContext) throw new Error("A required machine-review status context is not configured.");
+    if (!trustedReviewLogins.length) throw new Error("No trusted reviewer App identities are configured for merge authorization.");
+    const statuses = await request({
+      ...context,
+      path: `/repos/${repository}/commits/${headSha}/statuses?per_page=100`,
+    });
+    if (!Array.isArray(statuses)) throw new Error("GitHub returned an invalid machine-review status history.");
+    const reviewGate = statuses.find((status) => status.context === requiredReviewStatusContext);
+    if (reviewGate?.state !== "success") {
+      throw new Error(`Required machine-review status ${requiredReviewStatusContext} is not successful on ${headSha}.`);
+    }
+    if (!trustedReviewLogins.includes(reviewGate.creator?.login)) {
+      throw new Error(`Required machine-review status was not authored by a configured reviewer App: ${reviewGate.creator?.login || "unknown"}.`);
+    }
     const merged = await request({
       ...context,
       path: `/repos/${repository}/pulls/${prNumber}/merge`,
@@ -224,7 +240,10 @@ export function createBoundBuilderClient({
       body: { sha: headSha, merge_method: method },
     });
     if (!merged?.merged) throw new Error(`GitHub did not merge the bound pull request: ${merged?.message || "unknown error"}`);
-    return { operation: "merge", prNumber, sha: merged.sha, idempotent: false, login: expectedLogin, headSha };
+    return {
+      operation: "merge", prNumber, sha: merged.sha, idempotent: false, login: expectedLogin, headSha,
+      reviewGate: { context: reviewGate.context, state: reviewGate.state, login: reviewGate.creator.login },
+    };
   }
 
   return { identity, ensurePullRequest, reviewThreads, replyReviewThread, resolveReviewThread, markReady, merge };

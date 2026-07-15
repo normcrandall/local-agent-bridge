@@ -83,7 +83,7 @@ try {
     }
     if (/\/app\/installations\/(333|444|555)\/access_tokens$/.test(url)) {
       const installation = url.match(/installations\/(\d+)/)[1];
-      return json({ token: `reviewer-${installation}-installation-token`, expires_at: "2026-07-14T20:00:00Z", permissions: { contents: "read", pull_requests: "write", metadata: "read" } }, 201);
+      return json({ token: `reviewer-${installation}-installation-token`, expires_at: "2026-07-14T20:00:00Z", permissions: { contents: "read", pull_requests: "write", statuses: "write", metadata: "read" } }, 201);
     }
     return json({ message: `Unexpected URL ${url}` }, 404);
   };
@@ -131,6 +131,7 @@ try {
   assert.equal(assertGitHubAppPermissions("builder", { contents: "write", pull_requests: "write", issues: "write", metadata: "read" }), true);
   assert.throws(() => assertGitHubAppPermissions("builder", { contents: "write", pull_requests: "write", metadata: "read" }), /issues:write/);
   assert.throws(() => assertGitHubAppPermissions("reviewer", { contents: "read", pull_requests: "read", metadata: "read" }), /pull_requests:write/);
+  assert.throws(() => assertGitHubAppPermissions("reviewer", { contents: "read", pull_requests: "write", metadata: "read" }), /statuses:write/);
   const inspected = await inspectGitHubAppRoles({ configPath });
   assert.equal(inspected.roles.builder.privateKeySecure, true);
   assert.equal(inspected.roles.reviewers.claude.privateKeySecure, true);

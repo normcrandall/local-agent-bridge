@@ -13,6 +13,8 @@ const base = {
   prNumber: 42,
   headRef: "codex/feature",
   baseRef: "main",
+  requiredReviewStatusContext: "agent-review",
+  trustedReviewLogins: ["reviewer[bot]"],
   allowedOperations: ["ensure_pull_request", "read_review_threads", "reply_review_thread", "resolve_review_thread", "mark_ready", "merge"],
 };
 
@@ -20,7 +22,10 @@ function json(value, status = 200) {
   return new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } });
 }
 
-function fakeGitHub({ currentSha = headSha, wrongThread = false, existingPull = false } = {}) {
+function fakeGitHub({
+  currentSha = headSha, wrongThread = false, existingPull = false,
+  reviewStatus = "success", reviewLogin = "reviewer[bot]", reviewStatuses = null,
+} = {}) {
   const calls = [];
   const fetchImpl = async (url, options = {}) => {
     const path = new URL(url).pathname + new URL(url).search;
@@ -40,6 +45,9 @@ function fakeGitHub({ currentSha = headSha, wrongThread = false, existingPull = 
       number: 42, html_url: "https://github.test/pr/42", head: { sha: headSha }, base: { ref: "main" },
     }, 201);
     if (path === "/repos/owner/repo/pulls/42/merge") return json({ merged: true, sha: "b".repeat(40) });
+    if (path === `/repos/owner/repo/commits/${headSha}/statuses?per_page=100`) return json(reviewStatuses || [{
+      context: "agent-review", state: reviewStatus, creator: { login: reviewLogin },
+    }]);
     if (path === "/graphql") {
       if (body.query.includes("reviewThreads")) return json({ data: { repository: { pullRequest: { reviewThreads: { nodes: wrongThread ? [] : [{
         id: "thread-1", isResolved: false, comments: { nodes: [] },
@@ -78,7 +86,27 @@ assert.equal(replied.url, "https://github.test/comment/1");
 assert.match(api.calls.find((call) => call.body?.variables?.body)?.body.variables.body, /agent-bridge-builder:reply/);
 assert.equal((await builder.resolveReviewThread({ threadId: "thread-1" })).idempotent, false);
 assert.equal((await builder.markReady()).operation, "mark_ready");
-assert.equal((await builder.merge({ method: "squash" })).operation, "merge");
+const merged = await builder.merge({ method: "squash" });
+assert.equal(merged.operation, "merge");
+assert.equal(merged.reviewGate.login, "reviewer[bot]");
+await assert.rejects(
+  createBoundBuilderClient({ ...base, fetchImpl: fakeGitHub({ reviewStatus: "failure" }).fetchImpl }).merge({ method: "squash" }),
+  /machine-review status.*not successful/i,
+);
+await assert.rejects(
+  createBoundBuilderClient({ ...base, fetchImpl: fakeGitHub({ reviewLogin: "owner" }).fetchImpl }).merge({ method: "squash" }),
+  /not authored by a configured reviewer App/i,
+);
+await assert.rejects(
+  createBoundBuilderClient({
+    ...base,
+    fetchImpl: fakeGitHub({ reviewStatuses: [
+      { context: "agent-review", state: "success", creator: { login: "owner" } },
+      { context: "agent-review", state: "success", creator: { login: "reviewer[bot]" } },
+    ] }).fetchImpl,
+  }).merge({ method: "squash" }),
+  /not authored by a configured reviewer App/i,
+);
 const noMerge = createBoundBuilderClient({ ...base, allowedOperations: ["mark_ready"], fetchImpl: api.fetchImpl });
 await assert.rejects(noMerge.merge({ method: "squash" }), /not authorized: merge/);
 
@@ -102,4 +130,4 @@ const envelope = parseBuilderEnvelope(`done\n---BEGIN BOUND_GITHUB_BUILDER---\n$
 assert.equal(envelope.operations[0].operation, "reply_review_thread");
 assert.throws(() => parseBuilderEnvelope("missing"), /required bound GitHub builder envelope/);
 
-console.log("Bound GitHub builder tests passed: create, reply, resolve, ready, merge, stale-head, and thread-scope paths.");
+console.log("Bound GitHub builder tests passed: PR lifecycle, exact head, trusted latest review gate, and merge paths.");

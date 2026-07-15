@@ -73,7 +73,7 @@ Create each App from **GitHub Settings → Developer settings → GitHub Apps �
 - Turn off webhooks and OAuth unless another part of your system needs them.
 - Select **Only on this account** by default. Treat **Any account** as an explicit public-distribution decision, not a portability shortcut.
 - Builder repository permissions: **Contents: Read and write**, **Pull requests: Read and write**, **Issues: Read and write**, and **Metadata: Read-only**. Grant **Workflows: Read and write** only if the builder must intentionally modify workflow files.
-- Reviewer repository permissions: **Contents: Read-only**, **Pull requests: Read and write**, and **Metadata: Read-only**.
+- Reviewer repository permissions: **Contents: Read-only**, **Pull requests: Read and write**, **Commit statuses: Read and write**, and **Metadata: Read-only**.
 - Generate a private key, move it outside the repository, and restrict it with `chmod 600`.
 - Install the App on each account or organization, preferably for selected repositories.
 
@@ -110,9 +110,28 @@ Identity configuration belongs in the machine-local JSON file, not in a collabor
 
 The broker then selects the active provider's locally configured reviewer App. Use `expectedLogin` for one strict identity, or `expectedLogins.claude`, `.codex`, and `.antigravity` for strict provider-specific pins, only when repository policy requires exact bot names. These fields are policy assertions, not credentials. When moving a skill to another computer or sharing it publicly, leave them out so the receiving user supplies their own identities through `~/.config/local-agent-bridge/github-apps.json`.
 
-The `github-app:run` wrapper also retries the exact same command once with `~/.config/ghtoken` when GitHub explicitly rejects the App for insufficient permission. It prints the identity transition before retrying, never retries ordinary command failures, and never exposes either credential. Set `GITHUB_APP_ALLOW_PAT_FALLBACK=0` or disable `compatibility.allowPatFallback` to require the App identity. Override the mode-600 token path with `AGENT_BRIDGE_GITHUB_PAT_FILE`.
+The `github-app:run` wrapper may retry an allowlisted issue command or narrowly non-authorizing PR command (`create`, `comment`, `ready`, `close`, or `reopen`) once with `~/.config/ghtoken` when GitHub explicitly rejects the App for insufficient permission. It prints the identity transition, never retries ordinary failures, and never exposes either credential. PAT fallback is categorically blocked for pushes, merges, PR edits/retargeting, formal PR reviews, status/check publication, branch or ruleset changes, arbitrary `gh api`, and unknown commands. Set `GITHUB_APP_ALLOW_PAT_FALLBACK=0` or disable `compatibility.allowPatFallback` to remove the remaining compatibility path. Override the mode-600 token path with `AGENT_BRIDGE_GITHUB_PAT_FILE`.
 
-Set `"compatibility": { "allowPatFallback": false }` in the machine-local config (or `GITHUB_REVIEW_ALLOW_PAT_FALLBACK=0`) when a repository requires the reviewer App identity and must never accept the personal fallback. The bridge validates the minted installation token's role permissions before exposing any operation: builder requires Contents, Pull requests, and Issues write plus Metadata read; reviewer requires Contents read, Pull requests write, and Metadata read. Missing roles, owners, repositories, permissions, keys, and identity mismatches fail closed with the affected role named.
+Set `"compatibility": { "allowPatFallback": false }` in the machine-local config (or `GITHUB_REVIEW_ALLOW_PAT_FALLBACK=0`) when a repository requires App-only identity. This is now the recommended default. The bridge validates the minted installation token's role permissions before exposing any operation: builder requires Contents, Pull requests, and Issues write plus Metadata read; reviewer requires Contents read, Pull requests and Commit statuses write, and Metadata read. Missing roles, owners, repositories, permissions, keys, and identity mismatches fail closed with the affected role named. A legacy PAT reviewer may post only a non-gating `COMMENT`; it cannot `APPROVE`, `REQUEST_CHANGES`, or publish the machine-review status.
+
+### Enforce agent review without a human-identity bypass
+
+GitHub's required approving-review count is a human collaboration rule: an approval must come from a person with the required repository access. Do not use an owner PAT to turn an agent verdict into that human approval. For repositories where agents have standing merge authority, configure the target branch or ruleset as follows:
+
+1. Require pull requests and all repository CI checks.
+2. Set the required human approval count to zero unless the repository genuinely requires a human decision.
+3. Require the commit status context `agent-review` on the exact PR head. When several provider-specific reviewer Apps rotate, select any source in GitHub and rely on the builder's configured-reviewer identity check; do not grant Commit statuses write to the builder App.
+4. Require conversations to be resolved and prevent administrators/owners and the builder App from bypassing the ruleset.
+
+Every provider-specific reviewer App publishes `agent-review=success` only after its exact-head formal `APPROVE`; `REQUEST_CHANGES` publishes failure and `COMMENT` publishes pending. The bound builder independently reads the exact-head status and refuses to merge unless its latest `agent-review` is successful and authored by a reviewer App configured on that machine. GitHub still enforces CI and the ruleset. If a repository keeps a nonzero human approval count, the agent pipeline stops for a human; it never retries the merge as the owner PAT.
+
+After changing App permissions or installing the Apps on another account, verify the live installation without exposing credentials:
+
+```bash
+npm run github-app:verify -- OWNER/REPO
+```
+
+`doctor` validates local configuration and key hygiene only; `github-app:verify` mints short-lived installation tokens and checks the actual builder and provider-reviewer permissions accepted for that repository owner.
 
 For a bounded builder-side GitHub CLI command, mint a short-lived repository-scoped token at execution time:
 
@@ -639,9 +658,9 @@ The caller passes an exact PR authorization object. Omit `expectedLogin` to sele
 }
 ```
 
-The delegated tool mints a short-lived token from the provider-specific reviewer App (`claude`, `codex`, or `antigravity`/Gemini), or reads the backward-compatible `~/.config/ghtoken` fallback when no reviewer App is configured. A caller may still pin `expectedLogin` for a strict single-identity flow. Credentials never enter the prompt, skill, transcript, or MCP response. Before posting it verifies the token login, exact current PR head, and every inline-comment path. It submits a formal GitHub review (`APPROVE`, `REQUEST_CHANGES`, or `COMMENT`) with a general body and optional inline comments, records the returned URL in the handoff, and uses a content marker to avoid duplicate reviews. A re-review must refresh `headSha`.
+The delegated tool mints a short-lived token from the provider-specific reviewer App (`claude`, `codex`, or `antigravity`/Gemini), or reads the backward-compatible `~/.config/ghtoken` fallback when no reviewer App is configured. A caller may still pin `expectedLogin` for a strict single-identity flow. Credentials never enter the prompt, skill, transcript, or MCP response. Before posting it verifies the token login, exact current PR head, and every inline-comment path. The App submits a formal GitHub review (`APPROVE`, `REQUEST_CHANGES`, or `COMMENT`) and an exact-head `agent-review` commit status, records both in the handoff, and uses content markers to avoid duplicate work. A PAT fallback is comment-only and produces no gate. A re-review must refresh `headSha`.
 
-Writer-side PR delivery uses a separate `githubBuilder` authorization bound to one repository, expected bot login, current head SHA, optional PR, and an explicit `allowedOperations` list. Claude and Codex receive only `github_builder` tools; Antigravity returns a validated operation envelope that the broker executes unchanged outside model context. Supported actions are create/update the designated PR, read/reply/resolve exact review threads, mark ready, and merge the exact PR at the exact head SHA. Every mutation rechecks the per-operation allowlist, identity, and head state and returns an idempotent receipt. The default allowlist excludes `merge`; normal goal-loop and pair-program runs stop at a green reviewed PR unless the user explicitly adds `merge` and authorizes the SHA-pinned merge.
+Writer-side PR delivery uses a separate `githubBuilder` authorization bound to one repository, expected bot login, current head SHA, optional PR, and an explicit `allowedOperations` list. Claude and Codex receive only `github_builder` tools; Antigravity returns a validated operation envelope that the broker executes unchanged outside model context. Supported actions are create/update the designated PR, read/reply/resolve exact review threads, mark ready, and merge the exact PR at the exact head SHA. Every mutation rechecks the per-operation allowlist, identity, and head state and returns an idempotent receipt. Before merge, the builder also requires `agent-review=success` on that head from a configured reviewer App. The default allowlist excludes `merge`; normal goal-loop and pair-program runs stop at a green reviewed PR unless the user explicitly adds `merge` and authorizes the SHA-pinned merge.
 
 ## Browser boundary
 

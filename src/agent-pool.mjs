@@ -5,7 +5,7 @@ import { antigravityToolRequest, claudeToolRequest, codexToolRequest } from "./t
 import { parseReviewEnvelope, reviewEnvelopeInstructions } from "./review-envelope.mjs";
 import { loadConfiguredFallbackModels } from "./model-fallbacks.mjs";
 import { builderEnvelopeInstructions, parseBuilderEnvelope } from "./builder-envelope.mjs";
-import { configuredReviewerLogin, createInstallationToken } from "./github-app-auth.mjs";
+import { configuredReviewerLogin, createInstallationToken, inspectGitHubAppRoles } from "./github-app-auth.mjs";
 import { createBoundBuilderClient } from "./github-builder-client.mjs";
 
 function textFrom(result) {
@@ -93,10 +93,17 @@ export function createAgentPool({
     if (!githubBuilder) throw new Error("No bound GitHub builder authorization is configured.");
     const credential = await createInstallationToken({ role: "builder", repository: githubBuilder.repository });
     if (credential.expectedLogin !== githubBuilder.expectedLogin) throw new Error("Configured builder identity does not match the bound authorization.");
+    const appRoles = await inspectGitHubAppRoles();
+    const trustedReviewLogins = [
+      appRoles.roles?.reviewer?.expectedLogin,
+      ...Object.values(appRoles.roles?.reviewers || {}).map((reviewer) => reviewer.expectedLogin),
+    ].filter(Boolean);
     return createBoundBuilderClient({
+      ...githubBuilder,
       token: credential.token,
       verifiedLogin: credential.verifiedLogin,
-      ...githubBuilder,
+      requiredReviewStatusContext: "agent-review",
+      trustedReviewLogins,
     });
   }
 

@@ -39,6 +39,8 @@ Use the same `workProfile` distinction when Codex is the delegated writer. `impl
 
 If repository instructions require the reviewer to mirror findings to the pull request, treat that as standing authorization for the review publication only. Resolve the repository, PR number, and exact current head SHA, then pass them as `githubReview` for Claude, Codex, or Antigravity. Omit identity fields so the broker selects the active provider's user-owned reviewer App from machine-local configuration. Set `expectedLogin` or a provider entry in `expectedLogins` only when repository policy explicitly pins an exact bot. Never embed App IDs, installation IDs, private keys, or tokens in a skill. The reviewer must author the durable handoff first, then one formal PR review with a general verdict and inline comments for actionable line-specific findings. Claude and Codex use the bound review tools directly. Antigravity authors a validated review envelope that the broker sends unchanged through the target-bound publisher because `agy` lacks per-session MCP injection. Do not substitute the chair's personal `gh` identity.
 
+An App-authored verdict also publishes the exact-head `agent-review` commit status. A PAT compatibility credential is comment-only: it cannot approve, request changes, or publish the gate. Never describe a bot approval as satisfying GitHub's nonzero human-approval count, and never switch to a personal token to make it count.
+
 ## Show the handoff receipt
 
 Before calling the tool, show:

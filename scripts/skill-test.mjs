@@ -86,6 +86,8 @@ assert.match(askAgent, /workCommands/);
 assert.match(askAgent, /workProfile/);
 assert.match(askAgent, /Pass the current host as `chair`/);
 assert.match(askAgent, /provider's user-owned reviewer App/);
+assert.match(askAgent, /agent-review/);
+assert.match(askAgent, /never switch to a personal token/i);
 assert.doesNotMatch(askAgent, /~\/.config\/ghtoken|required bot login/);
 for (const term of ["detail: status", "includeTurns: 0", "afterTurn"]) assert.ok(askAgent.includes(term));
 assert.match(askAgent, /Never substitute a long-running Bash, sleep, gh, or PR polling loop/);
@@ -102,6 +104,7 @@ assert.match(roundtable, /workProfile/);
 assert.match(roundtable, /activeCall/);
 assert.match(roundtable, /indeterminate/);
 assert.match(roundtable, /provider's user-owned reviewer App/);
+assert.match(roundtable, /PAT compatibility is comment-only/);
 assert.doesNotMatch(roundtable, /~\/.config\/ghtoken|required bot login/);
 for (const term of ["detail: status", "includeTurns: 0", "afterTurn"]) assert.ok(roundtable.includes(term));
 assert.match(roundtable, /Never substitute a long-running Bash, sleep, gh, or PR polling loop/);
@@ -123,6 +126,8 @@ for (const term of ["bridge capabilities", "bridge preflight", "bridge roles", "
 for (const term of ["detail: status", "includeTurns: 0", "afterTurn"]) assert.ok(pairProgram.includes(term));
 assert.match(pairProgram, /Never substitute a long-running Bash, sleep, gh, or PR polling loop/);
 assert.match(pairProgram, /provider-specific, user-owned Apps/);
+assert.match(pairProgram, /agent-review=success/);
+assert.match(pairProgram, /never replace the App with a personal PAT/);
 
 const goalLoop = await readFile(resolve(root, "skills/goal-loop/SKILL.md"), "utf8");
 assert.match(goalLoop, /GOAL LOOP STARTING/);
@@ -140,6 +145,8 @@ assert.match(goalLoop, /workProfile/);
 assert.match(goalLoop, /activeCall/);
 assert.match(goalLoop, /indeterminate/);
 assert.match(goalLoop, /provider's user-owned App/);
+assert.match(goalLoop, /agent-review=success/);
+assert.match(goalLoop, /never retry the merge or review through a personal PAT/);
 for (const term of ["detail: status", "includeTurns: 0", "afterTurn"]) assert.ok(goalLoop.includes(term));
 assert.match(goalLoop, /Never substitute a long-running Bash, sleep, gh, or PR polling loop/);
 
@@ -347,6 +354,8 @@ for (const term of [
 assert.match(takeTheHelm, /Never leave the user at a static/);
 assert.match(takeTheHelm, /Never substitute a long-running Bash, sleep/);
 assert.match(takeTheHelm, /Merge only when repository policy contains standing auto-merge authority or the exact head SHA has been explicitly authorized/);
+assert.match(takeTheHelm, /agent-review=success/);
+assert.match(takeTheHelm, /never use an owner PAT bypass/);
 assert.match(takeTheHelm, /Routine uncertainty.*is not an escalation/);
 assert.match(takeTheHelm, /Continue with two models or one model/);
 

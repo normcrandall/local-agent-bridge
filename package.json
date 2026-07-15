@@ -8,6 +8,7 @@
     "doctor": "node scripts/doctor.mjs",
     "generate:skills": "node scripts/generate-council-skills.mjs",
     "github-app:installations": "node scripts/github-app-installations.mjs",
+    "github-app:verify": "node scripts/github-app-permission-check.mjs",
     "github-app:run": "node scripts/github-app-run.mjs",
     "install:global": "node scripts/install-global.mjs",
     "smoke": "node scripts/smoke-test.mjs",
