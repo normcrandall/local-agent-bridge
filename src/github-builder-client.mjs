@@ -14,7 +14,11 @@ async function responseJson(response, label) {
   const text = await response.text();
   let parsed = null;
   try { parsed = text ? JSON.parse(text) : null; } catch {}
-  if (!response.ok) throw new Error(`${label} failed: ${parsed?.message || text || response.statusText}`);
+  if (!response.ok) {
+    const error = new Error(`${label} failed: ${parsed?.message || text || response.statusText}`);
+    error.status = response.status;
+    throw error;
+  }
   return parsed;
 }
 
@@ -244,6 +248,7 @@ export function createBoundBuilderClient({
     }
     let reviewGate = null;
     let machineStatus = null;
+    let machineStatusUnavailableReason = null;
     let reviews = null;
     const effectiveReviewsFor = async (trustedLogins) => {
       if (!reviews) {
@@ -265,26 +270,12 @@ export function createBoundBuilderClient({
       }
       return [...latestByLogin.values()];
     };
-    if (requiredReviewStatusContext && trustedReviewLogins.length) {
-      const statuses = await requestPages({
-        ...context,
-        path: `/repos/${repository}/commits/${headSha}/statuses?per_page=100`,
-      });
-      if (!Array.isArray(statuses)) throw new Error("GitHub returned an invalid machine-review status history.");
-      machineStatus = statuses.find((candidate) => candidate.context === requiredReviewStatusContext);
-      if (machineStatus?.state === "success" && trustedReviewLogins.includes(machineStatus.creator?.login)) {
-        reviewGate = {
-          type: "machine_status",
-          context: machineStatus.context,
-          state: machineStatus.state,
-          login: machineStatus.creator.login,
-        };
-      }
-    }
-    if (!reviewGate && trustedReviewLogins.length) {
-      const effectiveReviews = await effectiveReviewsFor(trustedReviewLogins);
-      const changesRequested = effectiveReviews.find((review) => review.state === "CHANGES_REQUESTED");
-      const approval = effectiveReviews.find((review) => review.state === "APPROVED");
+    const effectiveAppReviews = trustedReviewLogins.length
+      ? await effectiveReviewsFor(trustedReviewLogins)
+      : [];
+    if (effectiveAppReviews.length) {
+      const changesRequested = effectiveAppReviews.find((review) => review.state === "CHANGES_REQUESTED");
+      const approval = effectiveAppReviews.find((review) => review.state === "APPROVED");
       if (approval && !changesRequested) {
         reviewGate = {
           type: "trusted_app_review",
@@ -293,6 +284,27 @@ export function createBoundBuilderClient({
           reviewId: approval.id,
           submittedAt: approval.submitted_at,
         };
+      }
+    }
+    if (!reviewGate && effectiveAppReviews.length === 0 && requiredReviewStatusContext && trustedReviewLogins.length) {
+      try {
+        const statuses = await requestPages({
+          ...context,
+          path: `/repos/${repository}/commits/${headSha}/statuses?per_page=100`,
+        });
+        if (!Array.isArray(statuses)) throw new Error("GitHub returned an invalid machine-review status history.");
+        machineStatus = statuses.find((candidate) => candidate.context === requiredReviewStatusContext);
+        if (machineStatus?.state === "success" && trustedReviewLogins.includes(machineStatus.creator?.login)) {
+          reviewGate = {
+            type: "machine_status",
+            context: machineStatus.context,
+            state: machineStatus.state,
+            login: machineStatus.creator.login,
+          };
+        }
+      } catch (error) {
+        if (error?.status !== 403) throw error;
+        machineStatusUnavailableReason = error.message;
       }
     }
     if (!reviewGate && trustedHumanReviewLogins.length) {
@@ -310,8 +322,17 @@ export function createBoundBuilderClient({
       }
     }
     if (!reviewGate) {
+      if (!trustedHumanReviewLogins.length && effectiveAppReviews.length) {
+        const decisions = effectiveAppReviews
+          .map((review) => `${review.user.login}:${review.state}`)
+          .join(", ");
+        throw new Error(`Configured reviewer App decisions do not authorize merge on exact head ${headSha}: ${decisions}.`);
+      }
       if (!trustedHumanReviewLogins.length && machineStatus?.state !== "success") {
-        throw new Error(`No exact-head approval from a configured reviewer App was found, and machine-review status ${requiredReviewStatusContext} is not successful on ${headSha}.`);
+        const statusDetail = machineStatusUnavailableReason
+          ? `the optional machine-review status could not be read (${machineStatusUnavailableReason})`
+          : `machine-review status ${requiredReviewStatusContext} is not successful`;
+        throw new Error(`No exact-head approval from a configured reviewer App was found, and ${statusDetail} on ${headSha}.`);
       }
       if (!trustedHumanReviewLogins.length && !trustedReviewLogins.includes(machineStatus?.creator?.login)) {
         throw new Error(`No exact-head approval from a configured reviewer App was found, and machine-review status was not authored by a configured reviewer App: ${machineStatus?.creator?.login || "unknown"}.`);
