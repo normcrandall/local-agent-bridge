@@ -1,6 +1,6 @@
 ---
 name: council-discovery
-description: Discover valuable new features for an existing application with independent Claude, Codex, and Antigravity analysis, optional public competitive-product research, evidence-backed consensus, and implementation-ready GitHub issues through a Wayfinder decision map. Ground every recommendation in customer retention, customer acquisition, maintainability, reduced operating overhead, or increased ROI. Use for product discovery, competitive feature analysis, roadmap expansion, feature ideation grounded in an existing codebase, or requests asking what an app should build next.
+description: Discover valuable new features for an existing application with independent Claude, Codex, and Antigravity analysis, a systematic web-wide competitor and substitute landscape scan, evidence-backed consensus, and implementation-ready GitHub issues through a Wayfinder decision map. Ground every recommendation in customer retention, customer acquisition, maintainability, reduced operating overhead, or increased ROI. Use for product discovery, competitive landscape and feature analysis, roadmap expansion, feature ideation grounded in an existing codebase, or requests asking what an app should build next.
 ---
 
 # Council Discovery
@@ -42,17 +42,41 @@ Do not edit product code. This workflow creates planning artifacts and issues on
 
 ## Add competitive evidence when useful
 
-Use competitive research when the user names competitors, the product category is identifiable, or parity and differentiation materially affect acquisition or retention. Do not force it into an internal-tool or novel-domain review where the comparison would be artificial.
+Run a web landscape scan when the product has a public market, even when the user names no competitors. Skip it only for a genuinely private internal tool, a market with no discoverable public alternatives, or when the user explicitly excludes web research; state the reason and coverage loss.
 
-Build a bounded comparison set, normally three to five products:
+Search broadly before choosing what to compare deeply. Build a discovery pool of at least eight credible products when the market supports it, then shortlist three to six representative products for detailed comparison:
 
 - **Direct competitors** solve the same core job for a similar customer.
 - **Adjacent substitutes** solve the job through a different workflow or category.
 - **Aspirational benchmarks** demonstrate an unusually effective interaction, operating model, or capability relevant to this product.
 
-Prefer products named by the user. Otherwise infer candidates, verify that they are current and relevant, and explain the classification. Research public product surfaces, official documentation, changelogs, pricing, demos, and first-party case studies. Use public third-party reviews only as attributed signals, never as settled fact. Record the URL, access date, plan or edition, geography when relevant, and whether each statement is an observed behavior or a vendor claim.
+Prefer products named by the user, but never stop there. Give the three participants independent search lanes before sharing names:
+
+1. **Category lane** — direct competitors found through category terms, job-to-be-done synonyms, buyer language, comparison searches, and relevant marketplaces or directories.
+2. **Substitute lane** — adjacent workflows, manual alternatives, platform features, open-source options, emerging entrants, and products serving the same outcome from another category.
+3. **Signal lane** — current reviews, community discussions, support complaints, app-store feedback, changelogs, launch announcements, integration ecosystems, and “alternative to” searches that reveal demand or movement.
+
+Each lane must use at least two materially different query families. Vary user vocabulary, geography, segment, and language when the product scope makes them relevant. Search-result snippets and rankings discover candidates; they are not evidence by themselves.
+
+Merge the independent pools only after all lanes complete. Deduplicate renamed, acquired, white-label, regional, and parent/subsidiary products. Classify every credible candidate and explain exclusions. If fewer than eight credible products exist, retain the smaller pool and list the queries and exclusion reasons rather than padding it with irrelevant names.
+
+Continue discovery until search saturation: two consecutive materially different query families produce no new credible competitor or substitute. Cap the scan when further searching is unlikely to change the representative shortlist; record the uncovered regions, languages, segments, paid surfaces, and authentication boundaries.
+
+Verify shortlisted products through public product surfaces, official documentation, changelogs, pricing, demos, and first-party case studies. Sample independent market signals for each important capability when available. Treat SEO comparison pages, affiliate rankings, anonymous claims, and vendor-authored competitor pages as leads requiring corroboration. Record the URL, publication or update date when visible, access date, plan or edition, geography when relevant, and whether each statement is observed behavior, a vendor claim, or an attributed external signal.
 
 Set `browser: true` for competitive phases so peers can inspect public product experiences in isolated browsers. Do not sign up, purchase, bypass access controls, accept legal terms, scrape prohibited surfaces, or use private credentials without explicit authorization. Pricing, packaging, and product capabilities change; verify them during the run instead of relying on model memory.
+
+Maintain a compact landscape ledger:
+
+```text
+Query family: <intent and representative query>
+Lane: category | substitute | signal
+Candidates found: <names>
+Candidate classification: direct | adjacent | benchmark | excluded
+Sources checked: <URLs with source type and dates>
+Coverage: <segment, geography, language, plan, and access limits>
+New information: yes | no
+```
 
 For each relevant capability, capture:
 
@@ -94,6 +118,7 @@ Chair: <provider>
 Mode: review; no source-code writer
 Competitive research: off | on (<products>)
 Browser: isolated public-product research when competitive research is on
+Web landscape: <lanes, candidate count, shortlist count, and saturation status>
 Tool: collaboration.start_collaboration
 Wayfinder map: <pending or URL>
 Decision ticket: <pending or URL>
@@ -106,6 +131,10 @@ Return the `collaborationId` immediately. Poll with `detail: status`, `includeTu
 ## Run the discovery phases
 
 Give every participant the same baseline packet. Prevent circular delegation. Run these phases in the same persistent collaboration:
+
+### 0. Independent web landscape
+
+When competitive research applies, run the category, substitute, and signal lanes independently. Do not seed one participant with another participant's product list. Consolidate only after each lane returns its queries, candidates, classifications, source types, exclusions, and coverage limits. The chair verifies the shortlist and attaches the landscape ledger to the Wayfinder portfolio resolution.
 
 ### 1. Independent proposals
 
@@ -148,6 +177,7 @@ A candidate reaches consensus only when every available participant, after criti
 - the problem and beneficiary;
 - the evidence that the problem exists;
 - when competition is material, the relevance and freshness of the comparison plus the chosen parity or differentiation posture;
+- whether the web scan reached the stated pool and saturation threshold, or transparently documented why it could not;
 - the primary business lens and credible mechanism connecting the enhancement to that outcome;
 - the scoped user outcome;
 - feasibility at the proposed size;
@@ -194,6 +224,7 @@ Create issues in dependency order. Apply `ready-for-agent` only when no unresolv
 ## Competitive context
 
 - Products reviewed: <names, plans or editions, and access dates, or not applicable>
+- Landscape coverage: <query lanes, candidate pool, shortlist, saturation, segments, geographies, languages, and access limits>
 - Evidence: <links labeled observed behavior, vendor claim, or attributed third-party signal>
 - Strategic posture: parity | differentiation | substitute response | deliberate non-adoption
 - Why this belongs here: <customer and business mechanism; never only “a competitor has it”>
@@ -241,9 +272,10 @@ Report:
 
 1. the Wayfinder map and resolved portfolio decision;
 2. proposals from each provider and the material objections;
-3. accepted, rejected, and deferred candidates with evidence, primary business lens, ROI hypothesis, and competitive posture when applicable;
-4. consensus level and unavailable providers;
-5. every created GitHub issue in dependency order;
-6. the portable collaboration ID and terminal status.
+3. the web landscape ledger, candidate pool, shortlist, saturation result, and coverage gaps;
+4. accepted, rejected, and deferred candidates with evidence, primary business lens, ROI hypothesis, and competitive posture when applicable;
+5. consensus level and unavailable providers;
+6. every created GitHub issue in dependency order;
+7. the portable collaboration ID and terminal status.
 
 The issue tracker is the source of truth. Do not claim completion until the published issues have been read back and verified.
