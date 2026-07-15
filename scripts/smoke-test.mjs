@@ -297,6 +297,9 @@ async function callAntigravityWithoutModel() {
     if (!serialized.includes("--add-dir")) {
       throw new Error("Antigravity delegated workspace was not added explicitly");
     }
+    if ((serialized.match(/--add-dir/g) || []).length < 2) {
+      throw new Error("Antigravity Git metadata directories were not added explicitly");
+    }
     const configuredDefault = await client.callTool({
       name: "ask_antigravity",
       arguments: { prompt: "configured model smoke test" },

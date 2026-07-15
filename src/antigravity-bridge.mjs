@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -46,6 +46,20 @@ function projectDirectory(requested) {
 function timeoutMs(requestedSeconds) {
   if (requestedSeconds === undefined) return DEFAULT_TIMEOUT_MS;
   return Math.min(requestedSeconds * 1000, MAX_TIMEOUT_MS);
+}
+
+function gitMetadataDirectories(cwd) {
+  const directories = [];
+  for (const argument of ["--absolute-git-dir", "--git-common-dir"]) {
+    const result = spawnSync("git", ["rev-parse", "--path-format=absolute", argument], {
+      cwd,
+      encoding: "utf8",
+      timeout: 5_000,
+    });
+    const directory = result.status === 0 ? result.stdout.trim() : "";
+    if (directory && existsSync(directory) && statSync(directory).isDirectory()) directories.push(realpathSync(directory));
+  }
+  return [...new Set(directories)];
 }
 
 function clipped(value) {
@@ -101,7 +115,9 @@ function runAntigravity({ prompt, cwd, mode, model, timeoutSeconds, permissionPr
   if (logFile) args.push("--log-file", logFile);
   // Headless sandbox sessions otherwise open in Antigravity's scratch project
   // instead of granting the delegated worktree to terminal tools.
-  args.push("--add-dir", actualCwd);
+  for (const directory of [actualCwd, ...gitMetadataDirectories(actualCwd)]) {
+    args.push("--add-dir", directory);
+  }
   if (mode === "work" && permissionProfile === "yolo") {
     if (!AGY_CAPABILITIES.yolo) throw new Error(`Installed Antigravity ${AGY_CAPABILITIES.version} cannot enable YOLO mode.`);
     args.push("--dangerously-skip-permissions");
