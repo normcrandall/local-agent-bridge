@@ -73,15 +73,90 @@ try {
   assert.deepEqual(names, [
     "acknowledge_handoff",
     "archive_collaboration",
+    "authorize_portfolio_merge",
+    "begin_portfolio_merge_validation",
     "cancel_collaboration",
     "continue_collaboration",
+    "create_portfolio",
+    "enqueue_portfolio_merge",
     "get_collaboration",
+    "get_portfolio",
     "list_collaborations",
+    "list_portfolios",
+    "plan_portfolio",
     "prune_collaborations",
     "record_decision",
     "record_native_chair_turn",
+    "record_portfolio_merge",
+    "record_portfolio_merge_validation",
+    "recover_portfolio_merge_validation",
+    "refresh_portfolio_target",
     "start_collaboration",
+    "update_portfolio_item",
   ]);
+  const targetSha = "a".repeat(40);
+  const firstHead = "b".repeat(40);
+  const plannedPortfolio = await firstClient.callTool({
+    name: "plan_portfolio",
+    arguments: {
+      maxParallel: 2,
+      items: [
+        { id: "101", title: "First", priority: 10, paths: ["src/first"] },
+        { id: "102", title: "Second", priority: 9, blockedBy: ["101"], paths: ["src/second"] },
+        { id: "103", title: "Third", priority: 8, paths: ["src/third"] },
+      ],
+    },
+  });
+  assert.deepEqual(plannedPortfolio.structuredContent.schedule.selected.map((item) => item.id), ["101", "103"]);
+  let portfolio = (await firstClient.callTool({
+    name: "create_portfolio",
+    arguments: {
+      objective: "Deliver independent work safely",
+      workspace: ".",
+      maxParallel: 2,
+      targetBranch: "main",
+      targetSha,
+      items: [
+        { id: "101", title: "First", priority: 10, paths: ["src/first"] },
+        { id: "102", title: "Second", priority: 9, blockedBy: ["101"], paths: ["src/second"] },
+      ],
+    },
+  })).structuredContent;
+  assert.match(portfolio.id, /^helm-/);
+  portfolio = (await firstClient.callTool({
+    name: "update_portfolio_item",
+    arguments: { portfolioId: portfolio.id, expectedRevision: portfolio.revision, itemId: "101", status: "implementing", writer: "claude" },
+  })).structuredContent;
+  portfolio = (await firstClient.callTool({
+    name: "enqueue_portfolio_merge",
+    arguments: { portfolioId: portfolio.id, expectedRevision: portfolio.revision, itemId: "101", prNumber: 11, headSha: firstHead, priority: 10 },
+  })).structuredContent;
+  portfolio = (await firstClient.callTool({
+    name: "begin_portfolio_merge_validation",
+    arguments: { portfolioId: portfolio.id, expectedRevision: portfolio.revision, itemId: "101", observedTargetSha: targetSha, observedHeadSha: firstHead },
+  })).structuredContent;
+  portfolio = (await firstClient.callTool({
+    name: "record_portfolio_merge_validation",
+    arguments: { portfolioId: portfolio.id, expectedRevision: portfolio.revision, itemId: "101", outcome: "passed", checks: ["npm test"] },
+  })).structuredContent;
+  const mergeAuthorizationResult = await firstClient.callTool({
+    name: "authorize_portfolio_merge",
+    arguments: { portfolioId: portfolio.id, itemId: "101", observedTargetSha: targetSha, observedHeadSha: firstHead },
+  });
+  assert.equal(mergeAuthorizationResult.structuredContent.authorization.authorized, true);
+  portfolio = (await firstClient.callTool({
+    name: "record_portfolio_merge",
+    arguments: {
+      portfolioId: portfolio.id,
+      expectedRevision: portfolio.revision,
+      itemId: "101",
+      expectedTargetSha: targetSha,
+      expectedHeadSha: firstHead,
+      mergedSha: "c".repeat(40),
+    },
+  })).structuredContent;
+  assert.equal(portfolio.items.find((item) => item.id === "101").status, "merged");
+  assert.equal(portfolio.schedule.selected[0].id, "102");
   const reconciledTerminal = await firstClient.callTool({
     name: "get_collaboration", arguments: { collaborationId: terminalReconcileId, detail: "full", includeTurns: 0 },
   });

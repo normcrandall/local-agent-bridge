@@ -11,6 +11,7 @@ import { GITHUB_LOGIN_PATTERN } from "./github-app-auth.mjs";
 import {
   appendEvent,
   archiveCollaboration,
+  collaborationDirectory,
   collaborationView,
   createCollaboration,
   listCollaborations,
@@ -25,10 +26,24 @@ import { createDecisionReceipt, DECISION_CATEGORIES } from "./decision-policy.mj
 import { resolveNativeChair } from "./native-chair.mjs";
 import { clearTerminalRuntime, legacyWorkerCommandMatches, reconciliationAction, workerCancellationMatches, workerCommandMatches } from "./collaboration-cleanup.mjs";
 import { acknowledgeCompletion } from "./handoff-protocol.mjs";
+import { analyzePortfolio, buildExecutionWaves, normalizePortfolioItems } from "./portfolio-scheduler.mjs";
+import { createPortfolio, listPortfolios, readPortfolio, updatePortfolio } from "./portfolio-store.mjs";
+import {
+  beginMergeValidation,
+  createArbitrationDossier,
+  createMergeTrain,
+  enqueueMergeCandidate,
+  mergeAuthorization,
+  recoverMergeValidation,
+  recordMergeResult,
+  recordMergeValidation,
+  refreshMergeTarget,
+} from "./merge-train.mjs";
 
 const RUNTIME_ROOT = realpathSync(process.env.BRIDGE_RUNTIME_ROOT || process.env.BRIDGE_ROOT || process.cwd());
 const WORKSPACE_ROOT = realpathSync(process.env.BRIDGE_WORKSPACE_ROOT || process.env.BRIDGE_ROOT || process.cwd());
 const WORKER = resolve(RUNTIME_ROOT, "scripts/collaboration-worker.mjs");
+const PORTFOLIO_ROOT = resolve(process.env.BRIDGE_PORTFOLIO_DIR || collaborationDirectory(WORKSPACE_ROOT), "portfolios");
 const TERMINAL_STATUSES = new Set(["agreed", "needs_user", "turn_limit", "failed", "cancelled", "budget"]);
 const STATUS_VALUES = ["queued", "running", "cancelling", "indeterminate", ...TERMINAL_STATUSES];
 
@@ -205,6 +220,28 @@ function compactStatusView(view) {
   return status;
 }
 
+function refreshPortfolioState(state) {
+  const schedule = analyzePortfolio({ items: state.items, maxParallel: state.maxParallel });
+  const finished = state.items.every((item) => ["merged", "completed", "obsolete"].includes(item.status));
+  const hasActive = state.items.some((item) => ["claimed", "planning", "implementing", "verifying", "reviewing", "repairing", "ready_to_merge", "integrating", "arbitrating"].includes(item.status));
+  return {
+    ...state,
+    status: finished ? "complete" : hasActive ? "running" : schedule.selected.length ? "ready" : "blocked",
+    schedule,
+  };
+}
+
+function updatePortfolioItemState(state, itemId, patch) {
+  let found = false;
+  const items = state.items.map((item) => {
+    if (item.id !== String(itemId)) return item;
+    found = true;
+    return { ...item, ...patch, id: item.id };
+  });
+  if (!found) throw new Error(`Portfolio item ${itemId} does not exist.`);
+  return refreshPortfolioState({ ...state, items });
+}
+
 const collaborationId = z.string().regex(/^bridge-[0-9a-f-]{36}$/).describe(
   "Portable collaboration ID returned by start_collaboration.",
 );
@@ -290,6 +327,32 @@ const chairSchema = z.object({
   capabilities: z.record(z.string(), z.unknown()).default({}),
   allowSameProviderDelegation: z.boolean().default(false),
 }).strict().optional().describe("Declare the active host as a native participant. Its provider is not delegated again unless explicitly allowed.");
+const portfolioId = z.string().regex(/^helm-[0-9a-f-]{36}$/).describe("Durable portfolio ID returned by create_portfolio.");
+const portfolioStatusSchema = z.enum([
+  "ready", "blocked", "claimed", "planning", "implementing", "verifying", "reviewing", "repairing",
+  "ready_to_merge", "integrating", "arbitrating", "needs_user", "indeterminate", "failed", "merged", "completed", "obsolete",
+]);
+const portfolioItemSchema = z.object({
+  id: z.string().min(1).max(200),
+  title: z.string().min(1).max(500).optional(),
+  task: z.string().min(1).max(50_000).optional(),
+  priority: z.number().finite().default(0),
+  status: portfolioStatusSchema.default("ready"),
+  blockedBy: z.array(z.string().min(1).max(200)).max(200).default([]),
+  conflictsWith: z.array(z.string().min(1).max(200)).max(200).default([]),
+  paths: z.array(z.string().min(1).max(1_000)).max(500).default([]),
+  resources: z.array(z.string().min(1).max(500)).max(200).default([]),
+  verificationCommands: verificationCommandsSchema.default([]),
+}).strict();
+const arbitrationDossierSchema = z.object({
+  itemId: z.string().min(1),
+  classification: z.enum(["mechanical", "structural", "semantic", "requirement"]),
+  files: z.array(z.string()).default([]),
+  currentIntent: z.string().min(1),
+  incomingIntent: z.string().min(1),
+  acceptanceCriteria: z.array(z.string()).default([]),
+  createdAt: z.string().optional(),
+}).passthrough();
 
 const server = new McpServer(
   { name: "desktop-agent-collaboration", version: "0.2.0" },
@@ -461,6 +524,255 @@ server.registerTool(
     }
     const view = await collaborationView(WORKSPACE_ROOT, id, includeTurns, afterTurn);
     return toolResponse(detail === "full" ? view : compactStatusView(view));
+  },
+);
+
+server.registerTool(
+  "plan_portfolio",
+  {
+    title: "Plan parallel issue portfolio",
+    description: "Compute the safe ready frontier and dry-run execution waves from explicit dependencies, conflicts, path scopes, and shared resources without starting work.",
+    inputSchema: {
+      items: z.array(portfolioItemSchema).min(1).max(500),
+      maxParallel: z.number().int().min(1).max(20).default(2),
+    },
+  },
+  async ({ items, maxParallel }) => toolResponse({
+    schedule: analyzePortfolio({ items, maxParallel }),
+    waves: buildExecutionWaves({ items, maxParallel }),
+  }),
+);
+
+server.registerTool(
+  "create_portfolio",
+  {
+    title: "Create durable parallel issue portfolio",
+    description: "Create a revisioned portfolio ledger and exact-SHA merge train. Selected lanes must still be started through start_collaboration in isolated worktrees.",
+    inputSchema: {
+      objective: z.string().min(1).max(50_000),
+      workspace: z.string().optional(),
+      items: z.array(portfolioItemSchema).min(1).max(500),
+      maxParallel: z.number().int().min(1).max(20).default(2),
+      targetBranch: z.string().min(1).max(500).default("main"),
+      targetSha: z.string().regex(/^[0-9a-f]{40}$/i),
+    },
+  },
+  async ({ objective, workspace: requestedWorkspace, items, maxParallel, targetBranch, targetSha }) => {
+    blockNestedCollaboration();
+    const workspace = projectDirectory(requestedWorkspace);
+    const normalized = normalizePortfolioItems(items);
+    const initial = refreshPortfolioState({
+      objective,
+      workspace,
+      maxParallel,
+      items: normalized,
+      mergeTrain: createMergeTrain({ targetBranch, targetSha }),
+    });
+    return toolResponse(await createPortfolio(PORTFOLIO_ROOT, initial));
+  },
+);
+
+server.registerTool(
+  "get_portfolio",
+  {
+    title: "Get parallel issue portfolio",
+    description: "Read the current durable portfolio, ready frontier, active lanes, and merge train.",
+    inputSchema: { portfolioId },
+  },
+  async ({ portfolioId: id }) => toolResponse(await readPortfolio(PORTFOLIO_ROOT, id)),
+);
+
+server.registerTool(
+  "list_portfolios",
+  {
+    title: "List parallel issue portfolios",
+    description: "List recent durable portfolio ledgers.",
+    inputSchema: { limit: z.number().int().min(1).max(100).default(20) },
+  },
+  async ({ limit }) => toolResponse({ portfolios: (await listPortfolios(PORTFOLIO_ROOT)).slice(0, limit) }),
+);
+
+server.registerTool(
+  "update_portfolio_item",
+  {
+    title: "Update portfolio lane",
+    description: "Record one lane lifecycle receipt using optimistic revision control, then recompute the safe frontier.",
+    inputSchema: {
+      portfolioId,
+      expectedRevision: z.number().int().min(1),
+      itemId: z.string().min(1).max(200),
+      status: portfolioStatusSchema,
+      writer: z.enum(KNOWN_AGENTS).optional(),
+      collaborationId: collaborationId.optional(),
+      worktree: z.string().max(5_000).optional(),
+      branch: z.string().max(1_000).optional(),
+      prNumber: z.number().int().min(1).optional(),
+      headSha: z.string().regex(/^[0-9a-f]{40}$/i).optional(),
+      summary: z.string().max(20_000).optional(),
+    },
+  },
+  async ({ portfolioId: id, expectedRevision, itemId, status, ...details }) => {
+    blockNestedCollaboration();
+    const patch = Object.fromEntries(Object.entries({ status, ...details }).filter(([, value]) => value !== undefined));
+    return toolResponse(await updatePortfolio(PORTFOLIO_ROOT, id, expectedRevision, (current) => updatePortfolioItemState(current, itemId, patch)));
+  },
+);
+
+server.registerTool(
+  "enqueue_portfolio_merge",
+  {
+    title: "Enqueue exact-SHA portfolio merge",
+    description: "Add or refresh one verified PR in the bridge-owned merge train. This does not merge it.",
+    inputSchema: {
+      portfolioId,
+      expectedRevision: z.number().int().min(1),
+      itemId: z.string().min(1).max(200),
+      prNumber: z.number().int().min(1),
+      headSha: z.string().regex(/^[0-9a-f]{40}$/i),
+      priority: z.number().finite().default(0),
+    },
+  },
+  async ({ portfolioId: id, expectedRevision, itemId, prNumber, headSha, priority }) => {
+    blockNestedCollaboration();
+    return toolResponse(await updatePortfolio(PORTFOLIO_ROOT, id, expectedRevision, (current) => updatePortfolioItemState({
+      ...current,
+      mergeTrain: enqueueMergeCandidate(current.mergeTrain, { itemId, prNumber, headSha, priority }),
+    }, itemId, { status: "ready_to_merge", prNumber, headSha })));
+  },
+);
+
+server.registerTool(
+  "begin_portfolio_merge_validation",
+  {
+    title: "Begin serialized portfolio merge validation",
+    description: "Acquire the one active integration slot after checking the observed target and PR head SHAs.",
+    inputSchema: {
+      portfolioId,
+      expectedRevision: z.number().int().min(1),
+      itemId: z.string().min(1).max(200),
+      observedTargetSha: z.string().regex(/^[0-9a-f]{40}$/i),
+      observedHeadSha: z.string().regex(/^[0-9a-f]{40}$/i),
+    },
+  },
+  async ({ portfolioId: id, expectedRevision, itemId, observedTargetSha, observedHeadSha }) => {
+    blockNestedCollaboration();
+    return toolResponse(await updatePortfolio(PORTFOLIO_ROOT, id, expectedRevision, (current) => updatePortfolioItemState({
+      ...current,
+      mergeTrain: beginMergeValidation(current.mergeTrain, { itemId, observedTargetSha, observedHeadSha }),
+    }, itemId, { status: "integrating" })));
+  },
+);
+
+server.registerTool(
+  "record_portfolio_merge_validation",
+  {
+    title: "Record portfolio merge validation",
+    description: "Record combined integration gates or a conflict dossier and release the integration slot.",
+    inputSchema: {
+      portfolioId,
+      expectedRevision: z.number().int().min(1),
+      itemId: z.string().min(1).max(200),
+      outcome: z.enum(["passed", "failed", "conflict"]),
+      checks: z.array(z.string().min(1).max(2_000)).max(100).default([]),
+      dossier: arbitrationDossierSchema.optional(),
+      error: z.string().max(20_000).optional(),
+    },
+  },
+  async ({ portfolioId: id, expectedRevision, itemId, outcome, checks, dossier, error }) => {
+    blockNestedCollaboration();
+    return toolResponse(await updatePortfolio(PORTFOLIO_ROOT, id, expectedRevision, (current) => {
+      const normalizedDossier = dossier ? createArbitrationDossier(dossier) : null;
+      const mergeTrain = recordMergeValidation(current.mergeTrain, { itemId, outcome, checks, dossier: normalizedDossier, error });
+      const status = outcome === "passed" ? "ready_to_merge" : outcome === "conflict" ? "arbitrating" : "repairing";
+      return updatePortfolioItemState({ ...current, mergeTrain }, itemId, { status, summary: error || undefined });
+    }));
+  },
+);
+
+server.registerTool(
+  "authorize_portfolio_merge",
+  {
+    title: "Authorize exact validated portfolio merge",
+    description: "Return an exact-SHA merge authorization only when combined validation is current. Actual merge still requires the separately bound GitHub builder permission.",
+    inputSchema: {
+      portfolioId,
+      itemId: z.string().min(1).max(200),
+      observedTargetSha: z.string().regex(/^[0-9a-f]{40}$/i),
+      observedHeadSha: z.string().regex(/^[0-9a-f]{40}$/i),
+    },
+  },
+  async ({ portfolioId: id, itemId, observedTargetSha, observedHeadSha }) => {
+    const current = await readPortfolio(PORTFOLIO_ROOT, id);
+    return toolResponse({ portfolioId: id, revision: current.revision, authorization: mergeAuthorization(current.mergeTrain, { itemId, observedTargetSha, observedHeadSha }) });
+  },
+);
+
+server.registerTool(
+  "recover_portfolio_merge_validation",
+  {
+    title: "Recover interrupted portfolio merge validation",
+    description: "Explicitly release an interrupted integration slot after inspection, preserving a durable reason and either requeueing the candidate or returning it for repair.",
+    inputSchema: {
+      portfolioId,
+      expectedRevision: z.number().int().min(1),
+      itemId: z.string().min(1).max(200),
+      reason: z.string().min(1).max(20_000),
+      disposition: z.enum(["requeue", "repair"]).default("requeue"),
+    },
+  },
+  async ({ portfolioId: id, expectedRevision, itemId, reason, disposition }) => {
+    blockNestedCollaboration();
+    return toolResponse(await updatePortfolio(PORTFOLIO_ROOT, id, expectedRevision, (current) => updatePortfolioItemState({
+      ...current,
+      mergeTrain: recoverMergeValidation(current.mergeTrain, { itemId, reason, disposition }),
+    }, itemId, {
+      status: disposition === "requeue" ? "ready_to_merge" : "repairing",
+      summary: `Merge validation recovered: ${reason}`,
+    })));
+  },
+);
+
+server.registerTool(
+  "refresh_portfolio_target",
+  {
+    title: "Refresh portfolio merge target",
+    description: "Record an externally advanced target SHA and invalidate every stale combined validation. Active validation must be recovered first.",
+    inputSchema: {
+      portfolioId,
+      expectedRevision: z.number().int().min(1),
+      observedTargetSha: z.string().regex(/^[0-9a-f]{40}$/i),
+      reason: z.string().min(1).max(20_000),
+    },
+  },
+  async ({ portfolioId: id, expectedRevision, observedTargetSha, reason }) => {
+    blockNestedCollaboration();
+    return toolResponse(await updatePortfolio(PORTFOLIO_ROOT, id, expectedRevision, (current) => refreshPortfolioState({
+      ...current,
+      mergeTrain: refreshMergeTarget(current.mergeTrain, { observedTargetSha, reason }),
+    })));
+  },
+);
+
+server.registerTool(
+  "record_portfolio_merge",
+  {
+    title: "Record completed portfolio merge",
+    description: "Record GitHub's successful exact-head merge, invalidate remaining combined validations, and release newly unblocked work.",
+    inputSchema: {
+      portfolioId,
+      expectedRevision: z.number().int().min(1),
+      itemId: z.string().min(1).max(200),
+      expectedTargetSha: z.string().regex(/^[0-9a-f]{40}$/i),
+      expectedHeadSha: z.string().regex(/^[0-9a-f]{40}$/i),
+      mergedSha: z.string().regex(/^[0-9a-f]{40}$/i),
+    },
+  },
+  async ({ portfolioId: id, expectedRevision, itemId, expectedTargetSha, expectedHeadSha, mergedSha }) => {
+    blockNestedCollaboration();
+    return toolResponse(await updatePortfolio(PORTFOLIO_ROOT, id, expectedRevision, (current) => updatePortfolioItemState({
+      ...current,
+      mergeTrain: recordMergeResult(current.mergeTrain, { itemId, expectedTargetSha, expectedHeadSha, mergedSha }),
+    }, itemId, { status: "merged", summary: `Merged as ${mergedSha}` })));
   },
 );
 

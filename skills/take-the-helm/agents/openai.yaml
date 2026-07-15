@@ -1,7 +1,7 @@
 interface:
   display_name: "Take the Helm"
-  short_description: "Let the council autonomously drive work to done"
-  default_prompt: "Use $take-the-helm to take ownership of this objective, resolve routine decisions with the agent council, and work through the queue without asking me unless a true escalation boundary is reached."
+  short_description: "Drive parallel issue lanes through a safe merge train"
+  default_prompt: "Use $take-the-helm to take ownership of this objective, schedule independent issues into parallel worktree lanes, serialize exact-SHA integration through the bridge merge train, arbitrate conflicts, and continue without asking me unless a true escalation boundary is reached."
 dependencies:
   tools:
     - type: "mcp"
