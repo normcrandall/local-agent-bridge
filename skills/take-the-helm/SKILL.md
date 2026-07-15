@@ -1,6 +1,6 @@
 ---
 name: take-the-helm
-description: Give the Claude, Codex, and Antigravity council operational ownership of a goal or work queue so it resolves routine questions, implements items sequentially, verifies and reviews the work, and continues without asking the user for ordinary decisions. Use for autonomous backlog execution, multi-issue delivery, or requests to take charge and drive work to completion. Escalate only for material financial risk, legal or potentially illegal activity, missing authority or credentials, destructive or irreversible external action, an explicit user-owned choice, or a question the agents genuinely cannot resolve after evidence and reversible experiments.
+description: Give the Claude, Codex, and Antigravity council operational ownership of a goal or work queue so it resolves routine questions, executes independent issues in safe parallel worktree lanes, serializes exact-SHA integration through a bridge-owned merge train, arbitrates conflicts, verifies and reviews the work, and continues without asking the user for ordinary decisions. Use for autonomous backlog execution, multi-issue delivery, parallel milestone work, or requests to take charge and drive work to completion. Escalate only for material financial risk, legal or potentially illegal activity, missing authority or credentials, destructive or irreversible external action, an explicit user-owned choice, or a question the agents genuinely cannot resolve after evidence and reversible experiments.
 ---
 
 # Take the Helm
@@ -18,6 +18,15 @@ Read and apply the installed `goal-loop`, `pair-program`, `council-grill-agents`
 
 This skill sets the autonomy policy; it does not weaken their safety, permission, identity, verification, or single-writer rules.
 
+Use the persistent collaboration portfolio tools for multi-issue work:
+
+- `plan_portfolio` validates the dependency graph and computes dry-run execution waves;
+- `create_portfolio` creates the durable `helm-<uuid>` ledger and exact-SHA merge train;
+- `update_portfolio_item` records every lane transition with optimistic revision control;
+- `enqueue_portfolio_merge`, `begin_portfolio_merge_validation`, `record_portfolio_merge_validation`, `authorize_portfolio_merge`, and `record_portfolio_merge` serialize integration and release newly unblocked work;
+- `recover_portfolio_merge_validation` explicitly releases an interrupted integration slot, while `refresh_portfolio_target` records an external target advance and invalidates stale validation;
+- `get_portfolio` and `list_portfolios` make the aggregate state portable across host apps.
+
 ## Derive the commander's intent
 
 Infer the objective, source-of-truth queue, scope, priorities, repository policy, and completion condition from the request, current issue or Wayfinder map, tracker, and repository. Do not ask for information that can be discovered.
@@ -33,9 +42,24 @@ If the request names a finite set, continue until every item is complete, blocke
 
 Define done from repository evidence: implementation, exact gates, independent review, required documentation or handoff, PR status, issue state, and deployment or merge boundaries authorized by repository policy.
 
+Default to `maxParallel: 2`. Increase it only when more independent issues, healthy distinct writers, isolated worktrees, provider capacity, and repository resources are available. Reduce it automatically when a provider is unavailable or the safe frontier is smaller. Sequential execution is the correct degraded mode when only one safe lane exists.
+
+## Build the safe frontier
+
+Before starting implementation, normalize every candidate issue into a scheduling manifest containing its ID, priority, status, hard blockers, explicit conflicts, expected paths, exclusive resources, acceptance criteria, and verification commands. Treat GitHub, Wayfinder, and parent-issue dependency links as the source of truth, then add temporary scheduling constraints discovered from repository inspection.
+
+Distinguish:
+
+- a **dependency edge**, which requires the predecessor to be merged or otherwise proven complete;
+- a **conflict edge**, which prevents simultaneous work but does not impose permanent product ordering;
+- a **path reservation**, which prevents overlapping directory or file ownership;
+- a **resource reservation**, for migrations, generated artifacts, lockfiles, shared environments, provider call capacity, or another exclusive surface.
+
+Call `plan_portfolio` before mutation. Reject dependency cycles. Do not treat an open PR, passing branch CI, or a provider handoff as satisfying a hard dependency that requires merged behavior. Recompute the frontier whenever an issue, PR, target branch, provider, or lane manifest changes.
+
 ## Reconstruct intent from Git history
 
-Before planning or changing an affected area, inspect its relevant Git and GitHub history. Use recent commits, merged pull requests, linked issues, review discussions, reversions, and blame when needed to recover why the current design exists, what was already attempted, and which constraints maintainers have established. Follow renamed files and inspect the actual diff; do not rely on commit subjects alone.
+Before planning or changing an affected area, inspect its relevant Git and GitHub history. Use commit and pull-request history, including recent commits, merged pull requests, linked issues, review discussions, reversions, and blame when needed to recover why the current design exists, what was already attempted, and which constraints maintainers have established. Follow renamed files and inspect the actual diff; do not rely on commit subjects alone.
 
 Keep the search bounded to the objective, affected paths, and enough recent history to explain the present state. Expand farther only when the current behavior or an apparent contradiction remains unexplained.
 
@@ -85,7 +109,7 @@ Escalate as genuinely unanswerable only when these attempts cannot produce a saf
 
 ## Start visibly
 
-Use `$run-roundtable`, backed by the persistent `collaboration` MCP. Include Claude, Codex, and Antigravity. Pass the current host as `chair` with its provider and absolute workspace. Keep chair work native and delegate only to peers. Omit model overrides so every provider uses the user's configured model and fallback policy.
+Use `plan_portfolio`, then `create_portfolio`, before starting issue collaborations. Include Claude, Codex, and Antigravity as the writer pool. Pass the current host as `chair` when it owns a lane, keep chair work native, and omit model overrides so every provider uses the user's configured model and fallback policy.
 
 Before starting, display:
 
@@ -94,32 +118,49 @@ TAKE THE HELM
 Objective: <goal>
 Queue: <issues, map, milestone, or frontier>
 Completion: <evidence-based done condition>
+Portfolio: <helm-id after creation>
+Safe frontier: <selected issue IDs>
+Max parallel: <default 2>
 Participants: Claude, Codex, Antigravity
 Chair: <provider>
-Current writer: <one provider or none during planning>
+Writer lanes: <issue -> provider, or pending>
 Autonomy: routine decisions owned by council
 Escalation: finance, legal/illegal, authority, irreversible action, owner-only choice, genuinely unanswerable
-Tool: collaboration.start_collaboration
+Tools: collaboration.plan_portfolio → collaboration.create_portfolio → collaboration.start_collaboration per selected lane
 Models: provider configured
 GitHub identities: provider-configured Apps; no embedded maintainer identities
 ```
 
-Return the `collaborationId` immediately. Poll with `detail: status`, `includeTurns: 0`, `afterUpdatedAt`, and `waitSeconds: 8`. Fetch completed output once when `runtime.turnCount` advances. Show changed provider-authored narrative from `runtime.activeCall.summary`; rate-limit heartbeat-only output to one compact line per 60 seconds. Never leave the user at a static “Calling …” message or repeat unchanged summaries. Never substitute a long-running Bash, sleep, `gh`, or PR polling loop for broker polling.
+Return the portfolio ID immediately, followed by each lane's collaboration ID when started. Poll each active collaboration with `detail: status`, `includeTurns: 0`, `afterUpdatedAt`, and `waitSeconds: 8`; do not put one long poll around the entire portfolio. Fetch completed output once when a lane's `runtime.turnCount` advances. Show changed provider-authored narrative and one aggregate liveness receipt per 60 seconds. Never leave the user at a static “Calling …” message or repeat unchanged summaries. Never substitute a long-running Bash, sleep, `gh`, or PR polling loop for broker polling.
 
-## Run the autonomous work loop
+## Run parallel issue lanes
 
-For each ready item:
+Start only the items selected by the portfolio's current safe frontier. Assign exactly one writer to every selected item and give it an isolated worktree. During implementation, use a writer-only collaboration for that lane so the same provider is not accidentally active in several council conversations; schedule independent review calls after a writer handoff when reviewers are free.
 
-1. **Claim and orient** — claim the issue using repository convention; read its body, comments, parent, blockers, prior attempts, relevant code, and the affected paths' pertinent commit and pull-request history.
-2. **Resolve the plan** — have all available models independently inspect the item. Resolve material disagreement through evidence or `council-grill-agents`. Record the selected plan, dissent, validation, and rollback path.
-3. **Assign exactly one writer** — use an isolated worktree or branch. Select `workProfile: implement` for local delivery through commit or `workProfile: deliver` when push and PR creation are authorized. Other models remain read-only.
-4. **Implement and verify** — follow repository TDD and quality rules, run exact local gates, and inspect the resulting diff. Do not reduce coverage or bypass gates to create progress.
-5. **Review independently** — the non-writing models review the actual diff and verification evidence. When the PR is the source of truth, pass `githubReview` with repository, PR, and current head SHA so each reviewer authors its own formal review through its configured App.
-6. **Reconcile and repair** — validate findings locally, fix valid blockers with the same writer, rerun gates, and request focused re-review. Use evidence rather than votes.
-7. **Complete delivery** — push and create or update the PR through the configured builder identity. Merge only when repository policy contains standing auto-merge authority or the exact head SHA has been explicitly authorized; otherwise leave the verified PR ready without manufacturing permission.
-8. **Advance the queue** — update or close the issue according to repository policy, release newly unblocked items, rotate roles when useful, and immediately begin the next ready item.
+For each selected lane:
 
-Never let two writers edit overlapping workspace state. Never have the chair impersonate a delegated reviewer or repost its review through a personal identity.
+1. **Claim and reserve** — claim the issue, create its worktree and branch, record its expected paths/resources, writer, and collaboration ID with `update_portfolio_item`, then recheck that it does not overlap another active lane.
+2. **Orient and plan** — read the issue, comments, parent, blockers, prior attempts, relevant code, and pertinent commit and PR history. Resolve consequential disagreement through evidence or `council-grill-agents` before source mutation.
+3. **Implement with one writer** — select `workProfile: implement` for local delivery through commit or `workProfile: deliver` for authorized push and PR creation. No other lane or reviewer may write that worktree.
+4. **Expand reservations before scope** — if implementation must touch an undeclared path, contract, migration, generated artifact, or shared resource, update the manifest and recompute the portfolio before editing it. Pause the lower-priority lane on a new collision.
+5. **Verify and hand off** — run exact issue gates and require a structured `HANDOFF`. The chair verifies and acknowledges that sequence before recording the lane as ready for review.
+6. **Review independently** — assign providers that did not write the lane. When the PR is the source of truth, use the exact PR head and configured reviewer Apps. Do not let provider capacity exceed one live call per provider.
+7. **Repair with the same writer** — validate review findings, return valid blockers to the original writer, rerun gates, refresh the exact head, and request focused re-review.
+8. **Enqueue** — after current reviews and checks pass, call `enqueue_portfolio_merge` with the exact PR head. A queued PR is not yet complete and does not release its dependents.
+
+Continue healthy lanes when another becomes blocked, indeterminate, or enters arbitration. Never let two writers edit overlapping workspace state. Never have the chair impersonate a delegated reviewer or repost its review through a personal identity.
+
+## Serialize integration through the bridge merge train
+
+Process one queued PR at a time. Refresh the current target SHA and PR head, then call `begin_portfolio_merge_validation`. In a disposable integration worktree based on the observed target SHA, combine the exact PR head without changing either source branch. Run both the lane gates and repository integration gates against that combined state.
+
+If another actor advances the target branch, call `refresh_portfolio_target` before the next validation. If a host exits while holding the integration slot, inspect the disposable worktree and Git state, then call `recover_portfolio_merge_validation` with a factual reason and an explicit requeue-or-repair disposition. Never silently steal an active slot.
+
+On success, call `record_portfolio_merge_validation` with `outcome: passed`, then `authorize_portfolio_merge` using the freshly observed target and head SHAs. This authorization proves validation freshness but grants no GitHub permission. Merge only when repository policy contains standing auto-merge authority or the exact head SHA has been explicitly authorized, and execute it through the separately bound builder App. Record the validated pre-merge target SHA, exact PR head SHA, and GitHub's resulting merge SHA with `record_portfolio_merge`; this invalidates other combined validations and recomputes the ready frontier.
+
+On textual, structural, semantic, or requirement conflict, record `outcome: conflict` with a dossier containing the files, current-main intent, incoming intent, and both sets of acceptance criteria. Use two read-only advocates and a third-model arbiter when available. Apply the resolution to the later PR with exactly one integration writer, then require new tests, reviews, head SHA, and queue entry. Prefer current owner policy, current `main`, security/data integrity, public compatibility, acceptance criteria, tests, ADRs, and recent history—in that order. Never use last-writer-wins or a model majority as the decision rule.
+
+If the target branch or PR head changes between validation and merge, discard the authorization and revalidate. Do not push a temporary integration commit directly to the protected branch.
 
 ## Require council agreement at consequential gates
 
@@ -146,7 +187,17 @@ If one item is truly blocked, record the blocker and continue every independent 
 
 ## Report without handing the helm back
 
-Status updates are receipts, not requests for approval. Show current item, writer, phase, latest narrative, gates, PR, consensus level, and next automatic action.
+Status updates are receipts, not requests for approval. Show the portfolio ID; ready, active, reviewing, queued, arbitrating, blocked, and merged counts; each active lane's writer, phase, latest narrative, gates, and PR; the merge-train candidate; and the next automatic action.
+
+Use an aggregate receipt rather than repeating every lane heartbeat:
+
+```text
+HELM <portfolio-id> · <running> RUNNING · <reviewing> REVIEWING · <ready> READY · <blocked> BLOCKED
+Lane <issue> · <writer> · <phase> · <changed narrative>
+Merge train · <idle | validating PR/head | arbitrating conflict>
+Released: <newly unblocked IDs or none>
+Next: <automatic scheduling action>
+```
 
 At the end, report:
 

@@ -193,7 +193,7 @@ Nine canonical skills provide the same visible vocabulary in Codex, Claude, and 
 - `show-collaboration`: render status and turn history as a timeline.
 - `goal-loop`: build toward verified completion through bounded, resumable council cycles.
 - `pair-program`: rotate implementation and review roles with preflight, worktrees, visible progress, recovery, CI, budgets, and review reconciliation.
-- `take-the-helm`: give the council operational ownership of a goal or queue, with autonomous decisions and narrowly defined human-escalation boundaries.
+- `take-the-helm`: give the council operational ownership of a goal or queue, schedule independent issues into parallel worktree lanes, and serialize integration through a bridge-owned merge train.
 - `council-discovery`: inspect an existing product and systematically scan competitors and substitutes across the web, reach evidence-backed feature consensus around retention, acquisition, maintainability, overhead, and ROI, then publish implementation-ready GitHub issues through Wayfinder.
 - `council-grill-agents`: make the chair cross-examine peer LLM answers through rotating answerer, challenger, and verifier roles without interviewing the user.
 - `council-ux-review`: challenge the rendered UI and end-to-end UX with three independent browser reviews, cross-verification, and prioritized GitHub issues.
@@ -263,11 +263,11 @@ These skills are supplied by this project and installed across Codex, Claude, an
 | `show-collaboration` | Display collaboration status, skipped providers, turns, and history. |
 | `goal-loop` | Build toward explicit completion criteria through bounded plan, implement, review, fix, and verification cycles. |
 | `pair-program` | Rotate one writer and independent reviewers across tasks, worktrees, CI, and formal PR reviews. |
-| `take-the-helm` | Autonomously drive a goal or work queue while escalating only finance, legal, authority, irreversible, owner-only, or genuinely unanswerable decisions. |
+| `take-the-helm` | Autonomously schedule safe parallel issue lanes, arbitrate conflicts, and integrate exact PR heads through a serialized merge train while preserving narrow escalation boundaries. |
 | `council-discovery` | Scan the web-wide competitive landscape and publish Wayfinder-backed features grounded in product, market, retention, acquisition, maintainability, overhead, and ROI evidence. |
 | `council-grill-agents` | Cross-examine model answers one question at a time and return the strongest evidence-backed conclusion with dissent. |
 | `council-ux-review` | Inspect rendered journeys across desktop, mobile, and accessibility states, then publish verified UX issues. |
-| `agent-dialogue` | Run a bounded, chair-hosted Codex–Claude dialogue inside the current CLI. This remains project-scoped rather than part of the global three-product set. |
+| `agent-dialogue` | Run a bounded, chair-hosted Codex–Claude dialogue inside the current CLI. The installer publishes it globally to Codex and Claude; Antigravity remains a council participant rather than a dialogue host. |
 
 ### Installed Matt Pocock's AI Hero skills and council options
 
@@ -382,9 +382,22 @@ The common tools are:
 - `list_collaborations`: finds recent portable IDs.
 - `record_native_chair_turn`: records work performed in the current host session without spawning the same provider again.
 - `record_decision`: records or escalates a bounded decision receipt.
+- `plan_portfolio` / `create_portfolio`: validate a dependency and conflict graph, compute safe execution waves, and create a durable `helm-<uuid>` ledger.
+- `get_portfolio` / `list_portfolios` / `update_portfolio_item`: inspect and update revision-controlled issue lanes across host apps.
+- `enqueue_portfolio_merge` / `begin_portfolio_merge_validation` / `record_portfolio_merge_validation`: serialize combined-state validation and record conflict arbitration dossiers.
+- `authorize_portfolio_merge` / `record_portfolio_merge`: enforce current target and PR head SHAs before a separately authorized GitHub merge, then release newly unblocked work.
+- `recover_portfolio_merge_validation` / `refresh_portfolio_target`: release an inspected interrupted validation slot or reconcile an external target advance while invalidating stale combined results.
 - `archive_collaboration` / `prune_collaborations`: retain terminal history without leaving live-looking status groups.
 
 State and JSONL transcripts live under `~/.local/share/agent-bridge/state`. A collaboration records provider session IDs, next speaker, agreement streak, selected agents, models, workspace, cumulative turn count, and an `activeCall` record. While a provider works, `activeCall` contains the provider, phase, automatic liveness heartbeat, elapsed time, and latest provider-authored or adapter-observed summary.
+
+### Parallel portfolios and bridge-owned merge trains
+
+`take-the-helm` uses a durable portfolio ledger under `~/.local/share/agent-bridge/state/portfolios`. Each issue declares hard blockers, temporary conflict edges, expected path ownership, exclusive resources, priority, and verification commands. `plan_portfolio` rejects dependency cycles and greedily selects the highest-priority non-conflicting frontier up to `maxParallel`, which defaults to two. A selected issue receives one writer and one isolated worktree; implementation collaborations use distinct providers so one provider is not active in multiple lanes at once. Reviews are scheduled after writer handoffs using providers that did not author the lane.
+
+Passing branch CI or opening a PR does not satisfy a hard dependency that requires merged behavior. Verified PR heads enter the bridge-owned merge train. They stop consuming writer capacity but continue reserving overlapping paths and exclusive resources until merged or repaired. Only one candidate may hold the integration slot. The chair combines the exact PR head with the current target SHA in a disposable worktree, runs the lane and repository integration gates, and records either a current validation or an arbitration dossier. `authorize_portfolio_merge` fails if the target or head changed and does not itself grant merge authority; the configured builder App still requires standing repository authority or explicit authorization for that exact head.
+
+After GitHub merges the authorized PR, `record_portfolio_merge` advances the target SHA, invalidates every remaining combined validation, marks the issue merged, and recomputes the frontier. Textual, structural, semantic, and requirement conflicts use two read-only advocates, a third-model arbiter when available, and exactly one resolution writer. The repaired PR receives a new head, tests, reviews, and queue entry. GitHub remains the source of truth for PRs, reviews, checks, and the final merge while the bridge owns ordering, combined validation, recovery, and conflict decisions.
 
 `get_collaboration` is compact by default: `detail: status` and `includeTurns: 0` omit the original brief, command arrays, preflight data, and completed turn bodies. Poll with `afterUpdatedAt`; when `runtime.turnCount` advances, request new output once with `detail: full`, a bounded `includeTurns`, and `afterTurn`. `runtime.activeCall.summary` is the narrative status, `summaryAt` says when that narrative changed, and `heartbeatAt` independently proves process liveness. `summarySource` distinguishes the broker's initial placeholder from provider-authored or adapter-observed work. A fresh heartbeat never makes an old narrative current.
 
