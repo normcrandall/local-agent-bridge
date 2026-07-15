@@ -1,7 +1,17 @@
 import assert from "node:assert/strict";
-import { localReviewPrompt, orderReviewProbes, resolveReviewPublication } from "../src/review-publication.mjs";
+import {
+  assertReviewWorkspaceHead,
+  localReviewPrompt,
+  orderReviewProbes,
+  resolveReviewPublication,
+} from "../src/review-publication.mjs";
 
 const githubReview = { repository: "owner/repo", prNumber: 1, headSha: "a".repeat(40) };
+assert.equal(assertReviewWorkspaceHead({ expectedHeadSha: "a".repeat(40), observedHeadSha: "A".repeat(40) }), true);
+assert.throws(
+  () => assertReviewWorkspaceHead({ expectedHeadSha: "a".repeat(40), observedHeadSha: "b".repeat(40) }),
+  /workspace head mismatch/i,
+);
 const bound = await resolveReviewPublication({
   agent: "claude",
   githubReview,

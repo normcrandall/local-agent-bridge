@@ -1,3 +1,12 @@
+export function assertReviewWorkspaceHead({ expectedHeadSha, observedHeadSha }) {
+  if (!/^[0-9a-f]{40}$/i.test(expectedHeadSha || "")) throw new Error("Review authorization requires a full expected head SHA.");
+  if (!/^[0-9a-f]{40}$/i.test(observedHeadSha || "")) throw new Error("Review workspace did not produce a full Git head SHA.");
+  if (expectedHeadSha.toLowerCase() !== observedHeadSha.toLowerCase()) {
+    throw new Error(`Review workspace head mismatch: authorized ${expectedHeadSha}, observed ${observedHeadSha}.`);
+  }
+  return true;
+}
+
 export async function resolveReviewPublication({
   agent,
   githubReview,

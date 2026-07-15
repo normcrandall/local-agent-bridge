@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { realpathSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
 import { createAgentPool } from "../src/agent-pool.mjs";
@@ -16,7 +17,7 @@ import { isTransportLivenessSummary, refreshCi, usageDecision } from "../src/ope
 import { clearTerminalRuntime } from "../src/collaboration-cleanup.mjs";
 import { createDecisionReceipt } from "../src/decision-policy.mjs";
 import { completionAfterHandoff } from "../src/handoff-protocol.mjs";
-import { orderReviewProbes } from "../src/review-publication.mjs";
+import { assertReviewWorkspaceHead, orderReviewProbes } from "../src/review-publication.mjs";
 
 const runtimeRoot = realpathSync(
   process.env.BRIDGE_RUNTIME_ROOT || process.env.BRIDGE_ROOT || fileURLToPath(new URL("..", import.meta.url)),
@@ -53,6 +54,15 @@ try {
   await appendEvent(workspaceRoot, id, { type: "run_started", at: new Date().toISOString(), pid: process.pid });
 
   if (state.mode === "work") releaseWorkspace = await acquireWorkspaceLock(workspaceRoot, state.workspace);
+
+  if (state.githubReview) {
+    const head = spawnSync("git", ["rev-parse", "HEAD"], { cwd: state.workspace, encoding: "utf8" });
+    if (head.status !== 0) throw new Error(`Unable to verify review workspace head: ${(head.stderr || head.stdout || "git failed").trim()}`);
+    assertReviewWorkspaceHead({
+      expectedHeadSha: state.githubReview.headSha,
+      observedHeadSha: head.stdout.trim(),
+    });
+  }
 
   pool = createAgentPool({
     root: runtimeRoot,
