@@ -45,9 +45,13 @@ function fakeGitHub({
       number: 42, html_url: "https://github.test/pr/42", head: { sha: headSha }, base: { ref: "main" },
     }, 201);
     if (path === "/repos/owner/repo/pulls/42/merge") return json({ merged: true, sha: "b".repeat(40) });
-    if (path === `/repos/owner/repo/commits/${headSha}/statuses?per_page=100`) return json(reviewStatuses || [{
-      context: "agent-review", state: reviewStatus, creator: { login: reviewLogin },
-    }]);
+    if (path.startsWith(`/repos/owner/repo/commits/${headSha}/statuses?per_page=100`)) {
+      const statuses = reviewStatuses || [{
+        context: "agent-review", state: reviewStatus, creator: { login: reviewLogin },
+      }];
+      const page = Number(new URL(url).searchParams.get("page") || 1);
+      return json(statuses.slice((page - 1) * 100, page * 100));
+    }
     if (path.startsWith("/repos/owner/repo/pulls/42/reviews?per_page=100")) {
       const page = Number(new URL(url).searchParams.get("page") || 1);
       return json(reviews.slice((page - 1) * 100, page * 100));
@@ -93,6 +97,18 @@ assert.equal((await builder.markReady()).operation, "mark_ready");
 const merged = await builder.merge({ method: "squash" });
 assert.equal(merged.operation, "merge");
 assert.equal(merged.reviewGate.login, "reviewer[bot]");
+const paginatedStatuses = Array.from({ length: 101 }, (_, index) => ({
+  context: index === 100 ? "agent-review" : `historical-${index}`,
+  state: "success",
+  creator: { login: "reviewer[bot]" },
+}));
+const paginatedStatusApi = fakeGitHub({ reviewStatuses: paginatedStatuses });
+const paginatedStatusMerge = await createBoundBuilderClient({
+  ...base,
+  fetchImpl: paginatedStatusApi.fetchImpl,
+}).merge({ method: "squash" });
+assert.equal(paginatedStatusMerge.reviewGate.context, "agent-review");
+assert.ok(paginatedStatusApi.calls.some((call) => call.path.includes("page=2")));
 await assert.rejects(
   createBoundBuilderClient({ ...base, fetchImpl: fakeGitHub({ reviewStatus: "failure" }).fetchImpl }).merge({ method: "squash" }),
   /machine-review status.*not successful/i,

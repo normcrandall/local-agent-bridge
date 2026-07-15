@@ -119,8 +119,14 @@ function summary(view) {
     if (view.reviewPublication.publishableAgents?.length) {
       lines.push(`Publishable reviewers: ${view.reviewPublication.publishableAgents.join(", ")}`);
     }
+    if (view.reviewPublication.publishedAgents?.length) {
+      lines.push(`Completed publications: ${view.reviewPublication.publishedAgents.join(", ")}`);
+    }
     for (const [agent, reason] of Object.entries(view.reviewPublication.localOnlyAgents || {})) {
       lines.push(`Local-only reviewer: ${agent} — ${reason}`);
+    }
+    for (const [agent, reason] of Object.entries(view.reviewPublication.unavailableAgents || {})) {
+      lines.push(`Reviewer failed after preflight: ${agent} — ${reason}`);
     }
     if (view.reviewPublication.humanApprovalRequired) {
       lines.push("Merge gate: exact-head approval from a configured trusted human is required.");

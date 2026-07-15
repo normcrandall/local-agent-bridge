@@ -294,6 +294,9 @@ async function callAntigravityWithoutModel() {
     if (!serialized.includes("--mode") || !serialized.includes("plan") || !serialized.includes("--sandbox")) {
       throw new Error("Antigravity review sandbox configuration was not forwarded");
     }
+    if (!serialized.includes("--add-dir")) {
+      throw new Error("Antigravity delegated workspace was not added explicitly");
+    }
     const configuredDefault = await client.callTool({
       name: "ask_antigravity",
       arguments: { prompt: "configured model smoke test" },

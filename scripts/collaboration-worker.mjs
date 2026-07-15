@@ -17,7 +17,11 @@ import { isTransportLivenessSummary, refreshCi, usageDecision } from "../src/ope
 import { clearTerminalRuntime } from "../src/collaboration-cleanup.mjs";
 import { createDecisionReceipt } from "../src/decision-policy.mjs";
 import { completionAfterHandoff } from "../src/handoff-protocol.mjs";
-import { assertReviewWorkspaceHead, orderReviewProbes } from "../src/review-publication.mjs";
+import {
+  assertReviewWorkspaceHead,
+  orderReviewProbes,
+  recordReviewPublicationResult,
+} from "../src/review-publication.mjs";
 
 const runtimeRoot = realpathSync(
   process.env.BRIDGE_RUNTIME_ROOT || process.env.BRIDGE_ROOT || fileURLToPath(new URL("..", import.meta.url)),
@@ -290,7 +294,13 @@ try {
           });
           handoffs = [...handoffs, completion.lastHandoff];
         }
-        return { ...current, usage, budgetExceeded: decision.exceeded, ci, decisions, decisionEscalation, completion, handoffs };
+        const reviewPublication = turn.metadata?.reviewPublication?.available
+          ? recordReviewPublicationResult(current.reviewPublication, { agent: turn.agent, published: true })
+          : current.reviewPublication;
+        return {
+          ...current, usage, budgetExceeded: decision.exceeded, ci, decisions, decisionEscalation,
+          completion, handoffs, reviewPublication,
+        };
       });
     },
     onAgentUnavailable: async (failure) => {
@@ -300,6 +310,13 @@ try {
         phase: "turn",
         ...failure,
       });
+      await updateCollaboration(workspaceRoot, id, (current) => ({
+        ...current,
+        reviewPublication: recordReviewPublicationResult(current.reviewPublication, {
+          agent: failure.agent,
+          unavailableReason: failure.reason,
+        }),
+      }));
     },
     onState: async (runtime) => {
       await updateCollaboration(workspaceRoot, id, (current) => ({

@@ -87,6 +87,9 @@ function runAntigravity({ prompt, cwd, mode, model, timeoutSeconds, permissionPr
   ]) if (!supported) throw new Error(`Installed Antigravity ${AGY_CAPABILITIES.version} lacks required ${feature} support.`);
   if (model && !AGY_CAPABILITIES.model) throw new Error(`Installed Antigravity ${AGY_CAPABILITIES.version} cannot select a model.`);
   if (conversationId && !AGY_CAPABILITIES.conversation) throw new Error(`Installed Antigravity ${AGY_CAPABILITIES.version} cannot resume a conversation.`);
+  if (!AGY_CAPABILITIES.addDir) {
+    throw new Error(`Installed Antigravity ${AGY_CAPABILITIES.version} lacks required --add-dir support for delegated workspace binding.`);
+  }
   const args = [
     "--print",
     prompt,
@@ -96,6 +99,9 @@ function runAntigravity({ prompt, cwd, mode, model, timeoutSeconds, permissionPr
     mode === "work" ? "accept-edits" : "plan",
   ];
   if (logFile) args.push("--log-file", logFile);
+  // Headless sandbox sessions otherwise open in Antigravity's scratch project
+  // instead of granting the delegated worktree to terminal tools.
+  args.push("--add-dir", actualCwd);
   if (mode === "work" && permissionProfile === "yolo") {
     if (!AGY_CAPABILITIES.yolo) throw new Error(`Installed Antigravity ${AGY_CAPABILITIES.version} cannot enable YOLO mode.`);
     args.push("--dangerously-skip-permissions");

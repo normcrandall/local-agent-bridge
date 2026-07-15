@@ -245,7 +245,7 @@ export function createBoundBuilderClient({
     let reviewGate = null;
     let machineStatus = null;
     if (requiredReviewStatusContext && trustedReviewLogins.length) {
-      const statuses = await request({
+      const statuses = await requestPages({
         ...context,
         path: `/repos/${repository}/commits/${headSha}/statuses?per_page=100`,
       });

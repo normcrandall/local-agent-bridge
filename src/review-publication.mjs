@@ -60,12 +60,46 @@ export function orderReviewProbes({ probes, requestedStartAgent = null, githubRe
         ? "available"
         : publishable.length ? "partial" : "degraded",
       publishableAgents: publishable.map((probe) => probe.agent),
+      publishedAgents: [],
       localOnlyAgents: Object.fromEntries(localOnly.map((probe) => [
         probe.agent,
         probe.reviewPublication?.reason || "review publication is unavailable",
       ])),
       humanApprovalRequired: publishable.length === 0,
     },
+  };
+}
+
+export function recordReviewPublicationResult(publication, {
+  agent,
+  published = false,
+  unavailableReason = null,
+} = {}) {
+  if (!publication || !agent) return publication;
+  const publishableAgents = (publication.publishableAgents || []).filter((candidate) => (
+    candidate !== agent || !unavailableReason
+  ));
+  const publishedAgents = [...new Set([
+    ...(publication.publishedAgents || []),
+    ...(published ? [agent] : []),
+  ])];
+  const unavailableAgents = { ...(publication.unavailableAgents || {}) };
+  if (unavailableReason) unavailableAgents[agent] = unavailableReason;
+  const localOnlyAgents = { ...(publication.localOnlyAgents || {}) };
+  if (unavailableReason) delete localOnlyAgents[agent];
+  const hasPublicationPath = publishedAgents.length > 0 || publishableAgents.length > 0;
+  return {
+    ...publication,
+    status: hasPublicationPath
+      ? (Object.keys(localOnlyAgents).length || Object.keys(unavailableAgents).length
+        ? "partial"
+        : "available")
+      : "degraded",
+    publishableAgents,
+    publishedAgents,
+    localOnlyAgents,
+    unavailableAgents,
+    humanApprovalRequired: !hasPublicationPath,
   };
 }
 

@@ -3,6 +3,7 @@ import {
   assertReviewWorkspaceHead,
   localReviewPrompt,
   orderReviewProbes,
+  recordReviewPublicationResult,
   resolveReviewPublication,
 } from "../src/review-publication.mjs";
 
@@ -60,6 +61,29 @@ assert.deepEqual(degraded.agents, ["claude", "antigravity"]);
 assert.equal(degraded.startAgent, "claude");
 assert.equal(degraded.publication.status, "degraded");
 assert.equal(degraded.publication.humanApprovalRequired, true);
+
+const preflightPartial = {
+  status: "partial",
+  publishableAgents: ["claude"],
+  publishedAgents: [],
+  localOnlyAgents: { antigravity: "unbound" },
+  humanApprovalRequired: false,
+};
+const failedPublishable = recordReviewPublicationResult(preflightPartial, {
+  agent: "claude",
+  unavailableReason: "transport closed",
+});
+assert.equal(failedPublishable.status, "degraded");
+assert.equal(failedPublishable.humanApprovalRequired, true);
+assert.deepEqual(failedPublishable.publishableAgents, []);
+assert.match(failedPublishable.unavailableAgents.claude, /transport closed/);
+const alreadyPublished = recordReviewPublicationResult(preflightPartial, { agent: "claude", published: true });
+const laterFailure = recordReviewPublicationResult(alreadyPublished, {
+  agent: "claude",
+  unavailableReason: "transport closed after publication",
+});
+assert.equal(laterFailure.humanApprovalRequired, false);
+assert.deepEqual(laterFailure.publishedAgents, ["claude"]);
 
 const ordinary = orderReviewProbes({
   requestedStartAgent: "codex",
