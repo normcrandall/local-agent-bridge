@@ -71,6 +71,12 @@ export async function inspectGitHubAppRoles({ configPath = DEFAULT_GITHUB_APPS_C
   const { config, exists } = await readConfig(configPath);
   if (!exists) return { configured: false, configPath: expandHome(configPath), version: null, roles: {} };
   if (config.version !== 1) throw new Error("Unsupported GitHub Apps config version.");
+  const trustedHumanReviewers = config.mergePolicy?.trustedHumanReviewers || [];
+  if (!Array.isArray(trustedHumanReviewers) || trustedHumanReviewers.some((login) => (
+    !GITHUB_LOGIN_PATTERN.test(login || "") || login.endsWith("[bot]")
+  ))) {
+    throw new Error("mergePolicy.trustedHumanReviewers must contain only non-bot GitHub logins.");
+  }
   const roles = {};
   for (const role of ["builder", "reviewer"]) {
     const selected = config.roles?.[role];
@@ -117,6 +123,7 @@ export async function inspectGitHubAppRoles({ configPath = DEFAULT_GITHUB_APPS_C
     configPath: expandHome(configPath),
     version: config.version,
     allowPatFallback: config.compatibility?.allowPatFallback !== false,
+    mergePolicy: { trustedHumanReviewers: [...new Set(trustedHumanReviewers)] },
     roles,
   };
 }

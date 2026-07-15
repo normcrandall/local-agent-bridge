@@ -3,6 +3,9 @@
   "compatibility": {
     "allowPatFallback": false
   },
+  "mergePolicy": {
+    "trustedHumanReviewers": ["your-github-login"]
+  },
   "roles": {
     "builder": {
       "appId": "YOUR_BUILDER_APP_ID",

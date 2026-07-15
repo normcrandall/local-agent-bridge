@@ -29,7 +29,7 @@ Call `collaboration.start_collaboration` with:
 - `githubReview` when the PR is the source of truth.
 - `githubBuilder` when the writer owns bounded PR delivery, with an explicit `allowedOperations` list. Merge remains absent unless the user explicitly authorizes the exact-head merge.
 
-For an autonomous merge, require the exact-head `agent-review=success` status from a configured reviewer App plus GitHub's required CI and rules. A bot verdict does not satisfy a nonzero human-approval count. If GitHub requires a human approval, stop for it; never replace the App with a personal PAT or use owner bypass.
+For an autonomous merge, require either the exact-head `agent-review=success` status from a configured reviewer App or an exact-head `APPROVED` review from a machine-locally configured trusted human, plus GitHub's required CI and rules. A bot verdict does not satisfy a nonzero human-approval count. If GitHub requires a human approval, pause for the person's real review; never replace the App with a personal PAT, manufacture the human approval, or use owner bypass.
 - `ciTracking.prNumber` when a PR exists.
 - optional `budget.maxCostUsd`, `budget.maxTokens`, and `budget.maxMinutes`.
 - optional `modelFallbacks.claude` and `modelFallbacks.codex`, preserving ordered overload-only downgrade chains; omit them to use machine-local policies.

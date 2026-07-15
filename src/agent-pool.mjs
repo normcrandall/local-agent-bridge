@@ -104,6 +104,7 @@ export function createAgentPool({
       verifiedLogin: credential.verifiedLogin,
       requiredReviewStatusContext: "agent-review",
       trustedReviewLogins,
+      trustedHumanReviewLogins: appRoles.mergePolicy?.trustedHumanReviewers || [],
     });
   }
 

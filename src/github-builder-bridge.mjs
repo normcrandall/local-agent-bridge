@@ -44,6 +44,7 @@ const client = createBoundBuilderClient({
   allowedOperations,
   requiredReviewStatusContext: process.env.GITHUB_BUILDER_REVIEW_STATUS_CONTEXT || "agent-review",
   trustedReviewLogins,
+  trustedHumanReviewLogins: appRoles.mergePolicy?.trustedHumanReviewers || [],
 });
 
 const server = new McpServer(

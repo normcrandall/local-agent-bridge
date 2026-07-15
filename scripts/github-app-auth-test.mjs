@@ -33,6 +33,7 @@ try {
   await writeFile(tokenFile, "static-review-token\n", { mode: 0o600 });
   await writeFile(configPath, JSON.stringify({
     version: 1,
+    mergePolicy: { trustedHumanReviewers: ["example-owner", "example-owner"] },
     roles: {
       builder: {
         appId: "123456",
@@ -137,6 +138,7 @@ try {
   assert.equal(inspected.roles.reviewers.claude.privateKeySecure, true);
   assert.equal(inspected.roles.reviewers.codex.expectedLogin, "example-codex-reviewer[bot]");
   assert.deepEqual(inspected.roles.builder.installations, ["ExampleOrg"]);
+  assert.deepEqual(inspected.mergePolicy.trustedHumanReviewers, ["example-owner"]);
 
   await assert.rejects(
     createInstallationToken({

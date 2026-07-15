@@ -114,6 +114,18 @@ The `github-app:run` wrapper may retry an allowlisted issue command or narrowly 
 
 Set `"compatibility": { "allowPatFallback": false }` in the machine-local config (or `GITHUB_REVIEW_ALLOW_PAT_FALLBACK=0`) when a repository requires App-only identity. This is now the recommended default. The bridge validates the minted installation token's role permissions before exposing any operation: builder requires Contents, Pull requests, and Issues write plus Metadata read; reviewer requires Contents read, Pull requests and Commit statuses write, and Metadata read. Missing roles, owners, repositories, permissions, keys, and identity mismatches fail closed with the affected role named. A legacy PAT reviewer may post only a non-gating `COMMENT`; it cannot `APPROVE`, `REQUEST_CHANGES`, or publish the machine-review status.
 
+To let a real person satisfy the bridge's merge gate, add their GitHub login to the optional machine-local policy:
+
+```json
+{
+  "mergePolicy": {
+    "trustedHumanReviewers": ["your-github-login"]
+  }
+}
+```
+
+These are identities, not credentials. The builder reads the complete paginated GitHub review record directly and accepts only an `APPROVED` review attached to the exact authorized head SHA. An approval on an older commit, a later `CHANGES_REQUESTED` or `DISMISSED` review on that head, an outstanding change request from another trusted human, an unlisted account, or the builder bot's identity does not satisfy the gate. Each installation should list its own maintainers; never publish maintainer-specific logins in a shared skill.
+
 ### Enforce agent review without a human-identity bypass
 
 GitHub's required approving-review count is a human collaboration rule: an approval must come from a person with the required repository access. Do not use an owner PAT to turn an agent verdict into that human approval. For repositories where agents have standing merge authority, configure the target branch or ruleset as follows:
@@ -123,7 +135,7 @@ GitHub's required approving-review count is a human collaboration rule: an appro
 3. Require the commit status context `agent-review` on the exact PR head. When several provider-specific reviewer Apps rotate, select any source in GitHub and rely on the builder's configured-reviewer identity check; do not grant Commit statuses write to the builder App.
 4. Require conversations to be resolved and prevent administrators/owners and the builder App from bypassing the ruleset.
 
-Every provider-specific reviewer App publishes `agent-review=success` only after its exact-head formal `APPROVE`; `REQUEST_CHANGES` publishes failure and `COMMENT` publishes pending. The bound builder independently reads the exact-head status and refuses to merge unless its latest `agent-review` is successful and authored by a reviewer App configured on that machine. GitHub still enforces CI and the ruleset. If a repository keeps a nonzero human approval count, the agent pipeline stops for a human; it never retries the merge as the owner PAT.
+Every provider-specific reviewer App publishes `agent-review=success` only after its exact-head formal `APPROVE`; `REQUEST_CHANGES` publishes failure and `COMMENT` publishes pending. The bound builder independently requires either that trusted App status or an exact-head `APPROVED` review from a configured `mergePolicy.trustedHumanReviewers` login. GitHub still enforces CI and the ruleset. If a repository keeps a nonzero human approval count, the pipeline pauses until the person actually reviews; it never manufactures that approval through an owner PAT or administrator bypass.
 
 After changing App permissions or installing the Apps on another account, verify the live installation without exposing credentials:
 
@@ -660,7 +672,7 @@ The caller passes an exact PR authorization object. Omit `expectedLogin` to sele
 
 The delegated tool mints a short-lived token from the provider-specific reviewer App (`claude`, `codex`, or `antigravity`/Gemini), or reads the backward-compatible `~/.config/ghtoken` fallback when no reviewer App is configured. A caller may still pin `expectedLogin` for a strict single-identity flow. Credentials never enter the prompt, skill, transcript, or MCP response. Before posting it verifies the token login, exact current PR head, and every inline-comment path. The App submits a formal GitHub review (`APPROVE`, `REQUEST_CHANGES`, or `COMMENT`) and an exact-head `agent-review` commit status, records both in the handoff, and uses content markers to avoid duplicate work. A PAT fallback is comment-only and produces no gate. A re-review must refresh `headSha`.
 
-Writer-side PR delivery uses a separate `githubBuilder` authorization bound to one repository, expected bot login, current head SHA, optional PR, and an explicit `allowedOperations` list. Claude and Codex receive only `github_builder` tools; Antigravity returns a validated operation envelope that the broker executes unchanged outside model context. Supported actions are create/update the designated PR, read/reply/resolve exact review threads, mark ready, and merge the exact PR at the exact head SHA. Every mutation rechecks the per-operation allowlist, identity, and head state and returns an idempotent receipt. Before merge, the builder also requires `agent-review=success` on that head from a configured reviewer App. The default allowlist excludes `merge`; normal goal-loop and pair-program runs stop at a green reviewed PR unless the user explicitly adds `merge` and authorizes the SHA-pinned merge.
+Writer-side PR delivery uses a separate `githubBuilder` authorization bound to one repository, expected bot login, current head SHA, optional PR, and an explicit `allowedOperations` list. Claude and Codex receive only `github_builder` tools; Antigravity returns a validated operation envelope that the broker executes unchanged outside model context. Supported actions are create/update the designated PR, read/reply/resolve exact review threads, mark ready, and merge the exact PR at the exact head SHA. Every mutation rechecks the per-operation allowlist, identity, and head state and returns an idempotent receipt. Before merge, the builder requires either `agent-review=success` on that head from a configured reviewer App or an exact-head approval from a configured trusted human. The default allowlist excludes `merge`; normal goal-loop and pair-program runs stop at a green reviewed PR unless the user explicitly adds `merge` and authorizes the SHA-pinned merge.
 
 ## Browser boundary
 
