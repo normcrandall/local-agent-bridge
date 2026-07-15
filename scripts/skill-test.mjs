@@ -3,12 +3,19 @@ import { readFile, readdir } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
-const codexPath = resolve(root, ".agents/skills/agent-dialogue/SKILL.md");
-const claudePath = resolve(root, ".claude/skills/agent-dialogue/SKILL.md");
-const [codex, claude] = await Promise.all([
+const canonicalCodexDialoguePath = resolve(root, ".agents/skills/agent-dialogue/SKILL.md");
+const canonicalClaudeDialoguePath = resolve(root, "assets/skills/claude/agent-dialogue/SKILL.md");
+const codexPath = resolve(process.env.HOME, ".codex/skills/agent-dialogue/SKILL.md");
+const claudePath = resolve(process.env.HOME, ".claude/skills/agent-dialogue/SKILL.md");
+const [canonicalCodexDialogue, canonicalClaudeDialogue, codex, claude] = await Promise.all([
+  readFile(canonicalCodexDialoguePath, "utf8"),
+  readFile(canonicalClaudeDialoguePath, "utf8"),
   readFile(codexPath, "utf8"),
   readFile(claudePath, "utf8"),
 ]);
+
+assert.equal(codex, canonicalCodexDialogue, "Codex agent-dialogue skill is stale");
+assert.equal(claude, canonicalClaudeDialogue, "Claude agent-dialogue skill is stale");
 
 for (const [name, content] of [["Codex", codex], ["Claude", claude]]) {
   assert.match(content, /^---\n[\s\S]+?\n---\n/);
@@ -318,6 +325,24 @@ for (const term of [
   "reversions",
   "Treat history as evidence, not permanent policy",
   "commit and pull-request history",
+  "plan_portfolio",
+  "create_portfolio",
+  "maxParallel: 2",
+  "dependency edge",
+  "conflict edge",
+  "path reservation",
+  "resource reservation",
+  "Run parallel issue lanes",
+  "provider capacity exceed one live call per provider",
+  "enqueue_portfolio_merge",
+  "begin_portfolio_merge_validation",
+  "authorize_portfolio_merge",
+  "record_portfolio_merge",
+  "recover_portfolio_merge_validation",
+  "refresh_portfolio_target",
+  "Serialize integration through the bridge merge train",
+  "two read-only advocates and a third-model arbiter",
+  "HELM <portfolio-id>",
 ]) assert.ok(takeTheHelm.includes(term), `Take the helm is missing ${term}`);
 assert.match(takeTheHelm, /Never leave the user at a static/);
 assert.match(takeTheHelm, /Never substitute a long-running Bash, sleep/);

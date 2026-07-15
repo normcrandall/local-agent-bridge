@@ -394,6 +394,17 @@ for (const required of [
   "continue_collaboration",
   "cancel_collaboration",
   "list_collaborations",
+  "plan_portfolio",
+  "create_portfolio",
+  "get_portfolio",
+  "update_portfolio_item",
+  "enqueue_portfolio_merge",
+  "begin_portfolio_merge_validation",
+  "record_portfolio_merge_validation",
+  "authorize_portfolio_merge",
+  "recover_portfolio_merge_validation",
+  "refresh_portfolio_target",
+  "record_portfolio_merge",
 ]) {
   if (!names(collaborationTools).includes(required)) throw new Error(`Missing collaboration tool: ${required}`);
 }

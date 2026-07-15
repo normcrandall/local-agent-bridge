@@ -14,6 +14,8 @@ const skillNames = (await readdir(resolve(sourceRoot, "skills"), { withFileTypes
   .filter((entry) => entry.isDirectory())
   .map((entry) => entry.name)
   .sort();
+const codexDialogueSkillSource = resolve(sourceRoot, ".agents/skills/agent-dialogue");
+const claudeDialogueSkillSource = resolve(sourceRoot, "assets/skills/claude/agent-dialogue");
 
 await mkdir(installRoot, { recursive: true, mode: 0o700 });
 await mkdir(stateRoot, { recursive: true, mode: 0o700 });
@@ -130,6 +132,14 @@ for (const skillRoot of skillRoots) {
     await cp(resolve(sourceRoot, "skills", name), destination, { recursive: true });
   }
 }
+for (const [skillRoot, source] of [
+  [skillRoots[0], codexDialogueSkillSource],
+  [skillRoots[1], claudeDialogueSkillSource],
+]) {
+  const destination = resolve(skillRoot, "agent-dialogue");
+  await rm(destination, { recursive: true, force: true });
+  await cp(source, destination, { recursive: true });
+}
 
 const antigravityCliSkills = resolve(homedir(), ".gemini/antigravity-cli/skills");
 await mkdir(antigravityCliSkills, { recursive: true, mode: 0o700 });
@@ -143,4 +153,4 @@ for (const name of skillNames) {
 console.log(`Installed runtime: ${runtimeRoot}`);
 console.log(`Installed launchers: ${Object.keys(launchers).map((name) => resolve(binRoot, name)).join(", ")}`);
 console.log(`Persistent state: ${stateRoot}`);
-console.log(`Installed skills: ${skillNames.join(", ")}`);
+console.log(`Installed skills: agent-dialogue, ${skillNames.join(", ")}`);

@@ -148,8 +148,8 @@ check("Codex user-scope bridge config", () => {
       && result.stdout.includes(resolve(homedir(), `.local/bin/${executable}`));
   });
 }, "register the bridge MCPs in ~/.codex/config.toml with the stable global launchers");
-check("Codex dialogue skill", () => existsSync(resolve(root, ".agents/skills/agent-dialogue/SKILL.md")));
-check("Claude dialogue skill", () => existsSync(resolve(root, ".claude/skills/agent-dialogue/SKILL.md")));
+check("Codex dialogue skill", () => existsSync(resolve(homedir(), ".codex/skills/agent-dialogue/SKILL.md")));
+check("Claude dialogue skill", () => existsSync(resolve(homedir(), ".claude/skills/agent-dialogue/SKILL.md")));
 check("Bridge launcher executable", () => {
   accessSync(resolve(root, "scripts/claude-bridge-mcp.sh"), constants.X_OK);
   return true;
