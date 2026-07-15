@@ -226,6 +226,30 @@ $council-grill-me Stress-test this architecture before we commit
 
 Codex uses the `$skill-name` form. Claude and Antigravity expose the same names as slash commands. Each skill prints a receipt before delegation with the selected peer, exact MCP operation, mode, workspace, browser setting, and model behavior, then prints the returned session or collaboration ID and completion state. This keeps a handoff visible instead of making it feel like a black box.
 
+### Deterministic UX-review start and native-turn watchdog
+
+A skill cannot print a heartbeat until the host model produces its first assistant output. If Codex App accepts a task but remains blank before that output, the collaboration broker has not started and has nothing to report. For an operationally deterministic start, launch the workflow from a normal terminal:
+
+```sh
+bridge start council-ux-review --workspace /absolute/path/to/repository --url http://127.0.0.1:3000
+```
+
+The command starts the durable broker directly, immediately prints its portable collaboration ID, follows lifecycle changes, shows changed provider narrative, and prints every newly completed turn once. Add `--no-follow` to detach after startup. Provider polling remains at eight seconds or less, while unchanged liveness is printed no more than once per minute.
+
+To observe a Codex App or CLI task that may be stuck before its first model output, run:
+
+```sh
+bridge watchdog --thread latest --watch --notify
+```
+
+The watchdog reads the local Codex task trace and distinguishes `pre-first-output` silence from responsive or terminal work. It can send a macOS notification after the threshold (60 seconds by default); it cannot inject a message into, retry, or change the model of an already running closed-source app turn. Use `--thread <task-id>` to pin a task and `--threshold-seconds <n>` to change the alert boundary.
+
+### Structured completion receipts
+
+Delegated providers end completed turns with a single-line `HANDOFF:` JSON receipt. The broker parses and persists its outcome, summary, artifacts, verification, remaining work, and requested next action as a monotonically numbered handoff. A terminal provider state is therefore not treated as verified completion by itself.
+
+The chair checks the claimed workspace, tests, pull request, or other evidence and calls `acknowledge_handoff` with the exact sequence. Until that acknowledgement is recorded, `continue_collaboration` and native-chair completion receipts are rejected. Status output shows the current handoff sequence, acknowledgement state, and next action, so the caller has a machine-readable and user-visible finish boundary.
+
 ## Complete skill catalog
 
 ### Bridge-native skills

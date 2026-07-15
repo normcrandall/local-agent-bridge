@@ -169,9 +169,15 @@ check("Global collaboration launcher executable", () => {
   return existsSync(resolve(homedir(), ".local/share/agent-bridge/runtime/src/collaboration-bridge.mjs"));
 });
 check("Global bridge operations CLI", () => {
-  accessSync(resolve(homedir(), ".local/bin/bridge"), constants.X_OK);
-  const result = spawnSync(resolve(homedir(), ".local/bin/bridge"), ["capabilities"], { encoding: "utf8" });
-  return result.status === 0 && result.stdout.includes('"claude"') && result.stdout.includes('"codex"');
+  const launcher = resolve(homedir(), ".local/bin/bridge");
+  accessSync(launcher, constants.X_OK);
+  const result = spawnSync(launcher, ["capabilities"], { encoding: "utf8" });
+  const source = readFileSync(launcher, "utf8");
+  return result.status === 0
+    && result.stdout.includes('"claude"')
+    && result.stdout.includes('"codex"')
+    && source.includes("workflow-launcher.mjs")
+    && source.includes("codex-turn-watchdog.mjs");
 }, "run npm run install:global to install ~/.local/bin/bridge");
 check("Global collaboration skills", () => {
   const names = readdirSync(resolve(root, "skills"), { withFileTypes: true })

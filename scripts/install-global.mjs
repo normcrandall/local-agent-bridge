@@ -95,6 +95,12 @@ COMMAND="\${1:-help}"
 if [[ "$COMMAND" == "talk" ]]; then
   shift
   exec "$NODE_BIN" "$RUNTIME/scripts/bridge-talk.mjs" "$@"
+elif [[ "$COMMAND" == "start" ]]; then
+  shift
+  exec "$NODE_BIN" "$RUNTIME/scripts/workflow-launcher.mjs" "$@"
+elif [[ "$COMMAND" == "watchdog" ]]; then
+  shift
+  exec "$NODE_BIN" "$RUNTIME/scripts/codex-turn-watchdog.mjs" "$@"
 elif [[ "$COMMAND" == "doctor" ]]; then
   exec "$NODE_BIN" "$RUNTIME/scripts/doctor.mjs"
 elif [[ "$COMMAND" == "smoke" ]]; then

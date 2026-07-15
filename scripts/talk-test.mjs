@@ -1,9 +1,24 @@
 import assert from "node:assert/strict";
-import { parseStatus, runConversation } from "../src/talk-protocol.mjs";
+import { parseHandoffEnvelope, parseStatus, runConversation } from "../src/talk-protocol.mjs";
 
 assert.equal(parseStatus("hello\nSTATUS: AGREED"), "AGREED");
 assert.equal(parseStatus("no marker"), "CONTINUE");
 assert.equal(parseStatus("STATUS: AGREED\nchanged my mind\nSTATUS: CONTINUE"), "CONTINUE");
+
+const parsedHandoff = parseHandoffEnvelope(`Completed the requested implementation.
+HANDOFF: {"outcome":"completed","summary":"Implemented the change.","artifacts":["src/example.mjs"],"verification":["npm test: passed"],"commit":"abc1234","pullRequest":"https://github.com/owner/repo/pull/1","remaining":[],"nextAction":"chair_verify"}
+STATUS: AGREED`);
+assert.deepEqual(parsedHandoff, {
+  outcome: "completed",
+  summary: "Implemented the change.",
+  artifacts: ["src/example.mjs"],
+  verification: ["npm test: passed"],
+  commit: "abc1234",
+  pullRequest: "https://github.com/owner/repo/pull/1",
+  remaining: [],
+  nextAction: "chair_verify",
+});
+assert.throws(() => parseHandoffEnvelope('HANDOFF: {"outcome":"completed"}'), /summary/);
 
 const scripted = [
   { message: "I propose interface A.\nSTATUS: CONTINUE", sessionId: "claude-1" },
@@ -25,6 +40,21 @@ assert.equal(outcome.turns.length, 3);
 assert.deepEqual(calls.map((call) => call.agent), ["claude", "codex", "claude"]);
 assert.equal(calls[2].sessionId, "claude-1");
 assert.match(calls[1].prompt, /I propose interface A/);
+
+const handoffOutcome = await runConversation({
+  task: "Implement a bounded change",
+  agents: ["claude"],
+  startAgent: "claude",
+  mode: "work",
+  writer: "claude",
+  maxTurns: 1,
+  send: async () => ({
+    message: 'Done.\nHANDOFF: {"outcome":"completed","summary":"Change implemented.","artifacts":["src/change.mjs"],"verification":["npm test: passed"],"remaining":[],"nextAction":"chair_verify"}\nSTATUS: AGREED',
+    sessionId: "claude-handoff",
+  }),
+});
+assert.equal(handoffOutcome.turns[0].handoff.outcome, "completed");
+assert.match(handoffOutcome.turns[0].handoff.summary, /implemented/);
 
 const writerCalls = [];
 await runConversation({

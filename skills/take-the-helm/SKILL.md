@@ -33,6 +33,14 @@ If the request names a finite set, continue until every item is complete, blocke
 
 Define done from repository evidence: implementation, exact gates, independent review, required documentation or handoff, PR status, issue state, and deployment or merge boundaries authorized by repository policy.
 
+## Reconstruct intent from Git history
+
+Before planning or changing an affected area, inspect its relevant Git and GitHub history. Use recent commits, merged pull requests, linked issues, review discussions, reversions, and blame when needed to recover why the current design exists, what was already attempted, and which constraints maintainers have established. Follow renamed files and inspect the actual diff; do not rely on commit subjects alone.
+
+Keep the search bounded to the objective, affected paths, and enough recent history to explain the present state. Expand farther only when the current behavior or an apparent contradiction remains unexplained.
+
+Treat history as evidence, not permanent policy. Weight current owner instructions, repository policy, ADRs, tests, and current behavior above older commits. A revert, superseding PR, changed requirement, or later correction overrides the earlier decision. Record the inherited constraint or prior failed approach that materially shaped the plan so reviewers can distinguish an intentional departure from accidental rediscovery.
+
 ## Know what the agents own
 
 Do not ask the user about:
@@ -102,7 +110,7 @@ Return the `collaborationId` immediately. Poll with `detail: status`, `includeTu
 
 For each ready item:
 
-1. **Claim and orient** — claim the issue using repository convention; read its body, comments, parent, blockers, prior attempts, and relevant code.
+1. **Claim and orient** — claim the issue using repository convention; read its body, comments, parent, blockers, prior attempts, relevant code, and the affected paths' pertinent commit and pull-request history.
 2. **Resolve the plan** — have all available models independently inspect the item. Resolve material disagreement through evidence or `council-grill-agents`. Record the selected plan, dissent, validation, and rollback path.
 3. **Assign exactly one writer** — use an isolated worktree or branch. Select `workProfile: implement` for local delivery through commit or `workProfile: deliver` when push and PR creation are authorized. Other models remain read-only.
 4. **Implement and verify** — follow repository TDD and quality rules, run exact local gates, and inspect the resulting diff. Do not reduce coverage or bypass gates to create progress.

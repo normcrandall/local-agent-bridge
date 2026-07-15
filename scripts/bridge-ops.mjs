@@ -150,5 +150,5 @@ print "Authenticate Claude Code, Codex, and Antigravity. Configure your reviewer
     break;
   }
   default:
-    process.stdout.write("Usage: bridge <status|capabilities|roles|preflight|recover|archive|prune|worktree|ci|reconcile|usage|bundle> [options]\n");
+    process.stdout.write("Usage: bridge <talk|start|watchdog|doctor|smoke|status|capabilities|roles|preflight|recover|archive|prune|worktree|ci|reconcile|usage|bundle> [options]\n");
 }

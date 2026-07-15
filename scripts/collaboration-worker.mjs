@@ -15,6 +15,7 @@ import { runConversation } from "../src/talk-protocol.mjs";
 import { isTransportLivenessSummary, refreshCi, usageDecision } from "../src/operations.mjs";
 import { clearTerminalRuntime } from "../src/collaboration-cleanup.mjs";
 import { createDecisionReceipt } from "../src/decision-policy.mjs";
+import { completionAfterHandoff } from "../src/handoff-protocol.mjs";
 
 const runtimeRoot = realpathSync(
   process.env.BRIDGE_RUNTIME_ROOT || process.env.BRIDGE_ROOT || fileURLToPath(new URL("..", import.meta.url)),
@@ -253,7 +254,17 @@ try {
             decisionEscalation = { action: "needs_user", reason: `Invalid decision receipt from ${turn.agent}: ${error.message}` };
           }
         }
-        return { ...current, usage, budgetExceeded: decision.exceeded, ci, decisions, decisionEscalation };
+        let completion = current.completion || null;
+        let handoffs = current.handoffs || [];
+        if (turn.handoff) {
+          completion = completionAfterHandoff(completion, {
+            handoff: turn.handoff,
+            agent: turn.agent,
+            turn: turn.number,
+          });
+          handoffs = [...handoffs, completion.lastHandoff];
+        }
+        return { ...current, usage, budgetExceeded: decision.exceeded, ci, decisions, decisionEscalation, completion, handoffs };
       });
     },
     onAgentUnavailable: async (failure) => {
