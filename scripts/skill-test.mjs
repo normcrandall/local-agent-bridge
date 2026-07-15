@@ -272,6 +272,17 @@ for (const term of [
   "ready-for-agent",
   "P0 — blocked or unsafe",
   "reread every issue from GitHub",
+  "Milestone updates are mandatory",
+  "Never allow more than 60 seconds",
+  "UX REVIEW · <ORIENTING | RENDERING | CHAIR PASS | COUNCIL PASS | VERIFYING | PUBLISHING>",
+  "PEER FINISHED: <provider>",
+  "ISSUES · PUBLISHING <current>/<total>",
+  "announce the completed provider immediately",
+  "Your first action after this skill is selected must be a user-visible message",
+  "bridge start council-ux-review",
+  "bridge watchdog --thread latest",
+  "acknowledge_handoff",
+  "HANDOFF:",
 ]) assert.ok(councilUxReview.includes(term), `Council UX review is missing ${term}`);
 assert.match(councilUxReview, /exactly one publisher/i);
 assert.match(councilUxReview, /Never leave the user at a static/);
@@ -301,6 +312,12 @@ for (const term of [
   "degraded consensus",
   "single-agent provisional result",
   "Do not ask “what next?”",
+  "Reconstruct intent from Git history",
+  "merged pull requests",
+  "linked issues",
+  "reversions",
+  "Treat history as evidence, not permanent policy",
+  "commit and pull-request history",
 ]) assert.ok(takeTheHelm.includes(term), `Take the helm is missing ${term}`);
 assert.match(takeTheHelm, /Never leave the user at a static/);
 assert.match(takeTheHelm, /Never substitute a long-running Bash, sleep/);

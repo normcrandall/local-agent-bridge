@@ -1,3 +1,5 @@
+import { normalizeHandoff } from "./handoff-protocol.mjs";
+
 const STATUSES = new Set(["CONTINUE", "AGREED", "NEEDS_USER"]);
 export const KNOWN_AGENTS = ["claude", "codex", "antigravity"];
 
@@ -16,6 +18,15 @@ export function parseStatus(message) {
   const matches = [...message.matchAll(/^STATUS:\s*(CONTINUE|AGREED|NEEDS_USER)\s*$/gim)];
   const status = matches.at(-1)?.[1]?.toUpperCase() || "CONTINUE";
   return STATUSES.has(status) ? status : "CONTINUE";
+}
+
+export function parseHandoffEnvelope(message) {
+  const lines = String(message || "").split("\n").filter((line) => /^HANDOFF:\s*/i.test(line));
+  if (!lines.length) return null;
+  const raw = lines.at(-1).replace(/^HANDOFF:\s*/i, "");
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch { throw new Error("HANDOFF must contain valid single-line JSON."); }
+  return normalizeHandoff(parsed);
 }
 
 export function parseDecisionEnvelope(message) {
@@ -68,6 +79,7 @@ Conversation rules:
 - Do not invoke another participant through MCP; the broker delivers each message.
 - Keep each turn focused and under 700 words.
 - When resolving a concrete choice, emit one single-line receipt before STATUS using: DECISION: {"question":"...","category":"reversible_technical","alternatives":["..."],"decision":"...","confidence":0.8,"dissent":[],"rollbackPath":"...","owner":"agent-name"}. Protected categories are escalated; this never grants new authority.
+- When your bounded assignment is ready to hand back, emit one validated single-line receipt before STATUS using: HANDOFF: {"outcome":"completed|blocked|needs_review|continue","summary":"...","artifacts":["..."],"verification":["..."],"commit":null,"pullRequest":null,"remaining":[],"nextAction":"chair_verify|peer_review|writer_fix|continue|needs_user"}. Report only observed evidence. Use outcome completed with nextAction chair_verify when the chair should independently verify completion.
 - End with exactly one status line:
   STATUS: CONTINUE — more useful discussion or work remains.
   STATUS: AGREED — the task has a sufficiently verified shared conclusion.
@@ -206,6 +218,10 @@ export async function runConversation({
     sessions[agent] = response.sessionId || sessions[agent];
 
     const status = parseStatus(response.message);
+    let handoff = null;
+    let handoffError = null;
+    try { handoff = parseHandoffEnvelope(response.message); }
+    catch (error) { handoffError = error.message; }
     let decision = null;
     try { decision = parseDecisionEnvelope(response.message); }
     catch (error) { decision = { invalid: error.message }; }
@@ -217,6 +233,8 @@ export async function runConversation({
       sessionId: sessions[agent],
       metadata: response.metadata || null,
       decision,
+      handoff,
+      handoffError,
     };
     turns.push(turn);
     agreementStreak = status === "AGREED" ? agreementStreak + 1 : 0;

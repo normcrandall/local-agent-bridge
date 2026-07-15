@@ -26,9 +26,13 @@ if (delayMs > 0) {
   await new Promise((resolvePromise) => setTimeout(resolvePromise, delayMs));
 }
 
+const result = process.env.FAKE_CLAUDE_HANDOFF === "1"
+  ? 'Completed the delegated task.\nHANDOFF: {"outcome":"completed","summary":"Implemented and verified the delegated task.","artifacts":["src/example.mjs"],"verification":["npm test: passed"],"remaining":[],"nextAction":"chair_verify"}\nSTATUS: AGREED'
+  : JSON.stringify({ args, mcpConfig });
+
 process.stdout.write(`${JSON.stringify({
   type: "result",
-  result: JSON.stringify({ args, mcpConfig }),
+  result,
   session_id: "fake-claude-session",
   is_error: false,
   duration_ms: 1,

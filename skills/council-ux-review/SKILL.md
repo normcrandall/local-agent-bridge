@@ -7,6 +7,21 @@ description: Challenge the rendered UI and end-to-end user experience of any exi
 
 Audit the application people actually experience. Keep the three reviews independent until critique, reproduce findings before publication, and reject aesthetic preference that lacks a violated UX principle, observable friction, or user and business impact.
 
+## Acknowledge before doing anything else
+
+Your first action after this skill is selected must be a user-visible message. Do not inspect the repository, reason silently, start a server, open a browser, or delegate first. Emit:
+
+```text
+UX REVIEW · ORIENTING
+Done: review accepted
+Now: resolving the application, workspace, journeys, and rendered target
+Next: render the application, then start independent council passes
+Coverage: 0 journeys; providers not started
+Collaboration: pending
+```
+
+This receipt proves the native host has actually begun executing the skill. If it never appears, the host model has not produced its first output and no collaboration heartbeat can exist yet. From a normal terminal, the user can bypass that native pre-output gap with `bridge start council-ux-review --workspace <absolute-path> [--url <url>]`; `bridge watchdog --thread latest --watch --notify` can separately alert when a Codex task remains in that pre-first-output state.
+
 ## Establish the review target
 
 Resolve the application URL, repository, supported users, core jobs, design system, and issue tracker from the workspace before asking the user. Start a documented local development target when that is a normal safe repository operation; never deploy or alter production.
@@ -21,6 +36,35 @@ Read product documentation, routes, UI architecture, accessibility guidance, exi
 - keyboard-only use, visible focus, zoom or reflow, labels, contrast, motion, and assistive semantics where observable.
 
 Use provided test accounts or fixtures. Never use a personal signed-in browser profile without explicit authorization. If authentication or unavailable data blocks a journey, record the coverage gap instead of inventing the state.
+
+## Keep the review visible
+
+Milestone updates are mandatory. Send the first user-visible update before repository inspection, server startup, browser work, or delegation. Then update immediately whenever the phase, active participant, completed journey count, coverage, blocker, or next action changes. Never allow more than 60 seconds of active work without a visible update.
+
+Use compact receipts rather than repeating the review brief:
+
+```text
+UX REVIEW · <ORIENTING | RENDERING | CHAIR PASS | COUNCIL PASS | VERIFYING | PUBLISHING>
+Done: <newly completed evidence or count>
+Now: <active participant and concrete activity>
+Next: <next observable milestone>
+Coverage: <journeys completed/total; desktop/mobile; providers completed/available>
+Collaboration: <id once available>
+```
+
+Required visible milestones are:
+
+1. orientation started and the target being resolved;
+2. application rendered, or the exact rendering blocker and fallback;
+3. chair browser pass started and each major journey or viewport completed;
+4. collaboration started with its ID and current participant;
+5. every peer completion as `PEER FINISHED: <provider> — <one-sentence result>`;
+6. cross-verification started and candidate counts accepted, rejected, or unresolved;
+7. issue drafting started with the verified finding count;
+8. issue publication progress, including `ISSUES · PUBLISHING <current>/<total>`;
+9. reread verification completed and the terminal result.
+
+For a long operation with no new narrative, emit one liveness line at the 60-second boundary naming the current phase, active participant or operation, elapsed time, and next expected signal. Do not invent progress, repeat an unchanged narrative card, expose private reasoning, or print every eight-second poll.
 
 ## Review the rendered app
 
@@ -52,6 +96,10 @@ Models: provider configured
 ```
 
 Return the `collaborationId` immediately. Poll with `detail: status`, `includeTurns: 0`, `afterUpdatedAt`, and `waitSeconds: 8`. Fetch completed output once when `runtime.turnCount` advances. Show changed provider-authored narrative from `runtime.activeCall.summary`; rate-limit heartbeat-only output to one compact line per 60 seconds. Never leave the user at a static “Calling …” message or repeat unchanged summaries. Never substitute a long-running Bash, sleep, `gh`, or PR polling loop for broker polling.
+
+When `runtime.turnCount` advances, announce the completed provider immediately before beginning another poll or chair-side analysis. Fetch that turn once, summarize its new evidence, update the provider completion count, and state the next participant or verification action. A terminal broker status must produce a visible terminal receipt; do not silently move into synthesis.
+
+Require each provider to end its completed turn with one structured `HANDOFF:` JSON receipt containing `outcome`, `summary`, `artifacts`, `verification`, `remaining`, and `nextAction`. Treat the broker's handoff sequence as the completion signal. The chair must independently check the claimed evidence, call `acknowledge_handoff` with that exact sequence, and only then continue the collaboration or report verified completion. Never infer completion solely from silence, a terminal process, a pull request appearing, or an unchanged heartbeat.
 
 ## Run independent passes
 
@@ -101,6 +149,8 @@ Do not publish speculative findings. Preserve unverified observations in the fin
 The user invoking this skill authorizes creation of planning issues, not code changes. Exactly one publisher—the chair—creates or updates issues using the repository's configured identity. Prefer a user-configured GitHub App or connector and never embed maintainer-specific identities or credentials. Apply the repository's existing labels; create new UI or UX labels only when repository policy permits it.
 
 Create issues in severity and dependency order. Merge findings only when one correction and one validation plan resolve them together. Split an oversized correction into tracer-bullet issues with explicit blocking links. Apply `ready-for-agent` only when reproduction, expected behavior, and acceptance criteria are complete.
+
+Before the first write, announce the number and order of issues to publish. After each issue creation or update, show its number, title, severity, and remaining count. If publication pauses or fails, identify the exact issue and retain the unpublished drafts instead of leaving the user at the last browser or council status.
 
 Use this issue body:
 

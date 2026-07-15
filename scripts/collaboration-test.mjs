@@ -65,11 +65,13 @@ let fallbackClient;
 let heartbeatClient;
 let cancellationClient;
 let codexFallbackClient;
+let completionClient;
 try {
   firstClient = await connect("collaboration-test-app-one");
   const tools = await firstClient.listTools();
   const names = tools.tools.map((tool) => tool.name).sort();
   assert.deepEqual(names, [
+    "acknowledge_handoff",
     "archive_collaboration",
     "cancel_collaboration",
     "continue_collaboration",
@@ -116,6 +118,46 @@ try {
   assert.match(firstRun.turns[0].message, /claude-opus-4-6,claude-sonnet-5/);
   assert.match(firstRun.turns[0].message, /Bash\(npm test\)/);
   assert.match(firstRun.turns[0].message, /collaboration-review\.md/);
+
+  completionClient = await connect("collaboration-test-completion", { FAKE_CLAUDE_HANDOFF: "1" });
+  const completionStarted = await completionClient.callTool({
+    name: "start_collaboration",
+    arguments: {
+      task: "Return a durable completion receipt",
+      agents: ["claude"],
+      maxTurns: 1,
+    },
+  });
+  const completionRun = await waitForStop(completionClient, completionStarted.structuredContent.id);
+  assert.equal(completionRun.status, "agreed");
+  assert.equal(completionRun.completion.phase, "awaiting_chair_verification");
+  assert.equal(completionRun.completion.sequence, 1);
+  assert.equal(completionRun.completion.acknowledged, false);
+  assert.equal(completionRun.completion.lastHandoff.outcome, "completed");
+  const completionCompact = await completionClient.callTool({
+    name: "get_collaboration",
+    arguments: { collaborationId: completionRun.id, detail: "status", includeTurns: 0 },
+  });
+  assert.equal(completionCompact.structuredContent.completion.nextAction, "chair_verify");
+  const prematureContinue = await completionClient.callTool({
+    name: "continue_collaboration",
+    arguments: { collaborationId: completionRun.id, message: "Continue without verifying", additionalTurns: 1 },
+  });
+  assert.equal(prematureContinue.isError, true);
+  assert.match(prematureContinue.content.map((item) => item.text || "").join("\n"), /unacknowledged HANDOFF sequence 1/);
+  const acknowledged = await completionClient.callTool({
+    name: "acknowledge_handoff",
+    arguments: {
+      collaborationId: completionRun.id,
+      sequence: 1,
+      accepted: true,
+      summary: "Chair verified the handoff.",
+      verification: ["npm test: passed independently"],
+      remaining: [],
+    },
+  });
+  assert.equal(acknowledged.structuredContent.completion.phase, "verified_complete");
+  assert.equal(acknowledged.structuredContent.completion.acknowledged, true);
 
   const chaired = await secondClient.callTool({
     name: "start_collaboration",
@@ -344,6 +386,7 @@ try {
   await heartbeatClient?.close().catch(() => {});
   await cancellationClient?.close().catch(() => {});
   await codexFallbackClient?.close().catch(() => {});
+  await completionClient?.close().catch(() => {});
   await rm(stateDirectory, { recursive: true, force: true });
   await rm(resolve(root, ".bridge/test-handoffs"), { recursive: true, force: true });
 }

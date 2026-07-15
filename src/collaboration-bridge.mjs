@@ -24,6 +24,7 @@ import { createWorktree, isSafeWorkerPid, preflight, selectRoles } from "./opera
 import { createDecisionReceipt, DECISION_CATEGORIES } from "./decision-policy.mjs";
 import { resolveNativeChair } from "./native-chair.mjs";
 import { clearTerminalRuntime, legacyWorkerCommandMatches, reconciliationAction, workerCancellationMatches, workerCommandMatches } from "./collaboration-cleanup.mjs";
+import { acknowledgeCompletion } from "./handoff-protocol.mjs";
 
 const RUNTIME_ROOT = realpathSync(process.env.BRIDGE_RUNTIME_ROOT || process.env.BRIDGE_ROOT || process.cwd());
 const WORKSPACE_ROOT = realpathSync(process.env.BRIDGE_WORKSPACE_ROOT || process.env.BRIDGE_ROOT || process.cwd());
@@ -116,6 +117,16 @@ function summary(view) {
       : `Decision needs user: ${decision.reason}`);
   }
   if (view.permissionProfile === "yolo") lines.push("Permissions: YOLO — provider approvals and sandbox protections are bypassed for the writer.");
+  if (view.completion?.lastHandoff) {
+    const completion = view.completion;
+    lines.push([
+      `Handoff ${completion.sequence}: ${completion.lastHandoff.agent} — ${completion.lastHandoff.outcome}`,
+      `Completion phase: ${completion.phase}`,
+      `Completion acknowledged: ${completion.acknowledged ? "yes" : "no"}`,
+      `Next action: ${completion.nextAction}`,
+      `Handoff summary: ${completion.lastHandoff.summary}`,
+    ].join("\n"));
+  }
   if (lastTurn) {
     const excerpt = lastTurn.message.length > 4_000
       ? `${lastTurn.message.slice(0, 4_000)}\n[turn excerpt truncated]`
@@ -407,6 +418,8 @@ server.registerTool(
       decisionPolicy: input.decisionPolicy || { additionalEscalations: [], maxDialogueTurns: 4 },
       decisionPolicyEnabled: Boolean(input.decisionPolicy),
       decisions: [],
+      handoffs: [],
+      completion: null,
       nativeChairTurns: [],
       turnTimeoutSeconds: input.turnTimeoutSeconds,
       run: { maxTurns: input.decisionPolicy ? Math.min(input.maxTurns, input.decisionPolicy.maxDialogueTurns) : input.maxTurns },
@@ -452,6 +465,47 @@ server.registerTool(
 );
 
 server.registerTool(
+  "acknowledge_handoff",
+  {
+    title: "Acknowledge delegated completion handoff",
+    description: "Record the chair's independent verification of the latest structured HANDOFF receipt.",
+    inputSchema: {
+      collaborationId,
+      sequence: z.number().int().min(1),
+      accepted: z.boolean(),
+      summary: z.string().min(1).max(20_000),
+      verification: z.array(z.string().min(1).max(2_000)).max(50).default([]),
+      remaining: z.array(z.string().min(1).max(2_000)).max(50).default([]),
+    },
+  },
+  async ({ collaborationId: id, sequence, accepted, summary: acknowledgementSummary, verification, remaining }) => {
+    blockNestedCollaboration();
+    const current = await readCollaboration(WORKSPACE_ROOT, id);
+    if (["queued", "running", "cancelling", "indeterminate"].includes(current.status)) {
+      throw new Error(`Collaboration ${id} is ${current.status}; acknowledge the HANDOFF after the delegated phase stops.`);
+    }
+    const recordedAt = new Date().toISOString();
+    const state = await updateCollaboration(WORKSPACE_ROOT, id, (previous) => ({
+      ...previous,
+      completion: acknowledgeCompletion(previous.completion, {
+        sequence,
+        accepted,
+        summary: acknowledgementSummary,
+        verification,
+        remaining,
+        at: recordedAt,
+      }),
+    }));
+    await appendEvent(WORKSPACE_ROOT, id, {
+      type: "handoff_acknowledged",
+      at: recordedAt,
+      completion: state.completion,
+    });
+    return toolResponse({ collaborationId: id, status: state.status, completion: state.completion });
+  },
+);
+
+server.registerTool(
   "record_native_chair_turn",
   {
     title: "Record native chair turn",
@@ -469,6 +523,9 @@ server.registerTool(
     if (!current.chair) throw new Error(`Collaboration ${id} has no declared native chair.`);
     if (["queued", "running", "cancelling", "indeterminate"].includes(current.status)) {
       throw new Error(`Collaboration ${id} is ${current.status}; record the native chair receipt after the delegated phase stops.`);
+    }
+    if (current.completion?.acknowledged === false) {
+      throw new Error(`Collaboration ${id} has unacknowledged HANDOFF sequence ${current.completion.sequence}; call acknowledge_handoff before continuing.`);
     }
     const receipt = {
       source: "native-chair", provider: current.chair.provider, sessionId: current.chair.sessionId || null,
@@ -530,6 +587,9 @@ server.registerTool(
     if (["queued", "running", "cancelling", "indeterminate"].includes(current.status)) {
       throw new Error(`Collaboration ${id} is ${current.status}; wait for it to stop before continuing.`);
     }
+    if (current.completion?.acknowledged === false) {
+      throw new Error(`Collaboration ${id} has unacknowledged HANDOFF sequence ${current.completion.sequence}; call acknowledge_handoff before continuing.`);
+    }
     if (githubReview && !(handoffPath || current.handoffPath)) {
       throw new Error("githubReview requires handoffPath.");
     }
@@ -572,6 +632,9 @@ server.registerTool(
         availableAgents: previous.agents,
         unavailableAgents: {},
       },
+      completion: previous.completion
+        ? { ...previous.completion, phase: "continuing", nextAction: "provider_work" }
+        : null,
     }));
     await appendEvent(WORKSPACE_ROOT, id, { type: "user_continued", at: new Date().toISOString(), message });
     startWorker(id);
