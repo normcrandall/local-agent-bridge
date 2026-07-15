@@ -25,6 +25,7 @@ function json(value, status = 200) {
 function fakeGitHub({
   currentSha = headSha, wrongThread = false, existingPull = false,
   reviewStatus = "success", reviewLogin = "reviewer[bot]", reviewStatuses = null, reviews = [],
+  statusPermissionDenied = false,
 } = {}) {
   const calls = [];
   const fetchImpl = async (url, options = {}) => {
@@ -46,6 +47,7 @@ function fakeGitHub({
     }, 201);
     if (path === "/repos/owner/repo/pulls/42/merge") return json({ merged: true, sha: "b".repeat(40) });
     if (path.startsWith(`/repos/owner/repo/commits/${headSha}/statuses?per_page=100`)) {
+      if (statusPermissionDenied) return json({ message: "Resource not accessible by integration" }, 403);
       const statuses = reviewStatuses || [{
         context: "agent-review", state: reviewStatus, creator: { login: reviewLogin },
       }];
@@ -124,18 +126,38 @@ const appApprovalApi = fakeGitHub({
 const appApproved = await createBoundBuilderClient({ ...base, fetchImpl: appApprovalApi.fetchImpl }).merge({ method: "squash" });
 assert.equal(appApproved.reviewGate.type, "trusted_app_review");
 assert.equal(appApproved.reviewGate.login, "reviewer[bot]");
+assert.equal(appApprovalApi.calls.some((call) => call.path.includes("/statuses?")), false);
+const noStatusPermissionAppApprovalApi = fakeGitHub({
+  statusPermissionDenied: true,
+  reviews: [{ id: 19, state: "APPROVED", commit_id: headSha, submitted_at: "2026-07-15T11:00:00Z", user: { login: "reviewer[bot]" } }],
+});
+const noStatusPermissionAppApproved = await createBoundBuilderClient({
+  ...base, fetchImpl: noStatusPermissionAppApprovalApi.fetchImpl,
+}).merge({ method: "squash" });
+assert.equal(noStatusPermissionAppApproved.reviewGate.type, "trusted_app_review");
+assert.equal(noStatusPermissionAppApprovalApi.calls.some((call) => call.path.includes("/statuses?")), false);
 await assert.rejects(
   createBoundBuilderClient({
     ...base,
     fetchImpl: fakeGitHub({
-      reviewStatus: "pending",
+      reviewStatus: "success",
+      reviews: [{ id: 20, state: "CHANGES_REQUESTED", commit_id: headSha, submitted_at: "2026-07-15T11:00:00Z", user: { login: "reviewer[bot]" } }],
+    }).fetchImpl,
+  }).merge({ method: "squash" }),
+  /reviewer App decisions do not authorize merge.*CHANGES_REQUESTED/i,
+);
+await assert.rejects(
+  createBoundBuilderClient({
+    ...base,
+    fetchImpl: fakeGitHub({
+      reviewStatus: "success",
       reviews: [
         { id: 9, state: "APPROVED", commit_id: headSha, submitted_at: "2026-07-15T11:00:00Z", user: { login: "reviewer[bot]" } },
         { id: 10, state: "DISMISSED", commit_id: headSha, submitted_at: "2026-07-15T11:01:00Z", user: { login: "reviewer[bot]" } },
       ],
     }).fetchImpl,
   }).merge({ method: "squash" }),
-  /No exact-head approval.*machine-review status.*not successful/i,
+  /reviewer App decisions do not authorize merge.*DISMISSED/i,
 );
 await assert.rejects(
   createBoundBuilderClient({
@@ -156,6 +178,14 @@ const humanApproved = await createBoundBuilderClient({
 }).merge({ method: "squash" });
 assert.equal(humanApproved.reviewGate.type, "human_approval");
 assert.equal(humanApproved.reviewGate.login, "owner");
+const noStatusPermissionHumanApi = fakeGitHub({
+  statusPermissionDenied: true,
+  reviews: [{ id: 21, state: "APPROVED", commit_id: headSha, submitted_at: "2026-07-15T12:00:00Z", user: { login: "owner" } }],
+});
+const noStatusPermissionHumanApproved = await createBoundBuilderClient({
+  ...base, trustedHumanReviewLogins: ["owner"], fetchImpl: noStatusPermissionHumanApi.fetchImpl,
+}).merge({ method: "squash" });
+assert.equal(noStatusPermissionHumanApproved.reviewGate.type, "human_approval");
 await assert.rejects(
   createBoundBuilderClient({
     ...base,
