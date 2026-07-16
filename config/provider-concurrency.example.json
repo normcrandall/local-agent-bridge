@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "providers": {
+    "claude": {
+      "work": 1,
+      "review": 2
+    },
+    "codex": {
+      "work": 1,
+      "review": 2
+    },
+    "antigravity": {
+      "work": 1,
+      "review": 2
+    }
+  }
+}

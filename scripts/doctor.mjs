@@ -51,6 +51,24 @@ check("Provider overload fallback policy", () => {
     ));
 }, "fix ~/.config/local-agent-bridge/model-fallbacks.json or remove it to disable machine fallback");
 
+check("Provider concurrency policy", () => {
+  const path = process.env.AGENT_BRIDGE_PROVIDER_CONCURRENCY_CONFIG
+    || resolve(homedir(), ".config/local-agent-bridge/provider-concurrency.json");
+  if (!existsSync(path)) return true;
+  const info = statSync(path);
+  const config = JSON.parse(readFileSync(path, "utf8"));
+  const providers = config.providers || {};
+  const validCapacity = (value) => Number.isInteger(value) && value >= 1 && value <= 20;
+  return info.isFile()
+    && (info.mode & 0o077) === 0
+    && config.version === 1
+    && ["claude", "codex", "antigravity"].every((provider) => {
+      const selected = providers[provider] || {};
+      return (selected.work === undefined || validCapacity(selected.work))
+        && (selected.review === undefined || validCapacity(selected.review));
+    });
+}, "fix ~/.config/local-agent-bridge/provider-concurrency.json or remove it to use work 1 and review 2");
+
 check("Antigravity CLI", () => {
   const agy = process.env.AGY_BIN || resolve(homedir(), ".local/bin/agy");
   const result = spawnSync(agy, ["--version"], { encoding: "utf8" });

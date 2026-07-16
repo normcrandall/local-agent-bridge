@@ -35,6 +35,7 @@ For every autonomous review leg, pass an ordered roster containing the preferred
 - `ciTracking.prNumber` when a PR exists.
 - optional `budget.maxCostUsd`, `budget.maxTokens`, and `budget.maxMinutes`.
 - optional `modelFallbacks.claude` and `modelFallbacks.codex`, preserving ordered overload-only downgrade chains; omit them to use machine-local policies.
+- optional `providerConcurrency`; omit it to use the machine policy, defaulting each provider to one live work call and two concurrent read-only review calls. A collaboration may lower but never raise that machine ceiling. Excess calls remain visibly queued and start automatically when the oldest compatible slot opens.
 
 A recognized provider model overload advances inside the active turn without rotating or reassigning the writer. Claude Code owns its native fallback; the Codex bridge records attempted and selected models. Show any downgrade narrative. Treat authentication, quota, permission, configuration, and transport errors through their existing failure or indeterminate paths instead of model fallback.
 
@@ -47,6 +48,8 @@ Never substitute a long-running Bash, sleep, gh, or PR polling loop for broker p
 For task N, let the selected writer implement test-first, verify, commit, and deliver only within its profile. Every other agent remains read-only. Reviewers author the handoff and formal PR review through their provider-specific, user-owned Apps selected from machine-local configuration. Omit identity fields unless repository policy requires strict login pins; never embed App credentials or maintainer-specific identities in the skill. On task N+1, run role selection again; do not transfer an active task's writer merely to satisfy rotation.
 
 After multiple reviews, reconcile evidence rather than vote. Use `bridge reconcile --reviews <json>` for structured findings. Show accepted, disputed, and rejected findings; the writer fixes only validated findings and reviewers re-check the actual new head.
+
+Submit review-ready PRs immediately even when a provider is occupied. The broker enforces role-specific capacity and displays `waiting_capacity`; do not serialize reviews in the chair merely because another review is active.
 
 Resolve reversible technical disagreements with `decisionPolicy` and one `DECISION:` receipt containing alternatives, confidence, dissent, rollback, and owner. Always escalate money, legal/compliance, authority expansion, destructive external effects, and user-owned product choices.
 

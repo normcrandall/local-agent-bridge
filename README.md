@@ -58,6 +58,16 @@ chmod 600 ~/.config/ghtoken
 
 Do not commit tokens, GitHub App private keys, or the populated machine-local App config to the bridge repository.
 
+Provider call concurrency is machine-local. The built-in default permits one live work call and two concurrent read-only review calls per provider. To customize it:
+
+```sh
+mkdir -p ~/.config/local-agent-bridge
+cp config/provider-concurrency.example.json ~/.config/local-agent-bridge/provider-concurrency.json
+chmod 600 ~/.config/local-agent-bridge/provider-concurrency.json
+```
+
+Keep `work` at `1` unless you deliberately want the same provider operating multiple independent writer sessions. Increasing `review` is safer because review sessions remain read-only and use exact-head GitHub authorization.
+
 On another computer, generate a new private key for the same App when possible, install the App on the required accounts, rerun the installation discovery command, and recreate the machine-local config. A securely transferred existing key also works, but it must remain outside the repository with mode `600`.
 
 ### Optional: use your own GitHub Apps
@@ -427,7 +437,9 @@ State and JSONL transcripts live under `~/.local/share/agent-bridge/state`. A co
 
 ### Parallel portfolios and bridge-owned merge trains
 
-`take-the-helm` uses a durable portfolio ledger under `~/.local/share/agent-bridge/state/portfolios`. Each issue declares hard blockers, temporary conflict edges, expected path ownership, exclusive resources, priority, and verification commands. `plan_portfolio` rejects dependency cycles and greedily selects the highest-priority non-conflicting frontier up to `maxParallel`, which defaults to two. A selected issue receives one writer and one isolated worktree; implementation collaborations use distinct providers so one provider is not active in multiple lanes at once. Reviews are scheduled after writer handoffs using providers that did not author the lane.
+`take-the-helm` uses a durable portfolio ledger under `~/.local/share/agent-bridge/state/portfolios`. Each issue declares hard blockers, temporary conflict edges, expected path ownership, exclusive resources, priority, and verification commands. `plan_portfolio` rejects dependency cycles and greedily selects the highest-priority non-conflicting frontier up to `maxParallel`, which defaults to two. A selected issue receives one writer and one isolated worktree. Provider execution uses role-specific semaphores: the machine default is one live work call and two concurrent read-only review calls per provider. Excess calls remain queued in FIFO order with `runtime.activeCall.phase: waiting_capacity` and start automatically when a compatible slot is released.
+
+The machine policy lives at `~/.config/local-agent-bridge/provider-concurrency.json` and is a hard ceiling. `start_collaboration.providerConcurrency` may lower it for one collaboration but cannot raise it; `continue_collaboration` preserves the resolved limits unless supplied a lower replacement. Implementation lanes should normally retain `work: 1`; review-ready PRs should be submitted immediately instead of being held by the chair.
 
 Passing branch CI or opening a PR does not satisfy a hard dependency that requires merged behavior. Verified PR heads enter the bridge-owned merge train. They stop consuming writer capacity but continue reserving overlapping paths and exclusive resources until merged or repaired. Only one candidate may hold the integration slot. The chair combines the exact PR head with the current target SHA in a disposable worktree, runs the lane and repository integration gates, and records either a current validation or an arbitration dossier. `authorize_portfolio_merge` fails if the target or head changed and does not itself grant merge authority; the configured builder App still requires standing repository authority or explicit authorization for that exact head.
 
@@ -446,6 +458,8 @@ When Codex App, Claude Code, or Antigravity is already doing the primary work, p
 For reversible technical uncertainty, enable `decisionPolicy`. Participants may emit a validated `DECISION:` envelope containing alternatives, selection, confidence, dissent, rollback path, and owner. The policy bounds the dialogue and records one concise receipt. Money, legal/compliance, external authorization, destructive/irreversible actions, and explicit user-owned choices always become `needs_user`; repository policy may add escalation categories but can never remove the baseline or expand permissions.
 
 In work mode, `writer` defaults to the starting agent. The designated writer receives edit permissions; every other participant is forced into review mode at both the prompt and provider-tool layers. A workspace lease prevents two persistent work-mode collaborations from editing this project simultaneously. Review-only collaborations may still run concurrently.
+
+Provider capacity is acquired for every turn, not merely when the collaboration starts. This means a coordinator may call the same provider repeatedly and several portfolios may share it safely. Work and review limits are independent, so an active writer does not consume a review slot. A transport-indeterminate call keeps its capacity reservation until the collaboration is explicitly cancelled or otherwise reconciled.
 
 Model fields are optional. Omitting them preserves each provider's configured model. Explicit values pass through unchanged.
 
