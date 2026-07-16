@@ -31,6 +31,10 @@ Claude CLI registers `codex`, `antigravity`, `collaboration`, and `playwright` a
 
 Codex App and CLI register `claude_code`, `antigravity`, `collaboration`, and `playwright` globally in `~/.codex/config.toml`, pointing at the stable `~/.local/bin/agent-*-mcp` launchers. Verify the user scope outside any project with `(cd /tmp && codex mcp list)`. The global bridge workspace root is the user's home directory so the same servers can operate across projects; narrower trusted-project entries may override it.
 
+Global setup also installs coordinator lifecycle hooks without replacing existing hook groups: Claude Code `Stop` and `SessionStart`, Codex `Stop` and `SessionStart`, and Antigravity/Gemini `AfterAgent` and `SessionStart`. The hooks inspect durable collaboration state, hold a native coordinator open while delegated work or an actionable completion remains, and restore an unprocessed wake after restart. They deliberately allow `needs_user` and `indeterminate` boundaries to stop.
+
+Claude Code additionally receives the `collaboration_wake` MCP Channel. During the Channels research preview, start Claude with `claude-collab` instead of `claude` to receive live collaboration completion events inside the current session. Ordinary Claude sessions still receive the Stop/SessionStart safety hooks. Restart active Codex, Claude, and Antigravity sessions after `npm run install:global`.
+
 ## Move the bridge to another computer
 
 The bridge repository is the portable source of truth for its runtime and `council-*` skills. Provider authentication, MCP registrations, the original AI Hero skills, and collaboration history are machine-local.
@@ -294,6 +298,8 @@ Delegated providers end completed turns with a single-line `HANDOFF:` JSON recei
 
 The chair checks the claimed workspace, tests, pull request, or other evidence and calls `acknowledge_handoff` with the exact sequence. Until that acknowledgement is recorded, `continue_collaboration` and native-chair completion receipts are rejected. Status output shows the current handoff sequence, acknowledgement state, and next action, so the caller has a machine-readable and user-visible finish boundary.
 
+For native-chair runs, the broker also writes a durable `coordinatorWake` when a delegated phase stops. It records the coordinator provider, monotonic sequence, source turn, summary, next action, delivery adapter, and acknowledgement. Host hooks hold the coordinator open while collaboration state is advancing or an actionable wake remains; if the exact same state retries without progress, they yield safely and rely on durable SessionStart recovery instead of creating an infinite host loop. Claude's optional Channel pushes the same receipt into a live session. The chair fetches the new turn, performs the exact next action, then calls `acknowledge_coordinator_wake`. Continuation and native-chair completion are rejected while an actionable wake is unacknowledged. `needs_user` and `indeterminate` wakes are non-actionable by design.
+
 ## Complete skill catalog
 
 ### Bridge-native skills
@@ -448,6 +454,8 @@ After GitHub merges the authorized PR, `record_portfolio_merge` advances the tar
 `get_collaboration` is compact by default: `detail: status` and `includeTurns: 0` omit the original brief, command arrays, preflight data, and completed turn bodies. Poll with `afterUpdatedAt`; when `runtime.turnCount` advances, request new output once with `detail: full`, a bounded `includeTurns`, and `afterTurn`. `runtime.activeCall.summary` is the narrative status, `summaryAt` says when that narrative changed, and `heartbeatAt` independently proves process liveness. `summarySource` distinguishes the broker's initial placeholder from provider-authored or adapter-observed work. A fresh heartbeat never makes an old narrative current.
 
 Make every heartbeat poll a separate `get_collaboration` call with `waitSeconds: 8` or less. Poll cadence and display cadence are deliberately different: show narrative or lifecycle changes immediately, but rate-limit liveness-only output to one compact line per 60 seconds and never repeat an unchanged status card. Do not replace broker polling with one long-running Bash, sleep, `gh`, or PR watcher: host CLIs generally redraw their status UI only after a tool call returns. Check GitHub after the broker reports a completed turn or terminal state.
+
+A native chair no longer has to infer that a peer finished from a stale heartbeat. Terminal phases enqueue `coordinatorWake`; the installed Stop/AfterAgent hook blocks the host while state is advancing and surfaces actionable completion, while SessionStart re-injects an unprocessed wake after a restart. A repeated Stop against an unchanged signature is allowed to exit so a broken host cannot loop forever; the wake remains durable. Claude's `collaboration_wake` Channel provides a live push path when launched through `claude-collab`. These mechanisms complement bounded broker polling; they do not create hidden shell pollers or bypass protected user/indeterminate boundaries.
 
 A timeout or lost transport becomes `indeterminate`, not unavailable. The broker preserves writer ownership and blocks replacement work in that workspace until the user inspects the provider/workspace and explicitly cancels. Only a confirmed provider failure permits removal from the rotation; cancellation terminates the detached process group.
 

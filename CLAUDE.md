@@ -28,6 +28,8 @@ When this Claude Code session is participating, pass `chair: { provider: "claude
 
 Poll with separate `get_collaboration` calls using `detail: status`, `includeTurns: 0`, `afterUpdatedAt`, and `waitSeconds: 8` or less. Never substitute a long-running Bash, sleep, `gh`, or PR polling loop: a blocking shell tool prevents Claude Code from refreshing its status line. Treat `runtime.activeCall.summary` as narrative status and show it with its `summaryAt` age when it changes; `summarySource: broker` is only a placeholder, while `provider_or_adapter` is observed work. Render lifecycle or narrative changes immediately; if only heartbeat or elapsed time changed, emit at most one compact liveness line per 60 seconds. Consult GitHub only after the broker reports a completed turn or terminal state.
 
+When a native-chair collaboration stops, treat `coordinatorWake` as the authoritative resume signal. Fetch the new terminal turn and completion receipt, perform its exact next action, then call `acknowledge_coordinator_wake` with the current sequence. Stop and session-start hooks keep Claude alive or restore the pending wake across restarts; `claude-collab` additionally enables the live collaboration channel during Claude's Channels preview. Never acknowledge before processing it. A `needs_user` or `indeterminate` wake is a protected boundary: explain it and allow the host turn to stop instead of looping.
+
 - Use the `codex` tool for an independent second opinion, review, or bounded delegated task.
 - Use `ask_antigravity` for a bounded Gemini/Antigravity second opinion and `continue_antigravity` only with its returned `conversationId`.
 - Start with `sandbox: read-only` for analysis and review.

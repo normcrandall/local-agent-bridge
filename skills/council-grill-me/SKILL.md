@@ -46,6 +46,8 @@ Return the `collaborationId` immediately. Routine polls must use `detail: status
 
 Never substitute a long-running Bash, sleep, gh, or PR polling loop for broker polling. A blocking shell watcher prevents the host CLI from redrawing its status line. Make each `get_collaboration` call separately and let it return within eight seconds. Poll cadence is not display cadence: never repeat an unchanged narrative card. Check GitHub only after the broker reports a completed turn or terminal state.
 
+For a declared native chair, treat terminal `coordinatorWake` as the durable resume signal. Fetch the new turn, perform its `nextAction`, then call `acknowledge_coordinator_wake` with the exact sequence before another phase or native-chair receipt. Stop/AfterAgent hooks hold the coordinator open while actionable work remains and SessionStart restores missed wakes. Never acknowledge without processing. Let `needs_user` and `indeterminate` stop because they are protected boundaries.
+
 ## Degrade gracefully
 
 Request all three providers, but do not require all three to proceed. The broker preflights each participant. Remove a provider only after a confirmed failure. A timeout or lost transport is `indeterminate`: preserve its writer ownership, block replacement work in that workspace, and require inspection or explicit cancellation. For a confirmed unavailable provider, immediately display:

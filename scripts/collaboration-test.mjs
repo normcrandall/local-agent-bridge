@@ -58,6 +58,23 @@ async function waitForStop(client, id, timeoutMs = 10_000) {
   throw new Error(`Timed out waiting for ${id}; last status: ${view?.status}`);
 }
 
+async function acknowledgeWake(client, view, summary = "Coordinator processed the wake event.") {
+  assert.equal(view.coordinatorWake?.actionable, true);
+  assert.equal(view.coordinatorWake?.status, "pending");
+  const result = await client.callTool({
+    name: "acknowledge_coordinator_wake",
+    arguments: {
+      collaborationId: view.id,
+      sequence: view.coordinatorWake.sequence,
+      provider: view.coordinatorWake.provider,
+      summary,
+      action: "processed",
+    },
+  });
+  assert.equal(result.structuredContent.coordinatorWake.status, "acknowledged");
+  return result.structuredContent;
+}
+
 let firstClient;
 let secondClient;
 let nestedClient;
@@ -72,6 +89,7 @@ try {
   const tools = await firstClient.listTools();
   const names = tools.tools.map((tool) => tool.name).sort();
   assert.deepEqual(names, [
+    "acknowledge_coordinator_wake",
     "acknowledge_handoff",
     "archive_collaboration",
     "authorize_portfolio_merge",
@@ -250,11 +268,42 @@ try {
   assert.equal(chaired.structuredContent.chair.source, "native-chair");
   const chairedDone = await waitForStop(secondClient, chaired.structuredContent.id);
   assert.equal(chairedDone.status, "turn_limit");
+  const prematureNativeReceipt = await secondClient.callTool({
+    name: "record_native_chair_turn",
+    arguments: { collaborationId: chairedDone.id, summary: "Must wait for wake acknowledgement.", artifacts: [], verification: [] },
+  });
+  assert.equal(prematureNativeReceipt.isError, true);
+  assert.match(prematureNativeReceipt.content.map((item) => item.text || "").join("\n"), /unacknowledged coordinator wake 1/);
+  await acknowledgeWake(secondClient, chairedDone, "Codex received the peer review completion.");
   const nativeReceipt = await secondClient.callTool({
     name: "record_native_chair_turn",
     arguments: { collaborationId: chairedDone.id, summary: "Codex implemented locally.", artifacts: ["src/example.mjs"], verification: ["tests passed"] },
   });
   assert.equal(nativeReceipt.structuredContent.receipt.source, "native-chair");
+  const protectedDecision = await secondClient.callTool({
+    name: "record_decision",
+    arguments: {
+      collaborationId: chairedDone.id,
+      question: "May the workflow spend money?",
+      category: "money",
+      owner: "user",
+    },
+  });
+  assert.equal(protectedDecision.structuredContent.status, "needs_user");
+  const protectedView = await secondClient.callTool({
+    name: "get_collaboration",
+    arguments: { collaborationId: chairedDone.id, detail: "full", includeTurns: 0 },
+  });
+  assert.equal(protectedView.structuredContent.coordinatorWake.sequence, 2);
+  assert.equal(protectedView.structuredContent.coordinatorWake.actionable, false);
+  const resumedAfterUser = await secondClient.callTool({
+    name: "continue_collaboration",
+    arguments: { collaborationId: chairedDone.id, message: "The user declined the spend; continue without it.", additionalTurns: 1 },
+  });
+  assert.notEqual(resumedAfterUser.isError, true);
+  assert.equal(resumedAfterUser.structuredContent.coordinatorWake.sequence, 2);
+  assert.equal(resumedAfterUser.structuredContent.coordinatorWake.status, "acknowledged");
+  await secondClient.callTool({ name: "cancel_collaboration", arguments: { collaborationId: chairedDone.id } });
   const archivedChair = await secondClient.callTool({ name: "archive_collaboration", arguments: { collaborationId: chairedDone.id } });
   assert.equal(archivedChair.structuredContent.archived, true);
   const rotatedNative = await secondClient.callTool({
