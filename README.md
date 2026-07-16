@@ -472,7 +472,9 @@ Provider capacity is acquired for every turn, not merely when the collaboration 
 
 Model fields are optional. Omitting them preserves each provider's configured model. Explicit values pass through unchanged.
 
-`modelFallbacks.claude` and `modelFallbacks.codex` are also optional. Omitting them loads the machine-local overload policy; an explicit provider array replaces that policy for the collaboration. Overload retries happen inside one provider turn, so they do not consume another broker turn or trigger writer reassignment.
+`modelFallbacks.claude`, `modelFallbacks.codex`, and `modelFallbacks.antigravity` are optional. Omitting them loads the machine-local overload policy; an explicit provider array replaces that policy for the collaboration. Overload retries happen inside one provider turn, so they do not consume another broker turn or trigger writer reassignment.
+
+Autonomous work lanes should pass all eligible providers in one ordered roster and identify one preferred writer. If that writer is confirmed unavailable, the broker moves ownership to the next eligible provider without changing the worktree. If the full roster is exhausted by transient model-capacity failures, the collaboration enters visible `recovering` state and retries according to `providerRecovery` (three attempts at 15, 60, and 180 seconds by default). Each recovery attempt begins with the provider's preferred configured model and then follows its downgrade chain, allowing automatic upgrade when capacity returns. Authentication, permission, quota, configuration, command, and indeterminate transport failures are not retried. `wait_for_portfolio_lane` races the desired head advancement against handoff, failure, cancellation, indeterminate ownership, and recovery so coordinators cannot park on a success-only signal.
 
 ## Pair-programming operations
 
@@ -559,17 +561,19 @@ The peer model override is passed directly through MCP. The host model is select
 
 #### Provider overload fallback
 
-Claude Code and Codex model-capacity failures can fall through an ordered chain inside the same delegated turn without breaking the collaboration or rotating its writer. The caller may pass `fallbackModels` on either provider's direct tools or use `modelFallbacks.claude` and `modelFallbacks.codex` on `start_collaboration` and `continue_collaboration`:
+Claude Code, Codex, and Antigravity model-capacity failures can fall through an ordered chain inside the same delegated turn without breaking the collaboration or rotating its writer. The caller may pass `fallbackModels` on a provider's direct tools or use `modelFallbacks.claude`, `modelFallbacks.codex`, and `modelFallbacks.antigravity` on `start_collaboration` and `continue_collaboration`:
 
 ```json
 {
   "models": {
     "claude": "claude-opus-4-8",
-    "codex": "gpt-5.6-sol"
+    "codex": "gpt-5.6-sol",
+    "antigravity": "Gemini 3.1 Pro (High)"
   },
   "modelFallbacks": {
     "claude": ["claude-opus-4-6", "claude-sonnet-5"],
-    "codex": ["gpt-5.6-terra"]
+    "codex": ["gpt-5.6-terra"],
+    "antigravity": ["Gemini 3.1 Pro (Low)", "Gemini 3.5 Flash (High)"]
   }
 }
 ```
@@ -580,7 +584,7 @@ For a machine-wide default, copy [`config/model-fallbacks.example.json`](config/
 chmod 600 ~/.config/local-agent-bridge/model-fallbacks.json
 ```
 
-Codex emits a visible downgrade narrative and records `requestedModel`, selected `model`, `fallbackUsed`, and `attemptedModels` in turn metadata. Claude Code owns its native retry and session continuity while the bridge records the configured fallback policy in turn metadata. Neither path uses model fallback for authentication, permission, quota, configuration, ordinary command failure, timeout, or lost transport. If the Codex chain is exhausted, the final error names every attempted model so the broker can continue with another available provider.
+Codex and Antigravity emit a visible downgrade narrative and record `requestedModel`, selected `model`, `fallbackUsed`, and `attemptedModels` in turn metadata. Claude Code owns its native retry and session continuity while the bridge records the configured fallback policy in turn metadata. None of these paths use model fallback for authentication, permission, quota, configuration, ordinary command failure, timeout, or lost transport. If a chain is exhausted, the final error names every attempted model so the broker can continue with another available provider.
 
 For example, Fable plans, a selected Codex model implements, and Fable reviews:
 

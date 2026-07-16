@@ -7,7 +7,7 @@ import {
   updateCollaboration,
 } from "./collaboration-store.mjs";
 
-const ACTIVE_STATUSES = new Set(["queued", "running", "cancelling"]);
+const ACTIVE_STATUSES = new Set(["queued", "running", "recovering", "cancelling"]);
 const TERMINAL_STATUSES = new Set(["agreed", "needs_user", "turn_limit", "failed", "cancelled", "budget"]);
 const ACTIONABLE_NEXT_ACTIONS = new Set(["chair_verify", "peer_review", "writer_fix", "continue"]);
 

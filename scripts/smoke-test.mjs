@@ -278,7 +278,11 @@ async function callAntigravityWithoutModel() {
     command: "/bin/zsh",
     args: [resolve(root, "scripts/antigravity-bridge-mcp.sh")],
     cwd: root,
-    env: { ...process.env, AGY_BIN: resolve(root, "scripts/fake-antigravity.mjs") },
+    env: {
+      ...process.env,
+      AGY_BIN: resolve(root, "scripts/fake-antigravity.mjs"),
+      FAKE_ANTIGRAVITY_OVERLOAD_MODELS: "overloaded-antigravity-model",
+    },
   });
   try {
     await client.connect(transport);
@@ -299,6 +303,20 @@ async function callAntigravityWithoutModel() {
     }
     if ((serialized.match(/--add-dir/g) || []).length < 2) {
       throw new Error("Antigravity Git metadata directories were not added explicitly");
+    }
+    const fallback = await client.callTool({
+      name: "ask_antigravity",
+      arguments: {
+        prompt: "bridge fallback smoke test",
+        model: "overloaded-antigravity-model",
+        fallbackModels: ["available-antigravity-model"],
+        mode: "review",
+      },
+    });
+    if (fallback.isError) throw new Error("Antigravity overload fallback returned an error");
+    if (fallback.structuredContent?.modelRouting?.model !== "available-antigravity-model"
+      || fallback.structuredContent?.modelRouting?.fallbackUsed !== true) {
+      throw new Error("Antigravity bridge did not apply its overload fallback chain");
     }
     const configuredDefault = await client.callTool({
       name: "ask_antigravity",
@@ -405,6 +423,7 @@ for (const required of [
   "create_portfolio",
   "get_portfolio",
   "update_portfolio_item",
+  "wait_for_portfolio_lane",
   "enqueue_portfolio_merge",
   "begin_portfolio_merge_validation",
   "record_portfolio_merge_validation",
@@ -443,7 +462,7 @@ for (const property of [
   if (!(property in claudeSchema)) throw new Error(`Claude bridge schema is missing: ${property}`);
 }
 const antigravitySchema = antigravityTools.find((tool) => tool.name === "ask_antigravity")?.inputSchema?.properties || {};
-for (const property of ["prompt", "mode", "model"]) {
+for (const property of ["prompt", "mode", "model", "fallbackModels"]) {
   if (!(property in antigravitySchema)) throw new Error(`Antigravity bridge schema is missing: ${property}`);
 }
 const collaborationSchema = collaborationTools.find((tool) => tool.name === "start_collaboration")?.inputSchema?.properties || {};
@@ -457,6 +476,7 @@ for (const property of [
   "maxTurns",
   "models",
   "modelFallbacks",
+  "providerRecovery",
   "verificationCommands",
   "workCommands",
   "workProfile",

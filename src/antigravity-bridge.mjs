@@ -8,6 +8,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { negotiateProviderCapabilities } from "./provider-cli-capabilities.mjs";
+import { loadConfiguredFallbackModels, normalizeFallbackModels } from "./model-fallbacks.mjs";
 
 const WORKSPACE_ROOT = realpathSync(process.env.BRIDGE_WORKSPACE_ROOT || process.env.BRIDGE_ROOT || process.cwd());
 const DEFAULT_TIMEOUT_MS = 2 * 60 * 60 * 1000;
@@ -84,7 +85,12 @@ function loggedConversation(path) {
   } catch { return null; }
 }
 
-function runAntigravity({ prompt, cwd, mode, model, timeoutSeconds, permissionProfile = "standard", conversationId, onProgress = () => {} }) {
+function isModelOverload(error) {
+  return /(?:^|[^a-z0-9])overloaded(?:[^a-z0-9]|$)|\bmodel[_ -]?overload(?:ed)?\b|\bover[_ -]?capacity\b|\bmodel\b[^\n]{0,80}\bat capacity\b|\bno capacity\b[^\n]{0,80}\bmodel\b|\bmodel\b[^\n]{0,80}\bhigh demand\b|\bhigh demand\b[^\n]{0,80}\bmodel\b|\bexperiencing high demand\b/i
+    .test(error?.message || String(error));
+}
+
+function runAntigravityAttempt({ prompt, cwd, mode, model, timeoutSeconds, permissionProfile = "standard", conversationId, onProgress = () => {} }) {
   if (process.env.ANTIGRAVITY_BRIDGE_ACTIVE === "1") {
     throw new Error("Nested Antigravity bridge invocation blocked to prevent an agent loop.");
   }
@@ -179,6 +185,53 @@ function runAntigravity({ prompt, cwd, mode, model, timeoutSeconds, permissionPr
   });
 }
 
+async function runAntigravity(input) {
+  let fallbackModels;
+  if (input.fallbackModels === undefined) {
+    try {
+      fallbackModels = loadConfiguredFallbackModels("antigravity");
+    } catch (error) {
+      input.onProgress?.(`Ignoring invalid machine Antigravity model-fallback policy: ${error.message}`);
+      fallbackModels = [];
+    }
+  } else {
+    fallbackModels = normalizeFallbackModels(input.fallbackModels, "fallbackModels");
+  }
+  const candidates = [input.model || null, ...fallbackModels.filter((model) => model !== input.model)];
+  const attemptedModels = [];
+  let prompt = input.prompt;
+  for (let index = 0; index < candidates.length; index += 1) {
+    const model = candidates[index];
+    const label = model || "provider-configured model";
+    attemptedModels.push(label);
+    try {
+      const result = await runAntigravityAttempt({ ...input, prompt, model });
+      return {
+        ...result,
+        modelRouting: {
+          requestedModel: input.model || null,
+          model,
+          fallbackUsed: index > 0,
+          attemptedModels,
+          fallbackModels,
+          fallbackManagedBy: fallbackModels.length ? "bridge" : null,
+        },
+      };
+    } catch (error) {
+      if (!isModelOverload(error) || index === candidates.length - 1) {
+        if (isModelOverload(error) && candidates.length > 1) {
+          error.message = `Antigravity model fallback chain exhausted: ${attemptedModels.join(" -> ")}. ${error.message}`;
+        }
+        throw error;
+      }
+      const nextLabel = candidates[index + 1] || "provider-configured model";
+      input.onProgress?.(`Antigravity model ${label} is overloaded; retrying with ${nextLabel}.`);
+      prompt = `A previous model attempt failed because that model was overloaded. Inspect the workspace before acting so you preserve any completed work, then complete this original request:\n\n${input.prompt}`;
+    }
+  }
+  throw new Error("Antigravity model fallback chain produced no attempt.");
+}
+
 function toolResponse(result) {
   return {
     content: [{ type: "text", text: result.result || "Antigravity returned no text." }],
@@ -195,6 +248,9 @@ const sharedInput = {
   ),
   model: z.string().min(1).optional().describe(
     "Optional Antigravity model label. Omit it to use the model selected in the user's Antigravity settings.",
+  ),
+  fallbackModels: z.array(z.string().trim().min(1)).max(5).optional().describe(
+    "Ordered Antigravity models to try only after a recognized overload. Omit to use the machine-local fallback policy; pass [] to disable it.",
   ),
   timeoutSeconds: z.number().int().min(10).max(14400).optional(),
   permissionProfile: z.enum(["standard", "yolo"]).default("standard").describe(

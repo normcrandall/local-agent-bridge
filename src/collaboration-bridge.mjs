@@ -55,7 +55,7 @@ const WORKSPACE_ROOT = realpathSync(process.env.BRIDGE_WORKSPACE_ROOT || process
 const WORKER = resolve(RUNTIME_ROOT, "scripts/collaboration-worker.mjs");
 const PORTFOLIO_ROOT = resolve(process.env.BRIDGE_PORTFOLIO_DIR || collaborationDirectory(WORKSPACE_ROOT), "portfolios");
 const TERMINAL_STATUSES = new Set(["agreed", "needs_user", "turn_limit", "failed", "cancelled", "budget"]);
-const STATUS_VALUES = ["queued", "running", "cancelling", "indeterminate", ...TERMINAL_STATUSES];
+const STATUS_VALUES = ["queued", "running", "recovering", "cancelling", "indeterminate", ...TERMINAL_STATUSES];
 
 function blockNestedCollaboration() {
   if (process.env.BRIDGE_DELEGATED_SESSION === "1") {
@@ -186,7 +186,7 @@ function summary(view) {
     lines.push(`Latest turn (${lastTurn.agent}, ${lastTurn.status}):\n${excerpt}`);
   }
   if (view.error) lines.push(`Error: ${view.error}`);
-  if (["queued", "running", "cancelling"].includes(view.status)) {
+  if (["queued", "running", "recovering", "cancelling"].includes(view.status)) {
     lines.push("Call get_collaboration with this ID to check progress.");
   } else if (view.status === "indeterminate") {
     lines.push("Provider execution state is unknown. Writer ownership is preserved; inspect the workspace/provider before cancelling or starting replacement work.");
@@ -222,7 +222,7 @@ async function reconcileInterruptedCleanup() {
       await appendEvent(WORKSPACE_ROOT, state.id, { type: "cleanup_reconciled", at: new Date().toISOString(), action: "clear-terminal-metadata" });
       continue;
     }
-    if (!["queued", "running", "cancelling"].includes(state.status)) continue;
+    if (!["queued", "running", "recovering", "cancelling"].includes(state.status)) continue;
     const ageMs = Date.now() - Date.parse(state.updatedAt || state.createdAt);
     if (!state.workerPid && ageMs < 30_000) continue;
     const alive = processAlive(state.workerPid);
@@ -280,6 +280,94 @@ function updatePortfolioItemState(state, itemId, patch) {
   return refreshPortfolioState({ ...state, items });
 }
 
+function portfolioLaneOutcome(item, collaboration, expectedHeadSha) {
+  const headAdvanced = Boolean(expectedHeadSha && item.headSha && item.headSha !== expectedHeadSha);
+  if (headAdvanced) {
+    return {
+      outcome: "success_signal",
+      nextAction: "process_head_advance",
+      reason: `Portfolio lane head advanced from ${expectedHeadSha} to ${item.headSha}.`,
+    };
+  }
+  if (collaboration.status === "indeterminate") {
+    return {
+      outcome: "lane_indeterminate",
+      nextAction: "inspect_before_reassign",
+      reason: collaboration.error || "Provider ownership is indeterminate.",
+    };
+  }
+  if (collaboration.status === "recovering") {
+    return {
+      outcome: "recovering",
+      nextAction: "wait_for_provider_recovery",
+      reason: collaboration.runtime?.activeCall?.summary || "The broker is waiting to retry the eligible provider roster.",
+    };
+  }
+  if (collaboration.status === "failed") {
+    const exhausted = /No requested model is currently available/i.test(collaboration.error || "");
+    return {
+      outcome: "lane_stopped",
+      nextAction: exhausted ? "reassign_writer" : "inspect_failure",
+      reason: collaboration.error || "The lane collaboration failed.",
+    };
+  }
+  if (collaboration.status === "needs_user") {
+    return {
+      outcome: "lane_stopped",
+      nextAction: "needs_user",
+      reason: collaboration.error || collaboration.coordinatorWake?.summary || "The lane requires user input.",
+    };
+  }
+  if (["cancelled", "budget"].includes(collaboration.status)) {
+    return {
+      outcome: "lane_stopped",
+      nextAction: collaboration.status === "budget" ? "inspect_budget" : "requeue_or_cancel",
+      reason: collaboration.error || `The lane collaboration entered ${collaboration.status}.`,
+    };
+  }
+  if (["agreed", "turn_limit"].includes(collaboration.status)) {
+    return {
+      outcome: "handoff_ready",
+      nextAction: collaboration.coordinatorWake?.nextAction || (collaboration.status === "agreed" ? "chair_verify" : "continue"),
+      reason: collaboration.coordinatorWake?.summary || `The lane collaboration entered ${collaboration.status}.`,
+    };
+  }
+  return {
+    outcome: "active",
+    nextAction: "continue_waiting",
+    reason: collaboration.runtime?.activeCall?.summary || `The lane collaboration is ${collaboration.status}.`,
+  };
+}
+
+async function markStoppedPortfolioLane(portfolioId_, itemId, collaboration, classification) {
+  if (!["lane_stopped", "lane_indeterminate"].includes(classification.outcome)) {
+    return readPortfolio(PORTFOLIO_ROOT, portfolioId_);
+  }
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const current = await readPortfolio(PORTFOLIO_ROOT, portfolioId_);
+    const item = current.items.find((candidate) => candidate.id === String(itemId));
+    if (!item) throw new Error(`Portfolio item ${itemId} does not exist.`);
+    const status = classification.outcome === "lane_indeterminate"
+      ? "indeterminate"
+      : collaboration.status === "needs_user"
+        ? "needs_user"
+        : "failed";
+    if (item.status === status && item.summary === classification.reason) return current;
+    try {
+      return await updatePortfolio(PORTFOLIO_ROOT, portfolioId_, current.revision, (state) => (
+        updatePortfolioItemState(state, itemId, {
+          status,
+          summary: classification.reason,
+          collaborationStatus: collaboration.status,
+        })
+      ));
+    } catch (error) {
+      if (!/Portfolio revision changed/i.test(error.message) || attempt === 1) throw error;
+    }
+  }
+  throw new Error(`Unable to reconcile portfolio lane ${itemId}.`);
+}
+
 const collaborationId = z.string().regex(/^bridge-[0-9a-f-]{36}$/).describe(
   "Portable collaboration ID returned by start_collaboration.",
 );
@@ -293,8 +381,9 @@ const modelsSchema = z.object({
 const modelFallbacksSchema = z.object({
   claude: z.array(z.string().trim().min(1)).max(5).optional(),
   codex: z.array(z.string().trim().min(1)).max(5).optional(),
+  antigravity: z.array(z.string().trim().min(1)).max(5).optional(),
 }).strict().optional().describe(
-  "Ordered provider models to try after an overload response. Claude uses its native fallback flag; Codex retries through the bridge. Omit to use the machine-local config; pass a provider's [] to disable it for this collaboration.",
+  "Ordered provider models to try after an overload response. Claude uses its native fallback flag; Codex and Antigravity retry through the bridge. A later provider-recovery attempt starts again from the preferred configured model. Omit to use the machine-local config; pass a provider's [] to disable it for this collaboration.",
 );
 const providerConcurrencyRoleSchema = z.object({
   work: z.number().int().min(1).max(20).optional(),
@@ -356,6 +445,13 @@ const budgetSchema = z.object({
   maxTokens: z.number().int().positive().optional(),
   maxMinutes: z.number().positive().optional(),
 }).strict().optional().describe("Optional collaboration budget. The broker stops after the current turn when a known limit is reached.");
+const providerRecoverySchema = z.object({
+  enabled: z.boolean().default(true),
+  maxAttempts: z.number().int().min(0).max(20).default(3),
+  backoffSeconds: z.array(z.number().int().min(1).max(3600)).min(1).max(20).default([15, 60, 180]),
+}).strict().optional().describe(
+  "Retry the full eligible-provider roster after every requested provider is confirmed unavailable. Recovery remains visible and preserves the workspace; indeterminate ownership is never retried.",
+);
 const ciTrackingSchema = z.object({
   prNumber: z.number().int().positive(),
 }).strict().optional().describe("Refresh GitHub PR checks after each completed turn.");
@@ -407,7 +503,7 @@ const server = new McpServer(
   { name: "desktop-agent-collaboration", version: "0.2.0" },
   {
     instructions:
-      "Use start_collaboration for an asynchronous durable job with one provider or a bounded roundtable with multiple providers. It returns immediately with a portable collaborationId. Unavailable providers are skipped and the run continues with any remaining participant. Pass verificationCommands and handoffPath for independently verified reviews. Choose workProfile implement for local ownership through commit or deliver when the writer also owns push and PR delivery; use workCommands only for unusual additions. When repository policy requires reviewer-authored PR feedback, pass githubReview so the delegated Claude or Codex reviewer receives target-bound handoff and formal-review tools. Native coordinators must use merge_pull_request for an exact-head merge authorized by machine-local policy; never request Bash permission for gh pr merge. Use modelFallbacks.claude or modelFallbacks.codex for ordered overload-only downgrade chains. Use get_collaboration to poll or inspect it, continue_collaboration for another phase, and cancel_collaboration to stop. Omit model overrides to preserve configured models. The broker owns routing; never ask a peer to call another peer.",
+      "Use start_collaboration for an asynchronous durable job with one provider or a bounded roundtable with multiple providers. It returns immediately with a portable collaborationId. Unavailable providers are skipped and the run continues with any remaining participant. Autonomous work lanes should include an ordered eligible-provider roster and an explicit preferred writer so a confirmed unavailable writer fails over in the same worktree. Pass verificationCommands and handoffPath for independently verified reviews. Choose workProfile implement for local ownership through commit or deliver when the writer also owns push and PR delivery; use workCommands only for unusual additions. When repository policy requires reviewer-authored PR feedback, pass githubReview so the delegated Claude or Codex reviewer receives target-bound handoff and formal-review tools. Native coordinators must use merge_pull_request for an exact-head merge authorized by machine-local policy; never request Bash permission for gh pr merge. Use wait_for_portfolio_lane to race expected success signals against collaboration failure, cancellation, indeterminate ownership, recovery, and handoff completion; never park on a PR-head or CI-only waiter. Use modelFallbacks.claude, modelFallbacks.codex, or modelFallbacks.antigravity for ordered overload-only downgrade chains. Use get_collaboration to poll or inspect it, continue_collaboration for another phase, and cancel_collaboration to stop. Omit model overrides to preserve configured models. The broker owns routing; never ask a peer to call another peer.",
   },
 );
 
@@ -462,6 +558,7 @@ server.registerTool(
       rotationOffset: z.number().int().default(0),
       worktree: worktreeSchema,
       budget: budgetSchema,
+      providerRecovery: providerRecoverySchema,
       ciTracking: ciTrackingSchema,
       decisionPolicy: decisionPolicySchema,
       chair: chairSchema,
@@ -545,6 +642,8 @@ server.registerTool(
       preflight: readiness,
       capabilities: readiness.capabilities,
       budget: input.budget || {},
+      providerRecovery: input.providerRecovery || { enabled: true, maxAttempts: 3, backoffSeconds: [15, 60, 180] },
+      providerRecoveryState: { attempts: 0, status: "idle" },
       usage: {},
       ciTracking: input.ciTracking || null,
       ci: null,
@@ -652,6 +751,43 @@ server.registerTool(
     inputSchema: { portfolioId },
   },
   async ({ portfolioId: id }) => toolResponse(await readPortfolio(PORTFOLIO_ROOT, id)),
+);
+
+server.registerTool(
+  "wait_for_portfolio_lane",
+  {
+    title: "Wait for a portfolio lane outcome",
+    description:
+      "Race a lane's expected head advance against its linked collaboration becoming terminal or indeterminate. Terminal failures are reconciled into the portfolio immediately so a success-only waiter cannot silently park.",
+    inputSchema: {
+      portfolioId,
+      itemId: z.string().min(1).max(200),
+      expectedHeadSha: z.string().regex(/^[0-9a-f]{40}$/i).optional(),
+      afterUpdatedAt: z.string().optional(),
+      waitSeconds: z.number().int().min(0).max(30).default(0),
+    },
+  },
+  async ({ portfolioId: id, itemId, expectedHeadSha, afterUpdatedAt, waitSeconds }) => {
+    let portfolio = await readPortfolio(PORTFOLIO_ROOT, id);
+    let item = portfolio.items.find((candidate) => candidate.id === String(itemId));
+    if (!item) throw new Error(`Portfolio item ${itemId} does not exist.`);
+    if (!item.collaborationId) throw new Error(`Portfolio item ${itemId} has no linked collaborationId.`);
+    if (waitSeconds > 0) {
+      await waitForCollaborationChange(WORKSPACE_ROOT, item.collaborationId, afterUpdatedAt, waitSeconds * 1000);
+    }
+    const collaboration = await collaborationView(WORKSPACE_ROOT, item.collaborationId, 0);
+    const classification = portfolioLaneOutcome(item, collaboration, expectedHeadSha);
+    portfolio = await markStoppedPortfolioLane(id, itemId, collaboration, classification);
+    item = portfolio.items.find((candidate) => candidate.id === String(itemId));
+    const unavailable = Object.keys(collaboration.runtime?.unavailableAgents || {});
+    return toolResponse({
+      portfolioId: id,
+      item,
+      collaboration: compactStatusView(collaboration),
+      ...classification,
+      candidateProviders: KNOWN_AGENTS.filter((agent) => agent !== item.writer && !unavailable.includes(agent)),
+    });
+  },
 );
 
 server.registerTool(
@@ -865,7 +1001,7 @@ server.registerTool(
   async ({ collaborationId: id, sequence, accepted, summary: acknowledgementSummary, verification, remaining }) => {
     blockNestedCollaboration();
     const current = await readCollaboration(WORKSPACE_ROOT, id);
-    if (["queued", "running", "cancelling", "indeterminate"].includes(current.status)) {
+    if (["queued", "running", "recovering", "cancelling", "indeterminate"].includes(current.status)) {
       throw new Error(`Collaboration ${id} is ${current.status}; acknowledge the HANDOFF after the delegated phase stops.`);
     }
     const recordedAt = new Date().toISOString();
@@ -933,7 +1069,7 @@ server.registerTool(
     blockNestedCollaboration();
     const current = await readCollaboration(WORKSPACE_ROOT, id);
     if (!current.chair) throw new Error(`Collaboration ${id} has no declared native chair.`);
-    if (["queued", "running", "cancelling", "indeterminate"].includes(current.status)) {
+    if (["queued", "running", "recovering", "cancelling", "indeterminate"].includes(current.status)) {
       throw new Error(`Collaboration ${id} is ${current.status}; record the native chair receipt after the delegated phase stops.`);
     }
     if (current.completion?.acknowledged === false) {
@@ -975,6 +1111,7 @@ server.registerTool(
       githubReview: githubReviewSchema,
       githubBuilder: githubBuilderSchema,
       budget: budgetSchema,
+      providerRecovery: providerRecoverySchema,
       ciTracking: ciTrackingSchema,
       turnTimeoutSeconds: z.number().int().min(30).max(7200).optional(),
       decisionPolicy: decisionPolicySchema,
@@ -995,13 +1132,14 @@ server.registerTool(
     githubReview,
     githubBuilder,
     budget,
+    providerRecovery,
     ciTracking,
     turnTimeoutSeconds,
     decisionPolicy,
   }) => {
     blockNestedCollaboration();
     const current = await readCollaboration(WORKSPACE_ROOT, id);
-    if (["queued", "running", "cancelling", "indeterminate"].includes(current.status)) {
+    if (["queued", "running", "recovering", "cancelling", "indeterminate"].includes(current.status)) {
       throw new Error(`Collaboration ${id} is ${current.status}; wait for it to stop before continuing.`);
     }
     if (current.completion?.acknowledged === false) {
@@ -1051,6 +1189,8 @@ server.registerTool(
       githubReview: githubReview || previous.githubReview || null,
       githubBuilder: githubBuilder || previous.githubBuilder || null,
       budget: budget || previous.budget || {},
+      providerRecovery: providerRecovery || previous.providerRecovery || { enabled: true, maxAttempts: 3, backoffSeconds: [15, 60, 180] },
+      providerRecoveryState: { attempts: 0, status: "idle" },
       ciTracking: ciTracking || previous.ciTracking || null,
       turnTimeoutSeconds: turnTimeoutSeconds || previous.turnTimeoutSeconds || 600,
       decisionPolicy: decisionPolicy || previous.decisionPolicy || { additionalEscalations: [], maxDialogueTurns: 4 },
@@ -1102,7 +1242,7 @@ server.registerTool(
   async ({ collaborationId: id, ...input }) => {
     blockNestedCollaboration();
     const current = await readCollaboration(WORKSPACE_ROOT, id);
-    if (["queued", "running", "cancelling", "indeterminate"].includes(current.status)) {
+    if (["queued", "running", "recovering", "cancelling", "indeterminate"].includes(current.status)) {
       throw new Error(`Collaboration ${id} is ${current.status}; record the decision only after the bounded dialogue stops.`);
     }
     const receipt = createDecisionReceipt({

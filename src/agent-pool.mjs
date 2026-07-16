@@ -236,6 +236,7 @@ export function createAgentPool({
           cwd: workspace,
           mode,
           model: models.antigravity,
+          fallbackModels: modelFallbacks.antigravity,
           timeoutSeconds: turnTimeoutSeconds,
           permissionProfile: effectivePermissionProfile,
         });

@@ -131,11 +131,13 @@ export function antigravityToolRequest({
   cwd = ".",
   mode = "review",
   model = null,
+  fallbackModels,
   timeoutSeconds = 7200,
   permissionProfile = "standard",
 }) {
   const arguments_ = { prompt, cwd, mode, timeoutSeconds, permissionProfile };
   if (model) arguments_.model = model;
+  if (fallbackModels !== undefined) arguments_.fallbackModels = fallbackModels;
   if (sessionId) {
     arguments_.conversationId = sessionId;
     return { name: "continue_antigravity", arguments: arguments_ };

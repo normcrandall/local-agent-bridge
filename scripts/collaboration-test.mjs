@@ -52,7 +52,7 @@ async function waitForStop(client, id, timeoutMs = 10_000) {
     });
     if (result.isError) throw new Error(JSON.stringify(result.content));
     view = result.structuredContent;
-    if (!["queued", "running", "cancelling"].includes(view.status)) return view;
+    if (!["queued", "running", "recovering", "cancelling"].includes(view.status)) return view;
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
   }
   throw new Error(`Timed out waiting for ${id}; last status: ${view?.status}`);
@@ -84,6 +84,7 @@ let cancellationClient;
 let codexFallbackClient;
 let completionClient;
 let capacityClient;
+let recoveryClient;
 try {
   firstClient = await connect("collaboration-test-app-one");
   const tools = await firstClient.listTools();
@@ -113,6 +114,7 @@ try {
     "refresh_portfolio_target",
     "start_collaboration",
     "update_portfolio_item",
+    "wait_for_portfolio_lane",
   ]);
   const targetSha = "a".repeat(40);
   const firstHead = "b".repeat(40);
@@ -177,6 +179,61 @@ try {
   })).structuredContent;
   assert.equal(portfolio.items.find((item) => item.id === "101").status, "merged");
   assert.equal(portfolio.schedule.selected[0].id, "102");
+
+  const failedLaneId = "bridge-00000000-0000-4000-8000-000000000040";
+  let failedLanePortfolio = (await firstClient.callTool({
+    name: "create_portfolio",
+    arguments: {
+      objective: "Do not park on a success-only signal",
+      workspace: ".",
+      maxParallel: 1,
+      targetBranch: "main",
+      targetSha,
+      items: [{ id: "40", title: "Rework", priority: 10, paths: ["src/rework"] }],
+    },
+  })).structuredContent;
+  failedLanePortfolio = (await firstClient.callTool({
+    name: "update_portfolio_item",
+    arguments: {
+      portfolioId: failedLanePortfolio.id,
+      expectedRevision: failedLanePortfolio.revision,
+      itemId: "40",
+      status: "repairing",
+      writer: "antigravity",
+      collaborationId: failedLaneId,
+      headSha: "d".repeat(40),
+    },
+  })).structuredContent;
+  await writeFile(join(stateDirectory, `${failedLaneId}.json`), `${JSON.stringify({
+    id: failedLaneId,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:01.000Z",
+    status: "failed",
+    task: "Repair lane #40",
+    workspace: root,
+    agents: ["antigravity"],
+    error: "No requested model is currently available.",
+    runtime: {
+      turnCount: 0,
+      availableAgents: [],
+      unavailableAgents: { antigravity: "Model unavailable." },
+    },
+  })}\n`);
+  const failedLane = await firstClient.callTool({
+    name: "wait_for_portfolio_lane",
+    arguments: {
+      portfolioId: failedLanePortfolio.id,
+      itemId: "40",
+      expectedHeadSha: "d".repeat(40),
+      waitSeconds: 0,
+    },
+  });
+  assert.equal(failedLane.structuredContent.outcome, "lane_stopped");
+  assert.equal(failedLane.structuredContent.nextAction, "reassign_writer");
+  assert.equal(failedLane.structuredContent.collaboration.status, "failed");
+  assert.match(failedLane.structuredContent.reason, /No requested model/);
+  assert.equal(failedLane.structuredContent.item.status, "failed");
+
   const reconciledTerminal = await firstClient.callTool({
     name: "get_collaboration", arguments: { collaborationId: terminalReconcileId, detail: "full", includeTurns: 0 },
   });
@@ -401,6 +458,43 @@ try {
   assert.match(fallbackRun.runtime.unavailableAgents.antigravity, /exited|failed/i);
   assert.deepEqual(fallbackRun.turns.map((turn) => turn.agent), ["claude", "claude"]);
 
+  const writerFailoverStarted = await fallbackClient.callTool({
+    name: "start_collaboration",
+    arguments: {
+      task: "Continue the work lane with the next eligible writer",
+      agents: ["antigravity", "claude"],
+      startAgent: "antigravity",
+      writer: "antigravity",
+      mode: "work",
+      workProfile: "implement",
+      maxTurns: 1,
+    },
+  });
+  const writerFailoverRun = await waitForStop(fallbackClient, writerFailoverStarted.structuredContent.id);
+  assert.equal(writerFailoverRun.runtime.writer, "claude");
+  assert.deepEqual(writerFailoverRun.turns.map((turn) => turn.agent), ["claude"]);
+  assert.match(writerFailoverRun.runtime.unavailableAgents.antigravity, /exited|failed/i);
+
+  recoveryClient = await connect("collaboration-test-provider-recovery", {
+    AGY_BIN: resolve(root, "scripts/fake-antigravity.mjs"),
+    FAKE_ANTIGRAVITY_OVERLOAD_MODELS: "provider-configured model",
+  });
+  const recoveryStarted = await recoveryClient.callTool({
+    name: "start_collaboration",
+    arguments: {
+      task: "Recover automatically when the only requested provider is temporarily unavailable",
+      agents: ["antigravity"],
+      maxTurns: 1,
+      modelFallbacks: { antigravity: [] },
+      providerRecovery: { enabled: true, maxAttempts: 1, backoffSeconds: [1] },
+    },
+  });
+  const recoveryRun = await waitForStop(recoveryClient, recoveryStarted.structuredContent.id);
+  assert.equal(recoveryRun.status, "failed");
+  assert.equal(recoveryRun.providerRecoveryState.attempts, 1);
+  assert.equal(recoveryRun.providerRecoveryState.status, "exhausted");
+  assert.match(recoveryRun.error, /No requested model/);
+
   const singleTurnStarted = await fallbackClient.callTool({
     name: "start_collaboration",
     arguments: {
@@ -557,6 +651,7 @@ try {
   await codexFallbackClient?.close().catch(() => {});
   await completionClient?.close().catch(() => {});
   await capacityClient?.close().catch(() => {});
+  await recoveryClient?.close().catch(() => {});
   await rm(stateDirectory, { recursive: true, force: true });
   await rm(resolve(root, ".bridge/test-handoffs"), { recursive: true, force: true });
 }

@@ -145,7 +145,7 @@ async function collaborationStillOwnsCapacity(root, collaborationId) {
   try {
     const statePath = resolve(collaborationDirectory(root), `${collaborationId}.json`);
     const state = JSON.parse(await readFile(statePath, "utf8"));
-    return ["queued", "running", "cancelling", "indeterminate"].includes(state.status);
+    return ["queued", "running", "recovering", "cancelling", "indeterminate"].includes(state.status);
   } catch {
     return false;
   }
