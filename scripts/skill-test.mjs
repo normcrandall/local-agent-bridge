@@ -125,6 +125,7 @@ for (const term of ["bridge capabilities", "bridge preflight", "bridge roles", "
 }
 for (const term of ["detail: status", "includeTurns: 0", "afterTurn"]) assert.ok(pairProgram.includes(term));
 assert.match(pairProgram, /Never substitute a long-running Bash, sleep, gh, or PR polling loop/);
+assert.match(pairProgram, /acknowledge_coordinator_wake/);
 assert.match(pairProgram, /provider-specific, user-owned Apps/);
 assert.match(pairProgram, /agent-review=success/);
 assert.match(pairProgram, /never replace the App with a personal PAT/);
@@ -149,6 +150,7 @@ assert.match(goalLoop, /agent-review=success/);
 assert.match(goalLoop, /never retry the merge or review through a personal PAT/);
 for (const term of ["detail: status", "includeTurns: 0", "afterTurn"]) assert.ok(goalLoop.includes(term));
 assert.match(goalLoop, /Never substitute a long-running Bash, sleep, gh, or PR polling loop/);
+assert.match(goalLoop, /acknowledge_coordinator_wake/);
 
 const readme = await readFile(resolve(root, "README.md"), "utf8");
 const claudeGuidance = await readFile(resolve(root, "CLAUDE.md"), "utf8");
@@ -156,7 +158,10 @@ const codexGuidance = await readFile(resolve(root, "AGENTS.md"), "utf8");
 for (const guidance of [claudeGuidance, codexGuidance]) {
   assert.match(guidance, /Never substitute a long-running Bash, sleep/);
   assert.match(guidance, /get_collaboration/);
+  assert.match(guidance, /acknowledge_coordinator_wake/);
 }
+assert.match(readme, /collaboration_wake/);
+assert.match(readme, /coordinatorWake/);
 assert.match(readme, /Do not replace broker polling with one long-running Bash/);
 const aiHeroSkillNames = (await readdir(resolve(process.env.HOME, ".agents/skills"), { withFileTypes: true }))
   .filter((entry) => entry.isDirectory())
@@ -189,6 +194,7 @@ for (const name of generatedCouncilSkillNames) {
   assert.match(content, /waitSeconds: 8/);
   assert.match(content, /Never leave the user at a static/);
   assert.match(content, /Never substitute a long-running Bash, sleep, gh, or PR polling loop/);
+  assert.match(content, /acknowledge_coordinator_wake/);
   assert.match(content, /PROVIDER SKIPPED/);
   assert.match(content, /Continue with two models or one model/);
   assert.match(content, /verificationCommands/);

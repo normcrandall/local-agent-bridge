@@ -395,6 +395,7 @@ for (const required of ["ask_antigravity", "continue_antigravity"]) {
   if (!names(antigravityTools).includes(required)) throw new Error(`Missing bridge tool: ${required}`);
 }
 for (const required of [
+  "acknowledge_coordinator_wake",
   "start_collaboration",
   "get_collaboration",
   "continue_collaboration",

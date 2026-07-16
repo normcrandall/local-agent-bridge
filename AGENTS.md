@@ -33,6 +33,8 @@ Treat `runtime.activeCall.summary` as narrative status and show it with its `sum
 
 Never substitute a long-running Bash, sleep, `gh`, or PR polling loop for broker polling. Make separate `get_collaboration` calls that return within eight seconds so the host CLI can redraw between heartbeats. Consult GitHub only after the broker reports a completed turn or terminal state.
 
+When a native-chair collaboration stops, treat `coordinatorWake` as the authoritative resume signal. Fetch the new terminal turn and completion receipt, perform its exact next action, then call `acknowledge_coordinator_wake` with the current sequence. Stop and session-start hooks keep the chair alive or restore the pending wake across restarts. Never acknowledge before processing it. A `needs_user` or `indeterminate` wake is a protected boundary: explain it and allow the host turn to stop instead of looping.
+
 - Use `ask_claude` for an independent second opinion, review, or bounded delegated task.
 - Use `ask_antigravity` for a bounded Gemini/Antigravity second opinion and `continue_antigravity` only with its returned `conversationId`.
 - Default to `mode: review`. Use `mode: work` only when the user asked for implementation and concurrent edits will not conflict.

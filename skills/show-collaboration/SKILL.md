@@ -17,6 +17,8 @@ Request up to 50 turns when the user asks for full history. `$ask-agent`, roundt
 
 If `runtime.activeCall` exists, lead with its active provider, phase, latest provider-authored summary, heartbeat age, start time, and status. Distinguish the automatic process heartbeat from the latest narrative summary. If status is `indeterminate`, state that writer ownership is preserved and replacement work is blocked until inspection and explicit cancellation.
 
+If `coordinatorWake` exists, show its sequence, provider, kind, status, summary, next action, delivery adapter, and acknowledgement. An actionable pending or delivered wake means the native chair has not yet processed the terminal event. Acknowledge it only after the chair performs that action. `needs_user` and `indeterminate` wakes are intentionally non-actionable.
+
 When monitoring a running collaboration, never substitute a long-running Bash, sleep, gh, or PR polling loop for broker polling. Make separate bounded `get_collaboration` calls so the host CLI can redraw between heartbeats. Check external sources only after a completed turn or terminal state.
 
 ## Render the timeline

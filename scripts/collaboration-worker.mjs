@@ -23,6 +23,7 @@ import {
   recordReviewPublicationResult,
 } from "../src/review-publication.mjs";
 import { acquireProviderCapacity, loadProviderConcurrency } from "../src/provider-concurrency.mjs";
+import { enqueueCoordinatorWake } from "../src/coordinator-wake.mjs";
 
 const runtimeRoot = realpathSync(
   process.env.BRIDGE_RUNTIME_ROOT || process.env.BRIDGE_ROOT || fileURLToPath(new URL("..", import.meta.url)),
@@ -414,6 +415,7 @@ try {
     reason: outcome.reason,
     turnCount: outcome.state.turnCount,
   });
+  await enqueueCoordinatorWake(workspaceRoot, id);
 } catch (error) {
   await updateCollaboration(workspaceRoot, id, (current) => error?.indeterminate
     ? ({ ...current, status: "indeterminate", error: error.stack || error.message })
@@ -423,6 +425,7 @@ try {
     at: new Date().toISOString(),
     error: error.stack || error.message,
   }).catch(() => {});
+  await enqueueCoordinatorWake(workspaceRoot, id).catch(() => {});
   process.exitCode = 1;
 } finally {
   await pool?.close().catch(() => {});

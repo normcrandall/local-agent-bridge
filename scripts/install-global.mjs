@@ -1,15 +1,22 @@
 #!/usr/bin/env node
 
 import { execFileSync } from "node:child_process";
-import { chmod, cp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
+import {
+  addCommandHook,
+  configuredCodexHookPath,
+  ensureCodexHookConfiguration,
+  resolveCodexHookPath,
+} from "../src/coordinator-hook-config.mjs";
 
 const sourceRoot = resolve(import.meta.dirname, "..");
 const installRoot = resolve(homedir(), ".local/share/agent-bridge");
 const runtimeRoot = resolve(installRoot, "runtime");
 const stateRoot = resolve(installRoot, "state");
 const binRoot = resolve(homedir(), ".local/bin");
+const hookRoot = resolve(installRoot, "hooks");
 const skillNames = (await readdir(resolve(sourceRoot, "skills"), { withFileTypes: true }))
   .filter((entry) => entry.isDirectory())
   .map((entry) => entry.name)
@@ -19,6 +26,7 @@ const claudeDialogueSkillSource = resolve(sourceRoot, "assets/skills/claude/agen
 
 await mkdir(installRoot, { recursive: true, mode: 0o700 });
 await mkdir(stateRoot, { recursive: true, mode: 0o700 });
+await mkdir(hookRoot, { recursive: true, mode: 0o700 });
 await rm(runtimeRoot, { recursive: true, force: true });
 await mkdir(runtimeRoot, { recursive: true, mode: 0o700 });
 
@@ -88,6 +96,32 @@ export BRIDGE_BASE_STATUSLINE="npx -y ccstatusline@latest"
 
 exec "$NODE_BIN" "$RUNTIME/scripts/claude-statusline.mjs"
 `,
+  "agent-bridge-coordinator-hook": `#!/bin/zsh
+set -eu
+
+RUNTIME="$HOME/.local/share/agent-bridge/runtime"
+export NODE_BIN=${JSON.stringify(process.execPath)}
+export BRIDGE_RUNTIME_ROOT="$RUNTIME"
+export BRIDGE_COLLABORATION_DIR="$HOME/.local/share/agent-bridge/state"
+
+exec "$NODE_BIN" "$RUNTIME/scripts/coordinator-hook.mjs" "$@"
+`,
+  "agent-bridge-claude-wake-channel": `#!/bin/zsh
+set -eu
+
+RUNTIME="$HOME/.local/share/agent-bridge/runtime"
+export NODE_BIN=${JSON.stringify(process.execPath)}
+export BRIDGE_RUNTIME_ROOT="$RUNTIME"
+export BRIDGE_COLLABORATION_DIR="$HOME/.local/share/agent-bridge/state"
+export BRIDGE_WORKSPACE_ROOT="\${AGENT_BRIDGE_WORKSPACE:-$PWD}"
+
+exec "$NODE_BIN" "$RUNTIME/src/claude-wake-channel.mjs"
+`,
+  "claude-collab": `#!/bin/zsh
+set -eu
+
+exec claude --dangerously-load-development-channels server:collaboration_wake "$@"
+`,
   "bridge": `#!/bin/zsh
 set -eu
 
@@ -118,6 +152,75 @@ for (const [name, script] of Object.entries(launchers)) {
   await writeFile(path, script, { mode: 0o700 });
   await chmod(path, 0o700);
 }
+
+async function readJson(path, fallback = {}) {
+  try {
+    return JSON.parse(await readFile(path, "utf8"));
+  } catch (error) {
+    if (error.code === "ENOENT") return fallback;
+    throw error;
+  }
+}
+
+async function readText(path, fallback = "") {
+  try {
+    return await readFile(path, "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT") return fallback;
+    throw error;
+  }
+}
+
+async function writeJson(path, value) {
+  await writeTextAtomic(path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+async function writeTextAtomic(path, content) {
+  await mkdir(resolve(path, ".."), { recursive: true, mode: 0o700 });
+  const temporary = `${path}.agent-bridge-${process.pid}.tmp`;
+  try {
+    await writeFile(temporary, content, { mode: 0o600 });
+    await rename(temporary, path);
+  } finally {
+    await rm(temporary, { force: true });
+  }
+}
+
+const hookLauncher = resolve(binRoot, "agent-bridge-coordinator-hook");
+const claudeSettingsPath = resolve(homedir(), ".claude/settings.json");
+let claudeSettings = await readJson(claudeSettingsPath);
+claudeSettings = addCommandHook(claudeSettings, "Stop", `${hookLauncher} claude stop`);
+claudeSettings = addCommandHook(claudeSettings, "SessionStart", `${hookLauncher} claude session_start`);
+await writeJson(claudeSettingsPath, claudeSettings);
+
+const claudeUserConfigPath = resolve(homedir(), ".claude.json");
+const claudeUserConfig = await readJson(claudeUserConfigPath);
+claudeUserConfig.mcpServers = {
+  ...(claudeUserConfig.mcpServers || {}),
+  collaboration_wake: {
+    command: resolve(binRoot, "agent-bridge-claude-wake-channel"),
+    args: [],
+  },
+};
+await writeJson(claudeUserConfigPath, claudeUserConfig);
+
+const antigravitySettingsPath = resolve(homedir(), ".gemini/antigravity-cli/settings.json");
+let antigravitySettings = await readJson(antigravitySettingsPath);
+antigravitySettings = addCommandHook(antigravitySettings, "AfterAgent", `${hookLauncher} antigravity stop`, { timeout: 5_000 });
+antigravitySettings = addCommandHook(antigravitySettings, "SessionStart", `${hookLauncher} antigravity session_start`, { timeout: 5_000 });
+await writeJson(antigravitySettingsPath, antigravitySettings);
+
+const codexConfigPath = resolve(homedir(), ".codex/config.toml");
+let codexConfig = await readText(codexConfigPath);
+const configuredHookPath = configuredCodexHookPath(codexConfig);
+const codexHookPath = resolveCodexHookPath(codexConfigPath, configuredHookPath)
+  || resolve(hookRoot, "codex-hooks.json");
+let codexHooks = await readJson(codexHookPath);
+codexHooks = addCommandHook(codexHooks, "Stop", `${hookLauncher} codex stop`);
+codexHooks = addCommandHook(codexHooks, "SessionStart", `${hookLauncher} codex session_start`);
+await writeJson(codexHookPath, codexHooks);
+codexConfig = ensureCodexHookConfiguration(codexConfig, codexHookPath);
+await writeTextAtomic(codexConfigPath, codexConfig);
 
 const skillRoots = [
   resolve(homedir(), ".codex/skills"),
@@ -153,4 +256,6 @@ for (const name of skillNames) {
 console.log(`Installed runtime: ${runtimeRoot}`);
 console.log(`Installed launchers: ${Object.keys(launchers).map((name) => resolve(binRoot, name)).join(", ")}`);
 console.log(`Persistent state: ${stateRoot}`);
+console.log(`Coordinator hooks: Claude Stop/SessionStart, Codex Stop/SessionStart, Antigravity AfterAgent/SessionStart`);
+console.log(`Claude wake channel: start Claude with ${resolve(binRoot, "claude-collab")} during the Channels research preview`);
 console.log(`Installed skills: agent-dialogue, ${skillNames.join(", ")}`);

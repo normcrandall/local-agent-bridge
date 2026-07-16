@@ -34,6 +34,10 @@ import {
   releaseProviderCapacityForCollaboration,
 } from "./provider-concurrency.mjs";
 import {
+  acknowledgeCoordinatorWake,
+  enqueueCoordinatorWake,
+} from "./coordinator-wake.mjs";
+import {
   beginMergeValidation,
   createArbitrationDossier,
   createMergeTrain,
@@ -163,6 +167,15 @@ function summary(view) {
       `Completion acknowledged: ${completion.acknowledged ? "yes" : "no"}`,
       `Next action: ${completion.nextAction}`,
       `Handoff summary: ${completion.lastHandoff.summary}`,
+    ].join("\n"));
+  }
+  if (view.coordinatorWake) {
+    const wake = view.coordinatorWake;
+    lines.push([
+      `Coordinator wake ${wake.sequence}: ${wake.kind} — ${wake.status}`,
+      `Wake target: ${wake.provider}`,
+      `Wake next action: ${wake.nextAction}`,
+      `Wake summary: ${wake.summary}`,
     ].join("\n"));
   }
   if (lastTurn) {
@@ -520,6 +533,8 @@ server.registerTool(
       decisions: [],
       handoffs: [],
       completion: null,
+      runSequence: 1,
+      coordinatorWake: null,
       nativeChairTurns: [],
       turnTimeoutSeconds: input.turnTimeoutSeconds,
       run: { maxTurns: input.decisionPolicy ? Math.min(input.maxTurns, input.decisionPolicy.maxDialogueTurns) : input.maxTurns },
@@ -855,6 +870,34 @@ server.registerTool(
 );
 
 server.registerTool(
+  "acknowledge_coordinator_wake",
+  {
+    title: "Acknowledge coordinator wake",
+    description: "Record that the native coordinator received and processed the current durable wake event.",
+    inputSchema: {
+      collaborationId,
+      sequence: z.number().int().min(1),
+      provider: z.enum(KNOWN_AGENTS),
+      summary: z.string().min(1).max(20_000),
+      action: z.enum(["processed", "continued", "needs_user", "completed"]).default("processed"),
+    },
+  },
+  async ({ collaborationId: id, sequence, provider, summary: wakeSummary, action }) => {
+    blockNestedCollaboration();
+    const state = await acknowledgeCoordinatorWake(WORKSPACE_ROOT, id, sequence, {
+      provider,
+      summary: wakeSummary,
+      action,
+    });
+    return toolResponse({
+      collaborationId: id,
+      status: state.status,
+      coordinatorWake: state.coordinatorWake,
+    });
+  },
+);
+
+server.registerTool(
   "record_native_chair_turn",
   {
     title: "Record native chair turn",
@@ -875,6 +918,9 @@ server.registerTool(
     }
     if (current.completion?.acknowledged === false) {
       throw new Error(`Collaboration ${id} has unacknowledged HANDOFF sequence ${current.completion.sequence}; call acknowledge_handoff before continuing.`);
+    }
+    if (current.coordinatorWake?.actionable && current.coordinatorWake.status !== "acknowledged") {
+      throw new Error(`Collaboration ${id} has unacknowledged coordinator wake ${current.coordinatorWake.sequence}; call acknowledge_coordinator_wake before continuing.`);
     }
     const receipt = {
       source: "native-chair", provider: current.chair.provider, sessionId: current.chair.sessionId || null,
@@ -941,6 +987,16 @@ server.registerTool(
     if (current.completion?.acknowledged === false) {
       throw new Error(`Collaboration ${id} has unacknowledged HANDOFF sequence ${current.completion.sequence}; call acknowledge_handoff before continuing.`);
     }
+    if (current.coordinatorWake?.actionable && current.coordinatorWake.status !== "acknowledged") {
+      throw new Error(`Collaboration ${id} has unacknowledged coordinator wake ${current.coordinatorWake.sequence}; call acknowledge_coordinator_wake before continuing.`);
+    }
+    if (current.coordinatorWake && !current.coordinatorWake.actionable && current.coordinatorWake.status !== "acknowledged") {
+      await acknowledgeCoordinatorWake(WORKSPACE_ROOT, id, current.coordinatorWake.sequence, {
+        provider: current.coordinatorWake.provider,
+        summary: "Coordinator supplied the user answer or inspection result and continued the collaboration.",
+        action: "continued",
+      });
+    }
     if (githubReview && !(handoffPath || current.handoffPath)) {
       throw new Error("githubReview requires handoffPath.");
     }
@@ -981,6 +1037,10 @@ server.registerTool(
       decisionPolicyEnabled: decisionPolicy ? true : previous.decisionPolicyEnabled || false,
       budgetExceeded: false,
       decisionEscalation: null,
+      runSequence: (previous.runSequence || 1) + 1,
+      coordinatorWake: previous.coordinatorWake?.status === "acknowledged"
+        ? previous.coordinatorWake
+        : null,
       run: { maxTurns: (decisionPolicy || previous.decisionPolicyEnabled)
         ? Math.min(additionalTurns, (decisionPolicy || previous.decisionPolicy).maxDialogueTurns)
         : additionalTurns },
@@ -1039,6 +1099,7 @@ server.registerTool(
         : previous.runtime,
     }));
     await appendEvent(WORKSPACE_ROOT, id, { type: "decision_recorded", at: recordedAt, receipt });
+    if (receipt.action === "needs_user") await enqueueCoordinatorWake(WORKSPACE_ROOT, id);
     return toolResponse({ collaborationId: id, receipt, status: state.status });
   },
 );

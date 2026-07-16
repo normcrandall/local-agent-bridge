@@ -126,6 +126,8 @@ Use `continue_collaboration` with the same ID for the next cycle. Include failed
 
 If the host was declared as `chair`, keep its provider out of delegated agents and record completed host work with `record_native_chair_turn`. This preserves one portable history without launching a duplicate same-provider CLI session.
 
+Before advancing a native-chair cycle, inspect the terminal `coordinatorWake`, process its `nextAction`, and call `acknowledge_coordinator_wake` with the exact sequence. Stop/AfterAgent hooks hold the coordinator open while a collaboration is active or an actionable wake remains; SessionStart restores the receipt after a restart. Never acknowledge merely to silence the hook. A `needs_user` or `indeterminate` wake is intentionally non-actionable and may end the host turn.
+
 Mark the goal complete only when every “done when” condition has current evidence. Peer agreement without verification is insufficient.
 
 ## Stop conditions

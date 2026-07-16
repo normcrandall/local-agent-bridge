@@ -39,6 +39,10 @@
     "test:merge-train": "node scripts/merge-train-test.mjs",
     "test:provider-capabilities": "node scripts/provider-capabilities-test.mjs",
     "test:provider-concurrency": "node scripts/provider-concurrency-test.mjs",
+    "test:coordinator-wake": "node scripts/coordinator-wake-test.mjs",
+    "test:coordinator-hook": "node scripts/coordinator-hook-test.mjs",
+    "test:claude-wake-channel": "node scripts/claude-wake-channel-test.mjs",
+    "test:coordinator-hook-config": "node scripts/coordinator-hook-config-test.mjs",
     "test:secrets": "node scripts/secret-boundary-test.mjs"
   },
   "dependencies": {

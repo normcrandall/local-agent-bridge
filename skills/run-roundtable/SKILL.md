@@ -64,6 +64,8 @@ Call `get_collaboration` repeatedly. For routine polling call `get_collaboration
 
 Never substitute a long-running Bash, sleep, gh, or PR polling loop for broker polling. A blocking shell watcher prevents the host CLI from redrawing its status line. Make each `get_collaboration` call separately and let it return within eight seconds. Poll cadence is not display cadence: do not repeat an unchanged narrative card. Check GitHub only after the broker reports a completed turn or terminal state.
 
+For a declared native chair, inspect `coordinatorWake` at terminal state. Fetch the newly completed turn, process `nextAction`, and call `acknowledge_coordinator_wake` with its exact sequence before continuing or recording native-chair completion. Host Stop/AfterAgent hooks prevent the coordinator from quietly ending while work or an actionable wake remains; SessionStart restores an unprocessed wake after restart. Never acknowledge a wake before acting on it. Let `needs_user` and `indeterminate` stop normally because they are protected human or inspection boundaries.
+
 ```text
 ROUND <number>
 Finished: <agent> — <status>

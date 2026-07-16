@@ -3,6 +3,10 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { GITHUB_LOGIN_PATTERN } from "../src/github-app-auth.mjs";
+import {
+  configuredCodexHookPath,
+  resolveCodexHookPath,
+} from "../src/coordinator-hook-config.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 let failed = false;
@@ -108,6 +112,39 @@ check("Claude CLI collaboration status line", () => {
   return settings.statusLine?.command === launcher
     && settings.statusLine?.refreshInterval <= 2;
 }, "point Claude statusLine at agent-bridge-claude-statusline with refreshInterval 2");
+const coordinatorHookLauncher = resolve(homedir(), ".local/bin/agent-bridge-coordinator-hook");
+function hasCommandHook(settings, event, command) {
+  return settings.hooks?.[event]?.some((group) => (
+    group.hooks?.some((hook) => hook.type === "command" && hook.command === command)
+  ));
+}
+check("Claude coordinator lifecycle hooks", () => {
+  accessSync(coordinatorHookLauncher, constants.X_OK);
+  const settings = JSON.parse(readFileSync(resolve(homedir(), ".claude/settings.json"), "utf8"));
+  return hasCommandHook(settings, "Stop", `${coordinatorHookLauncher} claude stop`)
+    && hasCommandHook(settings, "SessionStart", `${coordinatorHookLauncher} claude session_start`);
+}, "run npm run install:global to install Claude Stop and SessionStart coordinator hooks");
+check("Claude collaboration wake channel", () => {
+  const config = JSON.parse(readFileSync(resolve(homedir(), ".claude.json"), "utf8"));
+  const channelLauncher = resolve(homedir(), ".local/bin/agent-bridge-claude-wake-channel");
+  accessSync(channelLauncher, constants.X_OK);
+  accessSync(resolve(homedir(), ".local/bin/claude-collab"), constants.X_OK);
+  return config.mcpServers?.collaboration_wake?.command === channelLauncher;
+}, "run npm run install:global; use claude-collab to enable live Channels delivery");
+check("Antigravity coordinator lifecycle hooks", () => {
+  const settings = JSON.parse(readFileSync(resolve(homedir(), ".gemini/antigravity-cli/settings.json"), "utf8"));
+  return hasCommandHook(settings, "AfterAgent", `${coordinatorHookLauncher} antigravity stop`)
+    && hasCommandHook(settings, "SessionStart", `${coordinatorHookLauncher} antigravity session_start`);
+}, "run npm run install:global to install Antigravity AfterAgent and SessionStart coordinator hooks");
+check("Codex coordinator lifecycle hooks", () => {
+  const config = readFileSync(resolve(homedir(), ".codex/config.toml"), "utf8");
+  const selected = configuredCodexHookPath(config);
+  if (!selected || !/^\[features\][\s\S]*?^hooks\s*=\s*true\s*$/m.test(config)) return false;
+  const hookPath = resolveCodexHookPath(resolve(homedir(), ".codex/config.toml"), selected);
+  const hooks = JSON.parse(readFileSync(hookPath, "utf8"));
+  return hasCommandHook(hooks, "Stop", `${coordinatorHookLauncher} codex stop`)
+    && hasCommandHook(hooks, "SessionStart", `${coordinatorHookLauncher} codex session_start`);
+}, "run npm run install:global to install and enable Codex Stop and SessionStart coordinator hooks");
 function configuredGitHubEntry(selected) {
   const configPath = resolve(homedir(), ".config/local-agent-bridge/github-apps.json");
   if (!existsSync(configPath)) return false;

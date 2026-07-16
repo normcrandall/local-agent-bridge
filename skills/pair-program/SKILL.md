@@ -43,6 +43,8 @@ Return the collaboration ID immediately. For routine polling call `get_collabora
 
 Never substitute a long-running Bash, sleep, gh, or PR polling loop for broker polling. A blocking shell watcher prevents the host CLI from redrawing its status line. Make each `get_collaboration` call separately and let it return within eight seconds. Render a full update on lifecycle or narrative changes; for liveness-only changes, emit at most one compact line per 60 seconds. Never repeat an unchanged narrative card. Check GitHub only after the broker reports a completed turn or terminal state.
 
+For a native coordinator, every stopped leg produces a durable `coordinatorWake`. Read the new turn and completion receipt, perform `nextAction`, then call `acknowledge_coordinator_wake` with the exact sequence before dispatching repair, re-review, merge validation, or another task. Host Stop/AfterAgent hooks hold the turn open and SessionStart restores missed receipts. Do not acknowledge without processing. `needs_user` and `indeterminate` remain protected stop boundaries.
+
 ## Rotate and review
 
 For task N, let the selected writer implement test-first, verify, commit, and deliver only within its profile. Every other agent remains read-only. Reviewers author the handoff and formal PR review through their provider-specific, user-owned Apps selected from machine-local configuration. Omit identity fields unless repository policy requires strict login pins; never embed App credentials or maintainer-specific identities in the skill. On task N+1, run role selection again; do not transfer an active task's writer merely to satisfy rotation.
