@@ -28,7 +28,7 @@ try {
 
   const deadline = Date.now() + 15 * 60 * 1000;
   let view = started.structuredContent;
-  while (["queued", "running", "cancelling"].includes(view.status) && Date.now() < deadline) {
+  while (["queued", "running", "recovering", "cancelling"].includes(view.status) && Date.now() < deadline) {
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 1_000));
     const result = await client.callTool({
       name: "get_collaboration",

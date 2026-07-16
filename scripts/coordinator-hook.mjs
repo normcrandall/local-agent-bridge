@@ -35,7 +35,7 @@ if (event !== "session_start") {
 
 const finalizing = states.filter((state) => (
   state.runSequence
-  && !["queued", "running", "cancelling", "indeterminate"].includes(state.status)
+  && !["queued", "running", "recovering", "cancelling", "indeterminate"].includes(state.status)
   && !state.coordinatorWake
 ));
 if (finalizing.length) {
@@ -50,7 +50,7 @@ const decision = coordinatorHookDecision(states);
 if (event === "session_start") {
   const pending = states.find((state) => state.coordinatorWake?.status !== "acknowledged");
   const recovery = pending || states.find((state) => (
-    ["queued", "running", "cancelling", "indeterminate", "needs_user"].includes(state.status)
+    ["queued", "running", "recovering", "cancelling", "indeterminate", "needs_user"].includes(state.status)
   ));
   if (!recovery) {
     process.stdout.write("{}\n");
@@ -59,7 +59,7 @@ if (event === "session_start") {
   const wake = recovery.coordinatorWake;
   const additionalContext = wake?.actionable
     ? `A durable collaboration wake is pending. Collaboration ${recovery.id}, wake ${wake.sequence}, next action ${wake.nextAction}: ${wake.summary}. Inspect it with get_collaboration and acknowledge it with acknowledge_coordinator_wake after processing.`
-    : ["queued", "running", "cancelling"].includes(recovery.status)
+    : ["queued", "running", "recovering", "cancelling"].includes(recovery.status)
       ? `Collaboration ${recovery.id} is still ${recovery.status}. Resume bounded get_collaboration monitoring and do not finish while it remains active.`
       : `Collaboration ${recovery.id} requires attention but is not safe to continue autonomously: ${wake?.summary || recovery.status}.`;
   process.stdout.write(`${JSON.stringify({

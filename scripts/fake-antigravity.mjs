@@ -9,4 +9,10 @@ if (args.includes("--help")) {
   process.stdout.write("--print --print-timeout --mode --model --sandbox --dangerously-skip-permissions --conversation --log-file --add-dir\n");
   process.exit(0);
 }
+const modelIndex = args.indexOf("--model");
+const selectedModel = modelIndex >= 0 ? args[modelIndex + 1] : "provider-configured model";
+if ((process.env.FAKE_ANTIGRAVITY_OVERLOAD_MODELS || "").split(",").includes(selectedModel)) {
+  process.stderr.write(`Model ${selectedModel} is overloaded.\n`);
+  process.exit(1);
+}
 process.stdout.write(`${JSON.stringify(args)}\n`);

@@ -211,7 +211,7 @@ export async function waitForCollaborationChange(root, id, afterUpdatedAt, timeo
 export async function archiveCollaboration(root, id) {
   const target = paths(root, id);
   const state = await readCollaboration(root, id);
-  if (["queued", "running", "cancelling", "indeterminate"].includes(state.status)) {
+  if (["queued", "running", "recovering", "cancelling", "indeterminate"].includes(state.status)) {
     throw new Error(`Cannot archive ${id} while status is ${state.status}.`);
   }
   const archive = resolve(target.directory, "archive");
@@ -233,7 +233,7 @@ export async function pruneTerminalCollaborations(root, { olderThanDays = 30, no
   const cutoff = now - olderThanDays * 86_400_000;
   const archived = [];
   for (const state of states) {
-    if (["queued", "running", "cancelling", "indeterminate"].includes(state.status)) continue;
+    if (["queued", "running", "recovering", "cancelling", "indeterminate"].includes(state.status)) continue;
     const updatedAt = Date.parse(state.updatedAt);
     if (!Number.isFinite(updatedAt) || updatedAt > cutoff) continue;
     archived.push(await archiveCollaboration(root, state.id));

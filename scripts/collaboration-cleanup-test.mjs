@@ -10,6 +10,7 @@ const indeterminate = clearTerminalRuntime({ status: "indeterminate", workerPid:
 assert.equal(indeterminate.runtime.activeCall.status, "indeterminate");
 assert.equal(reconciliationAction({ status: "running" }, { processAlive: false, commandMatches: false }), "mark-indeterminate");
 assert.equal(reconciliationAction({ status: "running" }, { processAlive: true, commandMatches: false }), "retain-indeterminate-owner-mismatch");
+assert.equal(reconciliationAction({ status: "recovering" }, { processAlive: false, commandMatches: false }), "none");
 assert.equal(workerCommandMatches({ id: "bridge-1", workerPid: 12, workerOwner: { id: "bridge-1", pid: 12 } }, () => "node collaboration-worker.mjs bridge-1"), true);
 assert.equal(workerCommandMatches({ id: "bridge-1", workerPid: 12, workerOwner: { id: "bridge-1", pid: 12 } }, () => "node unrelated.mjs"), false);
 assert.equal(legacyWorkerCommandMatches({ id: "bridge-1", workerPid: 12 }, () => "node collaboration-worker.mjs bridge-1"), true);

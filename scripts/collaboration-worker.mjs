@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
 import { realpathSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 import process from "node:process";
 import { createAgentPool } from "../src/agent-pool.mjs";
 import {
@@ -38,6 +39,85 @@ let releaseWorker = null;
 let releaseWorkspace = null;
 let pool = null;
 
+async function scheduleProviderRecovery(error) {
+  if (!/No requested model is currently available/i.test(error?.message || String(error))) return false;
+  const current = await readCollaboration(workspaceRoot, id);
+  const unavailableReasons = Object.values(current.runtime?.unavailableAgents || {});
+  const transientModelFailure = (reason) => (
+    /\boverload(?:ed)?\b|\bover[_ -]?capacity\b|\bat capacity\b|\bno capacity\b|\bhigh demand\b|\bmodel\b[^\n]{0,80}\bunavailable\b|\btemporarily unavailable\b|(?:^|\D)(?:503|529)(?:\D|$)/i
+      .test(reason || "")
+  );
+  if (!unavailableReasons.length || unavailableReasons.some((reason) => !transientModelFailure(reason))) {
+    return false;
+  }
+  const policy = current.providerRecovery || { enabled: true, maxAttempts: 3, backoffSeconds: [15, 60, 180] };
+  const attempts = current.providerRecoveryState?.attempts || 0;
+  if (!policy.enabled || attempts >= policy.maxAttempts) {
+    await updateCollaboration(workspaceRoot, id, (state) => ({
+      ...state,
+      providerRecoveryState: {
+        ...(state.providerRecoveryState || {}),
+        attempts,
+        status: "exhausted",
+        exhaustedAt: new Date().toISOString(),
+        lastError: error.message,
+      },
+    }));
+    return false;
+  }
+  const delaySeconds = policy.backoffSeconds[Math.min(attempts, policy.backoffSeconds.length - 1)];
+  const nextRetryAt = new Date(Date.now() + delaySeconds * 1000).toISOString();
+  await updateCollaboration(workspaceRoot, id, (state) => ({
+    ...state,
+    status: "recovering",
+    error: error.message,
+    workerPid: null,
+    workerOwner: null,
+    providerRecoveryState: {
+      attempts: attempts + 1,
+      status: "waiting",
+      lastError: error.message,
+      scheduledAt: new Date().toISOString(),
+      nextRetryAt,
+    },
+    runtime: {
+      ...state.runtime,
+      activeCall: {
+        agent: null,
+        mode: state.mode,
+        status: "recovering",
+        phase: "provider_recovery",
+        startedAt: new Date().toISOString(),
+        heartbeatAt: new Date().toISOString(),
+        summary: `All eligible providers are unavailable. Recovery attempt ${attempts + 1}/${policy.maxAttempts} is scheduled for ${nextRetryAt}.`,
+        summaryAt: new Date().toISOString(),
+        summarySource: "broker",
+      },
+    },
+  }));
+  await appendEvent(workspaceRoot, id, {
+    type: "provider_recovery_scheduled",
+    at: new Date().toISOString(),
+    attempt: attempts + 1,
+    maxAttempts: policy.maxAttempts,
+    delaySeconds,
+    nextRetryAt,
+    error: error.message,
+  });
+  const supervisor = spawn(process.execPath, [
+    resolve(runtimeRoot, "scripts/collaboration-recovery.mjs"),
+    id,
+    String(delaySeconds),
+  ], {
+    cwd: runtimeRoot,
+    env: { ...process.env, BRIDGE_RUNTIME_ROOT: runtimeRoot, BRIDGE_WORKSPACE_ROOT: workspaceRoot },
+    detached: true,
+    stdio: "ignore",
+  });
+  supervisor.unref();
+  return true;
+}
+
 try {
   releaseWorker = await acquireWorkerLock(workspaceRoot, id);
   let state = await readCollaboration(workspaceRoot, id);
@@ -55,7 +135,7 @@ try {
       startedAt: new Date().toISOString(), command: "collaboration-worker.mjs",
     },
     error: null,
-    runStartedAt: new Date().toISOString(),
+    runStartedAt: current.runStartedAt || new Date().toISOString(),
   }));
   await appendEvent(workspaceRoot, id, { type: "run_started", at: new Date().toISOString(), pid: process.pid });
 
@@ -404,29 +484,55 @@ try {
     },
   });
 
-  const finalRuntime = outcome.reason === "indeterminate" ? outcome.state : { ...outcome.state, activeCall: null };
-  await updateCollaboration(workspaceRoot, id, (current) => clearTerminalRuntime({
-    ...current, runtime: finalRuntime, writer: outcome.state.writer,
-    cancelRequested: outcome.reason === "cancelled",
-  }, { status: outcome.reason, error: outcome.error || null }));
-  await appendEvent(workspaceRoot, id, {
-    type: "run_finished",
-    at: new Date().toISOString(),
-    reason: outcome.reason,
-    turnCount: outcome.state.turnCount,
-  });
-  await enqueueCoordinatorWake(workspaceRoot, id);
+  if (!(outcome.reason === "failed" && await scheduleProviderRecovery(new Error(outcome.error)))) {
+    const recoveryExhausted = outcome.reason === "failed"
+      && /No requested model is currently available/i.test(outcome.error || "");
+    const finalRuntime = outcome.reason === "indeterminate" ? outcome.state : { ...outcome.state, activeCall: null };
+    await updateCollaboration(workspaceRoot, id, (current) => clearTerminalRuntime({
+      ...current, runtime: finalRuntime, writer: outcome.state.writer,
+      cancelRequested: outcome.reason === "cancelled",
+      providerRecoveryState: recoveryExhausted
+        ? {
+          ...(current.providerRecoveryState || {}),
+          status: "exhausted",
+          exhaustedAt: new Date().toISOString(),
+          lastError: outcome.error,
+        }
+        : outcome.reason === "failed"
+          ? current.providerRecoveryState
+          : { ...(current.providerRecoveryState || {}), status: "recovered" },
+    }, { status: outcome.reason, error: outcome.error || null }));
+    await appendEvent(workspaceRoot, id, {
+      type: "run_finished",
+      at: new Date().toISOString(),
+      reason: outcome.reason,
+      turnCount: outcome.state.turnCount,
+    });
+    await enqueueCoordinatorWake(workspaceRoot, id);
+  }
 } catch (error) {
-  await updateCollaboration(workspaceRoot, id, (current) => error?.indeterminate
-    ? ({ ...current, status: "indeterminate", error: error.stack || error.message })
-    : clearTerminalRuntime(current, { status: "failed", error: error.stack || error.message })).catch(() => {});
-  await appendEvent(workspaceRoot, id, {
-    type: "run_failed",
-    at: new Date().toISOString(),
-    error: error.stack || error.message,
-  }).catch(() => {});
-  await enqueueCoordinatorWake(workspaceRoot, id).catch(() => {});
-  process.exitCode = 1;
+  if (!(await scheduleProviderRecovery(error).catch(() => false))) {
+    await updateCollaboration(workspaceRoot, id, (current) => error?.indeterminate
+      ? ({ ...current, status: "indeterminate", error: error.stack || error.message })
+      : clearTerminalRuntime({
+        ...current,
+        providerRecoveryState: /No requested model is currently available/i.test(error.message || "")
+          ? {
+            ...(current.providerRecoveryState || {}),
+            status: "exhausted",
+            exhaustedAt: new Date().toISOString(),
+            lastError: error.message,
+          }
+          : current.providerRecoveryState,
+      }, { status: "failed", error: error.stack || error.message })).catch(() => {});
+    await appendEvent(workspaceRoot, id, {
+      type: "run_failed",
+      at: new Date().toISOString(),
+      error: error.stack || error.message,
+    }).catch(() => {});
+    await enqueueCoordinatorWake(workspaceRoot, id).catch(() => {});
+    process.exitCode = 1;
+  }
 } finally {
   await pool?.close().catch(() => {});
   await releaseWorkspace?.().catch(() => {});

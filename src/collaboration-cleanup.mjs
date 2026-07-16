@@ -45,5 +45,6 @@ export function reconciliationAction(state, { processAlive, commandMatches }) {
   }
   if (["queued", "running", "cancelling"].includes(state.status) && !processAlive) return "mark-indeterminate";
   if (["queued", "running", "cancelling"].includes(state.status) && processAlive && !commandMatches) return "retain-indeterminate-owner-mismatch";
+  if (state.status === "recovering") return "none";
   return "none";
 }

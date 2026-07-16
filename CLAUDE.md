@@ -48,6 +48,7 @@ When a native-chair collaboration stops, treat `coordinatorWake` as the authorit
 - Treat Codex's output as advice until it is verified against the workspace and tests.
 - Omit provider model overrides unless the user explicitly requests one; the persistent broker preserves each provider's configured model by default.
 - Preserve caller-supplied `modelFallbacks.claude` and `modelFallbacks.codex` across collaboration phases. If omitted, let each adapter use the machine-local policy. Claude Code uses its native fallback option; Codex repeats the original ask and preserves an established continuation thread when applicable. A recognized overload stays within the same turn; show any downgrade narrative and do not mark the provider unavailable or reassign its writer unless the ordered chain is exhausted. Never use model fallback for authentication, permission, quota, configuration, timeout, or transport errors.
+- Preserve `modelFallbacks.antigravity` too. For autonomous work, pass every eligible provider in one ordered roster with the preferred writer explicit. The broker first downgrades models on recognized overload, then fails over to another provider, then enters visible provider recovery if the roster is exhausted. Recovery retries the preferred configured models first, so providers upgrade automatically when capacity returns. Monitor through `wait_for_portfolio_lane`; never wait only for a PR head, CI result, or other success signal.
 
 For implementation followed by review:
 

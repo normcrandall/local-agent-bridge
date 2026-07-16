@@ -142,8 +142,10 @@ assert.equal(Object.hasOwn(antigravityDefault.arguments, "model"), false);
 const antigravityExplicit = antigravityToolRequest({
   prompt: "test",
   model: "Gemini 3.1 Pro (High)",
+  fallbackModels: ["Gemini 3.1 Pro (Low)"],
 });
 assert.equal(antigravityExplicit.arguments.model, "Gemini 3.1 Pro (High)");
+assert.deepEqual(antigravityExplicit.arguments.fallbackModels, ["Gemini 3.1 Pro (Low)"]);
 const antigravityReply = antigravityToolRequest({
   prompt: "continue",
   sessionId: "00000000-0000-4000-8000-000000000000",
