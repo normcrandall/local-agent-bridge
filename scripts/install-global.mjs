@@ -16,7 +16,6 @@ const installRoot = resolve(homedir(), ".local/share/agent-bridge");
 const runtimeRoot = resolve(installRoot, "runtime");
 const stateRoot = resolve(installRoot, "state");
 const binRoot = resolve(homedir(), ".local/bin");
-const hookRoot = resolve(installRoot, "hooks");
 const skillNames = (await readdir(resolve(sourceRoot, "skills"), { withFileTypes: true }))
   .filter((entry) => entry.isDirectory())
   .map((entry) => entry.name)
@@ -26,7 +25,6 @@ const claudeDialogueSkillSource = resolve(sourceRoot, "assets/skills/claude/agen
 
 await mkdir(installRoot, { recursive: true, mode: 0o700 });
 await mkdir(stateRoot, { recursive: true, mode: 0o700 });
-await mkdir(hookRoot, { recursive: true, mode: 0o700 });
 await rm(runtimeRoot, { recursive: true, force: true });
 await mkdir(runtimeRoot, { recursive: true, mode: 0o700 });
 
@@ -213,13 +211,37 @@ await writeJson(antigravitySettingsPath, antigravitySettings);
 const codexConfigPath = resolve(homedir(), ".codex/config.toml");
 let codexConfig = await readText(codexConfigPath);
 const configuredHookPath = configuredCodexHookPath(codexConfig);
-const codexHookPath = resolveCodexHookPath(codexConfigPath, configuredHookPath)
-  || resolve(hookRoot, "codex-hooks.json");
+const legacyCodexHookPath = resolveCodexHookPath(codexConfigPath, configuredHookPath);
+const codexHookPath = resolve(homedir(), ".codex/hooks.json");
 let codexHooks = await readJson(codexHookPath);
+if (legacyCodexHookPath && legacyCodexHookPath !== codexHookPath) {
+  const legacyHooks = await readJson(legacyCodexHookPath);
+  const events = new Set([
+    ...Object.keys(legacyHooks.hooks || {}),
+    ...Object.keys(codexHooks.hooks || {}),
+  ]);
+  codexHooks = {
+    ...legacyHooks,
+    ...codexHooks,
+    hooks: Object.fromEntries([...events].map((event) => {
+      const groups = [
+        ...(legacyHooks.hooks?.[event] || []),
+        ...(codexHooks.hooks?.[event] || []),
+      ];
+      const seen = new Set();
+      return [event, groups.filter((group) => {
+        const key = JSON.stringify(group);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })];
+    })),
+  };
+}
 codexHooks = addCommandHook(codexHooks, "Stop", `${hookLauncher} codex stop`);
 codexHooks = addCommandHook(codexHooks, "SessionStart", `${hookLauncher} codex session_start`);
 await writeJson(codexHookPath, codexHooks);
-codexConfig = ensureCodexHookConfiguration(codexConfig, codexHookPath);
+codexConfig = ensureCodexHookConfiguration(codexConfig);
 await writeTextAtomic(codexConfigPath, codexConfig);
 
 const skillRoots = [

@@ -3,10 +3,6 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { GITHUB_LOGIN_PATTERN } from "../src/github-app-auth.mjs";
-import {
-  configuredCodexHookPath,
-  resolveCodexHookPath,
-} from "../src/coordinator-hook-config.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 let failed = false;
@@ -138,9 +134,8 @@ check("Antigravity coordinator lifecycle hooks", () => {
 }, "run npm run install:global to install Antigravity AfterAgent and SessionStart coordinator hooks");
 check("Codex coordinator lifecycle hooks", () => {
   const config = readFileSync(resolve(homedir(), ".codex/config.toml"), "utf8");
-  const selected = configuredCodexHookPath(config);
-  if (!selected || !/^\[features\][\s\S]*?^hooks\s*=\s*true\s*$/m.test(config)) return false;
-  const hookPath = resolveCodexHookPath(resolve(homedir(), ".codex/config.toml"), selected);
+  if (!/^\[features\][\s\S]*?^hooks\s*=\s*true\s*$/m.test(config)) return false;
+  const hookPath = resolve(homedir(), ".codex/hooks.json");
   const hooks = JSON.parse(readFileSync(hookPath, "utf8"));
   return hasCommandHook(hooks, "Stop", `${coordinatorHookLauncher} codex stop`)
     && hasCommandHook(hooks, "SessionStart", `${coordinatorHookLauncher} codex session_start`);

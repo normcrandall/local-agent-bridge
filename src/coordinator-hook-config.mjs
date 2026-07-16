@@ -23,15 +23,12 @@ export function resolveCodexHookPath(configPath, configuredPath) {
   return resolve(dirname(configPath), configuredPath);
 }
 
-export function ensureCodexHookConfiguration(config, hookPath) {
-  let output = config;
-  if (!configuredCodexHookPath(output)) {
-    const firstTable = output.search(/^\[/m);
-    const insertion = `hooks = ${JSON.stringify(hookPath)}\n`;
-    output = firstTable === -1
-      ? `${output.trimEnd()}\n${insertion}`
-      : `${output.slice(0, firstTable)}${insertion}\n${output.slice(firstTable)}`;
-  }
+export function ensureCodexHookConfiguration(config) {
+  const firstTable = config.search(/^\[/m);
+  const preambleEnd = firstTable === -1 ? config.length : firstTable;
+  const preamble = config.slice(0, preambleEnd)
+    .replace(/^hooks\s*=\s*(["']).*?\1\s*\n?/gm, "");
+  let output = `${preamble}${config.slice(preambleEnd)}`;
   const featureHeader = /^\[features\]\s*$/m.exec(output);
   if (!featureHeader) return `${output.trimEnd()}\n\n[features]\nhooks = true\n`;
   const start = featureHeader.index + featureHeader[0].length;
