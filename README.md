@@ -134,12 +134,13 @@ To let a real person satisfy the bridge's merge gate, add their GitHub login to 
 ```json
 {
   "mergePolicy": {
-    "trustedHumanReviewers": ["your-github-login"]
+    "trustedHumanReviewers": ["your-github-login"],
+    "autonomousMergeRepositories": ["your-account/*", "your-organization/*"]
   }
 }
 ```
 
-These are identities, not credentials. The builder reads the complete paginated GitHub review record directly and accepts only an `APPROVED` review attached to the exact authorized head SHA. An approval on an older commit, a later `CHANGES_REQUESTED` or `DISMISSED` review on that head, an outstanding change request from another trusted human, an unlisted account, or the builder bot's identity does not satisfy the gate. Each installation should list its own maintainers; never publish maintainer-specific logins in a shared skill.
+These are policies, not credentials. `trustedHumanReviewers` lists people whose exact-head approval may satisfy the builder gate. `autonomousMergeRepositories` grants native coordinators standing authority to call the broker's exact-head `merge_pull_request` tool for one repository or an owner's repositories using `owner/*`; omit it to require a user-owned merge action. The builder reads the complete paginated GitHub review record directly and accepts only an `APPROVED` review attached to the exact authorized head SHA. An approval on an older commit, a later `CHANGES_REQUESTED` or `DISMISSED` review on that head, an outstanding change request from another trusted human, an unlisted account, or the builder bot's identity does not satisfy the gate. Each installation should list its own maintainers; never publish maintainer-specific logins in a shared skill.
 
 ### Enforce agent review without a human-identity bypass
 
@@ -698,6 +699,8 @@ The caller passes an exact PR authorization object. Omit `expectedLogin` to sele
 The delegated tool mints a short-lived token from the provider-specific reviewer App (`claude`, `codex`, or `antigravity`/Gemini), or reads the backward-compatible `~/.config/ghtoken` fallback when no reviewer App is configured. A caller may still pin `expectedLogin` for a strict single-identity flow. Credentials never enter the prompt, skill, transcript, or MCP response. Before posting it verifies the token login, exact current PR head, and every inline-comment path. The App submits a formal GitHub review (`APPROVE`, `REQUEST_CHANGES`, or `COMMENT`), optionally publishes an exact-head `agent-review` commit status when permitted, records the receipt in the handoff, and uses content markers to avoid duplicate work. A PAT fallback is comment-only and produces no gate. A re-review must refresh `headSha`.
 
 Writer-side PR delivery uses a separate `githubBuilder` authorization bound to one repository, expected bot login, current head SHA, optional PR, and an explicit `allowedOperations` list. Claude and Codex receive only `github_builder` tools; Antigravity returns a validated operation envelope that the broker executes unchanged outside model context. Supported actions are create/update the designated PR, read/reply/resolve exact review threads, mark ready, and merge the exact PR at the exact head SHA. Every mutation rechecks the per-operation allowlist, identity, and head state and returns an idempotent receipt. Before merge, the builder requires an exact-head approval from a configured reviewer App, `agent-review=success` from that App, or an exact-head approval from a configured trusted human. The default allowlist excludes `merge`; normal goal-loop and pair-program runs stop at a green reviewed PR unless the user explicitly adds `merge` and authorizes the SHA-pinned merge.
+
+Native coordinators use collaboration `merge_pull_request` instead of shelling out to `gh pr merge`. The tool mints the configured builder App credential, requires the repository to match machine-local `mergePolicy.autonomousMergeRepositories`, pins the full PR head SHA, and applies the same independent-review and GitHub-rule checks. This removes the need for a broad Claude Bash allow rule while keeping autonomous merges fail-closed and auditable.
 
 ## Browser boundary
 

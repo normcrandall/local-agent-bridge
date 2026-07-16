@@ -8,6 +8,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { GITHUB_LOGIN_PATTERN } from "./github-app-auth.mjs";
+import { mergePullRequestWithBuilder } from "./native-github-builder.mjs";
 import {
   appendEvent,
   archiveCollaboration,
@@ -406,7 +407,26 @@ const server = new McpServer(
   { name: "desktop-agent-collaboration", version: "0.2.0" },
   {
     instructions:
-      "Use start_collaboration for an asynchronous durable job with one provider or a bounded roundtable with multiple providers. It returns immediately with a portable collaborationId. Unavailable providers are skipped and the run continues with any remaining participant. Pass verificationCommands and handoffPath for independently verified reviews. Choose workProfile implement for local ownership through commit or deliver when the writer also owns push and PR delivery; use workCommands only for unusual additions. When repository policy requires reviewer-authored PR feedback, pass githubReview so the delegated Claude or Codex reviewer receives target-bound handoff and formal-review tools. Use modelFallbacks.claude or modelFallbacks.codex for ordered overload-only downgrade chains. Use get_collaboration to poll or inspect it, continue_collaboration for another phase, and cancel_collaboration to stop. Omit model overrides to preserve configured models. The broker owns routing; never ask a peer to call another peer.",
+      "Use start_collaboration for an asynchronous durable job with one provider or a bounded roundtable with multiple providers. It returns immediately with a portable collaborationId. Unavailable providers are skipped and the run continues with any remaining participant. Pass verificationCommands and handoffPath for independently verified reviews. Choose workProfile implement for local ownership through commit or deliver when the writer also owns push and PR delivery; use workCommands only for unusual additions. When repository policy requires reviewer-authored PR feedback, pass githubReview so the delegated Claude or Codex reviewer receives target-bound handoff and formal-review tools. Native coordinators must use merge_pull_request for an exact-head merge authorized by machine-local policy; never request Bash permission for gh pr merge. Use modelFallbacks.claude or modelFallbacks.codex for ordered overload-only downgrade chains. Use get_collaboration to poll or inspect it, continue_collaboration for another phase, and cancel_collaboration to stop. Omit model overrides to preserve configured models. The broker owns routing; never ask a peer to call another peer.",
+  },
+);
+
+server.registerTool(
+  "merge_pull_request",
+  {
+    title: "Merge an authorized pull request",
+    description:
+      "Use the configured builder GitHub App to merge one exact PR head after independently checking the review gate and GitHub rules. The repository must be allowlisted by machine-local autonomous merge policy.",
+    inputSchema: {
+      repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
+      prNumber: z.number().int().min(1),
+      headSha: z.string().regex(/^[0-9a-f]{40}$/i),
+      method: z.enum(["merge", "squash", "rebase"]).default("squash"),
+    },
+  },
+  async (input) => {
+    blockNestedCollaboration();
+    return toolResponse(await mergePullRequestWithBuilder(input));
   },
 );
 

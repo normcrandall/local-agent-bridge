@@ -362,6 +362,7 @@ for (const term of [
 assert.match(takeTheHelm, /Never leave the user at a static/);
 assert.match(takeTheHelm, /Never substitute a long-running Bash, sleep/);
 assert.match(takeTheHelm, /Merge only when repository policy contains standing auto-merge authority or the exact head SHA has been explicitly authorized/);
+assert.match(takeTheHelm, /native coordinator calls collaboration `merge_pull_request`/);
 assert.match(takeTheHelm, /agent-review=success/);
 assert.match(takeTheHelm, /never use an owner PAT bypass/);
 assert.match(takeTheHelm, /Routine uncertainty.*is not an escalation/);

@@ -102,6 +102,7 @@ try {
     "get_portfolio",
     "list_collaborations",
     "list_portfolios",
+    "merge_pull_request",
     "plan_portfolio",
     "prune_collaborations",
     "record_decision",
