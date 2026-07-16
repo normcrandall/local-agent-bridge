@@ -5,6 +5,7 @@ import { dirname, isAbsolute, resolve } from "node:path";
 
 export const DEFAULT_GITHUB_APPS_CONFIG = resolve(homedir(), ".config/local-agent-bridge/github-apps.json");
 export const GITHUB_LOGIN_PATTERN = /^[A-Za-z0-9-]+(?:\[bot\])?$/;
+export const GITHUB_REPOSITORY_POLICY_PATTERN = /^[A-Za-z0-9_.-]+\/(?:[A-Za-z0-9_.-]+|\*)$/;
 export const GITHUB_APP_ROLE_PERMISSIONS = {
   builder: { contents: "write", pull_requests: "write", issues: "write", metadata: "read" },
   reviewer: { contents: "read", pull_requests: "write", metadata: "read" },
@@ -81,6 +82,12 @@ export async function inspectGitHubAppRoles({ configPath = DEFAULT_GITHUB_APPS_C
   ))) {
     throw new Error("mergePolicy.trustedHumanReviewers must contain only non-bot GitHub logins.");
   }
+  const autonomousMergeRepositories = config.mergePolicy?.autonomousMergeRepositories || [];
+  if (!Array.isArray(autonomousMergeRepositories) || autonomousMergeRepositories.some((repository) => (
+    !GITHUB_REPOSITORY_POLICY_PATTERN.test(repository || "")
+  ))) {
+    throw new Error("mergePolicy.autonomousMergeRepositories must contain only owner/repository or owner/* entries.");
+  }
   const roles = {};
   for (const role of ["builder", "reviewer"]) {
     const selected = config.roles?.[role];
@@ -127,7 +134,10 @@ export async function inspectGitHubAppRoles({ configPath = DEFAULT_GITHUB_APPS_C
     configPath: expandHome(configPath),
     version: config.version,
     allowPatFallback: config.compatibility?.allowPatFallback !== false,
-    mergePolicy: { trustedHumanReviewers: [...new Set(trustedHumanReviewers)] },
+    mergePolicy: {
+      trustedHumanReviewers: [...new Set(trustedHumanReviewers)],
+      autonomousMergeRepositories: [...new Set(autonomousMergeRepositories)],
+    },
     roles,
   };
 }

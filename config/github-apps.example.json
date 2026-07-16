@@ -4,7 +4,11 @@
     "allowPatFallback": false
   },
   "mergePolicy": {
-    "trustedHumanReviewers": ["your-github-login"]
+    "trustedHumanReviewers": ["your-github-login"],
+    "autonomousMergeRepositories": [
+      "your-personal-account/*",
+      "your-organization/*"
+    ]
   },
   "roles": {
     "builder": {
