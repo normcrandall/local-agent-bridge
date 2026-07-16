@@ -22,6 +22,7 @@ import {
   orderReviewProbes,
   recordReviewPublicationResult,
 } from "../src/review-publication.mjs";
+import { acquireProviderCapacity, loadProviderConcurrency } from "../src/provider-concurrency.mjs";
 
 const runtimeRoot = realpathSync(
   process.env.BRIDGE_RUNTIME_ROOT || process.env.BRIDGE_ROOT || fileURLToPath(new URL("..", import.meta.url)),
@@ -143,6 +144,66 @@ try {
     initialState: state.runtime,
     send: async (call) => {
       const startedAt = new Date().toISOString();
+      const capacityRole = call.mode === "work" ? "work" : "review";
+      const capacityLimits = state.providerConcurrency || await loadProviderConcurrency();
+      let lastCapacityWaitSignature = null;
+      let capacityLease;
+      try {
+        capacityLease = await acquireProviderCapacity(workspaceRoot, {
+          provider: call.agent,
+          role: capacityRole,
+          collaborationId: id,
+          limits: capacityLimits,
+          onWait: async ({ limit, inUse, position }) => {
+            const now = new Date().toISOString();
+            const summary = `Waiting for ${call.agent} ${capacityRole} capacity (${inUse}/${limit} slots in use; queue position ${position}).`;
+            await updateCollaboration(workspaceRoot, id, (current) => ({
+              ...current,
+              runtime: {
+                ...current.runtime,
+                activeCall: {
+                  agent: call.agent,
+                  mode: call.mode,
+                  status: "queued",
+                  phase: "waiting_capacity",
+                  startedAt,
+                  heartbeatAt: now,
+                  summary,
+                  summaryAt: now,
+                  summarySource: "broker",
+                  capacity: { role: capacityRole, limit, inUse, position },
+                },
+              },
+            }));
+            const signature = `${limit}:${inUse}:${position}`;
+            if (signature !== lastCapacityWaitSignature) {
+              lastCapacityWaitSignature = signature;
+              await appendEvent(workspaceRoot, id, {
+                type: "provider_capacity_wait",
+                at: now,
+                agent: call.agent,
+                role: capacityRole,
+                limit,
+                inUse,
+                position,
+              });
+            }
+          },
+        });
+      } catch (error) {
+        await updateCollaboration(workspaceRoot, id, (current) => ({
+          ...current,
+          runtime: { ...current.runtime, activeCall: null },
+        })).catch(() => {});
+        await appendEvent(workspaceRoot, id, {
+          type: "provider_capacity_failed",
+          at: new Date().toISOString(),
+          agent: call.agent,
+          role: capacityRole,
+          error: error.message,
+        }).catch(() => {});
+        throw error;
+      }
       let lastSummary = `Waiting for ${call.agent}'s first progress update.`;
       let summaryAt = null;
       let summarySource = "broker";
@@ -163,24 +224,35 @@ try {
               summaryAt,
               summarySource,
               livenessMessage,
+              capacity: {
+                role: capacityRole,
+                limit: capacityLease.limit,
+                slot: capacityLease.slot,
+              },
               ...patch,
             },
           },
         }));
       };
-      await writeActiveCall();
-      await appendEvent(workspaceRoot, id, {
-        type: "agent_started",
-        at: startedAt,
-        agent: call.agent,
-        mode: call.mode,
-        summary: lastSummary,
-      });
-      const heartbeat = setInterval(() => {
-        writeActiveCall().catch(() => {});
-      }, 5_000);
-      heartbeat.unref?.();
+      let heartbeat = null;
       try {
+        await writeActiveCall();
+        await appendEvent(workspaceRoot, id, {
+          type: "agent_started",
+          at: startedAt,
+          agent: call.agent,
+          mode: call.mode,
+          summary: lastSummary,
+          capacity: {
+            role: capacityRole,
+            limit: capacityLease.limit,
+            slot: capacityLease.slot,
+          },
+        });
+        heartbeat = setInterval(() => {
+          writeActiveCall().catch(() => {});
+        }, 5_000);
+        heartbeat.unref?.();
         const response = await pool.send(call, async (progress) => {
           const incoming = progress.summary?.trim().slice(0, 500);
           if (incoming && isTransportLivenessSummary(incoming)) livenessMessage = incoming;
@@ -210,7 +282,7 @@ try {
             });
           }
         });
-        clearInterval(heartbeat);
+        if (heartbeat) clearInterval(heartbeat);
         await updateCollaboration(workspaceRoot, id, (current) => ({
           ...current,
           runtime: { ...current.runtime, activeCall: null },
@@ -220,9 +292,10 @@ try {
           at: new Date().toISOString(),
           agent: call.agent,
         });
+        await capacityLease.release();
         return response;
       } catch (error) {
-        clearInterval(heartbeat);
+        if (heartbeat) clearInterval(heartbeat);
         if (error?.indeterminate) {
           lastSummary = `Caller lost contact with ${call.agent}; execution state is unknown and ownership is preserved.`;
           await writeActiveCall({ status: "indeterminate", phase: "unknown", summary: lastSummary });
@@ -238,6 +311,7 @@ try {
             ...current,
             runtime: { ...current.runtime, activeCall: null },
           }));
+          await capacityLease.release();
         }
         throw error;
       }

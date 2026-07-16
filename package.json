@@ -38,6 +38,7 @@
     "test:portfolio": "node scripts/portfolio-scheduler-test.mjs && node scripts/portfolio-store-test.mjs",
     "test:merge-train": "node scripts/merge-train-test.mjs",
     "test:provider-capabilities": "node scripts/provider-capabilities-test.mjs",
+    "test:provider-concurrency": "node scripts/provider-concurrency-test.mjs",
     "test:secrets": "node scripts/secret-boundary-test.mjs"
   },
   "dependencies": {

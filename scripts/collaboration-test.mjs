@@ -66,6 +66,7 @@ let heartbeatClient;
 let cancellationClient;
 let codexFallbackClient;
 let completionClient;
+let capacityClient;
 try {
   firstClient = await connect("collaboration-test-app-one");
   const tools = await firstClient.listTools();
@@ -421,6 +422,49 @@ try {
   const heartbeatRun = await waitForStop(heartbeatClient, heartbeatId);
   assert.ok(["agreed", "turn_limit"].includes(heartbeatRun.status), heartbeatRun.error || "heartbeat run failed");
 
+  capacityClient = await connect("collaboration-test-provider-capacity", { FAKE_CLAUDE_DELAY_MS: "2000" });
+  const capacityStarts = await Promise.all([1, 2, 3].map((number) => capacityClient.callTool({
+    name: "start_collaboration",
+    arguments: {
+      task: `Parallel read-only review ${number}`,
+      agents: ["claude"],
+      maxTurns: 1,
+      providerConcurrency: { claude: { work: 1, review: 2 } },
+    },
+  })));
+  const capacityIds = capacityStarts.map((result) => result.structuredContent.id);
+  let capacityViews = [];
+  const capacityDeadline = Date.now() + 5_000;
+  while (Date.now() < capacityDeadline) {
+    capacityViews = await Promise.all(capacityIds.map(async (collaborationId) => {
+      const result = await capacityClient.callTool({
+        name: "get_collaboration",
+        arguments: { collaborationId, detail: "full", includeTurns: 0 },
+      });
+      return result.structuredContent;
+    }));
+    const leased = capacityViews.filter((view) => view.runtime?.activeCall?.capacity?.slot);
+    const waiting = capacityViews.filter((view) => view.runtime?.activeCall?.phase === "waiting_capacity");
+    if (leased.length === 2 && waiting.length === 1) break;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+  }
+  assert.equal(
+    capacityViews.filter((view) => view.runtime?.activeCall?.capacity?.slot).length,
+    2,
+    JSON.stringify(capacityViews.map((view) => ({
+      status: view.status,
+      error: view.error,
+      activeCall: view.runtime?.activeCall,
+    })), null, 2),
+  );
+  assert.equal(capacityViews.filter((view) => view.runtime?.activeCall?.phase === "waiting_capacity").length, 1);
+  const capacityRuns = await Promise.all(capacityIds.map((collaborationId) => waitForStop(
+    capacityClient,
+    collaborationId,
+    10_000,
+  )));
+  assert.ok(capacityRuns.every((view) => view.runtime.turnCount === 1));
+
   cancellationClient = await connect("collaboration-test-active-cancellation", { FAKE_CLAUDE_DELAY_MS: "10000" });
   const cancellationStarted = await cancellationClient.callTool({
     name: "start_collaboration",
@@ -462,6 +506,7 @@ try {
   await cancellationClient?.close().catch(() => {});
   await codexFallbackClient?.close().catch(() => {});
   await completionClient?.close().catch(() => {});
+  await capacityClient?.close().catch(() => {});
   await rm(stateDirectory, { recursive: true, force: true });
   await rm(resolve(root, ".bridge/test-handoffs"), { recursive: true, force: true });
 }

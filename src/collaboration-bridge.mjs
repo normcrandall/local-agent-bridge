@@ -29,6 +29,11 @@ import { acknowledgeCompletion } from "./handoff-protocol.mjs";
 import { analyzePortfolio, buildExecutionWaves, normalizePortfolioItems } from "./portfolio-scheduler.mjs";
 import { createPortfolio, listPortfolios, readPortfolio, updatePortfolio } from "./portfolio-store.mjs";
 import {
+  loadProviderConcurrency,
+  normalizeProviderConcurrency,
+  releaseProviderCapacityForCollaboration,
+} from "./provider-concurrency.mjs";
+import {
   beginMergeValidation,
   createArbitrationDossier,
   createMergeTrain,
@@ -229,6 +234,7 @@ function compactStatusView(view) {
     task: _task,
     models: _models,
     modelFallbacks: _modelFallbacks,
+    providerConcurrency: _providerConcurrency,
     verificationCommands: _verificationCommands,
     workCommands: _workCommands,
     preflight: _preflight,
@@ -275,6 +281,17 @@ const modelFallbacksSchema = z.object({
   codex: z.array(z.string().trim().min(1)).max(5).optional(),
 }).strict().optional().describe(
   "Ordered provider models to try after an overload response. Claude uses its native fallback flag; Codex retries through the bridge. Omit to use the machine-local config; pass a provider's [] to disable it for this collaboration.",
+);
+const providerConcurrencyRoleSchema = z.object({
+  work: z.number().int().min(1).max(20).optional(),
+  review: z.number().int().min(1).max(20).optional(),
+}).strict();
+const providerConcurrencySchema = z.object({
+  claude: providerConcurrencyRoleSchema.optional(),
+  codex: providerConcurrencyRoleSchema.optional(),
+  antigravity: providerConcurrencyRoleSchema.optional(),
+}).strict().optional().describe(
+  "Optional lower per-provider live-call limits. The machine-local provider-concurrency policy is a hard ceiling; defaults are work 1 and review 2.",
 );
 const verificationCommandsSchema = z.array(
   z.string().trim().min(1).max(500).refine((command) => !/[\r\n]/.test(command), "Commands must be single-line."),
@@ -400,6 +417,7 @@ server.registerTool(
       turnTimeoutSeconds: z.number().int().min(30).max(7200).default(600).describe("Per-model inactivity limit. Progress resets it; ordered fallback chains have a hard total bound of this limit multiplied by the number of permitted model attempts."),
       models: modelsSchema,
       modelFallbacks: modelFallbacksSchema,
+      providerConcurrency: providerConcurrencySchema,
       verificationCommands: verificationCommandsSchema,
       workCommands: workCommandsSchema,
       workProfile: workProfileSchema,
@@ -480,6 +498,7 @@ server.registerTool(
       browser: input.browser,
       models: input.models || {},
       modelFallbacks: input.modelFallbacks || {},
+      providerConcurrency: await loadProviderConcurrency({ overrides: input.providerConcurrency || {} }),
       verificationCommands: input.verificationCommands || [],
       workCommands: input.workCommands || [],
       workProfile: input.workProfile || "exact",
@@ -881,6 +900,7 @@ server.registerTool(
       additionalTurns: z.number().int().min(1).max(20).default(6),
       models: modelsSchema,
       modelFallbacks: modelFallbacksSchema,
+      providerConcurrency: providerConcurrencySchema,
       verificationCommands: verificationCommandsSchema,
       workCommands: workCommandsSchema,
       workProfile: workProfileSchema.optional(),
@@ -900,6 +920,7 @@ server.registerTool(
     additionalTurns,
     models,
     modelFallbacks,
+    providerConcurrency,
     verificationCommands,
     workCommands,
     workProfile,
@@ -927,6 +948,14 @@ server.registerTool(
     if ((permissionProfile || current.permissionProfile) === "yolo" && current.mode !== "work") {
       throw new Error("permissionProfile yolo is available only in work mode.");
     }
+    const resolvedProviderConcurrency = providerConcurrency
+      ? await loadProviderConcurrency({
+        overrides: normalizeProviderConcurrency(
+          providerConcurrency,
+          current.providerConcurrency || await loadProviderConcurrency(),
+        ),
+      })
+      : current.providerConcurrency || await loadProviderConcurrency();
     const state = await updateCollaboration(WORKSPACE_ROOT, id, (previous) => ({
       ...previous,
       status: "queued",
@@ -937,6 +966,7 @@ server.registerTool(
       modelFallbacks: modelFallbacks
         ? { ...(previous.modelFallbacks || {}), ...modelFallbacks }
         : previous.modelFallbacks || {},
+      providerConcurrency: resolvedProviderConcurrency,
       verificationCommands: verificationCommands || previous.verificationCommands || [],
       workCommands: workCommands || previous.workCommands || [],
       workProfile: workProfile || previous.workProfile || "exact",
@@ -1032,10 +1062,12 @@ server.registerTool(
       ...previous,
       cancelRequested: true,
     }, { status: "cancelled" }));
+    const releasedProviderCapacity = await releaseProviderCapacityForCollaboration(WORKSPACE_ROOT, id);
     await appendEvent(WORKSPACE_ROOT, id, {
       type: "cancelled",
       at: new Date().toISOString(),
       terminatedWorkerPid: before.workerPid || null,
+      releasedProviderCapacity,
     });
     return toolResponse({ ...state, turns: [] });
   },
