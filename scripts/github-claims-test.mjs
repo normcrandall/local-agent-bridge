@@ -37,7 +37,7 @@ function createPausableMockGitHub() {
     const body = options.body ? JSON.parse(options.body) : null;
 
     // Optional pause hook before returning Git ref POST or comment POST
-    if (pausePromise && (pathname.endsWith("/git/refs") || pathname.endsWith("/comments"))) {
+    if (pausePromise && pathname.endsWith("/comments") && method === "POST") {
       await pausePromise;
     }
 
@@ -76,6 +76,19 @@ function createPausableMockGitHub() {
       return json({ ok: true });
     }
 
+    // GET matching refs
+    if (pathname.match(/^\/repos\/[^/]+\/[^/]+\/git\/matching-refs\/tags\/claims\/issue-\d+$/) && method === "GET") {
+      const issueNum = pathname.split("/").pop().split("-").pop();
+      const prefix = `refs/tags/claims/issue-${issueNum}`;
+      const matched = [];
+      for (const [ref, sha] of gitRefs.entries()) {
+        if (ref.startsWith(prefix)) {
+          matched.push({ ref, object: { sha } });
+        }
+      }
+      return json(matched);
+    }
+
     // Paginated Comments
     if (pathname.match(/^\/repos\/[^/]+\/[^/]+\/issues\/\d+\/comments$/) && method === "GET") {
       const page = Number(parsedUrl.searchParams.get("page") || 1);
@@ -90,7 +103,7 @@ function createPausableMockGitHub() {
       const comment = {
         id: nextCommentId++,
         body: body.body,
-        user: { login: isClient2 ? "reviewer-app[bot]" : "builder-app[bot]" }
+        user: { login: isClient2 ? "builder-app[bot]" : "builder-app[bot]" }
       };
       comments.push(comment);
       return json(comment);
@@ -119,9 +132,10 @@ function createPausableMockGitHub() {
       return json({ ref: body.ref, object: { sha: body.sha } }, 201);
     }
 
-    if (pathname.match(/^\/repos\/[^/]+\/[^/]+\/git\/refs\/tags\/claims\/issue-\d+$/) && method === "DELETE") {
-      const refName = `refs/tags/claims/issue-${pathname.split("/").pop().split("-").pop()}`;
-      gitRefs.delete(refName);
+    if (pathname.match(/^\/repos\/[^/]+\/[^/]+\/git\/refs\/tags\/claims\/issue-\d+-generation-\d+$/) && method === "DELETE") {
+      const refPath = pathname.match(/^\/repos\/[^/]+\/[^/]+\/git\/refs\/(tags\/claims\/issue-\d+-generation-\d+)$/)[1];
+      const fullRef = "refs/" + refPath;
+      gitRefs.delete(fullRef);
       return json({ ok: true });
     }
 
@@ -183,6 +197,7 @@ async function runTests() {
       "post_issue_comment",
       "update_issue_comment",
       "delete_issue_comment",
+      "list_tag_locks",
       "acquire_tag_lock",
       "release_tag_lock"
     ],
@@ -227,7 +242,7 @@ async function runTests() {
   });
   assert.equal(mock.getComments().length, 1);
   assert.ok(mock.getLabels().has("agent:in-progress"));
-  assert.ok(mock.getRefs().has("refs/tags/claims/issue-42"));
+  assert.ok(mock.getRefs().has("refs/tags/claims/issue-42-generation-1"));
 
   await acquireClaimLease({
     client,
@@ -244,7 +259,7 @@ async function runTests() {
   });
   assert.equal(mock.getComments().length, 1);
 
-  console.log("4. Testing barrier-controlled concurrent collision test...");
+  console.log("4. Testing barrier-controlled concurrent collision test (generation lock)...");
   mock.clear();
   mock.getRepoLabels().add("agent:in-progress");
   const client2 = createBoundBuilderClient({
@@ -268,10 +283,8 @@ async function runTests() {
     workspaceRoot: tempWorkspaceRoot
   });
 
-  // Wait briefly for client1 to have acquired tag lock and be paused before POST comments
   await new Promise((resolve) => setTimeout(resolve, 100));
 
-  // Client2 tries to claim while Client1 is paused
   const claimPromise2 = acquireClaimLease({
     client: client2,
     issueNumber: 42,
@@ -286,18 +299,19 @@ async function runTests() {
     workspaceRoot: tempWorkspaceRoot
   });
 
-  // Let client2 enter the 2s wait-and-recheck window, then resume client1
   await new Promise((resolve) => setTimeout(resolve, 500));
   mock.triggerResume();
 
-  // Client1 should succeed, client2 should reject with collision
   await claimPromise1;
   await assert.rejects(
     claimPromise2,
-    /already claimed/
+    /already claimed|Lock conflict/
   );
 
-  console.log("5. Testing spoofed comments check...");
+  // Assert client1's generation 1 lock was NOT deleted by client2's attempt
+  assert.ok(mock.getRefs().has("refs/tags/claims/issue-42-generation-1"));
+
+  console.log("5. Testing spoofed comments check & bot normalized comparisons...");
   mock.clear();
   mock.setComments([{
     id: 999,
@@ -307,7 +321,22 @@ async function runTests() {
   const parsed = await parseClaims(client, 42);
   assert.equal(parsed.length, 0);
 
-  console.log("6. Testing stale lease takeover...");
+  // Test case-insensitive and bot suffix normalization
+  const clientNormalized = createBoundBuilderClient({
+    ...baseClientConfig,
+    expectedLogin: "VELIQON-builder",
+    verifiedLogin: "veliqon-builder[bot]"
+  });
+  mock.setComments([{
+    id: 1000,
+    body: `### Agent Bridge Issue Claim Lease\n<!-- agent-bridge-issue-claim\n{"collaboration": "bridge-norm"}\n-->`,
+    user: { login: "veliqon-builder[bot]" }
+  }]);
+  const parsedNorm = await parseClaims(clientNormalized, 42);
+  assert.equal(parsedNorm.length, 1);
+  assert.equal(parsedNorm[0].data.collaboration, "bridge-norm");
+
+  console.log("6. Testing stale lease takeover (generation increment)...");
   mock.clear();
   mock.getRepoLabels().add("agent:in-progress");
   const oldPayload = {
@@ -320,6 +349,7 @@ async function runTests() {
     base: "0000000000000000000000000000000000000000",
     head: "9999999999999999999999999999999999999999",
     phase: "working",
+    generation: 1,
     timestamps: {
       created: "2020-01-01T00:00:00.000Z",
       updated: "2020-01-01T00:00:00.000Z"
@@ -330,7 +360,7 @@ async function runTests() {
     body: `### Agent Bridge Issue Claim Lease\n<!-- agent-bridge-issue-claim\n${JSON.stringify(oldPayload, null, 2)}\n-->`,
     user: { login: "builder-app[bot]" }
   }]);
-  mock.getRefs().set("refs/tags/claims/issue-42", "9999999999999999999999999999999999999999");
+  mock.getRefs().set("refs/tags/claims/issue-42-generation-1", "9999999999999999999999999999999999999999");
 
   await acquireClaimLease({
     client,
@@ -348,8 +378,11 @@ async function runTests() {
   });
 
   const comments = mock.getComments();
-  assert.equal(comments.length, 1); // Exactly one canonical comment maintained
-  assert.ok(comments[0].body.includes("Event: **claimed**"));
+  assert.equal(comments.length, 1);
+  assert.ok(comments[0].body.includes("Event: **takeover**"));
+  // Assert next generation (2) tag was created, and old generation (1) tag remains untouched
+  assert.ok(mock.getRefs().has("refs/tags/claims/issue-42-generation-2"));
+  assert.ok(mock.getRefs().has("refs/tags/claims/issue-42-generation-1"));
 
   console.log("7. Testing phase no-op / regression checks & rate limiting...");
   await refreshClaimLease({
@@ -384,7 +417,7 @@ async function runTests() {
   const ourFinalClaim = finalClaims.find(c => c.data.collaboration === "bridge-33333333-3333-3333-4444-555555555555");
   assert.equal(ourFinalClaim.data.phase, "cancelled");
   assert.ok(!mock.getLabels().has("agent:in-progress"));
-  assert.ok(!mock.getRefs().has("refs/tags/claims/issue-42"));
+  assert.ok(!mock.getRefs().has("refs/tags/claims/issue-42-generation-2"));
 
   console.log("9. Testing non-terminal outcomes (failed does not release tag lock)...");
   mock.clear();
@@ -399,7 +432,7 @@ async function runTests() {
     headSha: "1111111111111111111111111111111111111111",
     workspaceRoot: tempWorkspaceRoot
   });
-  assert.ok(mock.getRefs().has("refs/tags/claims/issue-42"));
+  assert.ok(mock.getRefs().has("refs/tags/claims/issue-42-generation-1"));
 
   await releaseClaimLease({
     client,
@@ -408,7 +441,7 @@ async function runTests() {
     outcome: "failed"
   });
   // Mutex lock is NOT released for failed
-  assert.ok(mock.getRefs().has("refs/tags/claims/issue-42"));
+  assert.ok(mock.getRefs().has("refs/tags/claims/issue-42-generation-1"));
   assert.ok(mock.getLabels().has("agent:in-progress"));
 
   console.log("10. Testing pagination support...");
@@ -426,11 +459,11 @@ async function runTests() {
   assert.equal(paginatedClaims.length, 1);
   assert.equal(paginatedClaims[0].data.collaboration, "bridge-paginated");
 
-  console.log("11. Testing legacy-v1 parsing...");
+  console.log("11. Testing legacy-v1 parsing (two-block shape)...");
   mock.clear();
   mock.setComments([{
     id: 5003486005,
-    body: `### Agent Bridge Legacy Claim\n<!-- agent-claim:v1\n{"collaboration": "bridge-legacy", "phase":"working"}\n-->`,
+    body: `### Agent Bridge Legacy Claim\n<!-- agent-claim:v1 issue=42 -->\n<!-- {"collaborationId": "bridge-legacy", "phase":"working", "claimedAt":"2026-07-17T00:00:00Z"} -->`,
     user: { login: "builder-app[bot]" }
   }]);
   const legacyClaims = await parseClaims(client, 42);
@@ -439,7 +472,6 @@ async function runTests() {
 
   console.log("12. Testing label existence and auto-creation check...");
   mock.clear();
-  // repoLabels does not contain agent:in-progress
   await acquireClaimLease({
     client,
     issueNumber: 42,
@@ -450,7 +482,6 @@ async function runTests() {
     headSha: "1111111111111111111111111111111111111111",
     workspaceRoot: tempWorkspaceRoot
   });
-  // Label should be auto-created in repo and then added to issue
   assert.ok(mock.getRepoLabels().has("agent:in-progress"));
   assert.ok(mock.getLabels().has("agent:in-progress"));
 

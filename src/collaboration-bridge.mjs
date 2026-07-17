@@ -641,7 +641,7 @@ server.registerTool(
         expectedLogin,
         headSha,
         issueNumber: input.issueClaim.issueNumber,
-        allowedOperations: ["get_issue", "add_issue_label", "remove_issue_label", "get_issue_comments", "post_issue_comment", "update_issue_comment", "delete_issue_comment", "acquire_tag_lock", "release_tag_lock"],
+        allowedOperations: ["get_issue", "add_issue_label", "remove_issue_label", "get_issue_comments", "post_issue_comment", "update_issue_comment", "delete_issue_comment", "list_tag_locks", "acquire_tag_lock", "release_tag_lock"],
         workspace: requestedWorkspace,
         fetchImpl: fetch,
       });
@@ -934,7 +934,30 @@ server.registerTool(
   async ({ portfolioId: id, expectedRevision, itemId, status, ...details }) => {
     blockNestedCollaboration();
     const patch = Object.fromEntries(Object.entries({ status, ...details }).filter(([, value]) => value !== undefined));
-    return toolResponse(await updatePortfolio(PORTFOLIO_ROOT, id, expectedRevision, (current) => updatePortfolioItemState(current, itemId, patch)));
+    const result = await updatePortfolio(PORTFOLIO_ROOT, id, expectedRevision, (current) => updatePortfolioItemState(current, itemId, patch));
+
+    if (status === "obsolete") {
+      const portfolioState = await readPortfolio(PORTFOLIO_ROOT, id);
+      const item = portfolioState.items.find(i => i.id === itemId);
+      const collabId = item?.collaborationId;
+      if (collabId) {
+        const collab = await readCollaboration(WORKSPACE_ROOT, collabId).catch(() => null);
+        if (collab && collab.issueClaim) {
+          const { getBuilderClientForWorkspace, releaseClaimLease } = await import("./github-issue-claims.mjs");
+          const claimClient = await getBuilderClientForWorkspace(collab.workspace || WORKSPACE_ROOT, collab.issueClaim.issueNumber);
+          if (claimClient) {
+            await releaseClaimLease({
+              client: claimClient,
+              issueNumber: collab.issueClaim.issueNumber,
+              collaborationId: collabId,
+              outcome: "obsolete",
+            });
+          }
+        }
+      }
+    }
+
+    return toolResponse(result);
   },
 );
 
@@ -1459,27 +1482,30 @@ server.registerTool(
       issueNumber: z.number().int().min(1),
       expectedLogin: z.string().regex(GITHUB_LOGIN_PATTERN),
       collaborationId: z.string().min(1),
-      outcome: z.enum(["completed", "merged", "cancelled", "obsolete", "failed", "indeterminate"]).default("cancelled"),
+      outcome: z.enum(["merged", "cancelled", "obsolete", "rolled_back", "taken_over"]).default("cancelled"),
     },
   },
   async ({ repository, issueNumber, expectedLogin, collaborationId, outcome }) => {
     blockNestedCollaboration();
     const { createInstallationToken } = await import("./github-app-auth.mjs");
     const { createBoundBuilderClient } = await import("./github-builder-client.mjs");
-    const { releaseClaimLease } = await import("./github-issue-claims.mjs");
+    const { releaseClaimLease, getHeadShaFromWorkspace } = await import("./github-issue-claims.mjs");
     const credential = await createInstallationToken({ role: "builder", repository });
+    const headSha = getHeadShaFromWorkspace(WORKSPACE_ROOT);
     const claimClient = createBoundBuilderClient({
       apiUrl: process.env.GITHUB_BUILDER_API_URL || "https://api.github.com",
       token: credential.token,
       verifiedLogin: credential.verifiedLogin,
       repository,
       expectedLogin,
-      headSha: "0000000000000000000000000000000000000000",
+      headSha,
       issueNumber,
-      allowedOperations: ["get_issue", "add_issue_label", "remove_issue_label", "get_issue_comments", "post_issue_comment", "update_issue_comment", "delete_issue_comment", "acquire_tag_lock", "release_tag_lock"],
+      allowedOperations: ["get_issue", "add_issue_label", "remove_issue_label", "get_issue_comments", "post_issue_comment", "update_issue_comment", "delete_issue_comment", "list_tag_locks", "acquire_tag_lock", "release_tag_lock"],
       workspace: WORKSPACE_ROOT,
       fetchImpl: fetch,
     });
+    const recoveryReceipt = `Force-release receipt: administrator initiated inspected recovery for issue #${issueNumber}, releasing collaboration ${collaborationId} lease with outcome ${outcome}.`;
+    await claimClient.postIssueComment(issueNumber, recoveryReceipt);
     await releaseClaimLease({ client: claimClient, issueNumber, collaborationId, outcome });
     return toolResponse({ ok: true });
   }

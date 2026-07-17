@@ -203,7 +203,8 @@ function marker(operation, headSha, value) {
 
 async function verifyIdentity({ fetchImpl, apiUrl, token, expectedLogin, verifiedLogin }) {
   const login = verifiedLogin || (await request({ fetchImpl, apiUrl, token, path: "/user" }))?.login;
-  if (login !== expectedLogin) {
+  const normLogin = (l) => (l || "").toLowerCase().endsWith("[bot]") ? (l || "").toLowerCase().slice(0, -5) : (l || "").toLowerCase();
+  if (normLogin(login) !== normLogin(expectedLogin)) {
     throw new Error(`GitHub builder identity mismatch: expected ${expectedLogin}, received ${login || "unknown"}.`);
   }
   return login;
@@ -1000,26 +1001,35 @@ export function createBoundBuilderClient({
     });
   }
 
-  async function acquireTagLock(sha) {
+  async function listTagLocks() {
+    authorize("list_tag_locks");
+    await identity();
+    return await request({
+      ...context,
+      path: `/repos/${repository}/git/matching-refs/tags/claims/issue-${issueNumber}`,
+    });
+  }
+
+  async function acquireTagLock(generation, sha) {
     authorize("acquire_tag_lock");
     await identity();
     return await request({
       ...context,
       path: `/repos/${repository}/git/refs`,
       method: "POST",
-      body: { ref: `refs/tags/claims/issue-${issueNumber}`, sha },
+      body: { ref: `refs/tags/claims/issue-${issueNumber}-generation-${generation}`, sha },
     });
   }
 
-  async function releaseTagLock() {
+  async function releaseTagLock(generation) {
     authorize("release_tag_lock");
     await identity();
     return await request({
       ...context,
-      path: `/repos/${repository}/git/refs/tags/claims/issue-${issueNumber}`,
+      path: `/repos/${repository}/git/refs/tags/claims/issue-${issueNumber}-generation-${generation}`,
       method: "DELETE",
     });
   }
 
-  return { identity, ensurePullRequest, reviewThreads, replyReviewThread, resolveReviewThread, markReady, merge, createBranch, pushBranch, replaceBranch, getIssue, addIssueLabel, removeIssueLabel, getIssueComments, postIssueComment, updateIssueComment, deleteIssueComment, acquireTagLock, releaseTagLock, expectedLogin, repository, issueNumber };
+  return { identity, ensurePullRequest, reviewThreads, replyReviewThread, resolveReviewThread, markReady, merge, createBranch, pushBranch, replaceBranch, getIssue, addIssueLabel, removeIssueLabel, getIssueComments, postIssueComment, updateIssueComment, deleteIssueComment, listTagLocks, acquireTagLock, releaseTagLock, expectedLogin, repository, issueNumber };
 }

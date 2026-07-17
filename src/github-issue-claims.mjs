@@ -5,6 +5,22 @@ import { inspectGitHubAppRoles, createInstallationToken } from "./github-app-aut
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 
+const CANONICAL_PHASES = [
+  "claiming",
+  "preflight",
+  "waiting_capacity",
+  "working",
+  "reviewing",
+  "verifying",
+  "completed",
+  "merged",
+  "failed",
+  "cancelled",
+  "obsolete",
+  "rolled_back",
+  "taken_over"
+];
+
 function processAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 1) return false;
   try {
@@ -13,6 +29,34 @@ function processAlive(pid) {
   } catch (error) {
     return error.code === "EPERM";
   }
+}
+
+function normalizeLogin(login) {
+  if (!login) return "";
+  let clean = login.toLowerCase();
+  if (clean.endsWith("[bot]")) {
+    clean = clean.slice(0, -5);
+  }
+  return clean;
+}
+
+function normalizePhase(phase) {
+  if (!phase) return "working";
+  const p = String(phase).toLowerCase();
+  if (p === "claiming") return "claiming";
+  if (p === "preflight") return "preflight";
+  if (p === "waiting_capacity") return "waiting_capacity";
+  if (p === "running" || p === "working" || p === "provider_progress" || p === "turn") return "working";
+  if (p === "review" || p === "reviewing") return "reviewing";
+  if (p === "verification" || p === "verifying") return "verifying";
+  if (p === "completed") return "completed";
+  if (p === "merged") return "merged";
+  if (p === "failed") return "failed";
+  if (p === "cancelled") return "cancelled";
+  if (p === "obsolete") return "obsolete";
+  if (p === "rolled_back") return "rolled_back";
+  if (p === "taken_over") return "taken_over";
+  return "working";
 }
 
 function getRepositoryFromWorkspace(workspacePath) {
@@ -54,7 +98,7 @@ export async function getBuilderClientForWorkspace(workspace, issueNum, fetchImp
     expectedLogin,
     headSha,
     issueNumber: issueNum,
-    allowedOperations: ["get_issue", "add_issue_label", "remove_issue_label", "get_issue_comments", "post_issue_comment", "update_issue_comment", "delete_issue_comment", "acquire_tag_lock", "release_tag_lock"],
+    allowedOperations: ["get_issue", "add_issue_label", "remove_issue_label", "get_issue_comments", "post_issue_comment", "update_issue_comment", "delete_issue_comment", "list_tag_locks", "acquire_tag_lock", "release_tag_lock"],
     workspace,
     fetchImpl,
   });
@@ -71,6 +115,7 @@ function generateCommentBody(payload) {
     `- Collaboration: \`${payload.collaboration}\`\n` +
     `- Writer: \`${payload.writer}\`\n` +
     `- Phase: \`${payload.phase}\`\n` +
+    `- Generation: \`${payload.generation || 1}\`\n` +
     `- Updated: \`${payload.timestamps.updated}\`\n\n` +
     `**History (last 10 events):**\n${historyLines}\n\n` +
     `<!-- agent-bridge-issue-claim\n${JSON.stringify(payload, null, 2)}\n-->`;
@@ -102,13 +147,45 @@ export async function parseClaims(client, issueNumber) {
   const claims = [];
   for (const c of comments) {
     const authorLogin = c.user?.login || c.author?.login;
-    if (authorLogin !== client.expectedLogin) {
+    if (normalizeLogin(authorLogin) !== normalizeLogin(client.expectedLogin)) {
       continue;
     }
-    const match = c.body.match(/<!-- (agent-bridge-issue-claim|agent-claim:v1)\n([\s\S]*?)\n-->/);
+
+    // Support real two-block legacy format: <!-- agent-claim:v1 issue=51 --> followed by <!-- {json} -->
+    const v1MarkerMatch = c.body.match(/<!--\s*agent-claim:v1\s+issue=(\d+)\s*-->/);
+    if (v1MarkerMatch && Number(v1MarkerMatch[1]) === Number(issueNumber)) {
+      const jsonMatch = c.body.match(/<!--\s*(\{[\s\S]*?\})\s*-->/);
+      if (jsonMatch) {
+        try {
+          const parsedData = JSON.parse(jsonMatch[1]);
+          const mappedData = {
+            portfolio: parsedData.portfolio || null,
+            item: parsedData.item || null,
+            writer: parsedData.writer || null,
+            collaboration: parsedData.collaboration || parsedData.collaborationId || null,
+            branch: parsedData.branch || null,
+            worktree: parsedData.worktree || null,
+            base: parsedData.base || null,
+            head: parsedData.head || null,
+            phase: parsedData.phase || "working",
+            generation: parsedData.generation || 1,
+            timestamps: {
+              created: parsedData.timestamps?.created || parsedData.claimedAt || new Date().toISOString(),
+              updated: parsedData.timestamps?.updated || parsedData.updatedAt || new Date().toISOString(),
+            },
+            history: parsedData.history || [],
+          };
+          claims.push({ commentId: c.id, data: mappedData, author: authorLogin, isLegacyV1: true });
+          continue;
+        } catch {}
+      }
+    }
+
+    // Canonical format
+    const match = c.body.match(/<!-- agent-bridge-issue-claim\n([\s\S]*?)\n-->/);
     if (match) {
       try {
-        claims.push({ commentId: c.id, data: JSON.parse(match[2]), author: authorLogin });
+        claims.push({ commentId: c.id, data: JSON.parse(match[1]), author: authorLogin });
       } catch {}
     }
   }
@@ -129,6 +206,20 @@ export async function acquireClaimLease({
   ttlMs = 300_000,
   workspaceRoot,
 }) {
+  // 1. List existing tag locks to find current generation
+  const existingRefs = await client.listTagLocks();
+  let maxGen = 0;
+  for (const refObj of existingRefs) {
+    const match = refObj.ref.match(/-generation-(\d+)$/);
+    if (match) {
+      const g = parseInt(match[1], 10);
+      if (g > maxGen) {
+        maxGen = g;
+      }
+    }
+  }
+
+  // 2. Check for active comments
   const claims = await parseClaims(client, issueNumber);
   let activeClaim = null;
   for (const claim of claims) {
@@ -146,40 +237,36 @@ export async function acquireClaimLease({
     return;
   }
 
+  // 3. Contender publication window delay
+  if (maxGen > 0) {
+    const latestGenClaim = claims.find(c => c.data.generation === maxGen);
+    if (!latestGenClaim) {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 2000));
+      const reClaims = await parseClaims(client, issueNumber);
+      const reLatestGenClaim = reClaims.find(c => c.data.generation === maxGen);
+      if (reLatestGenClaim && await isClaimActive(reLatestGenClaim, workspaceRoot, ttlMs)) {
+        if (reLatestGenClaim.data.collaboration !== collaborationId) {
+          throw new Error(`Issue #${issueNumber} is already claimed by active collaboration ${reLatestGenClaim.data.collaboration} (writer: ${reLatestGenClaim.data.writer}).`);
+        }
+        await refreshClaimLease({ client, issueNumber, collaborationId, phase: "claiming", headSha });
+        return;
+      }
+    }
+  }
+
+  // 4. Try next generation
+  const nextGen = maxGen + 1;
   const refSha = headSha || baseSha || getHeadShaFromWorkspace(workspaceRoot);
+
   let mutexAcquired = false;
   try {
-    await client.acquireTagLock(refSha);
+    await client.acquireTagLock(nextGen, refSha);
     mutexAcquired = true;
   } catch (err) {
     if (err.status !== 422) {
-      throw err; // Throw 403, 500, etc. immediately!
+      throw err; // Propagate 403, 500, etc. immediately
     }
-
-    // Tag already exists. Let's wait 2 seconds to see if another provider is in the middle of comment publication.
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 2000));
-
-    const reClaims = await parseClaims(client, issueNumber);
-    let reActive = null;
-    for (const claim of reClaims) {
-      if (await isClaimActive(claim, workspaceRoot, ttlMs)) {
-        reActive = claim;
-        break;
-      }
-    }
-
-    if (reActive) {
-      if (reActive.data.collaboration !== collaborationId) {
-        throw new Error(`Issue #${issueNumber} is already claimed by active collaboration ${reActive.data.collaboration} (writer: ${reActive.data.writer}).`);
-      }
-      await refreshClaimLease({ client, issueNumber, collaborationId, phase: "claiming", headSha });
-      return;
-    }
-
-    // If still no active comment exists, the tag ref is stale/orphaned. Let's delete and recreate it.
-    await client.releaseTagLock().catch(() => {});
-    await client.acquireTagLock(refSha);
-    mutexAcquired = true;
+    throw new Error(`Lock conflict: generation ${nextGen} lock for issue #${issueNumber} already exists.`);
   }
 
   if (!mutexAcquired) {
@@ -192,20 +279,22 @@ export async function acquireClaimLease({
     let oldHistory = [];
 
     if (staleClaims.length > 0) {
+      staleClaims.sort((a, b) => (b.data.generation || 0) - (a.data.generation || 0));
       canonicalCommentId = staleClaims[0].commentId;
       const oldPayload = staleClaims[0].data;
       oldHistory = oldPayload.history || [];
 
-      // Update stale comments that are not the canonical one to taken_over, or delete them to avoid pile-up.
+      // Record takeover in history
+      oldHistory = [
+        { event: "takeover", collaboration: collaborationId, writer, phase: "claiming", at: new Date().toISOString(), previousCollaboration: oldPayload.collaboration },
+        ...oldHistory
+      ];
+
+      // Delete other comments to avoid pile-up
       for (let i = 1; i < staleClaims.length; i++) {
         await client.deleteIssueComment(staleClaims[i].commentId).catch(() => {});
       }
     }
-
-    const newHistory = [
-      { event: "claimed", collaboration: collaborationId, writer, phase: "claiming", at: new Date().toISOString() },
-      ...oldHistory
-    ].slice(0, 10);
 
     const payload = {
       portfolio: portfolioId || null,
@@ -217,11 +306,12 @@ export async function acquireClaimLease({
       base: baseSha || null,
       head: headSha || null,
       phase: "claiming",
+      generation: nextGen,
       timestamps: {
         created: new Date().toISOString(),
         updated: new Date().toISOString(),
       },
-      history: newHistory,
+      history: oldHistory.slice(0, 10),
     };
 
     const commentBody = generateCommentBody(payload);
@@ -234,7 +324,7 @@ export async function acquireClaimLease({
 
     await client.addIssueLabel(issueNumber, "agent:in-progress");
   } catch (mutationError) {
-    await client.releaseTagLock().catch(() => {});
+    await client.releaseTagLock(nextGen).catch(() => {});
     throw mutationError;
   }
 }
@@ -246,18 +336,17 @@ export async function refreshClaimLease({ client, issueNumber, collaborationId, 
     throw new Error(`No active claim lease found on GitHub for collaboration ${collaborationId}.`);
   }
 
-  // Clean up duplicate claim comments if any
+  // Clean up duplicate comments
   const duplicates = claims.filter(c => c.data.collaboration === collaborationId && c.commentId !== ours.commentId);
   for (const dup of duplicates) {
     await client.deleteIssueComment(dup.commentId).catch(() => {});
   }
 
-  const phases = ["claiming", "working", "reviewing", "verifying", "completed", "merged", "failed", "cancelled", "rolled_back", "taken_over"];
-  const currentIdx = phases.indexOf(ours.data.phase);
-  const newIdx = phases.indexOf(phase);
-  let targetPhase = phase;
+  const currentIdx = CANONICAL_PHASES.indexOf(normalizePhase(ours.data.phase));
+  const newIdx = CANONICAL_PHASES.indexOf(normalizePhase(phase));
+  let targetPhase = normalizePhase(phase);
   if (newIdx < currentIdx) {
-    targetPhase = ours.data.phase;
+    targetPhase = normalizePhase(ours.data.phase);
   }
 
   const samePhase = ours.data.phase === targetPhase;
@@ -287,11 +376,15 @@ export async function refreshClaimLease({ client, issueNumber, collaborationId, 
 }
 
 export async function releaseClaimLease({ client, issueNumber, collaborationId, outcome }) {
+  const allowedOutcomes = ["merged", "cancelled", "obsolete", "rolled_back", "taken_over", "failed", "indeterminate"];
+  if (!allowedOutcomes.includes(outcome)) {
+    throw new Error(`Invalid claim lease release outcome: ${outcome}.`);
+  }
+
   const claims = await parseClaims(client, issueNumber);
   const ours = claims.find(c => c.data.collaboration === collaborationId);
   if (!ours) return;
 
-  // Clean up duplicates if any
   const duplicates = claims.filter(c => c.data.collaboration === collaborationId && c.commentId !== ours.commentId);
   for (const dup of duplicates) {
     await client.deleteIssueComment(dup.commentId).catch(() => {});
@@ -307,10 +400,11 @@ export async function releaseClaimLease({ client, issueNumber, collaborationId, 
   const commentBody = generateCommentBody(ours.data);
   await client.updateIssueComment(ours.commentId, commentBody);
 
-  const terminal = ["completed", "merged", "cancelled", "obsolete", "rolled_back"].includes(outcome);
+  const terminal = ["merged", "cancelled", "obsolete", "rolled_back", "taken_over"].includes(outcome);
 
   if (terminal) {
-    await client.releaseTagLock();
+    const generation = ours.data.generation || 1;
+    await client.releaseTagLock(generation);
 
     const remainingClaims = (await parseClaims(client, issueNumber)).filter(
       c => c.data.collaboration !== collaborationId && !["completed", "merged", "cancelled", "obsolete", "rolled_back", "taken_over"].includes(c.data.phase)
@@ -321,9 +415,22 @@ export async function releaseClaimLease({ client, issueNumber, collaborationId, 
   }
 }
 
+async function updatePortfolioWithRetry(portfoliosPath, pId, updater, maxAttempts = 5) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const currentPortfolio = await readPortfolio(portfoliosPath, pId);
+      await updatePortfolio(portfoliosPath, pId, currentPortfolio.revision, updater);
+      return;
+    } catch (err) {
+      if (attempt === maxAttempts) throw err;
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+    }
+  }
+}
+
 export async function reconcileClaimsAndPortfolios(workspaceRoot, fetchImpl = fetch, clientOverride = null) {
   const portfoliosPath = resolve(workspaceRoot, ".bridge/portfolios");
-  const portfolios = await listPortfolios(portfoliosPath).catch(() => []);
+  const portfolios = await listPortfolios(portfoliosPath);
   for (const p of portfolios) {
     let portfolioState = await readPortfolio(portfoliosPath, p.id);
     for (const item of portfolioState.items) {
@@ -336,35 +443,32 @@ export async function reconcileClaimsAndPortfolios(workspaceRoot, fetchImpl = fe
         const issueNum = item.issueNumber || collab?.issueClaim?.issueNumber;
         if (!issueNum) continue;
 
-        let client = clientOverride || await getBuilderClientForWorkspace(portfolioState.workspace || workspaceRoot, issueNum, fetchImpl).catch(() => null);
+        let client = clientOverride || await getBuilderClientForWorkspace(portfolioState.workspace || workspaceRoot, issueNum, fetchImpl);
         if (!client) continue;
 
         if (collab) {
-          const terminal = ["completed", "cancelled", "obsolete"].includes(collab.status);
+          const terminal = ["cancelled", "obsolete"].includes(collab.status);
           if (terminal) {
-            const outcome = collab.status === "completed" ? "completed" : collab.status;
-            await releaseClaimLease({ client, issueNumber: issueNum, collaborationId: item.collaborationId, outcome });
+            await releaseClaimLease({ client, issueNumber: issueNum, collaborationId: item.collaborationId, outcome: collab.status });
           } else if (collab.status === "indeterminate" || collab.status === "failed") {
-            const currentPortfolio = await readPortfolio(portfoliosPath, p.id);
-            await updatePortfolio(portfoliosPath, p.id, currentPortfolio.revision, async (current) => {
+            await updatePortfolioWithRetry(portfoliosPath, p.id, async (current) => {
               const targetItem = current.items.find(i => i.id === item.id);
               if (targetItem) {
                 targetItem.status = collab.status;
                 targetItem.summary = collab.error || "Reconciled after restart";
               }
               return current;
-            }).catch(() => {});
+            });
           }
         } else {
-          const currentPortfolio = await readPortfolio(portfoliosPath, p.id);
-          await updatePortfolio(portfoliosPath, p.id, currentPortfolio.revision, async (current) => {
+          await updatePortfolioWithRetry(portfoliosPath, p.id, async (current) => {
             const targetItem = current.items.find(i => i.id === item.id);
             if (targetItem) {
               targetItem.status = "failed";
               targetItem.summary = "No local collaboration found for this claim lease.";
             }
             return current;
-          }).catch(() => {});
+          });
         }
       }
     }

@@ -153,7 +153,7 @@ try {
       expectedLogin,
       headSha: workerHeadSha,
       issueNumber: state.issueClaim.issueNumber,
-      allowedOperations: ["get_issue", "add_issue_label", "remove_issue_label", "get_issue_comments", "post_issue_comment", "update_issue_comment", "delete_issue_comment", "acquire_tag_lock", "release_tag_lock"],
+      allowedOperations: ["get_issue", "add_issue_label", "remove_issue_label", "get_issue_comments", "post_issue_comment", "update_issue_comment", "delete_issue_comment", "list_tag_locks", "acquire_tag_lock", "release_tag_lock"],
       workspace: state.workspace,
       fetchImpl: fetch,
     });
@@ -180,7 +180,7 @@ try {
       collaborationId: id,
       phase: "running",
       headSha: workerHeadSha,
-    }).catch(() => {});
+    });
   }
 
   if (state.mode === "work") releaseWorkspace = await acquireWorkspaceLock(workspaceRoot, state.workspace);
@@ -562,19 +562,43 @@ try {
       reason: outcome.reason,
       turnCount: outcome.state.turnCount,
     });
-    if (claimClient && (outcome.reason === "cancelled" || outcome.reason === "obsolete")) {
-      const { releaseClaimLease } = await import("../src/github-issue-claims.mjs");
-      await releaseClaimLease({
-        client: claimClient,
-        issueNumber: state.issueClaim.issueNumber,
-        collaborationId: id,
-        outcome: outcome.reason,
-      }).catch(() => {});
+    if (claimClient) {
+      if (outcome.reason === "completed") {
+        const { refreshClaimLease } = await import("../src/github-issue-claims.mjs");
+        await refreshClaimLease({
+          client: claimClient,
+          issueNumber: state.issueClaim.issueNumber,
+          collaborationId: id,
+          phase: "completed",
+          headSha: workerHeadSha,
+        });
+      } else if (["cancelled", "obsolete", "failed", "indeterminate"].includes(outcome.reason)) {
+        const { releaseClaimLease } = await import("../src/github-issue-claims.mjs");
+        await releaseClaimLease({
+          client: claimClient,
+          issueNumber: state.issueClaim.issueNumber,
+          collaborationId: id,
+          outcome: outcome.reason,
+        });
+      }
     }
     await enqueueCoordinatorWake(workspaceRoot, id);
   }
 } catch (error) {
   if (!(await scheduleProviderRecovery(error).catch(() => false))) {
+    if (claimClient) {
+      try {
+        const { releaseClaimLease } = await import("../src/github-issue-claims.mjs");
+        await releaseClaimLease({
+          client: claimClient,
+          issueNumber: state.issueClaim.issueNumber,
+          collaborationId: id,
+          outcome: error?.indeterminate ? "indeterminate" : "failed",
+        });
+      } catch (claimErr) {
+        console.error("Failed to release claim lease during worker catch block:", claimErr);
+      }
+    }
     await updateCollaboration(workspaceRoot, id, (current) => error?.indeterminate
       ? ({ ...current, status: "indeterminate", error: error.stack || error.message })
       : clearTerminalRuntime({
