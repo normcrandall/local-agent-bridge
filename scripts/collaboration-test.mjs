@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
@@ -639,6 +640,9 @@ try {
   assert.equal(activeCancellation.structuredContent.status, "cancelled");
   assert.equal(activeCancellation.structuredContent.workerPid, null);
   assert.equal(activeCancellation.structuredContent.runtime.activeCall, null);
+
+  const cpTestResult = spawnSync(process.execPath, [resolve(root, "scripts/collaboration-control-plane-test.mjs")], { stdio: "inherit" });
+  assert.equal(cpTestResult.status, 0, "Control plane unit tests failed");
 
   console.log("Persistent collaboration and unavailable-provider fallback tests passed without invoking any model.");
 } finally {

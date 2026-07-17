@@ -706,6 +706,28 @@ Writer-side PR delivery uses a separate `githubBuilder` authorization bound to o
 
 Native coordinators use collaboration `merge_pull_request` instead of shelling out to `gh pr merge`. The tool mints the configured builder App credential, requires the repository to match machine-local `mergePolicy.autonomousMergeRepositories`, pins the full PR head SHA, and applies the same independent-review and GitHub-rule checks. This removes the need for a broad Claude Bash allow rule while keeping autonomous merges fail-closed and auditable.
 
+## Local Council Control Plane
+
+The bridge provides a strictly read-only local council control plane query and reporting interface over collaboration and portfolio state directories.
+
+### Commands & Output Format
+- `node scripts/bridge-ops.mjs status`: Returns a stable versioned JSON payload conforming to schema version `1.0.0`.
+- `node scripts/bridge-ops.mjs status --human` (or `--format=human`): Outputs a structured, console-friendly text representation of all matching active lanes.
+
+### Filters & Options
+The control plane accepts the following CLI filters:
+- `--workspace <path>`: Filters lanes by matching or subdirectory path under the workspace root.
+- `--status <status>`: Filters by lifecycle phase (e.g. `running`, `ready`, `failed`, `agreed`).
+- `--provider <name>`: Filters lanes where the specified provider is a writer or participant.
+- `--portfolio <id>`: Filters lanes belonging to a specific portfolio milestones scope.
+- `--include-archived` (or `--archive`): Explicit opt-in required to read/query archived records stored under `archive/`.
+
+### Sensitive-Data Boundary
+To prevent leakages, the control plane is strictly read-only, makes no external network calls, does not mutate repository state, and filters out:
+- Full turn bodies, prompt transcripts, and credentials.
+- Unbounded sensitive paths.
+- Pending decisions and budget/escalation statuses (mapped instead to bounded metadata fields).
+
 ## Browser boundary
 
 The Codex/ChatGPT desktop built-in browser cannot be passed through this bridge: it is not available to Codex CLI, and `codex mcp-server` is a CLI surface. The configured Playwright MCP server gives both agents an isolated Chrome instance instead. It does not inherit cookies, accounts, or tabs from the Codex browser or your normal Chrome profile.
