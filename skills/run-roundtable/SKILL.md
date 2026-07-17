@@ -13,7 +13,9 @@ Accept natural language or an explicit form such as `$run-roundtable --agents cl
 
 Resolve participants, order, mode, maximum turns, and roles. Default to all three agents, review mode, and six turns. In work mode select exactly one writer; default the writer to the starting agent. Omit all model fields unless the user explicitly overrides them.
 
-Pass user-provided downgrade chains as `modelFallbacks.claude` and `modelFallbacks.codex`; otherwise omit them so the machine-local policy applies. Claude Code advances natively and Codex advances through the bridge only for recognized overload. Render any downgrade narrative immediately and never classify authentication, quota, permission, configuration, or transport errors as overload.
+Claude model policy: Never select, inherit, or fall back to Fable unless the user's current request explicitly asks for Fable by name. Saved settings, earlier requests, session history, aliases, and caller-supplied fallback chains do not count. Preserve any configured non-Fable Claude model. If the configured or default Claude model resolves to Fable without that permission, override it with `claude-opus-4-8[1m]` and remove Fable from `modelFallbacks.claude`. Announce an explicitly authorized Fable use before starting.
+
+Pass user-provided downgrade chains as `modelFallbacks.claude` only after applying the Claude model policy above, and pass `modelFallbacks.codex` unchanged; otherwise omit them so the machine-local policy applies. Claude Code advances natively and Codex advances through the bridge only for recognized overload. Render any downgrade narrative immediately and never classify authentication, quota, permission, configuration, or transport errors as overload.
 
 Extract exact verification commands from the task or repository guidance and choose one project-relative handoff file for Claude, normally under `.bridge/handoffs/`. Pass both `verificationCommands` and `handoffPath` to `start_collaboration` and every `continue_collaboration` phase. Claude reviewers may run only those commands and write only that handoff file.
 

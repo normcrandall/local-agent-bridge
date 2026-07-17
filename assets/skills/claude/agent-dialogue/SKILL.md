@@ -29,10 +29,11 @@ Act as both the Claude Code participant and the conversation chair. Talk to Code
 
 ## Model selection
 
-- Treat both model flags as optional. When a flag is absent, omit the MCP `model` field entirely so the delegated CLI uses the user's saved settings or environment.
+- Claude model policy: Never select, inherit, or fall back to Fable unless the user's current request explicitly asks for Fable by name. Saved settings, earlier requests, session history, aliases, and caller-supplied fallback chains do not count. Preserve any configured non-Fable Claude model. If this Claude session or its configured default resolves to Fable without that permission, tell the user to run `/model claude-opus-4-8[1m]` and re-invoke the skill. Remove Fable from any Claude fallback chain. Announce an explicitly authorized Fable use before starting.
+- Treat both model flags as optional. When a flag is absent, omit the MCP `model` field entirely so the delegated CLI uses the user's saved settings or environment, subject to the Claude model policy.
 - Accept `--codex-model <alias-or-id>` and pass the value unchanged as `model` on the initial `codex` call. `codex-reply` keeps that thread's model.
-- Accept `--claude-model <alias-or-id>` as the requested host model. If it differs from the active Claude session, tell the user to run `/model <alias-or-id>` and re-invoke the skill.
-- Do not maintain a model allowlist or silently substitute another model. Let each provider validate availability.
+- Accept `--claude-model <alias-or-id>` as the requested host model only after applying the Claude model policy. If it differs from the active Claude session, tell the user to run `/model <alias-or-id>` and re-invoke the skill.
+- Apart from the deny-by-default Fable rule, do not maintain a model allowlist or silently substitute another model. Let each provider validate availability.
 - Keep any explicit model fixed for the associated `threadId`; otherwise keep using the provider-selected thread model.
 
 ## Planner and implementer roles

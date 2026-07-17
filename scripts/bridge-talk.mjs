@@ -32,7 +32,7 @@ Examples:
   ./bridge talk "Review the current diff and agree on the real defects"
   ./bridge talk --agents claude,codex,antigravity "Stress-test this design"
   ./bridge talk --turns 8 --start codex "Design the API boundary for this module"
-  ./bridge talk --claude-model fable --codex-model gpt-5.6 "Plan and implement the task"
+  ./bridge talk --claude-model claude-opus-4-8 --codex-model gpt-5.6 "Plan and implement the task"
   ./bridge talk --work "Implement the feature, then cross-review it"`;
 }
 

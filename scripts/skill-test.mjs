@@ -15,6 +15,7 @@ const [canonicalCodexDialogue, canonicalClaudeDialogue, codex, claude] = await P
   readFile(codexPath, "utf8"),
   readFile(claudePath, "utf8"),
 ]);
+const claudeFablePolicy = /Never select, inherit, or fall back to Fable unless the user's current request explicitly asks for Fable by name/;
 
 assert.equal(codex, canonicalCodexDialogue, "Codex agent-dialogue skill is stale");
 assert.equal(claude, canonicalClaudeDialogue, "Claude agent-dialogue skill is stale");
@@ -26,6 +27,7 @@ for (const [name, content] of [["Codex", codex], ["Claude", claude]]) {
   assert.doesNotMatch(content, /TODO/);
   assert.match(content, /at most three|Make at most three/i);
   assert.match(content, /STATUS: NEEDS_USER/);
+  assert.match(content, claudeFablePolicy);
   console.log(`${name} agent-dialogue skill: valid`);
 }
 
@@ -191,6 +193,9 @@ for (const name of bridgeSkillNames) {
   const canonical = await readFile(resolve(root, "skills", name, "SKILL.md"), "utf8");
   assert.match(canonical, new RegExp(`name: ${name}`));
   assert.doesNotMatch(canonical, /TODO/);
+  if (/\bClaude\b/.test(canonical)) {
+    assert.match(canonical, claudeFablePolicy, `${name} can invoke Claude but lacks the deny-by-default Fable policy`);
+  }
   for (const [index, skillRoot] of globalSkillRoots.entries()) {
     const installed = await readFile(resolve(skillRoot, name, "SKILL.md"), "utf8");
     assert.equal(installed, index === 0 ? canonical : adaptForSlashCommands(canonical), `${name} is stale under ${skillRoot}`);

@@ -19,6 +19,8 @@ Use the persistent collaboration broker. Keep exactly one writer and make the PR
 
 ## Start
 
+Claude model policy: Never select, inherit, or fall back to Fable unless the user's current request explicitly asks for Fable by name. Saved settings, earlier requests, session history, aliases, and caller-supplied fallback chains do not count. Preserve any configured non-Fable Claude model. If the configured or default Claude model resolves to Fable without that permission, override it with `claude-opus-4-8[1m]` and remove Fable from `modelFallbacks.claude`. Announce an explicitly authorized Fable use before starting.
+
 Call `collaboration.start_collaboration` with:
 
 - `workspace`: absolute repository path.
@@ -35,7 +37,7 @@ For an autonomous merge, require an exact-head `APPROVED` review from a configur
 For every autonomous review leg, pass an ordered roster containing the preferred reviewer plus every eligible non-writer fallback in the same collaboration. Set `maxTurns` to the number of successful reviews required; a provider failure does not consume a turn, so the broker advances to the next candidate. Never launch a critical review with one candidate unless the user explicitly pins that provider. The broker checks reviewer-App publication before the turn, prefers publishable identities, and degrades an unbound participant to a local durable handoff. If no bot can publish, continue the review and require an exact-head approval from a configured trusted human instead of terminating the pipeline.
 - `ciTracking.prNumber` when a PR exists.
 - optional `budget.maxCostUsd`, `budget.maxTokens`, and `budget.maxMinutes`.
-- optional `modelFallbacks.claude` and `modelFallbacks.codex`, preserving ordered overload-only downgrade chains; omit them to use machine-local policies.
+- optional `modelFallbacks.claude`, filtered through the Claude model policy above, and `modelFallbacks.codex`, preserving ordered overload-only downgrade chains; omit them to use machine-local policies.
 - optional `providerConcurrency`; omit it to use the machine policy, defaulting each provider to one live work call and two concurrent read-only review calls. A collaboration may lower but never raise that machine ceiling. Excess calls remain visibly queued and start automatically when the oldest compatible slot opens.
 
 A recognized provider model overload advances inside the active turn without rotating or reassigning the writer. Claude Code owns its native fallback; the Codex bridge records attempted and selected models. Show any downgrade narrative. Treat authentication, quota, permission, configuration, and transport errors through their existing failure or indeterminate paths instead of model fallback.

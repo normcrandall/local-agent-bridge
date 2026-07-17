@@ -25,7 +25,9 @@ Resolve reversible technical ambiguity among the agents. Ask the user only for m
 
 ## Start visibly
 
-Use `$run-roundtable`, backed by the persistent `collaboration` MCP. Include Claude, Codex, and Antigravity. Pass the current host as `chair` with its provider and absolute workspace so the chair participates natively and only peers are delegated. Omit model overrides so each provider uses the user's configured model and fallback policy. Use review mode unless the user separately authorizes a final artifact mutation.
+Use `$run-roundtable`, backed by the persistent `collaboration` MCP. Include Claude, Codex, and Antigravity. Pass the current host as `chair` with its provider and absolute workspace so the chair participates natively and only peers are delegated. Omit model overrides so each provider uses the user's configured model and fallback policy, subject to the Claude policy below. Use review mode unless the user separately authorizes a final artifact mutation.
+
+Claude model policy: Never select, inherit, or fall back to Fable unless the user's current request explicitly asks for Fable by name. Saved settings, earlier requests, session history, aliases, and caller-supplied fallback chains do not count. Preserve any configured non-Fable Claude model. If the configured or default Claude model resolves to Fable without that permission, override it with `claude-opus-4-8[1m]` and remove Fable from `modelFallbacks.claude`. Announce an explicitly authorized Fable use before starting.
 
 Enable `browser: true` only when current external evidence or a rendered application is necessary. Give every participant the same self-contained evidence packet. Prevent circular delegation; agents answer the chair and never call one another.
 
