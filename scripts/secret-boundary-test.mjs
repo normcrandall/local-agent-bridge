@@ -17,7 +17,7 @@ try {
   const path = join(temporary, "manifest.json");
   const manifest = exportPortableManifest({ destination: path, sourceRoot: root });
   const exclusions = manifest.excludes.join(" ");
-  for (const expected of ["ghtoken", "github-apps", "provider credentials", "collaboration state"]) assert.match(exclusions, new RegExp(expected));
+  for (const expected of ["ghtoken", "github-apps", "provider credentials", "collaboration state", "capsule files"]) assert.match(exclusions, new RegExp(expected));
 } finally { rmSync(temporary, { recursive: true, force: true }); }
 
 console.log("Secret boundary test passed: tracked source and portable manifest exclude credentials.");

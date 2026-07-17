@@ -1,7 +1,12 @@
 import { normalizeHandoff } from "./handoff-protocol.mjs";
+import {
+  extractAndSaveCapsuleBeforeObserve,
+  redactSecretsAndInjectionFromText,
+} from "./context-capsule.mjs";
 
 const STATUSES = new Set(["CONTINUE", "AGREED", "NEEDS_USER"]);
 export const KNOWN_AGENTS = ["claude", "codex", "antigravity"];
+const MAX_CAPSULE_PROTOCOL_RETRIES = 2;
 
 const DISPLAY_NAMES = {
   claude: "Claude Code",
@@ -23,6 +28,9 @@ export function parseStatus(message) {
 export function parseHandoffEnvelope(message) {
   const lines = String(message || "").split("\n").filter((line) => /^HANDOFF:\s*/i.test(line));
   if (!lines.length) return null;
+  if (lines.length > 1) {
+    throw new Error("Multiple HANDOFF lines are not allowed.");
+  }
   const raw = lines.at(-1).replace(/^HANDOFF:\s*/i, "");
   let parsed;
   try { parsed = JSON.parse(raw); } catch { throw new Error("HANDOFF must contain valid single-line JSON."); }
@@ -37,6 +45,24 @@ export function parseDecisionEnvelope(message) {
   try { parsed = JSON.parse(raw); } catch { throw new Error("DECISION must contain valid single-line JSON."); }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("DECISION must be a JSON object.");
   return parsed;
+}
+
+function capsuleProtocolErrorCode(error) {
+  const reason = error?.message || String(error);
+  if (/Multiple HANDOFF/i.test(reason)) return "multiple_handoffs";
+  if (/size|hard cap/i.test(reason)) return "size_limit";
+  if (/source/i.test(reason)) return "missing_fact_source";
+  if (/allowlist|allowlisted|unrecognized key/i.test(reason)) return "schema_allowlist";
+  if (/marker.*missing/i.test(reason)) return "missing_capsule_file";
+  return "invalid_capsule";
+}
+
+function capsuleProtocolRetryMessage(code, attempt) {
+  return [
+    `Context capsule protocol error (${code}); the response was rejected before observation.`,
+    `Retry ${attempt}/${MAX_CAPSULE_PROTOCOL_RETRIES}: emit exactly one HANDOFF line with a schema-valid capsule, explicit sources for every fact, and content within the configured size cap.`,
+    "STATUS: CONTINUE",
+  ].join("\n");
 }
 
 export function validateAgents(agents, startAgent) {
@@ -124,6 +150,8 @@ export async function runConversation({
   onState = async () => {},
   onAgentUnavailable = async () => {},
   shouldStop = async () => false,
+  workspace = null,
+  collaborationId = null,
 }) {
   if (!task?.trim()) throw new Error("A task is required.");
   if (!Number.isInteger(maxTurns) || maxTurns < 1 || maxTurns > 20) {
@@ -148,6 +176,7 @@ export async function runConversation({
   let totalTurnCount = initialState?.turnCount ?? 0;
   let effectiveWriter = writer;
   const turns = [];
+  const capsuleProtocolRetries = Object.fromEntries(agents.map((agent) => [agent, 0]));
 
   const stateSnapshot = () => ({
     sessions: { ...sessions },
@@ -216,6 +245,61 @@ export async function runConversation({
       continue;
     }
     sessions[agent] = response.sessionId || sessions[agent];
+
+    try {
+      if (workspace && collaborationId) {
+        const { sanitizedMessage } = await extractAndSaveCapsuleBeforeObserve(response.message, {
+          agent,
+          turn: number,
+          workspace,
+          collaborationId,
+        });
+        response.message = sanitizedMessage;
+      } else {
+        response.message = redactSecretsAndInjectionFromText(response.message);
+      }
+      capsuleProtocolRetries[agent] = 0;
+    } catch (error) {
+      const attempt = capsuleProtocolRetries[agent] + 1;
+      capsuleProtocolRetries[agent] = attempt;
+      const code = capsuleProtocolErrorCode(error);
+      const message = capsuleProtocolRetryMessage(code, attempt);
+      const turn = {
+        number,
+        agent,
+        message,
+        status: "CONTINUE",
+        sessionId: sessions[agent],
+        metadata: response.metadata || null,
+        decision: null,
+        handoff: null,
+        handoffError: null,
+        protocolError: { code, attempt, maxAttempts: MAX_CAPSULE_PROTOCOL_RETRIES },
+      };
+      turns.push(turn);
+      agreementStreak = 0;
+      previousMessage = message;
+      previousAgent = agent;
+      totalTurnCount = number;
+      const state = stateSnapshot();
+      await onTurn(turn);
+      await onState(state, turn);
+
+      const afterTurnStop = await shouldStop();
+      if (afterTurnStop) {
+        return { reason: afterTurnStop === true ? "cancelled" : afterTurnStop, turns, sessions, state };
+      }
+      if (attempt >= MAX_CAPSULE_PROTOCOL_RETRIES) {
+        return {
+          reason: "turn_limit",
+          error: `Context capsule protocol retries exhausted for ${agent}.`,
+          turns,
+          sessions,
+          state,
+        };
+      }
+      continue;
+    }
 
     const status = parseStatus(response.message);
     let handoff = null;

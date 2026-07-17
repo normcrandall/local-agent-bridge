@@ -276,6 +276,8 @@ try {
     browser: state.browser,
     writer,
     initialState: state.runtime,
+    workspace: workspaceRoot,
+    collaborationId: id,
     send: async (call) => {
       const startedAt = new Date().toISOString();
       const capacityRole = call.mode === "work" ? "work" : "review";

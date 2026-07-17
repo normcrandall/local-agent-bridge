@@ -27,6 +27,7 @@ import { createDecisionReceipt, DECISION_CATEGORIES } from "./decision-policy.mj
 import { resolveNativeChair } from "./native-chair.mjs";
 import { clearTerminalRuntime, legacyWorkerCommandMatches, reconciliationAction, workerCancellationMatches, workerCommandMatches } from "./collaboration-cleanup.mjs";
 import { acknowledgeCompletion } from "./handoff-protocol.mjs";
+import { readContextCapsule } from "./context-capsule.mjs";
 import { analyzePortfolio, buildExecutionWaves, normalizePortfolioItems } from "./portfolio-scheduler.mjs";
 import { createPortfolio, listPortfolios, readPortfolio, updatePortfolio } from "./portfolio-store.mjs";
 import {
@@ -1200,6 +1201,28 @@ server.registerTool(
       completion: state.completion,
     });
     return toolResponse({ collaborationId: id, status: state.status, completion: state.completion });
+  },
+);
+
+server.registerTool(
+  "get_context_capsule",
+  {
+    title: "Get collaboration context capsule",
+    description: "Retrieve all or selected allowed sections of the context capsule for a collaboration without reading the full transcript.",
+    inputSchema: {
+      collaborationId,
+      sections: z.array(z.enum([
+        "facts", "decisions", "artifacts", "constraints", "unresolvedQuestions", "sourceReferences"
+      ])).optional().describe("Allowed sections to retrieve. If omitted, all sections are returned."),
+    },
+  },
+  async ({ collaborationId: id, sections }) => {
+    blockNestedCollaboration();
+    const capsule = await readContextCapsule(WORKSPACE_ROOT, id, sections);
+    if (!capsule) {
+      throw new Error(`No context capsule found for collaboration ${id}.`);
+    }
+    return toolResponse(capsule);
   },
 );
 
