@@ -507,6 +507,7 @@ const portfolioItemSchema = z.object({
   paths: z.array(z.string().min(1).max(1_000)).max(500).default([]),
   resources: z.array(z.string().min(1).max(500)).max(200).default([]),
   verificationCommands: verificationCommandsSchema.default([]),
+  issueNumber: z.number().int().min(1).optional(),
 }).strict();
 const arbitrationDossierSchema = z.object({
   itemId: z.string().min(1),
@@ -622,15 +623,25 @@ server.registerTool(
       const repository = input.issueClaim.repository;
       const expectedLogin = input.issueClaim.expectedLogin;
       const credential = await createInstallationToken({ role: "builder", repository });
+      let headSha = input.issueClaim.headSha;
+      if (!headSha) {
+        const rev = spawnSync("git", ["rev-parse", "HEAD"], { cwd: requestedWorkspace, encoding: "utf8" });
+        if (rev.status === 0) {
+          headSha = rev.stdout.trim();
+        } else {
+          throw new Error("Unable to retrieve HEAD SHA from workspace.");
+        }
+      }
+
       claimClient = createBoundBuilderClient({
         apiUrl: input.issueClaim.apiUrl || process.env.GITHUB_BUILDER_API_URL || "https://api.github.com",
         token: credential.token,
         verifiedLogin: credential.verifiedLogin,
         repository,
         expectedLogin,
-        headSha: input.issueClaim.headSha || "0000000000000000000000000000000000000000",
+        headSha,
         issueNumber: input.issueClaim.issueNumber,
-        allowedOperations: ["get_issue", "add_issue_label", "remove_issue_label", "get_issue_comments", "post_issue_comment", "update_issue_comment", "delete_issue_comment", "create_ref", "delete_ref"],
+        allowedOperations: ["get_issue", "add_issue_label", "remove_issue_label", "get_issue_comments", "post_issue_comment", "update_issue_comment", "delete_issue_comment", "acquire_tag_lock", "release_tag_lock"],
         workspace: requestedWorkspace,
         fetchImpl: fetch,
       });
@@ -651,6 +662,12 @@ server.registerTool(
         } catch {}
       }
 
+      let plannedWorktreePath = null;
+      if (input.worktree) {
+        const root = resolve(input.worktree.root || join(requestedWorkspace, ".bridge/worktrees"));
+        plannedWorktreePath = resolve(root, input.worktree.taskId);
+      }
+
       await acquireClaimLease({
         client: claimClient,
         issueNumber: input.issueClaim.issueNumber,
@@ -659,7 +676,7 @@ server.registerTool(
         writer: writer || input.writer || startAgent,
         collaborationId,
         branch: input.worktree?.branch || input.issueClaim.branch || null,
-        worktree: input.worktree?.root || input.issueClaim.worktree || null,
+        worktree: plannedWorktreePath || input.issueClaim.worktree || null,
         baseSha: input.worktree?.base || input.issueClaim.baseSha || null,
         headSha: input.issueClaim.headSha || null,
         workspaceRoot: WORKSPACE_ROOT,
@@ -1072,6 +1089,28 @@ server.registerTool(
   },
   async ({ portfolioId: id, expectedRevision, itemId, expectedTargetSha, expectedHeadSha, mergedSha }) => {
     blockNestedCollaboration();
+    const portfolioState = await readPortfolio(PORTFOLIO_ROOT, id);
+    const item = portfolioState.items.find(i => i.id === itemId);
+    const collabId = item?.collaborationId;
+    if (collabId) {
+      const collab = await readCollaboration(WORKSPACE_ROOT, collabId).catch(() => null);
+      if (collab && collab.issueClaim) {
+        try {
+          const { getBuilderClientForWorkspace, releaseClaimLease } = await import("./github-issue-claims.mjs");
+          const claimClient = await getBuilderClientForWorkspace(collab.workspace || WORKSPACE_ROOT, collab.issueClaim.issueNumber);
+          if (claimClient) {
+            await releaseClaimLease({
+              client: claimClient,
+              issueNumber: collab.issueClaim.issueNumber,
+              collaborationId: collabId,
+              outcome: "merged",
+            });
+          }
+        } catch (err) {
+          console.error("Failed to release claim lease during record_portfolio_merge:", err);
+        }
+      }
+    }
     return toolResponse(await updatePortfolio(PORTFOLIO_ROOT, id, expectedRevision, (current) => updatePortfolioItemState({
       ...current,
       mergeTrain: recordMergeResult(current.mergeTrain, { itemId, expectedTargetSha, expectedHeadSha, mergedSha }),
@@ -1227,6 +1266,7 @@ server.registerTool(
     handoffPath,
     githubReview,
     githubBuilder,
+    issueClaim,
     budget,
     providerRecovery,
     ciTracking,
@@ -1284,6 +1324,7 @@ server.registerTool(
       handoffPath: handoffPath || previous.handoffPath || null,
       githubReview: githubReview || previous.githubReview || null,
       githubBuilder: githubBuilder || previous.githubBuilder || null,
+      issueClaim: issueClaim || previous.issueClaim || null,
       budget: budget || previous.budget || {},
       providerRecovery: providerRecovery || previous.providerRecovery || { enabled: true, maxAttempts: 3, backoffSeconds: [15, 60, 180] },
       providerRecoveryState: { attempts: 0, status: "idle" },
@@ -1379,6 +1420,24 @@ server.registerTool(
       ...previous,
       cancelRequested: true,
     }, { status: "cancelled" }));
+
+    if (before.issueClaim) {
+      try {
+        const { getBuilderClientForWorkspace, releaseClaimLease } = await import("./github-issue-claims.mjs");
+        const claimClient = await getBuilderClientForWorkspace(before.workspace || WORKSPACE_ROOT, before.issueClaim.issueNumber);
+        if (claimClient) {
+          await releaseClaimLease({
+            client: claimClient,
+            issueNumber: before.issueClaim.issueNumber,
+            collaborationId: id,
+            outcome: "cancelled",
+          });
+        }
+      } catch (err) {
+        console.error("Failed to release claim lease during cancel_collaboration:", err);
+      }
+    }
+
     const releasedProviderCapacity = await releaseProviderCapacityForCollaboration(WORKSPACE_ROOT, id);
     await appendEvent(WORKSPACE_ROOT, id, {
       type: "cancelled",
@@ -1388,6 +1447,42 @@ server.registerTool(
     });
     return toolResponse({ ...state, turns: [] });
   },
+);
+
+server.registerTool(
+  "release_issue_claim",
+  {
+    title: "Release issue claim lease",
+    description: "Force-release a claim lease for an issue, deleting its tag lock ref and removing the progress label.",
+    inputSchema: {
+      repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
+      issueNumber: z.number().int().min(1),
+      expectedLogin: z.string().regex(GITHUB_LOGIN_PATTERN),
+      collaborationId: z.string().min(1),
+      outcome: z.enum(["completed", "merged", "cancelled", "obsolete", "failed", "indeterminate"]).default("cancelled"),
+    },
+  },
+  async ({ repository, issueNumber, expectedLogin, collaborationId, outcome }) => {
+    blockNestedCollaboration();
+    const { createInstallationToken } = await import("./github-app-auth.mjs");
+    const { createBoundBuilderClient } = await import("./github-builder-client.mjs");
+    const { releaseClaimLease } = await import("./github-issue-claims.mjs");
+    const credential = await createInstallationToken({ role: "builder", repository });
+    const claimClient = createBoundBuilderClient({
+      apiUrl: process.env.GITHUB_BUILDER_API_URL || "https://api.github.com",
+      token: credential.token,
+      verifiedLogin: credential.verifiedLogin,
+      repository,
+      expectedLogin,
+      headSha: "0000000000000000000000000000000000000000",
+      issueNumber,
+      allowedOperations: ["get_issue", "add_issue_label", "remove_issue_label", "get_issue_comments", "post_issue_comment", "update_issue_comment", "delete_issue_comment", "acquire_tag_lock", "release_tag_lock"],
+      workspace: WORKSPACE_ROOT,
+      fetchImpl: fetch,
+    });
+    await releaseClaimLease({ client: claimClient, issueNumber, collaborationId, outcome });
+    return toolResponse({ ok: true });
+  }
 );
 
 server.registerTool(

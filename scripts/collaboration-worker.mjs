@@ -129,24 +129,34 @@ try {
   }
 
   let claimClient = null;
+  let workerHeadSha = null;
   if (state.issueClaim) {
-    try {
-      const repository = state.issueClaim.repository;
-      const expectedLogin = state.issueClaim.expectedLogin;
-      const credential = await createInstallationToken({ role: "builder", repository });
-      claimClient = createBoundBuilderClient({
-        apiUrl: state.issueClaim.apiUrl || "https://api.github.com",
-        token: credential.token,
-        verifiedLogin: credential.verifiedLogin,
-        repository,
-        expectedLogin,
-        headSha: state.issueClaim.headSha || "0000000000000000000000000000000000000000",
-        issueNumber: state.issueClaim.issueNumber,
-        allowedOperations: ["get_issue", "add_issue_label", "remove_issue_label", "get_issue_comments", "post_issue_comment", "update_issue_comment", "delete_issue_comment", "create_ref", "delete_ref"],
-        workspace: state.workspace,
-        fetchImpl: fetch,
-      });
-    } catch {}
+    const repository = state.issueClaim.repository;
+    const expectedLogin = state.issueClaim.expectedLogin;
+    const credential = await createInstallationToken({ role: "builder", repository });
+
+    workerHeadSha = state.issueClaim.headSha;
+    if (!workerHeadSha) {
+      const rev = spawnSync("git", ["rev-parse", "HEAD"], { cwd: state.workspace, encoding: "utf8" });
+      if (rev.status === 0) {
+        workerHeadSha = rev.stdout.trim();
+      } else {
+        throw new Error("Unable to retrieve HEAD SHA from workspace.");
+      }
+    }
+
+    claimClient = createBoundBuilderClient({
+      apiUrl: state.issueClaim.apiUrl || "https://api.github.com",
+      token: credential.token,
+      verifiedLogin: credential.verifiedLogin,
+      repository,
+      expectedLogin,
+      headSha: workerHeadSha,
+      issueNumber: state.issueClaim.issueNumber,
+      allowedOperations: ["get_issue", "add_issue_label", "remove_issue_label", "get_issue_comments", "post_issue_comment", "update_issue_comment", "delete_issue_comment", "acquire_tag_lock", "release_tag_lock"],
+      workspace: state.workspace,
+      fetchImpl: fetch,
+    });
   }
 
   state = await updateCollaboration(workspaceRoot, id, (current) => ({
@@ -169,7 +179,7 @@ try {
       issueNumber: state.issueClaim.issueNumber,
       collaborationId: id,
       phase: "running",
-      headSha: state.issueClaim.headSha || (state.githubBuilder && state.githubBuilder.headSha) || "0000000000000000000000000000000000000000",
+      headSha: workerHeadSha,
     }).catch(() => {});
   }
 
@@ -522,7 +532,7 @@ try {
           issueNumber: state.issueClaim.issueNumber,
           collaborationId: id,
           phase: runtime.activeCall?.phase || "running",
-          headSha: state.issueClaim.headSha || (state.githubBuilder && state.githubBuilder.headSha) || "0000000000000000000000000000000000000000",
+          headSha: workerHeadSha,
         }).catch(() => {});
       }
     },

@@ -113,6 +113,7 @@ try {
     "record_portfolio_merge_validation",
     "recover_portfolio_merge_validation",
     "refresh_portfolio_target",
+    "release_issue_claim",
     "start_collaboration",
     "update_portfolio_item",
     "wait_for_portfolio_lane",

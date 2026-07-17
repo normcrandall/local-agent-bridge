@@ -907,6 +907,29 @@ export function createBoundBuilderClient({
     authorize("add_issue_label");
     assertIssueBound(issueNum);
     await identity();
+    try {
+      await request({
+        ...context,
+        path: `/repos/${repository}/labels/${encodeURIComponent(label)}`,
+      });
+    } catch (err) {
+      if (err.status === 404) {
+        try {
+          await request({
+            ...context,
+            path: `/repos/${repository}/labels`,
+            method: "POST",
+            body: { name: label, color: "ededed", description: "Agent Bridge issue claim label" },
+          });
+        } catch (createErr) {
+          if (createErr.status !== 422) {
+            throw createErr;
+          }
+        }
+      } else {
+        throw err;
+      }
+    }
     return await request({
       ...context,
       path: `/repos/${repository}/issues/${issueNum}/labels`,
@@ -930,7 +953,7 @@ export function createBoundBuilderClient({
     authorize("get_issue_comments");
     assertIssueBound(issueNum);
     await identity();
-    return await request({
+    return await requestPages({
       ...context,
       path: `/repos/${repository}/issues/${issueNum}/comments?per_page=100`,
     });
@@ -977,27 +1000,26 @@ export function createBoundBuilderClient({
     });
   }
 
-  async function createRef(ref, sha) {
-    authorize("create_ref");
+  async function acquireTagLock(sha) {
+    authorize("acquire_tag_lock");
     await identity();
     return await request({
       ...context,
       path: `/repos/${repository}/git/refs`,
       method: "POST",
-      body: { ref, sha },
+      body: { ref: `refs/tags/claims/issue-${issueNumber}`, sha },
     });
   }
 
-  async function deleteRef(ref) {
-    authorize("delete_ref");
+  async function releaseTagLock() {
+    authorize("release_tag_lock");
     await identity();
-    const cleanRef = ref.startsWith("refs/") ? ref.slice(5) : ref;
     return await request({
       ...context,
-      path: `/repos/${repository}/git/refs/${cleanRef}`,
+      path: `/repos/${repository}/git/refs/tags/claims/issue-${issueNumber}`,
       method: "DELETE",
     });
   }
 
-  return { identity, ensurePullRequest, reviewThreads, replyReviewThread, resolveReviewThread, markReady, merge, createBranch, pushBranch, replaceBranch, getIssue, addIssueLabel, removeIssueLabel, getIssueComments, postIssueComment, updateIssueComment, deleteIssueComment, createRef, deleteRef };
+  return { identity, ensurePullRequest, reviewThreads, replyReviewThread, resolveReviewThread, markReady, merge, createBranch, pushBranch, replaceBranch, getIssue, addIssueLabel, removeIssueLabel, getIssueComments, postIssueComment, updateIssueComment, deleteIssueComment, acquireTagLock, releaseTagLock, expectedLogin, repository, issueNumber };
 }
