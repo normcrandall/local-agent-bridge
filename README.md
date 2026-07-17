@@ -235,13 +235,14 @@ Portable collaboration records and JSONL transcripts live under `~/.local/share/
 
 In short: move the repository and `~/.agents`, authenticate providers afresh, run the installer, replace absolute paths, verify, and restart. The remaining portability gap is automatic MCP re-registration; `npm run install:global` does not currently rewrite every application's existing config file.
 
-Nine canonical skills provide the same visible vocabulary in Codex, Claude, and Antigravity:
+Ten canonical skills provide the same visible vocabulary in Codex, Claude, and Antigravity:
 
 - `ask-agent`: announce and perform one named peer handoff.
 - `run-roundtable`: start and actively monitor a persistent collaboration.
 - `show-collaboration`: render status and turn history as a timeline.
 - `goal-loop`: build toward verified completion through bounded, resumable council cycles.
 - `pair-program`: rotate implementation and review roles with preflight, worktrees, visible progress, recovery, CI, budgets, and review reconciliation.
+- `collaboration-doctor`: audit the effective workspace, provider, permission, fallback, skill, budget, and GitHub App policy without changing it.
 - `take-the-helm`: give the council operational ownership of a goal or queue, schedule independent issues into parallel worktree lanes, and serialize integration through a bridge-owned merge train.
 - `council-discovery`: inspect an existing product and systematically scan competitors and substitutes across the web, reach evidence-backed feature consensus around retention, acquisition, maintainability, overhead, and ROI, then publish implementation-ready GitHub issues through Wayfinder.
 - `council-grill-agents`: make the chair cross-examine peer LLM answers through rotating answerer, challenger, and verifier roles without interviewing the user.
@@ -265,6 +266,7 @@ $ask-agent --to claude --mode review Review the current diff
 $run-roundtable --agents claude,codex,antigravity --writer codex Plan, implement, and review this change
 /show-collaboration bridge-<uuid>
 $goal-loop --writer codex --max-cycles 4 Build the feature and satisfy the verification checklist
+$collaboration-doctor Audit whether Codex and Antigravity can deliver this repository safely
 $take-the-helm Own this milestone and work every ready issue to its authorized completion boundary
 $council-discovery Find and publish the strongest next features for this app
 $council-grill-agents Cross-examine the council on whether this architecture will scale
@@ -314,6 +316,7 @@ These skills are supplied by this project and installed across Codex, Claude, an
 | `show-collaboration` | Display collaboration status, skipped providers, turns, and history. |
 | `goal-loop` | Build toward explicit completion criteria through bounded plan, implement, review, fix, and verification cycles. |
 | `pair-program` | Rotate one writer and independent reviewers across tasks, worktrees, CI, and formal PR reviews. |
+| `collaboration-doctor` | Render a read-only effective-policy matrix with fail-closed findings and least-authority remediations before delegation. |
 | `take-the-helm` | Autonomously schedule safe parallel issue lanes, arbitrate conflicts, and integrate exact PR heads through a serialized merge train while preserving narrow escalation boundaries. |
 | `council-discovery` | Scan the web-wide competitive landscape and publish Wayfinder-backed features grounded in product, market, retention, acquisition, maintainability, overhead, and ROI evidence. |
 | `council-grill-agents` | Cross-examine model answers one question at a time and return the strongest evidence-backed conclusion with dissent. |
@@ -475,6 +478,30 @@ Model fields are optional. Omitting them preserves each provider's configured mo
 `modelFallbacks.claude`, `modelFallbacks.codex`, and `modelFallbacks.antigravity` are optional. Omitting them loads the machine-local overload policy; an explicit provider array replaces that policy for the collaboration. Overload retries happen inside one provider turn, so they do not consume another broker turn or trigger writer reassignment.
 
 Autonomous work lanes should pass all eligible providers in one ordered roster and identify one preferred writer. If that writer is confirmed unavailable, the broker moves ownership to the next eligible provider without changing the worktree. If the full roster is exhausted by transient model-capacity failures, the collaboration enters visible `recovering` state and retries according to `providerRecovery` (three attempts at 15, 60, and 180 seconds by default). Each recovery attempt begins with the provider's preferred configured model and then follows its downgrade chain, allowing automatic upgrade when capacity returns. Authentication, permission, quota, configuration, command, and indeterminate transport failures are not retried. `wait_for_portfolio_lane` races the desired head advancement against handoff, failure, cancellation, indeterminate ownership, and recovery so coordinators cannot park on a success-only signal.
+
+## Effective collaboration policy doctor
+
+Bare `bridge doctor` retains the installation and registration checks. Add policy options to audit one exact delegation without changing configuration, permissions, credentials, the repository, or any provider session:
+
+```bash
+bridge doctor \
+  --workspace /path/to/repo \
+  --host codex \
+  --providers codex,antigravity \
+  --mode work \
+  --role writer \
+  --profile deliver \
+  --require-fallback \
+  --builder-operation create_branch \
+  --builder-operation push_branch \
+  --builder-operation ensure_pull_request
+
+bridge doctor --workspace /path/to/repo --host claude --providers codex,antigravity --mode review --require-review-app --json
+```
+
+The human view and versioned JSON report contain the same request, provider matrix, finding counts, authoritative sources, impacts, and least-authority remediations. Failures block the complete request, constraints remove or limit a provider while allowing a degraded roster, and notices remain optional. Use `--strict-provider` only for a provider that must participate; optional budgets and overload fallbacks are not errors unless explicitly required.
+
+The doctor detects missing or stale MCP transports, unavailable CLIs, browser mismatches, incompatible overload fallback chains, exact-command allowlist gaps, unavailable skill capabilities, missing budgets, unsafe PAT compatibility, reviewer/builder identity overlap, and missing or unverifiable GitHub App bindings and scopes. Live App scope remains fail-closed unless supplied by a trusted read-only verification snapshot; `npm run github-app:verify -- OWNER/REPO` verifies the configured identities and base scopes separately but does not grant them. Neither report contains token values, private keys, full prompts, or credential-bearing remote URLs. `--input snapshot.json` exists for hermetic incident replay and tests, not as proof of current machine state.
 
 ## Pair-programming operations
 

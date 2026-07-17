@@ -9,6 +9,7 @@ Prefer the installed collaboration skills as the user-facing interface. Announce
 - Use `$show-collaboration` to inspect, monitor, or resume collaboration history.
 - Use `$goal-loop` to build toward explicit completion criteria through bounded plan, implement, review, and verification cycles.
 - Use `$pair-program` for rotating Claude/Codex/Antigravity implementer and reviewer roles with preflight, worktree isolation, CI tracking, budgets, recovery, and formal PR reviews.
+- Use `$collaboration-doctor` for a read-only effective-policy audit of one workspace, provider roster, role, permission profile, fallback chain, and GitHub App boundary before delegation.
 - Use `$take-the-helm` when the user delegates operational ownership of a goal or work queue and wants the council to resolve routine decisions without human interruption.
 - Use `$council-discovery` to inspect an existing app, systematically search the public web for competitors and substitutes, reconcile evidence-backed feature proposals from Claude, Codex, and Antigravity, and publish implementation-ready GitHub issues through Wayfinder.
 - Use `$council-grill-agents` when the user wants the chair to cross-examine Claude, Codex, and Antigravity for a defensible answer instead of interviewing the user.

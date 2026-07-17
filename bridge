@@ -18,7 +18,11 @@ case "$COMMAND" in
     exec node "$ROOT/scripts/codex-turn-watchdog.mjs" "$@"
     ;;
   doctor)
-    exec npm --prefix "$ROOT" run doctor
+    shift
+    if (( $# == 0 )); then
+      exec npm --prefix "$ROOT" run doctor
+    fi
+    exec node "$ROOT/scripts/collaboration-doctor.mjs" "$@"
     ;;
   smoke)
     exec npm --prefix "$ROOT" run smoke
