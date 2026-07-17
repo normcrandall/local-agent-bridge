@@ -32,6 +32,7 @@
     "test:github-review": "node scripts/github-review-test.mjs",
     "test:review-publication": "node scripts/review-publication-test.mjs",
     "test:skills": "node scripts/skill-test.mjs",
+    "test:skills:installed": "AGENT_BRIDGE_VERIFY_INSTALLED_SKILLS=1 node scripts/skill-test.mjs",
     "test:statusline": "node scripts/statusline-test.mjs",
     "test:models": "node scripts/model-routing-test.mjs",
     "test:native-chair": "node scripts/native-chair-test.mjs",

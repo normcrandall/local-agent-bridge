@@ -413,6 +413,9 @@ const modelFallbacksSchema = z.object({
 }).strict().optional().describe(
   "Ordered provider models to try after an overload response. Claude uses its native fallback flag; Codex and Antigravity retry through the bridge. A later provider-recovery attempt starts again from the preferred configured model. Omit to use the machine-local config; pass a provider's [] to disable it for this collaboration.",
 );
+const allowClaudeFableSchema = z.boolean().default(false).describe(
+  "Explicit Fable authorization for this phase. Set true only when the user's current request asks for Fable by name; saved settings and earlier phases do not count.",
+);
 const providerConcurrencyRoleSchema = z.object({
   work: z.number().int().min(1).max(20).optional(),
   review: z.number().int().min(1).max(20).optional(),
@@ -547,7 +550,7 @@ const server = new McpServer(
   { name: "desktop-agent-collaboration", version: "0.2.0" },
   {
     instructions:
-      "Use start_collaboration for an asynchronous durable job with one provider or a bounded roundtable with multiple providers. It returns immediately with a portable collaborationId. Unavailable providers are skipped and the run continues with any remaining participant. Autonomous work lanes should include an ordered eligible-provider roster and an explicit preferred writer so a confirmed unavailable writer fails over in the same worktree. Pass verificationCommands and handoffPath for independently verified reviews. Choose workProfile implement for local ownership through commit or deliver when the writer also owns push and PR delivery; use workCommands only for unusual additions. When repository policy requires reviewer-authored PR feedback, pass githubReview so the delegated Claude or Codex reviewer receives target-bound handoff and formal-review tools. Native coordinators must use merge_pull_request for an exact-head merge authorized by machine-local policy; never request Bash permission for gh pr merge. Use wait_for_portfolio_lane to race expected success signals against collaboration failure, cancellation, indeterminate ownership, recovery, and handoff completion; never park on a PR-head or CI-only waiter. Use modelFallbacks.claude, modelFallbacks.codex, or modelFallbacks.antigravity for ordered overload-only downgrade chains. Use get_collaboration to poll or inspect it, continue_collaboration for another phase, and cancel_collaboration to stop. Omit model overrides to preserve configured models. The broker owns routing; never ask a peer to call another peer.",
+      "Use start_collaboration for an asynchronous durable job with one provider or a bounded roundtable with multiple providers. It returns immediately with a portable collaborationId. Unavailable providers are skipped and the run continues with any remaining participant. Autonomous work lanes should include an ordered eligible-provider roster and an explicit preferred writer so a confirmed unavailable writer fails over in the same worktree. Pass verificationCommands and handoffPath for independently verified reviews. Choose workProfile implement for local ownership through commit or deliver when the writer also owns push and PR delivery; use workCommands only for unusual additions. When repository policy requires reviewer-authored PR feedback, pass githubReview so the delegated Claude or Codex reviewer receives target-bound handoff and formal-review tools. Native coordinators must use merge_pull_request for an exact-head merge authorized by machine-local policy; never request Bash permission for gh pr merge. Use wait_for_portfolio_lane to race expected success signals against collaboration failure, cancellation, indeterminate ownership, recovery, and handoff completion; never park on a PR-head or CI-only waiter. Use modelFallbacks.claude, modelFallbacks.codex, or modelFallbacks.antigravity for ordered overload-only downgrade chains. Fable is denied by default; set allowClaudeFable only when the user's current request explicitly asks for Fable by name. Use get_collaboration to poll or inspect it, continue_collaboration for another phase, and cancel_collaboration to stop. The broker owns routing; never ask a peer to call another peer.",
   },
 );
 
@@ -590,6 +593,7 @@ server.registerTool(
       turnTimeoutSeconds: z.number().int().min(30).max(7200).default(600).describe("Per-model inactivity limit. Progress resets it; ordered fallback chains have a hard total bound of this limit multiplied by the number of permitted model attempts."),
       models: modelsSchema,
       modelFallbacks: modelFallbacksSchema,
+      allowClaudeFable: allowClaudeFableSchema,
       providerConcurrency: providerConcurrencySchema,
       verificationCommands: verificationCommandsSchema,
       workCommands: workCommandsSchema,
@@ -778,6 +782,7 @@ server.registerTool(
         browser: input.browser,
         models: input.models || {},
         modelFallbacks: input.modelFallbacks || {},
+        allowClaudeFable: input.allowClaudeFable === true,
         providerConcurrency: await loadProviderConcurrency({ overrides: input.providerConcurrency || {} }),
         verificationCommands: input.verificationCommands || [],
         workCommands: input.workCommands || [],
@@ -1303,6 +1308,7 @@ server.registerTool(
       additionalTurns: z.number().int().min(1).max(20).default(6),
       models: modelsSchema,
       modelFallbacks: modelFallbacksSchema,
+      allowClaudeFable: allowClaudeFableSchema.optional(),
       providerConcurrency: providerConcurrencySchema,
       verificationCommands: verificationCommandsSchema,
       workCommands: workCommandsSchema,
@@ -1325,6 +1331,7 @@ server.registerTool(
     additionalTurns,
     models,
     modelFallbacks,
+    allowClaudeFable,
     providerConcurrency,
     verificationCommands,
     workCommands,
@@ -1408,6 +1415,7 @@ server.registerTool(
       modelFallbacks: modelFallbacks
         ? { ...(previous.modelFallbacks || {}), ...modelFallbacks }
         : previous.modelFallbacks || {},
+      allowClaudeFable: allowClaudeFable === true,
       providerConcurrency: resolvedProviderConcurrency,
       verificationCommands: verificationCommands || previous.verificationCommands || [],
       workCommands: workCommands || previous.workCommands || [],

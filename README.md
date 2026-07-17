@@ -417,7 +417,7 @@ The collaboration service lets one app start a detached roundtable and another a
 
 Ask any configured app:
 
-> Start a persistent collaboration with Claude, Codex, and Antigravity. Claude plans, Codex implements as the only writer, and Antigravity reviews. Use configured models and return the collaboration ID immediately.
+> Start a persistent collaboration with Claude, Codex, and Antigravity. Claude plans, Codex implements as the only writer, and Antigravity reviews. Use configured non-Fable models and return the collaboration ID immediately.
 
 The app calls `start_collaboration` and returns an ID such as `bridge-<uuid>`. In another app, ask:
 
@@ -473,7 +473,7 @@ In work mode, `writer` defaults to the starting agent. The designated writer rec
 
 Provider capacity is acquired for every turn, not merely when the collaboration starts. This means a coordinator may call the same provider repeatedly and several portfolios may share it safely. Work and review limits are independent, so an active writer does not consume a review slot. A transport-indeterminate call keeps its capacity reservation until the collaboration is explicitly cancelled or otherwise reconciled.
 
-Model fields are optional. Omitting them preserves each provider's configured model. Explicit values pass through unchanged.
+Model fields are optional. Omitting them preserves each provider's configured model. Explicit values pass through unchanged except for the Claude Fable policy: the bridge runtime denies Fable unless the user's current request explicitly asks for Fable by name. Saved defaults, earlier requests, aliases, and fallback chains do not grant permission. Without that explicit request, the runtime preserves any configured non-Fable Claude model, substitutes `claude-opus-4-8[1m]` if the configured/default model resolves to Fable, and removes Fable from the Claude fallback chain.
 
 `modelFallbacks.claude`, `modelFallbacks.codex`, and `modelFallbacks.antigravity` are optional. Omitting them loads the machine-local overload policy; an explicit provider array replaces that policy for the collaboration. Overload retries happen inside one provider turn, so they do not consume another broker turn or trigger writer reassignment.
 
@@ -584,7 +584,7 @@ claude --model <claude-model>
 codex -m <codex-model>
 ```
 
-The peer model override is passed directly through MCP. The host model is selected by its CLI session. A model selected only for an unrelated terminal session is not a saved provider default; pass it explicitly when the bridge starts a separate delegated process.
+The peer model override is passed directly through MCP after the collaboration skill applies the Claude Fable policy. The host model is selected by its CLI session. A model selected only for an unrelated terminal session is not a saved provider default; pass it explicitly when the bridge starts a separate delegated process. If a Claude host is already running Fable without an explicit Fable request in the current task, switch it to a non-Fable model before invoking the skill.
 
 #### Provider overload fallback
 
@@ -613,7 +613,9 @@ chmod 600 ~/.config/local-agent-bridge/model-fallbacks.json
 
 Codex and Antigravity emit a visible downgrade narrative and record `requestedModel`, selected `model`, `fallbackUsed`, and `attemptedModels` in turn metadata. Claude Code owns its native retry and session continuity while the bridge records the configured fallback policy in turn metadata. None of these paths use model fallback for authentication, permission, quota, configuration, ordinary command failure, timeout, or lost transport. If a chain is exhausted, the final error names every attempted model so the broker can continue with another available provider.
 
-For example, Fable plans, a selected Codex model implements, and Fable reviews:
+#### Explicit Fable opt-in
+
+Fable is never selected, inherited, or used as a fallback by the collaboration skills or raw bridge tools unless the user's current request explicitly asks for Fable by name. A saved Fable setting or earlier request is not permission. When the current request does explicitly opt in, announce that exception before starting and pass `allowClaudeFable: true` to that collaboration phase or `allowFable: true` to that direct Claude call. These flags default to false, and collaboration continuation resets authorization rather than inheriting it. For example, a user may explicitly request that Fable plan, a selected Codex model implement, and Fable review:
 
 ```sh
 claude --model fable
@@ -623,13 +625,13 @@ claude --model fable
 /agent-dialogue --claude-model fable --codex-model <codex-model> Fable plans, Codex implements, then Fable reviews: <task>
 ```
 
-Or a selected Codex model plans, Fable implements, and Codex reviews:
+Or the user may explicitly request that a selected Codex model plan, Fable implement, and Codex review:
 
 ```text
 $agent-dialogue --codex-model <active-codex-model> --claude-model fable Codex plans, Fable implements, then Codex reviews: <task>
 ```
 
-The inverse arrangement also works from Claude Code after selecting Fable with `/model fable`:
+The explicitly requested inverse arrangement also works from Claude Code after selecting Fable with `/model fable`:
 
 ```text
 /agent-dialogue --codex-model <codex-model> --claude-model fable Codex plans, Fable implements, then Codex reviews: <task>

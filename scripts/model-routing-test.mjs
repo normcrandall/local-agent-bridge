@@ -4,10 +4,56 @@ import {
   claudeToolRequest,
   codexToolRequest,
 } from "../src/tool-requests.mjs";
+import {
+  DEFAULT_NON_FABLE_CLAUDE_MODEL,
+  isFableModel,
+  loadConfiguredClaudeModel,
+  resolveClaudeModelPolicy,
+} from "../src/claude-model-policy.mjs";
 
 const claudeDefault = claudeToolRequest({ prompt: "test" });
 assert.equal(claudeDefault.name, "ask_claude");
 assert.equal(Object.hasOwn(claudeDefault.arguments, "model"), false);
+assert.equal(Object.hasOwn(claudeDefault.arguments, "allowFable"), false);
+
+const claudeFableOptIn = claudeToolRequest({ prompt: "test", model: "fable", allowFable: true });
+assert.equal(claudeFableOptIn.arguments.allowFable, true);
+
+const blockedRequestedFable = resolveClaudeModelPolicy({ model: "fable" });
+assert.equal(blockedRequestedFable.model, DEFAULT_NON_FABLE_CLAUDE_MODEL);
+assert.deepEqual(blockedRequestedFable.blockedModels, ["fable"]);
+const blockedConfiguredFable = resolveClaudeModelPolicy({ configuredModel: "claude-fable-latest" });
+assert.equal(blockedConfiguredFable.model, DEFAULT_NON_FABLE_CLAUDE_MODEL);
+const preservedConfiguredOpus = resolveClaudeModelPolicy({ configuredModel: "claude-opus-4-8[1m]" });
+assert.equal(preservedConfiguredOpus.model, "claude-opus-4-8[1m]");
+const filteredFableFallback = resolveClaudeModelPolicy({
+  model: "claude-opus-4-8[1m]",
+  fallbackModels: ["fable", "claude-opus-4-6", "fable"],
+});
+assert.deepEqual(filteredFableFallback.fallbackModels, ["claude-opus-4-6"]);
+assert.deepEqual(filteredFableFallback.blockedModels, ["fable"]);
+const allowedFable = resolveClaudeModelPolicy({
+  model: "fable",
+  fallbackModels: ["claude-fable-latest"],
+  allowFable: true,
+});
+assert.equal(allowedFable.model, "fable");
+assert.deepEqual(allowedFable.fallbackModels, ["claude-fable-latest"]);
+assert.equal(allowedFable.allowFable, true);
+assert.throws(
+  () => resolveClaudeModelPolicy({ replacementModel: "fable" }),
+  /must not resolve to Fable/,
+);
+assert.equal(isFableModel("CLAUDE-FABLE-LATEST"), true);
+assert.equal(isFableModel("claude-opus-4-8[1m]"), false);
+assert.equal(
+  loadConfiguredClaudeModel({
+    cwd: "/missing",
+    home: "/missing",
+    environment: { CLAUDE_MODEL: "configured-model" },
+  }),
+  "configured-model",
+);
 
 const claudeExplicit = claudeToolRequest({
   prompt: "test",
@@ -153,4 +199,4 @@ const antigravityReply = antigravityToolRequest({
 assert.equal(antigravityReply.name, "continue_antigravity");
 assert.equal(antigravityReply.arguments.conversationId, "00000000-0000-4000-8000-000000000000");
 
-console.log("Model routing tests passed: explicit overrides pass through; omitted models stay omitted.");
+console.log("Model routing tests passed: explicit overrides pass through and Fable requires per-request authorization.");

@@ -208,6 +208,7 @@ try {
     workspace: state.workspace,
     models: state.models,
     modelFallbacks: state.modelFallbacks || {},
+    allowClaudeFable: state.allowClaudeFable === true,
     verificationCommands: state.verificationCommands || [],
     workCommands: state.workCommands || [],
     workProfile: state.workProfile || "exact",

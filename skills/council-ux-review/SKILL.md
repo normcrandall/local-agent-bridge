@@ -76,7 +76,9 @@ Use at least one representative desktop viewport and one narrow mobile viewport.
 
 ## Start the council visibly
 
-Use `$run-roundtable`, backed by the persistent `collaboration` MCP. Include Claude, Codex, and Antigravity. Pass the current host as `chair` with its provider and absolute workspace so the chair contributes natively and only peers are delegated. Omit model overrides to preserve the user's configured models and fallback policy. Use review mode; no participant edits source code.
+Use `$run-roundtable`, backed by the persistent `collaboration` MCP. Include Claude, Codex, and Antigravity. Pass the current host as `chair` with its provider and absolute workspace so the chair contributes natively and only peers are delegated. Omit model overrides to preserve the user's configured models and fallback policy, subject to the Claude policy below. Use review mode; no participant edits source code.
+
+Claude model policy: Never select, inherit, or fall back to Fable unless the user's current request explicitly asks for Fable by name. Saved settings, earlier requests, session history, aliases, and caller-supplied fallback chains do not count. Preserve any configured non-Fable Claude model. If the configured or default Claude model resolves to Fable without that permission, override it with `claude-opus-4-8[1m]` and remove Fable from `modelFallbacks.claude`. Announce an explicitly authorized Fable use before starting. For that authorized phase only, pass `allowClaudeFable: true` to collaboration or `allowFable: true` to a direct Claude call. Never set either field otherwise; authorization resets on every collaboration continuation.
 
 Before starting, display:
 

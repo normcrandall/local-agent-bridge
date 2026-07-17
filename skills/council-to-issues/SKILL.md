@@ -13,7 +13,9 @@ Read `~/.agents/skills/to-issues/SKILL.md` completely before acting. Follow ever
 
 ## Start visibly
 
-Use `$run-roundtable` as the collaboration protocol. If skill composition is unavailable, call the equivalent `collaboration` MCP operations directly. Include Claude, Codex, and Antigravity unless the user explicitly excludes one. Pass the current host as `chair` with its provider and absolute workspace, keep its work in the native session, and delegate only to peers; same-provider delegation requires an explicit user request. Omit model overrides so every provider uses the model currently configured by the user.
+Use `$run-roundtable` as the collaboration protocol. If skill composition is unavailable, call the equivalent `collaboration` MCP operations directly. Include Claude, Codex, and Antigravity unless the user explicitly excludes one. Pass the current host as `chair` with its provider and absolute workspace, keep its work in the native session, and delegate only to peers; same-provider delegation requires an explicit user request. Omit model overrides so every provider uses the model currently configured by the user, subject to the Claude policy below.
+
+Claude model policy: Never select, inherit, or fall back to Fable unless the user's current request explicitly asks for Fable by name. Saved settings, earlier requests, session history, aliases, and caller-supplied fallback chains do not count. Preserve any configured non-Fable Claude model. If the configured or default Claude model resolves to Fable without that permission, override it with `claude-opus-4-8[1m]` and remove Fable from `modelFallbacks.claude`. Announce an explicitly authorized Fable use before starting. For that authorized phase only, pass `allowClaudeFable: true` to collaboration or `allowFable: true` to a direct Claude call. Never set either field otherwise; authorization resets on every collaboration continuation.
 
 Resolve exact repository gates and a project-relative Claude handoff file, normally under `.bridge/handoffs/`. Pass them as `verificationCommands` and `handoffPath` to every collaboration phase. Claude's review session may run only those gates and write only that handoff file; source edits and arbitrary shell commands remain denied.
 
@@ -63,7 +65,7 @@ Collaboration: <id>
 
 Do not repeatedly retry an unavailable provider in the same phase. Continue with two models or one model; clearly label the result as degraded rather than full council consensus. If the work-mode writer is unavailable before its next turn, reassign the single-writer role to an available participant and disclose the change. Stop only when no requested provider is available, or when the base workflow itself requires user input.
 
-A recognized model overload is not provider unavailability. Preserve caller-supplied `modelFallbacks.claude` and `modelFallbacks.codex`, or omit them so machine-local policies apply. Claude Code uses native fallback; Codex retries through the bridge. Keep the same turn and writer, and only treat a provider as unavailable after its ordered chain is exhausted.
+A recognized model overload is not provider unavailability. Preserve caller-supplied `modelFallbacks.claude` only after applying the Claude model policy above, and preserve `modelFallbacks.codex`; otherwise omit them so machine-local policies apply. Claude Code uses native fallback; Codex retries through the bridge. Keep the same turn and writer, and only treat a provider as unavailable after its ordered chain is exhausted.
 
 ## Apply the council pattern
 
