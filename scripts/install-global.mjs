@@ -10,6 +10,7 @@ import {
   ensureCodexHookConfiguration,
   resolveCodexHookPath,
 } from "../src/coordinator-hook-config.mjs";
+import { exportSkills } from "./skill-portability.mjs";
 
 const sourceRoot = resolve(import.meta.dirname, "..");
 const installRoot = resolve(homedir(), ".local/share/agent-bridge");
@@ -28,7 +29,7 @@ await mkdir(stateRoot, { recursive: true, mode: 0o700 });
 await rm(runtimeRoot, { recursive: true, force: true });
 await mkdir(runtimeRoot, { recursive: true, mode: 0o700 });
 
-for (const name of ["src", "scripts", "package.json", "package-lock.json"]) {
+for (const name of ["src", "scripts", "skills", "package.json", "package-lock.json"]) {
   await cp(resolve(sourceRoot, name), resolve(runtimeRoot, name), { recursive: true });
 }
 
@@ -139,6 +140,9 @@ elif [[ "$COMMAND" == "doctor" ]]; then
   exec "$NODE_BIN" "$RUNTIME/scripts/doctor.mjs"
 elif [[ "$COMMAND" == "smoke" ]]; then
   exec "$NODE_BIN" "$RUNTIME/scripts/smoke-test.mjs"
+elif [[ "$COMMAND" == "skills" ]]; then
+  shift
+  exec "$NODE_BIN" "$RUNTIME/scripts/skill-portability.mjs" "$@"
 else
   [[ "$COMMAND" == "help" ]] || shift
   exec "$NODE_BIN" "$RUNTIME/scripts/bridge-ops.mjs" "$COMMAND" "$@"
@@ -244,19 +248,12 @@ await writeJson(codexHookPath, codexHooks);
 codexConfig = ensureCodexHookConfiguration(codexConfig);
 await writeTextAtomic(codexConfigPath, codexConfig);
 
+const portableSkills = await exportSkills({ homeRoot: homedir(), sourceRoot });
 const skillRoots = [
   resolve(homedir(), ".codex/skills"),
   resolve(homedir(), ".claude/skills"),
   resolve(homedir(), ".gemini/config/skills"),
 ];
-for (const skillRoot of skillRoots) {
-  await mkdir(skillRoot, { recursive: true, mode: 0o700 });
-  for (const name of skillNames) {
-    const destination = resolve(skillRoot, name);
-    await rm(destination, { recursive: true, force: true });
-    await cp(resolve(sourceRoot, "skills", name), destination, { recursive: true });
-  }
-}
 for (const [skillRoot, source] of [
   [skillRoots[0], codexDialogueSkillSource],
   [skillRoots[1], claudeDialogueSkillSource],
@@ -266,18 +263,14 @@ for (const [skillRoot, source] of [
   await cp(source, destination, { recursive: true });
 }
 
-const antigravityCliSkills = resolve(homedir(), ".gemini/antigravity-cli/skills");
-await mkdir(antigravityCliSkills, { recursive: true, mode: 0o700 });
-for (const name of skillNames) {
-  await cp(
-    resolve(sourceRoot, "skills", name, "SKILL.md"),
-    resolve(antigravityCliSkills, `${name}.md`),
-  );
-}
-
 console.log(`Installed runtime: ${runtimeRoot}`);
 console.log(`Installed launchers: ${Object.keys(launchers).map((name) => resolve(binRoot, name)).join(", ")}`);
 console.log(`Persistent state: ${stateRoot}`);
 console.log(`Coordinator hooks: Claude Stop/SessionStart, Codex Stop/SessionStart, Antigravity AfterAgent/SessionStart`);
 console.log(`Claude wake channel: start Claude with ${resolve(binRoot, "claude-collab")} during the Channels research preview`);
 console.log(`Installed skills: agent-dialogue, ${skillNames.join(", ")}`);
+for (const [target, skills] of Object.entries(portableSkills.exports)) {
+  for (const [name, result] of Object.entries(skills)) {
+    if (!result.supported) console.log(`UNSUPPORTED: ${target}/${name}: ${result.unsupported.join("; ")}`);
+  }
+}

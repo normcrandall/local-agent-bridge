@@ -23,12 +23,16 @@ case "$COMMAND" in
   smoke)
     exec npm --prefix "$ROOT" run smoke
     ;;
+  skills)
+    shift
+    exec node "$ROOT/scripts/skill-portability.mjs" "$@"
+    ;;
   status|capabilities|roles|preflight|recover|archive|prune|worktree|ci|reconcile|usage|bundle)
     shift
     exec node "$ROOT/scripts/bridge-ops.mjs" "$COMMAND" "$@"
     ;;
   ""|help|--help|-h)
-    print "Usage: ./bridge <talk|start|watchdog|doctor|smoke|status|capabilities|roles|preflight|recover|archive|prune|worktree|ci|reconcile|usage|bundle> [options]"
+    print "Usage: ./bridge <talk|start|watchdog|doctor|smoke|skills|status|capabilities|roles|preflight|recover|archive|prune|worktree|ci|reconcile|usage|bundle> [options]"
     print "Run './bridge talk --help' for conversation options."
     ;;
   *)

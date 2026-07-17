@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
-import { readFile, readdir } from "node:fs/promises";
-import { resolve } from "node:path";
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { hostname, tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { exportSkills, lintSkillCatalog, verifySkillExport } from "./skill-portability.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const canonicalCodexDialoguePath = resolve(root, ".agents/skills/agent-dialogue/SKILL.md");
@@ -48,25 +50,156 @@ const bridgeSkillNames = (await readdir(resolve(root, "skills"), { withFileTypes
   .filter((entry) => entry.isDirectory())
   .map((entry) => entry.name)
   .sort();
+const portableHome = await mkdtemp(join(tmpdir(), "agent-bridge-skill-export-"));
+const firstPortableExport = await exportSkills({ homeRoot: portableHome, sourceRoot: root });
+const secondPortableExport = await exportSkills({ homeRoot: portableHome, sourceRoot: root });
+assert.deepEqual(secondPortableExport, firstPortableExport, "Skill export is not deterministic");
+const catalogLint = await lintSkillCatalog({ sourceRoot: root, exportedHome: portableHome });
+assert.deepEqual(catalogLint.findings, [], `Portable catalog lint failed: ${JSON.stringify(catalogLint.findings)}`);
+assert.equal((await verifySkillExport({ homeRoot: portableHome })).ok, true);
+assert.equal(firstPortableExport.profileVersion, 1);
+for (const target of ["codex", "claude", "gemini", "antigravity-cli"]) {
+  assert.ok(firstPortableExport.targets[target], `Missing portable target ${target}`);
+  assert.ok(firstPortableExport.exports[target]["take-the-helm"].supported);
+}
+assert.equal(
+  firstPortableExport.exports.claude["ask-agent"].files.some((file) => file.path.endsWith("agents/openai.yaml")),
+  false,
+  "Claude export leaked Codex-only openai.yaml",
+);
+assert.deepEqual(firstPortableExport.skills["ask-agent"].requiredCapabilities.mcpServers, ["antigravity", "claude_code", "codex"]);
+assert.doesNotMatch(JSON.stringify(firstPortableExport), new RegExp(root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+assert.match(
+  await readFile(resolve(portableHome, ".claude/skills/show-collaboration/SKILL.md"), "utf8"),
+  /`\/ask-agent`/,
+);
+
+const stalePath = resolve(portableHome, ".codex/skills/ask-agent/SKILL.md");
+await writeFile(stalePath, `${await readFile(stalePath, "utf8")}\nmodified\n`);
+const staleVerification = await verifySkillExport({ homeRoot: portableHome });
+assert.equal(staleVerification.ok, false);
+assert.ok(staleVerification.findings.some((item) => item.code === "stale-export"));
+await exportSkills({ homeRoot: portableHome, sourceRoot: root });
+
+const escapedManifest = JSON.parse(await readFile(resolve(portableHome, ".local/share/agent-bridge/skill-exports/manifest.v1.json"), "utf8"));
+escapedManifest.exports.codex["ask-agent"].files[0].path = "../../outside-home";
+await writeFile(
+  resolve(portableHome, ".local/share/agent-bridge/skill-exports/manifest.v1.json"),
+  `${JSON.stringify(escapedManifest, null, 2)}\n`,
+);
+const escapedVerification = await verifySkillExport({ homeRoot: portableHome });
+assert.ok(escapedVerification.findings.some((item) => item.code === "export-path-escape"));
+await exportSkills({ homeRoot: portableHome, sourceRoot: root });
+
+const brokenSource = await mkdtemp(join(tmpdir(), "agent-bridge-broken-skill-"));
+const brokenSkillRoot = resolve(brokenSource, "skills/broken-skill");
+await mkdir(resolve(brokenSkillRoot, "agents"), { recursive: true });
+await writeFile(resolve(brokenSkillRoot, "SKILL.md"), `---
+name: broken-skill
+description: Broken portability fixture
+version: 1
+---
+Use $missing-skill and [the missing resource](assets/missing.md).
+Do not copy /Users/example/private, example-reviewer[bot], ${"github" + "_pat_" + "1".repeat(20)},
+${hostname()}, or bridge-deadbeef-0000-4000-8000-000000000000.
+`);
+await writeFile(resolve(brokenSkillRoot, "agents/openai.yaml"), `dependencies:
+  tools:
+    - type: "mcp"
+      value: "missing_server"
+`);
+const brokenCodes = new Set((await lintSkillCatalog({ sourceRoot: brokenSource })).findings.map((item) => item.code));
+for (const code of [
+  "unsupported-metadata",
+  "missing-resource",
+  "absolute-local-path",
+  "machine-identity",
+  "embedded-app-identity",
+  "embedded-credential",
+  "collaboration-history",
+  "unresolved-tool",
+  "unadapted-invocation",
+]) assert.ok(brokenCodes.has(code), `Broken fixture did not trigger ${code}`);
+await rm(brokenSource, { recursive: true, force: true });
+
+const resourceSource = await mkdtemp(join(tmpdir(), "agent-bridge-resource-skill-"));
+const resourceSkillRoot = resolve(resourceSource, "skills/resource-skill");
+await mkdir(resolve(resourceSkillRoot, "assets"), { recursive: true });
+await writeFile(resolve(resourceSkillRoot, "SKILL.md"), `---
+name: resource-skill
+description: Valid resource portability fixture
+---
+Read [the template](assets/template.md).
+`);
+await writeFile(resolve(resourceSkillRoot, "assets/template.md"), "portable template\n");
+const resourceExport = await exportSkills({ homeRoot: portableHome, sourceRoot: resourceSource });
+assert.equal(resourceExport.exports.codex["resource-skill"].supported, true);
+assert.equal(resourceExport.exports["antigravity-cli"]["resource-skill"].supported, false);
+assert.match(resourceExport.exports["antigravity-cli"]["resource-skill"].unsupported[0], /cannot package resources/);
+await rm(resourceSource, { recursive: true, force: true });
+await exportSkills({ homeRoot: portableHome, sourceRoot: root });
+
+const driftSource = await mkdtemp(join(tmpdir(), "agent-bridge-drift-skill-"));
+const driftSkillRoot = resolve(driftSource, "skills/drift-skill");
+const driftHome = await mkdtemp(join(tmpdir(), "agent-bridge-drift-home-"));
+await mkdir(driftSkillRoot, { recursive: true });
+await writeFile(resolve(driftSkillRoot, "SKILL.md"), `---
+name: drift-skill
+description: Source drift fixture
+---
+Original source.
+`);
+await exportSkills({ homeRoot: driftHome, sourceRoot: driftSource });
+assert.equal((await verifySkillExport({ homeRoot: driftHome, sourceRoot: driftSource })).ok, true);
+await writeFile(resolve(driftSkillRoot, "SKILL.md"), `---
+name: drift-skill
+description: Source drift fixture
+---
+Changed source.
+`);
+const driftVerification = await verifySkillExport({ homeRoot: driftHome, sourceRoot: driftSource });
+assert.ok(driftVerification.findings.some((item) => item.code === "stale-source"));
+await rm(driftSource, { recursive: true, force: true });
+await rm(driftHome, { recursive: true, force: true });
+
+const unsafeSource = await mkdtemp(join(tmpdir(), "agent-bridge-unsafe-skill-"));
+const unsafeSkillRoot = resolve(unsafeSource, "skills/unsafe-skill");
+await mkdir(resolve(unsafeSkillRoot, "assets"), { recursive: true });
+await writeFile(resolve(unsafeSource, "outside.md"), "outside\n");
+await writeFile(resolve(unsafeSkillRoot, "SKILL.md"), `---
+name: unsafe-skill
+description: Unsafe resource fixture
+---
+Read [outside](../../outside.md) and [linked](assets/linked.md).
+`);
+await symlink(resolve(unsafeSource, "outside.md"), resolve(unsafeSkillRoot, "assets/linked.md"));
+const unsafeCodes = new Set((await lintSkillCatalog({ sourceRoot: unsafeSource })).findings.map((item) => item.code));
+assert.ok(unsafeCodes.has("resource-path-escape"));
+assert.ok(unsafeCodes.has("symlink-resource"));
+await rm(unsafeSource, { recursive: true, force: true });
+
 const globalSkillRoots = [
-  resolve(process.env.HOME, ".codex/skills"),
-  resolve(process.env.HOME, ".claude/skills"),
-  resolve(process.env.HOME, ".gemini/config/skills"),
+  resolve(portableHome, ".codex/skills"),
+  resolve(portableHome, ".claude/skills"),
+  resolve(portableHome, ".gemini/config/skills"),
 ];
+const adaptForSlashCommands = (content) => content.replace(/\$([a-z][a-z0-9-]+)/g, (original, name) => (
+  bridgeSkillNames.includes(name) ? `/${name}` : original
+));
 
 for (const name of bridgeSkillNames) {
   const canonical = await readFile(resolve(root, "skills", name, "SKILL.md"), "utf8");
   assert.match(canonical, new RegExp(`name: ${name}`));
   assert.doesNotMatch(canonical, /TODO/);
-  for (const skillRoot of globalSkillRoots) {
+  for (const [index, skillRoot] of globalSkillRoots.entries()) {
     const installed = await readFile(resolve(skillRoot, name, "SKILL.md"), "utf8");
-    assert.equal(installed, canonical, `${name} is stale under ${skillRoot}`);
+    assert.equal(installed, index === 0 ? canonical : adaptForSlashCommands(canonical), `${name} is stale under ${skillRoot}`);
   }
   const antigravityCli = await readFile(
-    resolve(process.env.HOME, ".gemini/antigravity-cli/skills", `${name}.md`),
+    resolve(portableHome, ".gemini/antigravity-cli/skills", `${name}.md`),
     "utf8",
   );
-  assert.equal(antigravityCli, canonical, `${name} is stale for Antigravity CLI`);
+  assert.equal(antigravityCli, adaptForSlashCommands(canonical), `${name} is stale for Antigravity CLI`);
 }
 
 const askAgent = await readFile(resolve(root, "skills/ask-agent/SKILL.md"), "utf8");
@@ -153,6 +286,8 @@ assert.match(goalLoop, /Never substitute a long-running Bash, sleep, gh, or PR p
 assert.match(goalLoop, /acknowledge_coordinator_wake/);
 
 const readme = await readFile(resolve(root, "README.md"), "utf8");
+const localBridge = await readFile(resolve(root, "bridge"), "utf8");
+assert.match(localBridge, /\n  skills\)\n/);
 const claudeGuidance = await readFile(resolve(root, "CLAUDE.md"), "utf8");
 const codexGuidance = await readFile(resolve(root, "AGENTS.md"), "utf8");
 for (const guidance of [claudeGuidance, codexGuidance]) {
@@ -373,3 +508,4 @@ assert.match(takeTheHelm, /Routine uncertainty.*is not an escalation/);
 assert.match(takeTheHelm, /Continue with two models or one model/);
 
 console.log("Global bridge skills are synchronized across Codex, Claude, Antigravity App, and Antigravity CLI.");
+await rm(portableHome, { recursive: true, force: true });
