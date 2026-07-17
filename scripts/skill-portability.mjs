@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
-import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -92,6 +92,56 @@ function resolveInside(root, relativePath, code = "path-escape") {
   const path = resolve(root, relativePath);
   if (!isInside(root, path)) throw new Error(`${code}: path must stay inside its configured root: ${relativePath}`);
   return path;
+}
+
+async function assertNoSymlinkedAncestors(root, path, code = "export-symlink") {
+  const base = resolve(root);
+  let current = base;
+  for (const part of relative(base, resolve(path)).split(sep).filter(Boolean)) {
+    current = join(current, part);
+    let info;
+    try {
+      info = await lstat(current);
+    } catch (error) {
+      if (error.code === "ENOENT") return;
+      throw error;
+    }
+    if (info.isSymbolicLink()) {
+      throw new Error(`${code}: symlinked path segment is not allowed: ${slash(relative(base, current))}`);
+    }
+  }
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function sortedByKey(object) {
+  return Object.fromEntries(Object.keys(object).sort().map((key) => [key, object[key]]));
+}
+
+function filterKeys(object, keep) {
+  return Object.fromEntries(Object.entries(object).filter(([key]) => keep(key)));
+}
+
+async function readPriorManifest({ manifestPath, requireReadable }) {
+  let raw;
+  try {
+    raw = await readFile(manifestPath, "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+  try {
+    const manifest = JSON.parse(raw);
+    if (!isPlainObject(manifest)) throw new Error("manifest root must be an object");
+    return manifest;
+  } catch (error) {
+    if (requireReadable) {
+      throw new Error(`partial-export-manifest: the existing export manifest cannot be merged (${error.message}); run a full export to rebuild it`);
+    }
+    return null;
+  }
 }
 
 async function inventoryUnder(root, current = root) {
@@ -252,7 +302,6 @@ async function skillProfile({ skillRoot, name }) {
   return {
     name,
     description: frontmatter.values.description || "",
-    trigger: frontmatter.values.description || "",
     requiredCapabilities: { mcpServers: parseMcpServers(yaml) },
     contracts: deriveContracts(content),
     permissionIdentityBoundaries: deriveBoundaries(content),
@@ -263,6 +312,7 @@ async function skillProfile({ skillRoot, name }) {
 
 async function writeExportFile({ home, relativePath, content }) {
   const path = resolveInside(home, relativePath, "export-path-escape");
+  await assertNoSymlinkedAncestors(home, path);
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   await writeFile(path, content, { mode: 0o600 });
   return { path: slash(relativePath), sha256: sha256(content) };
@@ -286,6 +336,28 @@ export async function exportSkills({ homeRoot, sourceRoot, skillNames, targets }
   }
   const lint = await lintSkillCatalog({ sourceRoot: source });
   if (!lint.ok) throw new Error(`Skill portability lint failed: ${JSON.stringify(lint.findings)}`);
+
+  const manifestPath = resolve(home, MANIFEST_RELATIVE_PATH);
+  await assertNoSymlinkedAncestors(home, manifestPath);
+  const isFullExport = selectedNames.length === availableNames.length
+    && selectedTargets.length === Object.keys(TARGET_PROFILES).length;
+  const prior = await readPriorManifest({ manifestPath, requireReadable: !isFullExport });
+  const priorSkills = isPlainObject(prior?.skills) ? prior.skills : {};
+  const priorExports = isPlainObject(prior?.exports) ? prior.exports : {};
+  const priorTargets = isPlainObject(prior?.targets) ? prior.targets : {};
+  const orphanNames = [...new Set([
+    ...Object.keys(priorSkills),
+    ...Object.values(priorExports).flatMap((skills) => (isPlainObject(skills) ? Object.keys(skills) : [])),
+  ])].filter((name) => !availableNames.includes(name)).sort();
+  for (const name of orphanNames.filter((name) => SAFE_SKILL_NAME.test(name))) {
+    for (const targetProfile of Object.values(TARGET_PROFILES)) {
+      const orphanPath = targetProfile.layout === "flat-markdown"
+        ? resolve(home, targetProfile.root, `${name}.md`)
+        : resolve(home, targetProfile.root, name);
+      await assertNoSymlinkedAncestors(home, orphanPath);
+      await rm(orphanPath, { recursive: true, force: true });
+    }
+  }
 
   const profiles = {};
   const exports = {};
@@ -316,6 +388,7 @@ export async function exportSkills({ homeRoot, sourceRoot, skillNames, targets }
           }));
         } else {
           const destination = resolve(home, targetProfile.root, name);
+          await assertNoSymlinkedAncestors(home, destination);
           await rm(destination, { recursive: true, force: true });
           for (const file of sourceFiles) {
             if (file === "agents/openai.yaml" && !targetProfile.includeOpenAiMetadata) continue;
@@ -333,12 +406,26 @@ export async function exportSkills({ homeRoot, sourceRoot, skillNames, targets }
     }
   }
 
+  const mergedExports = {};
+  for (const target of Object.keys(TARGET_PROFILES).sort()) {
+    const priorTarget = isPlainObject(priorExports[target]) ? priorExports[target] : {};
+    const merged = {
+      ...filterKeys(priorTarget, (name) => availableNames.includes(name)),
+      ...(exports[target] || {}),
+    };
+    if (Object.keys(merged).length) mergedExports[target] = sortedByKey(merged);
+  }
   const manifest = {
     manifestVersion: 1,
     profileVersion: PROFILE_VERSION,
-    targets: Object.fromEntries(selectedTargets.map((target) => [target, TARGET_PROFILES[target]])),
-    skills: profiles,
-    exports,
+    targets: Object.fromEntries(Object.keys(TARGET_PROFILES).sort()
+      .filter((target) => selectedTargets.includes(target) || target in priorTargets || target in mergedExports)
+      .map((target) => [target, TARGET_PROFILES[target]])),
+    skills: sortedByKey({
+      ...filterKeys(priorSkills, (name) => availableNames.includes(name)),
+      ...profiles,
+    }),
+    exports: mergedExports,
     excludes: [
       "provider authentication",
       "GitHub identity configuration",
@@ -347,7 +434,6 @@ export async function exportSkills({ homeRoot, sourceRoot, skillNames, targets }
       "user-specific absolute paths",
     ],
   };
-  const manifestPath = resolve(home, MANIFEST_RELATIVE_PATH);
   await mkdir(dirname(manifestPath), { recursive: true, mode: 0o700 });
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
   return manifest;
@@ -359,11 +445,13 @@ export async function verifySkillExport({ homeRoot, sourceRoot } = {}) {
   const manifestPath = resolve(home, MANIFEST_RELATIVE_PATH);
   let manifest;
   try {
+    await assertNoSymlinkedAncestors(home, manifestPath);
     manifest = JSON.parse(await readFile(manifestPath, "utf8"));
   } catch (error) {
+    const code = error.message.startsWith("export-symlink:") ? "export-symlink" : "missing-export-manifest";
     return {
       ok: false,
-      findings: [{ skill: "catalog", code: "missing-export-manifest", path: MANIFEST_RELATIVE_PATH, message: error.message }],
+      findings: [{ skill: "catalog", code, path: MANIFEST_RELATIVE_PATH, message: error.message }],
     };
   }
   const findings = [];
@@ -403,10 +491,13 @@ export async function verifySkillExport({ homeRoot, sourceRoot } = {}) {
     for (const [skill, result] of Object.entries(skills)) {
       for (const file of result.files || []) {
         try {
-          const content = await readFile(resolveInside(home, file.path, "export-path-escape"));
+          const path = resolveInside(home, file.path, "export-path-escape");
+          await assertNoSymlinkedAncestors(home, path);
+          const content = await readFile(path);
           if (sha256(content) !== file.sha256) findings.push(finding(skill, "stale-export", `Export hash differs for ${target}.`, file.path));
         } catch (error) {
-          const code = error.message.startsWith("export-path-escape:") ? "export-path-escape" : "missing-export";
+          const code = error.message.startsWith("export-path-escape:") ? "export-path-escape"
+            : (error.message.startsWith("export-symlink:") ? "export-symlink" : "missing-export");
           findings.push(finding(skill, code, `Export file cannot be verified for ${target}: ${error.message}`, file.path));
         }
       }

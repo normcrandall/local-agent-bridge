@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { exportSkills, lintSkillCatalog, verifySkillExport } from "./skill-portability.mjs";
@@ -506,6 +506,135 @@ assert.match(takeTheHelm, /agent-review=success/);
 assert.match(takeTheHelm, /never use an owner PAT bypass/);
 assert.match(takeTheHelm, /Routine uncertainty.*is not an escalation/);
 assert.match(takeTheHelm, /Continue with two models or one model/);
+
+const pathExists = (path) => stat(path).then(() => true, (error) => (error.code === "ENOENT" ? false : Promise.reject(error)));
+
+const mergeSource = await mkdtemp(join(tmpdir(), "agent-bridge-merge-skill-"));
+const mergeHome = await mkdtemp(join(tmpdir(), "agent-bridge-merge-home-"));
+const mergeManifestPath = resolve(mergeHome, ".local/share/agent-bridge/skill-exports/manifest.v1.json");
+const writeMergeSkill = async (name, body) => {
+  const skillRoot = resolve(mergeSource, "skills", name);
+  await mkdir(skillRoot, { recursive: true });
+  await writeFile(resolve(skillRoot, "SKILL.md"), `---\nname: ${name}\ndescription: ${name} fixture\n---\n${body}\n`);
+};
+await writeMergeSkill("alpha-skill", "Alpha body.");
+await writeMergeSkill("beta-skill", "Beta body.");
+const fullMerge = await exportSkills({ homeRoot: mergeHome, sourceRoot: mergeSource });
+assert.equal(fullMerge.skills["alpha-skill"].trigger, undefined, "Profile must not duplicate description as trigger");
+assert.equal(fullMerge.skills["alpha-skill"].description, "alpha-skill fixture");
+const manifestBytesA = await readFile(mergeManifestPath, "utf8");
+await exportSkills({ homeRoot: mergeHome, sourceRoot: mergeSource });
+assert.equal(await readFile(mergeManifestPath, "utf8"), manifestBytesA, "Manifest bytes must be deterministic across repeated exports");
+
+const partialMerge = await exportSkills({ homeRoot: mergeHome, sourceRoot: mergeSource, skillNames: ["alpha-skill"], targets: ["codex"] });
+assert.ok(partialMerge.skills["beta-skill"], "Partial export must preserve non-selected skill profiles");
+assert.ok(partialMerge.exports.claude["beta-skill"], "Partial export must preserve non-selected targets");
+assert.ok(partialMerge.exports.codex["beta-skill"], "Partial export must preserve non-selected skills in a selected target");
+assert.deepEqual(partialMerge, fullMerge, "A no-change partial export must merge back to the full manifest");
+
+await writeFile(resolve(mergeHome, ".claude/skills/beta-skill/SKILL.md"), "tampered\n");
+await exportSkills({ homeRoot: mergeHome, sourceRoot: mergeSource, skillNames: ["alpha-skill"], targets: ["codex"] });
+const tamperedMergeVerification = await verifySkillExport({ homeRoot: mergeHome, sourceRoot: mergeSource });
+assert.ok(
+  tamperedMergeVerification.findings.some((item) => item.skill === "beta-skill" && item.code === "stale-export"),
+  "Tampered non-selected export must stay detectable after a partial export",
+);
+await rm(resolve(mergeHome, ".gemini/antigravity-cli/skills/beta-skill.md"));
+const deletedMergeVerification = await verifySkillExport({ homeRoot: mergeHome, sourceRoot: mergeSource });
+assert.ok(
+  deletedMergeVerification.findings.some((item) => item.skill === "beta-skill" && item.code === "missing-export"),
+  "Deleted non-selected export must stay detectable after a partial export",
+);
+await exportSkills({ homeRoot: mergeHome, sourceRoot: mergeSource });
+assert.equal((await verifySkillExport({ homeRoot: mergeHome, sourceRoot: mergeSource })).ok, true);
+
+await rm(resolve(mergeSource, "skills/beta-skill"), { recursive: true, force: true });
+const prunedMerge = await exportSkills({ homeRoot: mergeHome, sourceRoot: mergeSource, skillNames: ["alpha-skill"], targets: ["codex"] });
+assert.equal(prunedMerge.skills["beta-skill"], undefined, "Deleted catalog skill must be pruned from the manifest");
+assert.equal(prunedMerge.exports.claude["beta-skill"], undefined);
+assert.equal(await pathExists(resolve(mergeHome, ".claude/skills/beta-skill")), false, "Orphaned directory export must be removed");
+assert.equal(await pathExists(resolve(mergeHome, ".gemini/antigravity-cli/skills/beta-skill.md")), false, "Orphaned flat export must be removed");
+assert.equal((await verifySkillExport({ homeRoot: mergeHome, sourceRoot: mergeSource })).ok, true);
+
+await writeFile(mergeManifestPath, "not json\n");
+await assert.rejects(
+  exportSkills({ homeRoot: mergeHome, sourceRoot: mergeSource, skillNames: ["alpha-skill"], targets: ["codex"] }),
+  /partial-export-manifest/,
+  "A partial export over an unreadable manifest must fail closed",
+);
+await exportSkills({ homeRoot: mergeHome, sourceRoot: mergeSource });
+assert.equal((await verifySkillExport({ homeRoot: mergeHome, sourceRoot: mergeSource })).ok, true);
+
+const symlinkHome = await mkdtemp(join(tmpdir(), "agent-bridge-symlink-home-"));
+const symlinkOutside = await mkdtemp(join(tmpdir(), "agent-bridge-symlink-outside-"));
+
+await symlink(symlinkOutside, resolve(symlinkHome, ".codex"));
+await assert.rejects(
+  exportSkills({ homeRoot: symlinkHome, sourceRoot: mergeSource }),
+  /export-symlink/,
+  "A symlinked directory-target root must abort the export",
+);
+await rm(resolve(symlinkHome, ".codex"));
+await rm(resolve(symlinkHome, ".gemini"), { recursive: true, force: true });
+await rm(resolve(symlinkHome, ".claude"), { recursive: true, force: true });
+
+await mkdir(resolve(symlinkHome, ".gemini/antigravity-cli/skills"), { recursive: true });
+await writeFile(resolve(symlinkOutside, "target.md"), "outside\n");
+await symlink(resolve(symlinkOutside, "target.md"), resolve(symlinkHome, ".gemini/antigravity-cli/skills/alpha-skill.md"));
+await assert.rejects(
+  exportSkills({ homeRoot: symlinkHome, sourceRoot: mergeSource }),
+  /export-symlink/,
+  "A symlinked flat export file must abort the export",
+);
+await rm(resolve(symlinkHome, ".gemini"), { recursive: true, force: true });
+await rm(resolve(symlinkHome, ".claude"), { recursive: true, force: true });
+
+await mkdir(resolve(symlinkOutside, "share"), { recursive: true });
+await mkdir(resolve(symlinkHome, ".local"), { recursive: true });
+await symlink(resolve(symlinkOutside, "share"), resolve(symlinkHome, ".local/share"));
+await assert.rejects(
+  exportSkills({ homeRoot: symlinkHome, sourceRoot: mergeSource }),
+  /export-symlink/,
+  "A symlinked manifest parent must abort the export",
+);
+await rm(resolve(symlinkHome, ".local"), { recursive: true, force: true });
+
+await mkdir(resolve(symlinkHome, ".local/share/agent-bridge/skill-exports"), { recursive: true });
+await writeFile(resolve(symlinkOutside, "manifest.v1.json"), "{}\n");
+await symlink(resolve(symlinkOutside, "manifest.v1.json"), resolve(symlinkHome, ".local/share/agent-bridge/skill-exports/manifest.v1.json"));
+await assert.rejects(
+  exportSkills({ homeRoot: symlinkHome, sourceRoot: mergeSource }),
+  /export-symlink/,
+  "A symlinked manifest file must abort the export",
+);
+const manifestSymlinkVerification = await verifySkillExport({ homeRoot: symlinkHome, sourceRoot: mergeSource });
+assert.ok(
+  manifestSymlinkVerification.findings.some((item) => item.code === "export-symlink"),
+  "Verification must reject a symlinked manifest instead of following it",
+);
+await rm(resolve(symlinkHome, ".local"), { recursive: true, force: true });
+
+await exportSkills({ homeRoot: symlinkHome, sourceRoot: mergeSource });
+assert.equal((await verifySkillExport({ homeRoot: symlinkHome, sourceRoot: mergeSource })).ok, true);
+const alphaCodexDir = resolve(symlinkHome, ".codex/skills/alpha-skill");
+await rm(alphaCodexDir, { recursive: true, force: true });
+await mkdir(resolve(symlinkOutside, "alpha-skill"), { recursive: true });
+await writeFile(
+  resolve(symlinkOutside, "alpha-skill/SKILL.md"),
+  await readFile(resolve(mergeSource, "skills/alpha-skill/SKILL.md")),
+);
+await symlink(resolve(symlinkOutside, "alpha-skill"), alphaCodexDir);
+const readSymlinkVerification = await verifySkillExport({ homeRoot: symlinkHome, sourceRoot: mergeSource });
+assert.ok(
+  readSymlinkVerification.findings.some((item) => item.code === "export-symlink" && item.path === ".codex/skills/alpha-skill/SKILL.md"),
+  "Verification must reject symlinked export paths even when the linked content hash matches",
+);
+
+await rm(mergeSource, { recursive: true, force: true });
+await rm(mergeHome, { recursive: true, force: true });
+await rm(symlinkHome, { recursive: true, force: true });
+await rm(symlinkOutside, { recursive: true, force: true });
+console.log("Partial-export merge, orphan cleanup, and symlink-rejection tests passed.");
 
 console.log("Global bridge skills are synchronized across Codex, Claude, Antigravity App, and Antigravity CLI.");
 await rm(portableHome, { recursive: true, force: true });

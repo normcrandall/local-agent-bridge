@@ -6,7 +6,6 @@
   "required": [
     "name",
     "description",
-    "trigger",
     "requiredCapabilities",
     "contracts",
     "permissionIdentityBoundaries",
@@ -15,7 +14,6 @@
   "properties": {
     "name": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
     "description": { "type": "string", "minLength": 1 },
-    "trigger": { "type": "string", "minLength": 1 },
     "requiredCapabilities": {
       "type": "object",
       "required": ["mcpServers"],
