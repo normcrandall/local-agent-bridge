@@ -201,9 +201,14 @@ function marker(operation, headSha, value) {
   return `<!-- agent-bridge-builder:${operation}:${headSha}:${digest} -->`;
 }
 
+function normalizeBotLogin(login) {
+  const normalized = (login || "").toLowerCase();
+  return normalized.endsWith("[bot]") ? normalized.slice(0, -5) : normalized;
+}
+
 async function verifyIdentity({ fetchImpl, apiUrl, token, expectedLogin, verifiedLogin }) {
   const login = verifiedLogin || (await request({ fetchImpl, apiUrl, token, path: "/user" }))?.login;
-  if (login !== expectedLogin) {
+  if (normalizeBotLogin(login) !== normalizeBotLogin(expectedLogin)) {
     throw new Error(`GitHub builder identity mismatch: expected ${expectedLogin}, received ${login || "unknown"}.`);
   }
   return login;
@@ -229,6 +234,7 @@ export function createBoundBuilderClient({
   verifiedLogin = null,
   headSha,
   prNumber = null,
+  issueNumber = null,
   headRef = null,
   baseRef = null,
   requiredReviewStatusContext = "agent-review",
@@ -257,6 +263,9 @@ export function createBoundBuilderClient({
   if (trustedHumanReviewLogins.includes(expectedLogin)) {
     throw new Error("The builder identity cannot be a trusted human reviewer.");
   }
+  if (trustedReviewLogins.some((login) => typeof login !== "string" || !login || !login.endsWith("[bot]"))) {
+    throw new Error("Trusted reviewer logins must be bot logins.");
+  }
   if (trustedHumanReviewLogins.some((login) => typeof login !== "string" || !login || login.endsWith("[bot]"))) {
     throw new Error("Trusted human reviewer logins must be non-bot GitHub logins.");
   }
@@ -264,10 +273,16 @@ export function createBoundBuilderClient({
   let cachedToken = token || null;
   let cachedVerifiedLogin = verifiedLogin || null;
 
-  const context = { fetchImpl, apiUrl, token: cachedToken, repository, expectedLogin, verifiedLogin: cachedVerifiedLogin, headSha, prNumber };
+  const context = { fetchImpl, apiUrl, token: cachedToken, repository, expectedLogin, verifiedLogin: cachedVerifiedLogin, headSha, prNumber, issueNumber };
   const allowed = new Set(allowedOperations);
   const authorize = (operation) => {
     if (!allowed.has(operation)) throw new Error(`GitHub builder operation is not authorized: ${operation}.`);
+  };
+
+  const assertIssueBound = (num) => {
+    if (issueNumber === null || Number(issueNumber) !== Number(num)) {
+      throw new Error(`Client is bound to issue ${issueNumber}, cannot mutate issue ${num}.`);
+    }
   };
 
   async function ensureToken() {
@@ -334,7 +349,7 @@ export function createBoundBuilderClient({
     await identity();
     await boundPullRequest(context);
     const [owner, name] = repository.split("/");
-    const query = `query($owner:String!,$name:String!,$number:Int!,$after:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$after){nodes{id isResolved comments(first:100){nodes{id body url author{login}} pageInfo{hasNextPage endCursor}}} pageInfo{hasNextPage endCursor}}}}}`;
+    const query = `query($owner:String!,$name:String!,$number:Int!,$after:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$after){nodes{id isResolved comments(first:100){nodes{id body url author{login __typename}} pageInfo{hasNextPage endCursor}}} pageInfo{hasNextPage endCursor}}}}}`;
     const threads = [];
     let after = null;
     do {
@@ -347,7 +362,7 @@ export function createBoundBuilderClient({
       threads.push(...(connection?.nodes || []));
       after = connection?.pageInfo?.hasNextPage ? connection.pageInfo.endCursor : null;
     } while (after);
-    const commentsQuery = `query($id:ID!,$after:String){node(id:$id){... on PullRequestReviewThread{comments(first:100,after:$after){nodes{id body url author{login}} pageInfo{hasNextPage endCursor}}}}}`;
+    const commentsQuery = `query($id:ID!,$after:String){node(id:$id){... on PullRequestReviewThread{comments(first:100,after:$after){nodes{id body url author{login __typename}} pageInfo{hasNextPage endCursor}}}}}`;
     for (const thread of threads) {
       let commentsAfter = thread.comments?.pageInfo?.hasNextPage ? thread.comments.pageInfo.endCursor : null;
       while (commentsAfter) {
@@ -376,10 +391,12 @@ export function createBoundBuilderClient({
     if (!thread) throw new Error("Review thread is not part of the bound pull request.");
     const receiptMarker = marker("reply", headSha, `${threadId}:${body}`);
     const existing = thread.comments?.nodes?.find((comment) => (
-      comment.author?.login === expectedLogin && comment.body?.includes(receiptMarker)
+      comment.author?.__typename === "Bot"
+      && normalizeBotLogin(comment.author?.login) === normalizeBotLogin(expectedLogin)
+      && comment.body?.includes(receiptMarker)
     ));
     if (existing) return { operation: "reply_review_thread", threadId, url: existing.url, idempotent: true, login: expectedLogin, headSha };
-    const query = `mutation($threadId:ID!,$body:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$threadId,body:$body}){comment{id url author{login}}}}`;
+    const query = `mutation($threadId:ID!,$body:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$threadId,body:$body}){comment{id url author{login __typename}}}}`;
     const result = await request({
       ...context,
       path: "/graphql",
@@ -388,7 +405,9 @@ export function createBoundBuilderClient({
     });
     if (result?.errors?.length) throw new Error(`GitHub review-thread reply failed: ${result.errors[0].message}`);
     const comment = result?.data?.addPullRequestReviewThreadReply?.comment;
-    if (comment?.author?.login !== expectedLogin) throw new Error("GitHub posted the thread reply with an unexpected identity.");
+    if (comment?.author?.__typename !== "Bot" || normalizeBotLogin(comment?.author?.login) !== normalizeBotLogin(expectedLogin)) {
+      throw new Error("GitHub posted the thread reply with an unexpected identity.");
+    }
     return { operation: "reply_review_thread", threadId, url: comment.url, idempotent: false, login: expectedLogin, headSha };
   }
 
@@ -883,5 +902,156 @@ export function createBoundBuilderClient({
     });
   }
 
-  return { identity, ensurePullRequest, reviewThreads, replyReviewThread, resolveReviewThread, markReady, merge, createBranch, pushBranch, replaceBranch };
+  async function getIssue(issueNum) {
+    authorize("get_issue");
+    assertIssueBound(issueNum);
+    await identity();
+    return await request({
+      ...context,
+      path: `/repos/${repository}/issues/${issueNum}`,
+    });
+  }
+
+  async function addIssueLabel(issueNum, label) {
+    authorize("add_issue_label");
+    assertIssueBound(issueNum);
+    await identity();
+    try {
+      await request({
+        ...context,
+        path: `/repos/${repository}/labels/${encodeURIComponent(label)}`,
+      });
+    } catch (err) {
+      if (err.status === 404) {
+        try {
+          await request({
+            ...context,
+            path: `/repos/${repository}/labels`,
+            method: "POST",
+            body: { name: label, color: "ededed", description: "Agent Bridge issue claim label" },
+          });
+        } catch (createErr) {
+          if (createErr.status !== 422) {
+            throw createErr;
+          }
+        }
+      } else {
+        throw err;
+      }
+    }
+    return await request({
+      ...context,
+      path: `/repos/${repository}/issues/${issueNum}/labels`,
+      method: "POST",
+      body: { labels: [label] },
+    });
+  }
+
+  async function removeIssueLabel(issueNum, label) {
+    authorize("remove_issue_label");
+    assertIssueBound(issueNum);
+    await identity();
+    return await request({
+      ...context,
+      path: `/repos/${repository}/issues/${issueNum}/labels/${encodeURIComponent(label)}`,
+      method: "DELETE",
+    });
+  }
+
+  async function getIssueComments(issueNum) {
+    authorize("get_issue_comments");
+    assertIssueBound(issueNum);
+    await identity();
+    return await requestPages({
+      ...context,
+      path: `/repos/${repository}/issues/${issueNum}/comments?per_page=100`,
+    });
+  }
+
+  async function postIssueComment(issueNum, body) {
+    authorize("post_issue_comment");
+    assertIssueBound(issueNum);
+    await identity();
+    return await request({
+      ...context,
+      path: `/repos/${repository}/issues/${issueNum}/comments`,
+      method: "POST",
+      body: { body },
+    });
+  }
+
+  async function updateIssueComment(commentId, body) {
+    authorize("update_issue_comment");
+    const comments = await getIssueComments(issueNumber);
+    if (!comments.some(c => c.id === commentId)) {
+      throw new Error(`Comment ${commentId} does not belong to bound issue ${issueNumber}.`);
+    }
+    await identity();
+    return await request({
+      ...context,
+      path: `/repos/${repository}/issues/comments/${commentId}`,
+      method: "PATCH",
+      body: { body },
+    });
+  }
+
+  async function deleteIssueComment(commentId) {
+    authorize("delete_issue_comment");
+    const comments = await getIssueComments(issueNumber);
+    if (!comments.some(c => c.id === commentId)) {
+      throw new Error(`Comment ${commentId} does not belong to bound issue ${issueNumber}.`);
+    }
+    await identity();
+    return await request({
+      ...context,
+      path: `/repos/${repository}/issues/comments/${commentId}`,
+      method: "DELETE",
+    });
+  }
+
+  async function listTagLocks() {
+    authorize("list_tag_locks");
+    await identity();
+    const locks = await request({
+      ...context,
+      path: `/repos/${repository}/git/matching-refs/tags/claims/issue-${issueNumber}`,
+    });
+    const exactPrefix = `refs/tags/claims/issue-${issueNumber}-generation-`;
+    return locks.filter((lock) => {
+      if (!String(lock?.ref || "").startsWith(exactPrefix)) return false;
+      const generation = Number.parseInt(lock.ref.slice(exactPrefix.length), 10);
+      return Number.isInteger(generation)
+        && generation > 0
+        && lock.ref === `${exactPrefix}${generation}`;
+    });
+  }
+
+  async function acquireTagLock(generation, sha) {
+    authorize("acquire_tag_lock");
+    if (!Number.isInteger(generation) || generation < 1) {
+      throw new Error("Claim lock generation must be a positive integer.");
+    }
+    await identity();
+    return await request({
+      ...context,
+      path: `/repos/${repository}/git/refs`,
+      method: "POST",
+      body: { ref: `refs/tags/claims/issue-${issueNumber}-generation-${generation}`, sha },
+    });
+  }
+
+  async function releaseTagLock(generation) {
+    authorize("release_tag_lock");
+    if (!Number.isInteger(generation) || generation < 1) {
+      throw new Error("Claim lock generation must be a positive integer.");
+    }
+    await identity();
+    return await request({
+      ...context,
+      path: `/repos/${repository}/git/refs/tags/claims/issue-${issueNumber}-generation-${generation}`,
+      method: "DELETE",
+    });
+  }
+
+  return { identity, ensurePullRequest, reviewThreads, replyReviewThread, resolveReviewThread, markReady, merge, createBranch, pushBranch, replaceBranch, getIssue, addIssueLabel, removeIssueLabel, getIssueComments, postIssueComment, updateIssueComment, deleteIssueComment, listTagLocks, acquireTagLock, releaseTagLock, expectedLogin, repository, issueNumber };
 }

@@ -242,6 +242,12 @@ async function reconcileInterruptedCleanup() {
       await appendEvent(WORKSPACE_ROOT, state.id, { type: "cleanup_reconciled", at: new Date().toISOString(), action });
     }
   }
+  try {
+    const { reconcileClaimsAndPortfolios } = await import("./github-issue-claims.mjs");
+    await reconcileClaimsAndPortfolios(WORKSPACE_ROOT);
+  } catch (error) {
+    console.error(`GitHub issue claim reconciliation failed: ${error.message}`);
+  }
 }
 
 function compactStatusView(view) {
@@ -279,6 +285,27 @@ function updatePortfolioItemState(state, itemId, patch) {
   });
   if (!found) throw new Error(`Portfolio item ${itemId} does not exist.`);
   return refreshPortfolioState({ ...state, items });
+}
+
+async function releaseLinkedIssueClaim(item, outcome) {
+  if (!item?.collaborationId) return { released: false, reason: "no_collaboration" };
+  const collaboration = await readCollaboration(WORKSPACE_ROOT, item.collaborationId);
+  if (!collaboration.issueClaim) return { released: false, reason: "no_issue_claim" };
+  const { getBuilderClientForWorkspace, releaseClaimLease } = await import("./github-issue-claims.mjs");
+  const claimClient = await getBuilderClientForWorkspace(
+    collaboration.workspace || WORKSPACE_ROOT,
+    collaboration.issueClaim.issueNumber,
+  );
+  if (!claimClient) {
+    throw new Error(`No builder App client is configured for claimed issue #${collaboration.issueClaim.issueNumber}.`);
+  }
+  await releaseClaimLease({
+    client: claimClient,
+    issueNumber: collaboration.issueClaim.issueNumber,
+    collaborationId: item.collaborationId,
+    outcome,
+  });
+  return { released: true, issueNumber: collaboration.issueClaim.issueNumber };
 }
 
 function portfolioLaneOutcome(item, collaboration, expectedHeadSha) {
@@ -441,6 +468,21 @@ const githubBuilderSchema = z.object({
 }).strict().optional().describe(
   "Authorize only target-bound builder GitHub operations for one repository and head SHA. Available only to the work-mode writer.",
 );
+const issueClaimSchema = z.object({
+  repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
+  issueNumber: z.number().int().min(1),
+  expectedLogin: z.string().regex(GITHUB_LOGIN_PATTERN),
+  portfolioId: z.string().min(1).optional(),
+  itemId: z.string().min(1).optional(),
+  writer: z.string().min(1).optional(),
+  branch: z.string().min(1).optional(),
+  worktree: z.string().min(1).optional(),
+  baseSha: z.string().regex(/^[0-9a-f]{40}$/i).optional(),
+  headSha: z.string().regex(/^[0-9a-f]{40}$/i).optional(),
+  allowedOperations: z.array(z.string()).optional(),
+}).strict().optional().describe(
+  "Durable issue claim lease configuration.",
+);
 const budgetSchema = z.object({
   maxCostUsd: z.number().positive().optional(),
   maxTokens: z.number().int().positive().optional(),
@@ -489,6 +531,7 @@ const portfolioItemSchema = z.object({
   paths: z.array(z.string().min(1).max(1_000)).max(500).default([]),
   resources: z.array(z.string().min(1).max(500)).max(200).default([]),
   verificationCommands: verificationCommandsSchema.default([]),
+  issueNumber: z.number().int().min(1).optional(),
 }).strict();
 const arbitrationDossierSchema = z.object({
   itemId: z.string().min(1),
@@ -555,6 +598,7 @@ server.registerTool(
       handoffPath: handoffPathSchema,
       githubReview: githubReviewSchema,
       githubBuilder: githubBuilderSchema,
+      issueClaim: issueClaimSchema,
       taskNumber: z.number().int().nonnegative().optional().describe("When supplied, rotate the writer deterministically across the selected agents unless writer is explicit."),
       rotationOffset: z.number().int().default(0),
       worktree: worktreeSchema,
@@ -592,86 +636,211 @@ server.registerTool(
     }
     if (writer && !delegatedAgents.includes(writer)) throw new Error("writer must be included in delegated agents.");
     const requestedWorkspace = projectDirectory(input.workspace);
-    const worktree = input.worktree
-      ? createWorktree({
+    const collaborationId = `bridge-${randomUUID()}`;
+    let leaseAcquired = false;
+    let claimClient = null;
+    let claimHeadSha = null;
+    let claimBaseSha = null;
+    let resolvedIssueClaim = input.issueClaim ? { ...input.issueClaim } : null;
+
+    if (input.issueClaim) {
+      const { acquireClaimLease } = await import("./github-issue-claims.mjs");
+      const { createInstallationToken } = await import("./github-app-auth.mjs");
+      const { createBoundBuilderClient } = await import("./github-builder-client.mjs");
+      const repository = input.issueClaim.repository;
+      const expectedLogin = input.issueClaim.expectedLogin;
+      const credential = await createInstallationToken({ role: "builder", repository });
+      let headSha = input.issueClaim.headSha;
+      if (!headSha) {
+        const rev = spawnSync("git", ["rev-parse", "HEAD"], { cwd: requestedWorkspace, encoding: "utf8" });
+        if (rev.status === 0) {
+          headSha = rev.stdout.trim();
+        } else {
+          throw new Error("Unable to retrieve HEAD SHA from workspace.");
+        }
+      }
+      claimHeadSha = headSha;
+      const baseRef = input.worktree?.base || input.issueClaim.baseSha || headSha;
+      const baseRevision = spawnSync("git", ["rev-parse", baseRef], { cwd: requestedWorkspace, encoding: "utf8" });
+      if (baseRevision.status !== 0) throw new Error(`Unable to resolve claim base revision ${baseRef}.`);
+      claimBaseSha = baseRevision.stdout.trim();
+
+      claimClient = createBoundBuilderClient({
+        apiUrl: input.issueClaim.apiUrl || process.env.GITHUB_BUILDER_API_URL || "https://api.github.com",
+        token: credential.token,
+        verifiedLogin: credential.verifiedLogin,
+        repository,
+        expectedLogin,
+        headSha,
+        issueNumber: input.issueClaim.issueNumber,
+        allowedOperations: ["get_issue", "add_issue_label", "remove_issue_label", "get_issue_comments", "post_issue_comment", "update_issue_comment", "delete_issue_comment", "list_tag_locks", "acquire_tag_lock", "release_tag_lock"],
         workspace: requestedWorkspace,
-        taskId: input.worktree.taskId,
-        branch: input.worktree.branch,
-        base: input.worktree.base,
-        worktreeRoot: input.worktree.root,
-      })
-      : null;
-    const workspace = worktree?.path || requestedWorkspace;
-    if (input.chair?.workspace && projectDirectory(input.chair.workspace) !== realpathSync(workspace)) {
-      throw new Error("Native chair workspace must match the collaboration workspace.");
+        fetchImpl: fetch,
+      });
+
+      let portfolioId = input.issueClaim.portfolioId || null;
+      let itemId = input.issueClaim.itemId || null;
+      if (!portfolioId || !itemId) {
+        try {
+          const portfolios = await listPortfolios(PORTFOLIO_ROOT);
+          for (const p of portfolios) {
+            const item = p.items.find(i => i.issueNumber === input.issueClaim.issueNumber || i.id === String(input.issueClaim.issueNumber));
+            if (item) {
+              portfolioId = p.id;
+              itemId = item.id;
+              break;
+            }
+          }
+        } catch {}
+      }
+
+      let plannedWorktreePath = null;
+      if (input.worktree) {
+        const root = resolve(input.worktree.root || join(requestedWorkspace, ".bridge/worktrees"));
+        plannedWorktreePath = resolve(root, input.worktree.taskId);
+      }
+
+      await acquireClaimLease({
+        client: claimClient,
+        issueNumber: input.issueClaim.issueNumber,
+        portfolioId,
+        itemId,
+        writer: writer || input.writer || startAgent,
+        collaborationId,
+        branch: input.worktree?.branch || input.issueClaim.branch || null,
+        worktree: plannedWorktreePath || input.issueClaim.worktree || null,
+        baseSha: claimBaseSha,
+        headSha: claimHeadSha,
+        workspaceRoot: WORKSPACE_ROOT,
+      });
+      leaseAcquired = true;
     }
-    const readiness = preflight({ workspace, agents: delegatedAgents, mode: effectiveMode, workProfile: input.workProfile || "exact", permissionProfile: effectivePermissionProfile });
-    if (!readiness.checks.find((check) => check.name === "workspace")?.ok
-      || !readiness.checks.find((check) => check.name === "git-repository")?.ok) {
-      throw new Error("Collaboration preflight failed: workspace must exist and be a Git repository.");
-    }
-    const existing = await listCollaborations(WORKSPACE_ROOT, { status: "indeterminate", limit: 100 });
-    const ownershipConflict = existing.find((candidate) => candidate.workspace === workspace);
-    if (ownershipConflict) {
-      throw new Error(`Workspace ownership is preserved by indeterminate collaboration ${ownershipConflict.id}; inspect and cancel it before starting replacement work.`);
-    }
-    const state = await createCollaboration(WORKSPACE_ROOT, {
-      task: input.task,
-      workspace,
-      agents: delegatedAgents,
-      participants: input.chair ? [input.chair.provider, ...delegatedAgents.filter((agent) => agent !== input.chair.provider)] : delegatedAgents,
-      chair: native.chair,
-      startAgent,
-      mode: effectiveMode,
-      requestedMode: input.mode,
-      chairOwnsWork: native.chairOwnsWork,
-      writer,
-      browser: input.browser,
-      models: input.models || {},
-      modelFallbacks: input.modelFallbacks || {},
-      providerConcurrency: await loadProviderConcurrency({ overrides: input.providerConcurrency || {} }),
-      verificationCommands: input.verificationCommands || [],
-      workCommands: input.workCommands || [],
-      workProfile: input.workProfile || "exact",
-      permissionProfile: effectivePermissionProfile,
-      requestedPermissionProfile: input.permissionProfile || "standard",
-      handoffPath: input.handoffPath || null,
-      githubReview: input.githubReview || null,
-      githubBuilder: input.githubBuilder || null,
-      rotation: rotated ? { taskNumber: input.taskNumber, offset: input.rotationOffset, ...rotated } : null,
-      worktree,
-      preflight: readiness,
-      capabilities: readiness.capabilities,
-      budget: input.budget || {},
-      providerRecovery: input.providerRecovery || { enabled: true, maxAttempts: 3, backoffSeconds: [15, 60, 180] },
-      providerRecoveryState: { attempts: 0, status: "idle" },
-      usage: {},
-      ciTracking: input.ciTracking || null,
-      ci: null,
-      decisionPolicy: input.decisionPolicy || { additionalEscalations: [], maxDialogueTurns: 4 },
-      decisionPolicyEnabled: Boolean(input.decisionPolicy),
-      decisions: [],
-      handoffs: [],
-      completion: null,
-      runSequence: 1,
-      coordinatorWake: null,
-      nativeChairTurns: [],
-      turnTimeoutSeconds: input.turnTimeoutSeconds,
-      run: { maxTurns: input.decisionPolicy ? Math.min(input.maxTurns, input.decisionPolicy.maxDialogueTurns) : input.maxTurns },
-      runtime: {
-        sessions: Object.fromEntries(delegatedAgents.map((agent) => [agent, null])),
-        nextAgent: startAgent,
-        previousMessage: null,
-        previousAgent: null,
-        agreementStreak: 0,
-        turnCount: 0,
-        availableAgents: delegatedAgents,
-        unavailableAgents: {},
+
+    try {
+      const worktree = input.worktree
+        ? createWorktree({
+          workspace: requestedWorkspace,
+          taskId: input.worktree.taskId,
+          branch: input.worktree.branch,
+          base: input.worktree.base,
+          worktreeRoot: input.worktree.root,
+        })
+        : null;
+      const workspace = worktree?.path || requestedWorkspace;
+      if (input.chair?.workspace && projectDirectory(input.chair.workspace) !== realpathSync(workspace)) {
+        throw new Error("Native chair workspace must match the collaboration workspace.");
+      }
+      const readiness = preflight({ workspace, agents: delegatedAgents, mode: effectiveMode, workProfile: input.workProfile || "exact", permissionProfile: effectivePermissionProfile });
+      if (!readiness.checks.find((check) => check.name === "workspace")?.ok
+        || !readiness.checks.find((check) => check.name === "git-repository")?.ok) {
+        throw new Error("Collaboration preflight failed: workspace must exist and be a Git repository.");
+      }
+      const existing = await listCollaborations(WORKSPACE_ROOT, { status: "indeterminate", limit: 100 });
+      const ownershipConflict = existing.find((candidate) => candidate.workspace === workspace);
+      if (ownershipConflict) {
+        throw new Error(`Workspace ownership is preserved by indeterminate collaboration ${ownershipConflict.id}; inspect and cancel it before starting replacement work.`);
+      }
+      if (input.issueClaim) {
+        const actualHead = spawnSync("git", ["rev-parse", "HEAD"], { cwd: workspace, encoding: "utf8" });
+        if (actualHead.status !== 0) throw new Error("Unable to resolve the claimed worktree HEAD.");
+        resolvedIssueClaim = {
+          ...input.issueClaim,
+          writer: writer || input.writer || startAgent,
+          branch: worktree?.branch || input.issueClaim.branch || null,
+          worktree: workspace,
+          baseSha: claimBaseSha,
+          headSha: actualHead.stdout.trim(),
+        };
+        const { refreshClaimLease } = await import("./github-issue-claims.mjs");
+        await refreshClaimLease({
+          client: claimClient,
+          issueNumber: input.issueClaim.issueNumber,
+          collaborationId,
+          phase: "preflight",
+          summary: "Worktree created and collaboration preflight passed.",
+          headSha: resolvedIssueClaim.headSha,
+          branch: resolvedIssueClaim.branch,
+          worktree: resolvedIssueClaim.worktree,
+        });
+      }
+      const state = await createCollaboration(WORKSPACE_ROOT, {
+        id: collaborationId,
+        task: input.task,
+        workspace,
+        agents: delegatedAgents,
+        participants: input.chair ? [input.chair.provider, ...delegatedAgents.filter((agent) => agent !== input.chair.provider)] : delegatedAgents,
+        chair: native.chair,
+        startAgent,
+        mode: effectiveMode,
+        requestedMode: input.mode,
+        chairOwnsWork: native.chairOwnsWork,
         writer,
-      },
-    });
-    startWorker(state.id);
-    return toolResponse(await collaborationView(WORKSPACE_ROOT, state.id, 1));
+        browser: input.browser,
+        models: input.models || {},
+        modelFallbacks: input.modelFallbacks || {},
+        providerConcurrency: await loadProviderConcurrency({ overrides: input.providerConcurrency || {} }),
+        verificationCommands: input.verificationCommands || [],
+        workCommands: input.workCommands || [],
+        workProfile: input.workProfile || "exact",
+        permissionProfile: effectivePermissionProfile,
+        requestedPermissionProfile: input.permissionProfile || "standard",
+        handoffPath: input.handoffPath || null,
+        githubReview: input.githubReview || null,
+        githubBuilder: input.githubBuilder || null,
+        issueClaim: resolvedIssueClaim,
+        rotation: rotated ? { taskNumber: input.taskNumber, offset: input.rotationOffset, ...rotated } : null,
+        worktree,
+        preflight: readiness,
+        capabilities: readiness.capabilities,
+        budget: input.budget || {},
+        providerRecovery: input.providerRecovery || { enabled: true, maxAttempts: 3, backoffSeconds: [15, 60, 180] },
+        providerRecoveryState: { attempts: 0, status: "idle" },
+        usage: {},
+        ciTracking: input.ciTracking || null,
+        ci: null,
+        decisionPolicy: input.decisionPolicy || { additionalEscalations: [], maxDialogueTurns: 4 },
+        decisionPolicyEnabled: Boolean(input.decisionPolicy),
+        decisions: [],
+        handoffs: [],
+        completion: null,
+        runSequence: 1,
+        coordinatorWake: null,
+        nativeChairTurns: [],
+        turnTimeoutSeconds: input.turnTimeoutSeconds,
+        run: { maxTurns: input.decisionPolicy ? Math.min(input.maxTurns, input.decisionPolicy.maxDialogueTurns) : input.maxTurns },
+        runtime: {
+          sessions: Object.fromEntries(delegatedAgents.map((agent) => [agent, null])),
+          nextAgent: startAgent,
+          previousMessage: null,
+          previousAgent: null,
+          agreementStreak: 0,
+          turnCount: 0,
+          availableAgents: delegatedAgents,
+          unavailableAgents: {},
+          writer,
+        },
+      });
+      startWorker(state.id);
+      return toolResponse(await collaborationView(WORKSPACE_ROOT, state.id, 1));
+    } catch (startError) {
+      if (leaseAcquired && claimClient && input.issueClaim) {
+        try {
+          const { releaseClaimLease } = await import("./github-issue-claims.mjs");
+          await releaseClaimLease({
+            client: claimClient,
+            issueNumber: input.issueClaim.issueNumber,
+            collaborationId,
+            outcome: "rolled_back",
+          });
+        } catch (rollbackError) {
+          throw new AggregateError(
+            [startError, rollbackError],
+            `Collaboration start failed and its issue-claim rollback also failed: ${startError.message}; ${rollbackError.message}`,
+          );
+        }
+      }
+      throw startError;
+    }
   },
 );
 
@@ -823,7 +992,13 @@ server.registerTool(
   async ({ portfolioId: id, expectedRevision, itemId, status, ...details }) => {
     blockNestedCollaboration();
     const patch = Object.fromEntries(Object.entries({ status, ...details }).filter(([, value]) => value !== undefined));
-    return toolResponse(await updatePortfolio(PORTFOLIO_ROOT, id, expectedRevision, (current) => updatePortfolioItemState(current, itemId, patch)));
+    const result = await updatePortfolio(PORTFOLIO_ROOT, id, expectedRevision, (current) => updatePortfolioItemState(current, itemId, patch));
+
+    if (status === "obsolete") {
+      await releaseLinkedIssueClaim(result.items.find((item) => item.id === itemId), "obsolete");
+    }
+
+    return toolResponse(result);
   },
 );
 
@@ -978,10 +1153,13 @@ server.registerTool(
   },
   async ({ portfolioId: id, expectedRevision, itemId, expectedTargetSha, expectedHeadSha, mergedSha }) => {
     blockNestedCollaboration();
-    return toolResponse(await updatePortfolio(PORTFOLIO_ROOT, id, expectedRevision, (current) => updatePortfolioItemState({
+    const updatedState = await updatePortfolio(PORTFOLIO_ROOT, id, expectedRevision, (current) => updatePortfolioItemState({
       ...current,
       mergeTrain: recordMergeResult(current.mergeTrain, { itemId, expectedTargetSha, expectedHeadSha, mergedSha }),
-    }, itemId, { status: "merged", summary: `Merged as ${mergedSha}` })));
+    }, itemId, { status: "merged", summary: `Merged as ${mergedSha}` }));
+
+    await releaseLinkedIssueClaim(updatedState.items.find((item) => item.id === itemId), "merged");
+    return toolResponse(updatedState);
   },
 );
 
@@ -1133,6 +1311,7 @@ server.registerTool(
       handoffPath: handoffPathSchema,
       githubReview: githubReviewSchema,
       githubBuilder: githubBuilderSchema,
+      issueClaim: issueClaimSchema,
       budget: budgetSchema,
       providerRecovery: providerRecoverySchema,
       ciTracking: ciTrackingSchema,
@@ -1154,6 +1333,7 @@ server.registerTool(
     handoffPath,
     githubReview,
     githubBuilder,
+    issueClaim,
     budget,
     providerRecovery,
     ciTracking,
@@ -1193,6 +1373,31 @@ server.registerTool(
         ),
       })
       : current.providerConcurrency || await loadProviderConcurrency();
+    let resolvedContinuationIssueClaim = current.issueClaim || null;
+    if (issueClaim) {
+      if (!current.issueClaim) {
+        throw new Error("A GitHub issue claim cannot be added during continuation; acquire it atomically with start_collaboration.");
+      }
+      if (issueClaim.repository !== current.issueClaim.repository
+        || issueClaim.issueNumber !== current.issueClaim.issueNumber
+        || issueClaim.expectedLogin !== current.issueClaim.expectedLogin) {
+        throw new Error("Continuation cannot change the repository, issue number, or builder identity of an existing claim.");
+      }
+      resolvedContinuationIssueClaim = { ...current.issueClaim, ...issueClaim };
+      const { getBuilderClientForWorkspace, refreshClaimLease } = await import("./github-issue-claims.mjs");
+      const claimClient = await getBuilderClientForWorkspace(current.workspace, current.issueClaim.issueNumber);
+      if (!claimClient) throw new Error(`No builder App client is configured for claimed issue #${current.issueClaim.issueNumber}.`);
+      await refreshClaimLease({
+        client: claimClient,
+        issueNumber: current.issueClaim.issueNumber,
+        collaborationId: id,
+        phase: "working",
+        summary: "Collaboration continuation queued.",
+        headSha: resolvedContinuationIssueClaim.headSha,
+        branch: resolvedContinuationIssueClaim.branch,
+        worktree: resolvedContinuationIssueClaim.worktree || current.workspace,
+      });
+    }
     const state = await updateCollaboration(WORKSPACE_ROOT, id, (previous) => ({
       ...previous,
       status: "queued",
@@ -1211,6 +1416,7 @@ server.registerTool(
       handoffPath: handoffPath || previous.handoffPath || null,
       githubReview: githubReview || previous.githubReview || null,
       githubBuilder: githubBuilder || previous.githubBuilder || null,
+      issueClaim: resolvedContinuationIssueClaim,
       budget: budget || previous.budget || {},
       providerRecovery: providerRecovery || previous.providerRecovery || { enabled: true, maxAttempts: 3, backoffSeconds: [15, 60, 180] },
       providerRecoveryState: { attempts: 0, status: "idle" },
@@ -1306,15 +1512,61 @@ server.registerTool(
       ...previous,
       cancelRequested: true,
     }, { status: "cancelled" }));
+
+    let claimReleaseError = null;
+    if (before.issueClaim) {
+      try {
+        await releaseLinkedIssueClaim({ collaborationId: id }, "cancelled");
+      } catch (error) {
+        claimReleaseError = error;
+      }
+    }
+
     const releasedProviderCapacity = await releaseProviderCapacityForCollaboration(WORKSPACE_ROOT, id);
     await appendEvent(WORKSPACE_ROOT, id, {
       type: "cancelled",
       at: new Date().toISOString(),
       terminatedWorkerPid: before.workerPid || null,
       releasedProviderCapacity,
+      claimRelease: claimReleaseError ? { ok: false, error: claimReleaseError.message } : { ok: true },
     });
+    if (claimReleaseError) {
+      throw new Error(`Collaboration ${id} was cancelled, but its GitHub issue claim remains held: ${claimReleaseError.message}`, { cause: claimReleaseError });
+    }
     return toolResponse({ ...state, turns: [] });
   },
+);
+
+server.registerTool(
+  "release_issue_claim",
+  {
+    title: "Recover an inspected issue claim",
+    description: "Release one target-bound issue claim after explicit inspection. Orphaned refs require their exact generation.",
+    inputSchema: {
+      repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
+      issueNumber: z.number().int().min(1),
+      expectedLogin: z.string().regex(GITHUB_LOGIN_PATTERN),
+      collaborationId: z.string().min(1),
+      generation: z.number().int().min(1).optional(),
+      outcome: z.enum(["merged", "cancelled", "obsolete", "rolled_back", "taken_over", "recovered"]).default("recovered"),
+    },
+  },
+  async ({ repository, issueNumber, expectedLogin, collaborationId, generation, outcome }) => {
+    blockNestedCollaboration();
+    const { getBuilderClientForWorkspace, recoverIssueClaim, releaseClaimLease } = await import("./github-issue-claims.mjs");
+    const claimClient = await getBuilderClientForWorkspace(WORKSPACE_ROOT, issueNumber);
+    if (!claimClient) throw new Error(`No builder App client is configured for claimed issue #${issueNumber}.`);
+    const normalizeLogin = (login) => String(login || "").toLowerCase().replace(/\[bot\]$/, "");
+    if (claimClient.repository !== repository || normalizeLogin(claimClient.expectedLogin) !== normalizeLogin(expectedLogin)) {
+      throw new Error("Inspected recovery target does not match the bound repository and builder App identity.");
+    }
+    const recovery = outcome === "recovered"
+      ? await recoverIssueClaim({ client: claimClient, issueNumber, collaborationId, generation, workspaceRoot: WORKSPACE_ROOT })
+      : (await releaseClaimLease({ client: claimClient, issueNumber, collaborationId, outcome }), { recovered: true, generation, canonical: true });
+    const recoveryReceipt = `Inspected recovery receipt: issue #${issueNumber}, collaboration ${collaborationId}, generation ${recovery.generation || generation || "canonical"}, outcome ${outcome}.`;
+    await claimClient.postIssueComment(issueNumber, recoveryReceipt);
+    return toolResponse({ ok: true, ...recovery, outcome });
+  }
 );
 
 server.registerTool(

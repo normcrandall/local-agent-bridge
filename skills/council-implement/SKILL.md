@@ -11,6 +11,8 @@ Apply the installed AI Hero `implement` workflow with a visible three-model coun
 
 Read `~/.agents/skills/implement/SKILL.md` completely before acting. Follow every ordering rule, evidence gate, confirmation point, and output contract in that skill. If it is missing, stop and report the missing path instead of improvising a substitute.
 
+Inspect the issue's `agent:in-progress` label and trusted builder-App claim comment before scheduling it. Exclude a fresh claim owned by another collaboration, acquire a durable GitHub issue claim lease before worktree creation or delegation, and release it only at terminal delivery (merge, cancel, obsolete) or explicit recovery. Failed, indeterminate, completed, and review-pending work remains claimed.
+
 ## Start visibly
 
 Use `$run-roundtable` as the collaboration protocol. If skill composition is unavailable, call the equivalent `collaboration` MCP operations directly. Include Claude, Codex, and Antigravity unless the user explicitly excludes one. Pass the current host as `chair` with its provider and absolute workspace, keep its work in the native session, and delegate only to peers; same-provider delegation requires an explicit user request. Omit model overrides so every provider uses the model currently configured by the user.

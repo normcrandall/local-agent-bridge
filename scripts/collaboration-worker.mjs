@@ -25,6 +25,8 @@ import {
 } from "../src/review-publication.mjs";
 import { acquireProviderCapacity, loadProviderConcurrency } from "../src/provider-concurrency.mjs";
 import { enqueueCoordinatorWake } from "../src/coordinator-wake.mjs";
+import { createBoundBuilderClient } from "../src/github-builder-client.mjs";
+import { createInstallationToken } from "../src/github-app-auth.mjs";
 
 const runtimeRoot = realpathSync(
   process.env.BRIDGE_RUNTIME_ROOT || process.env.BRIDGE_ROOT || fileURLToPath(new URL("..", import.meta.url)),
@@ -38,6 +40,20 @@ if (!id) throw new Error("A collaboration ID is required.");
 let releaseWorker = null;
 let releaseWorkspace = null;
 let pool = null;
+
+function gitValue(workspace, args, label) {
+  const result = spawnSync("git", args, { cwd: workspace, encoding: "utf8" });
+  if (result.status !== 0) throw new Error(`Unable to resolve ${label} in ${workspace}.`);
+  return result.stdout.trim();
+}
+
+function claimWorkspaceMetadata(state) {
+  return {
+    headSha: gitValue(state.workspace, ["rev-parse", "HEAD"], "claim HEAD"),
+    branch: gitValue(state.workspace, ["branch", "--show-current"], "claim branch") || state.issueClaim?.branch || null,
+    worktree: state.workspace,
+  };
+}
 
 async function scheduleProviderRecovery(error) {
   if (!/No requested model is currently available/i.test(error?.message || String(error))) return false;
@@ -126,6 +142,29 @@ try {
     process.exit(0);
   }
 
+  let claimClient = null;
+  let workerHeadSha = null;
+  if (state.issueClaim) {
+    const repository = state.issueClaim.repository;
+    const expectedLogin = state.issueClaim.expectedLogin;
+    const credential = await createInstallationToken({ role: "builder", repository });
+
+    workerHeadSha = claimWorkspaceMetadata(state).headSha;
+
+    claimClient = createBoundBuilderClient({
+      apiUrl: state.issueClaim.apiUrl || "https://api.github.com",
+      token: credential.token,
+      verifiedLogin: credential.verifiedLogin,
+      repository,
+      expectedLogin,
+      headSha: workerHeadSha,
+      issueNumber: state.issueClaim.issueNumber,
+      allowedOperations: ["get_issue", "add_issue_label", "remove_issue_label", "get_issue_comments", "post_issue_comment", "update_issue_comment", "delete_issue_comment", "list_tag_locks", "acquire_tag_lock", "release_tag_lock"],
+      workspace: state.workspace,
+      fetchImpl: fetch,
+    });
+  }
+
   state = await updateCollaboration(workspaceRoot, id, (current) => ({
     ...current,
     status: "running",
@@ -138,6 +177,20 @@ try {
     runStartedAt: current.runStartedAt || new Date().toISOString(),
   }));
   await appendEvent(workspaceRoot, id, { type: "run_started", at: new Date().toISOString(), pid: process.pid });
+
+  if (claimClient) {
+    const { refreshClaimLease } = await import("../src/github-issue-claims.mjs");
+    const metadata = claimWorkspaceMetadata(state);
+    workerHeadSha = metadata.headSha;
+    await refreshClaimLease({
+      client: claimClient,
+      issueNumber: state.issueClaim.issueNumber,
+      collaborationId: id,
+      phase: "running",
+      summary: "Starting provider work.",
+      ...metadata,
+    });
+  }
 
   if (state.mode === "work") releaseWorkspace = await acquireWorkspaceLock(workspaceRoot, state.workspace);
 
@@ -476,13 +529,27 @@ try {
       }));
     },
     onState: async (runtime) => {
+      const metadata = claimClient ? claimWorkspaceMetadata(state) : null;
+      if (metadata) workerHeadSha = metadata.headSha;
       await updateCollaboration(workspaceRoot, id, (current) => ({
         ...current,
+        issueClaim: metadata ? { ...current.issueClaim, ...metadata } : current.issueClaim,
         runtime: {
           ...runtime,
           activeCall: runtime.activeCall === undefined ? current.runtime?.activeCall || null : runtime.activeCall,
         },
       }));
+      if (claimClient) {
+        const { refreshClaimLease } = await import("../src/github-issue-claims.mjs");
+        await refreshClaimLease({
+          client: claimClient,
+          issueNumber: state.issueClaim.issueNumber,
+          collaborationId: id,
+          phase: runtime.activeCall?.phase || "running",
+          summary: runtime.activeCall?.summary || "Provider work is active.",
+          ...metadata,
+        });
+      }
     },
   });
 
@@ -490,8 +557,11 @@ try {
     const recoveryExhausted = outcome.reason === "failed"
       && /No requested model is currently available/i.test(outcome.error || "");
     const finalRuntime = outcome.reason === "indeterminate" ? outcome.state : { ...outcome.state, activeCall: null };
+    const finalClaimMetadata = claimClient ? claimWorkspaceMetadata(state) : null;
+    if (finalClaimMetadata) workerHeadSha = finalClaimMetadata.headSha;
     await updateCollaboration(workspaceRoot, id, (current) => clearTerminalRuntime({
       ...current, runtime: finalRuntime, writer: outcome.state.writer,
+      issueClaim: finalClaimMetadata ? { ...current.issueClaim, ...finalClaimMetadata } : current.issueClaim,
       cancelRequested: outcome.reason === "cancelled",
       providerRecoveryState: recoveryExhausted
         ? {
@@ -510,12 +580,64 @@ try {
       reason: outcome.reason,
       turnCount: outcome.state.turnCount,
     });
+    if (claimClient) {
+      if (outcome.reason === "completed") {
+        const { refreshClaimLease } = await import("../src/github-issue-claims.mjs");
+        await refreshClaimLease({
+          client: claimClient,
+          issueNumber: state.issueClaim.issueNumber,
+          collaborationId: id,
+          phase: "completed",
+          summary: "Provider work completed; the claim remains held through review and merge.",
+          ...finalClaimMetadata,
+        });
+      } else if (["cancelled", "obsolete"].includes(outcome.reason)) {
+        const { releaseClaimLease } = await import("../src/github-issue-claims.mjs");
+        await releaseClaimLease({
+          client: claimClient,
+          issueNumber: state.issueClaim.issueNumber,
+          collaborationId: id,
+          outcome: outcome.reason,
+        });
+      } else if (["failed", "indeterminate"].includes(outcome.reason)) {
+        const { refreshClaimLease } = await import("../src/github-issue-claims.mjs");
+        await refreshClaimLease({
+          client: claimClient,
+          issueNumber: state.issueClaim.issueNumber,
+          collaborationId: id,
+          phase: outcome.reason,
+          summary: outcome.error || `Provider work stopped with ${outcome.reason}; the claim remains held.`,
+          ...finalClaimMetadata,
+        });
+      }
+    }
     await enqueueCoordinatorWake(workspaceRoot, id);
   }
 } catch (error) {
   if (!(await scheduleProviderRecovery(error).catch(() => false))) {
+    let failure = error;
+    if (claimClient) {
+      try {
+        const { refreshClaimLease } = await import("../src/github-issue-claims.mjs");
+        const metadata = claimWorkspaceMetadata(state);
+        workerHeadSha = metadata.headSha;
+        await refreshClaimLease({
+          client: claimClient,
+          issueNumber: state.issueClaim.issueNumber,
+          collaborationId: id,
+          phase: error?.indeterminate ? "indeterminate" : "failed",
+          summary: error.message,
+          ...metadata,
+        });
+      } catch (claimErr) {
+        failure = new AggregateError(
+          [error, claimErr],
+          `Provider work failed and the GitHub claim could not be refreshed: ${error.message}; ${claimErr.message}`,
+        );
+      }
+    }
     await updateCollaboration(workspaceRoot, id, (current) => error?.indeterminate
-      ? ({ ...current, status: "indeterminate", error: error.stack || error.message })
+      ? ({ ...current, status: "indeterminate", error: failure.stack || failure.message })
       : clearTerminalRuntime({
         ...current,
         providerRecoveryState: /No requested model is currently available/i.test(error.message || "")
@@ -526,12 +648,13 @@ try {
             lastError: error.message,
           }
           : current.providerRecoveryState,
-      }, { status: "failed", error: error.stack || error.message })).catch(() => {});
+      }, { status: "failed", error: failure.stack || failure.message })).catch(() => {});
     await appendEvent(workspaceRoot, id, {
       type: "run_failed",
       at: new Date().toISOString(),
-      error: error.stack || error.message,
+      error: failure.stack || failure.message,
     }).catch(() => {});
+
     await enqueueCoordinatorWake(workspaceRoot, id).catch(() => {});
     process.exitCode = 1;
   }
