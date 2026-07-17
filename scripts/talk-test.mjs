@@ -154,4 +154,17 @@ assert.deepEqual(indeterminateOutcome.state.availableAgents, ["claude", "codex"]
 assert.equal(indeterminateOutcome.state.activeCall.agent, "codex");
 assert.equal(indeterminateOutcome.state.activeCall.status, "indeterminate");
 
+const standaloneSecret = "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRcfiCYEXAMPLEKEY";
+const standaloneOutcome = await runConversation({
+  task: "Sanitize a standalone transcript",
+  agents: ["claude"],
+  maxTurns: 1,
+  send: async () => ({
+    message: `Observed ${standaloneSecret}.\nSTATUS: AGREED`,
+    sessionId: "standalone-redaction",
+  }),
+});
+assert.doesNotMatch(standaloneOutcome.turns[0].message, /wJalrXUtnFEMI/);
+assert.match(standaloneOutcome.turns[0].message, /<REDACTED_ENV_SECRET>/);
+
 console.log("Talk protocol tests passed without invoking any model.");

@@ -1,6 +1,7 @@
 import { z } from "zod";
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { resolve, relative, isAbsolute, sep, dirname } from "node:path";
+import { randomUUID } from "node:crypto";
 import { collaborationDirectory } from "./collaboration-store.mjs";
 
 const DEFAULT_CAP_BYTES = 50 * 1024; // 50 KB
@@ -58,12 +59,16 @@ export function redactSecretsAndInjectionFromText(text) {
     redacted = redacted.replace(ghTokenRegex, "<REDACTED_GITHUB_TOKEN>");
   }
 
-  const envAssignRegex = /([A-Z_]{4,20}\s*=\s*["']?)([a-zA-Z0-9_\-\.\~]{16,})(["']?)/g;
+  const secretValueChars = "[a-zA-Z0-9_\\-\\.\\~+/=:@]";
+  const envAssignRegex = new RegExp(`([A-Z_][A-Z0-9_]{3,39}\\s*=\\s*["']?)(${secretValueChars}{16,})(["']?)`, "g");
   if (envAssignRegex.test(redacted)) {
     redacted = redacted.replace(envAssignRegex, "$1<REDACTED_ENV_SECRET>$3");
   }
 
-  const genericSecretRegex = /((?:api[_-]?key|secret|password|passwd|token|auth[_-]?token|access[_-]?token|private[_-]?key|session[_-]?key)\s*[:=]\s*["']?)([a-zA-Z0-9_\-\.\~]{16,})(["']?)/gi;
+  const genericSecretRegex = new RegExp(
+    `((?:api[_-]?key|access[_-]?key|secret[_-]?access[_-]?key|secret|password|passwd|token|auth[_-]?token|access[_-]?token|private[_-]?key|session[_-]?key)\\s*[:=]\\s*["']?)(${secretValueChars}{16,})(["']?)`,
+    "gi",
+  );
   if (genericSecretRegex.test(redacted)) {
     redacted = redacted.replace(genericSecretRegex, "$1<REDACTED_SECRET>$3");
   }
@@ -240,17 +245,17 @@ export function redactSecretsAndInjectionFromCapsule(capsule) {
     if (typeof text !== "string") return text;
     const redacted = redactSecretsAndInjectionFromText(text);
     if (redacted !== text) {
-      let reason = "generic_secret";
-      if (text.includes("PRIVATE KEY")) {
-        reason = text.includes("-----BEGIN") ? "private_key" : "private_key_header";
-      } else if (text.includes("github_pat_") || /gh[pousr]_/.test(text)) {
-        reason = "github_token";
-      } else if (text.includes("ignore") || text.includes("override")) {
-        reason = "prompt_injection";
-      } else if (/[A-Z_]+=/.test(text)) {
-        reason = "environment_secret";
+      const markerReasons = [
+        ["<REDACTED_PRIVATE_KEY>", "private_key"],
+        ["<REDACTED_PRIVATE_KEY_HEADER>", "private_key_header"],
+        ["<REDACTED_GITHUB_TOKEN>", "github_token"],
+        ["<REDACTED_PROMPT_INJECTION>", "prompt_injection"],
+        ["<REDACTED_ENV_SECRET>", "environment_secret"],
+        ["<REDACTED_SECRET>", "generic_secret"],
+      ].filter(([marker]) => redacted.includes(marker));
+      for (const [, reason] of markerReasons) {
+        redactions.push({ field: fieldPath, reason });
       }
-      redactions.push({ field: fieldPath, reason });
     }
     return redacted;
   };
@@ -303,6 +308,16 @@ export function getSerializedSizeAndEnforceCap(capsule, configuredMaxBytes = und
   return { serialized, sizeBytes };
 }
 
+function writeCapsuleAtomically(capsulePath, serialized) {
+  const temporaryPath = `${capsulePath}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporaryPath, serialized, { mode: 0o600 });
+    renameSync(temporaryPath, capsulePath);
+  } finally {
+    rmSync(temporaryPath, { force: true });
+  }
+}
+
 export async function saveContextCapsule(root, id, rawCapsule, { agent, turn, configMaxBytes }) {
   const capsulePath = getSafeCapsulePath(root, id);
   const dir = dirname(capsulePath);
@@ -312,7 +327,7 @@ export async function saveContextCapsule(root, id, rawCapsule, { agent, turn, co
   const { capsule: redactedCapsule } = redactSecretsAndInjectionFromCapsule(normalized);
   const { serialized } = getSerializedSizeAndEnforceCap(redactedCapsule, configMaxBytes);
 
-  writeFileSync(capsulePath, serialized, { mode: 0o600 });
+  writeCapsuleAtomically(capsulePath, serialized);
 }
 
 export async function readContextCapsule(root, id, sections = null) {
@@ -370,10 +385,6 @@ export async function readContextCapsule(root, id, sections = null) {
   if (redacted.redactions) {
     result.redactions = redacted.redactions;
   }
-  if (redacted.warnings) {
-    result.warnings = redacted.warnings;
-  }
-
   for (const section of sections) {
     if (allowedSections.has(section)) {
       result[section] = redacted[section] || [];
@@ -419,6 +430,10 @@ export async function extractAndSaveCapsuleBeforeObserve(message, { agent, turn,
     const rawCapsule = handoffObj.capsule;
 
     if (rawCapsule === "<capsule-available>") {
+      const capsulePath = getSafeCapsulePath(workspace, collaborationId);
+      if (!existsSync(capsulePath)) {
+        throw new Error("Capsule marker references a missing capsule file.");
+      }
       return { sanitizedMessage: redactedMessage, hasCapsule: true };
     }
 
@@ -431,7 +446,7 @@ export async function extractAndSaveCapsuleBeforeObserve(message, { agent, turn,
     const capsulePath = getSafeCapsulePath(workspace, collaborationId);
     const dir = dirname(capsulePath);
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    writeFileSync(capsulePath, serialized, { mode: 0o600 });
+    writeCapsuleAtomically(capsulePath, serialized);
 
     const safeHandoffObj = { ...handoffObj, capsule: "<capsule-available>" };
     redactedLines[handoffLineIndex] = "HANDOFF: " + JSON.stringify(safeHandoffObj);
