@@ -142,6 +142,38 @@ To let a real person satisfy the bridge's merge gate, add their GitHub login to 
 
 These are policies, not credentials. `trustedHumanReviewers` lists people whose exact-head approval may satisfy the builder gate. `autonomousMergeRepositories` grants native coordinators standing authority to call the broker's exact-head `merge_pull_request` tool for one repository or an owner's repositories using `owner/*`; omit it to require a user-owned merge action. The builder reads the complete paginated GitHub review record directly and accepts only an `APPROVED` review attached to the exact authorized head SHA. An approval on an older commit, a later `CHANGES_REQUESTED` or `DISMISSED` review on that head, an outstanding change request from another trusted human, an unlisted account, or the builder bot's identity does not satisfy the gate. Each installation should list its own maintainers; never publish maintainer-specific logins in a shared skill.
 
+### Choose an opt-in GitHub merge-enforcement tier
+
+Paid GitHub protection features are not required. The portable default keeps merge authorization in the bridge:
+
+```json
+{
+  "github": {
+    "mergeEnforcement": "broker"
+  }
+}
+```
+
+Choose one machine-local mode:
+
+| Mode | Behavior |
+| --- | --- |
+| `broker` | Default. The bridge requires exact-head review and authorizes the exact merge locally. GitHub does not independently require the agent-review gate; workflows must verify any CI that is not protected by GitHub. |
+| `branch-protection` | Require repository branch protection whose `agent-review` check is bound to a configured reviewer App ID. The builder App needs optional **Administration: Read-only** so the bridge can verify this protection before merging. |
+| `organization-ruleset` | Require an active organization ruleset whose `agent-review` check is bound to a configured reviewer App ID. Organization-level rulesets currently require GitHub Team or Enterprise. |
+| `auto` | Inspect the pull request's base branch and select organization ruleset, then branch protection, then broker. Every downgrade is included in the merge receipt and doctor report. |
+
+Explicit GitHub modes fail closed when their App-bound check cannot be verified. `auto` is the only mode that downgrades, and it never treats an unbound check name as trusted. A selected reviewer App must have **Commit statuses: Read and write** to publish the required `agent-review` context. These modes inspect existing GitHub configuration only; the bridge never creates or changes branch protection or rulesets.
+
+Produce a credential-free verification snapshot and give it to the read-only policy doctor:
+
+```bash
+npm run github-app:verify -- owner/repository --json > /tmp/github-verification.json
+bridge doctor --workspace /path/to/repository --github-verification /tmp/github-verification.json --json
+```
+
+Omit `github.mergeEnforcement` for the same behavior as `broker`. This preserves compatibility for existing installations and users without paid GitHub plans.
+
 ### Enforce agent review without a human-identity bypass
 
 GitHub's required approving-review count is a human collaboration rule: an approval must come from a person with the required repository access. Do not use an owner PAT to turn an agent verdict into that human approval. For repositories where agents have standing merge authority, configure the target branch or ruleset as follows:
@@ -501,7 +533,7 @@ bridge doctor --workspace /path/to/repo --host claude --providers codex,antigrav
 
 The human view and versioned JSON report contain the same request, provider matrix, finding counts, authoritative sources, impacts, and least-authority remediations. Failures block the complete request, constraints remove or limit a provider while allowing a degraded roster, and notices remain optional. Use `--strict-provider` only for a provider that must participate; optional budgets and overload fallbacks are not errors unless explicitly required.
 
-The doctor detects missing or stale MCP transports, unavailable CLIs, browser mismatches, incompatible overload fallback chains, exact-command allowlist gaps, unavailable skill capabilities, missing budgets, unsafe PAT compatibility, reviewer/builder identity overlap, and missing or unverifiable GitHub App bindings and scopes. Live App scope remains fail-closed unless supplied by a trusted read-only verification snapshot; `npm run github-app:verify -- OWNER/REPO` verifies the configured identities and base scopes separately but does not grant them. Neither report contains token values, private keys, full prompts, or credential-bearing remote URLs. `--input snapshot.json` exists for hermetic incident replay and tests, not as proof of current machine state.
+The doctor detects missing or stale MCP transports, unavailable CLIs, browser mismatches, incompatible overload fallback chains, exact-command allowlist gaps, unavailable skill capabilities, missing budgets, unsafe PAT compatibility, reviewer/builder identity overlap, missing or unverifiable GitHub App bindings and scopes, and the configured versus effective GitHub merge-enforcement tier. Live App scope and explicit GitHub enforcement remain fail-closed unless supplied by a trusted read-only verification snapshot; `npm run github-app:verify -- OWNER/REPO --json` emits that snapshot without granting or changing permissions. Broker-only enforcement is a visible notice, not an installation failure. Neither report contains token values, private keys, full prompts, or credential-bearing remote URLs. `--input snapshot.json` exists for hermetic incident replay and tests, not as proof of current machine state.
 
 ## Pair-programming operations
 

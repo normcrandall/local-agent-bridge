@@ -47,7 +47,7 @@ function provider(name, overrides = {}) {
   };
 }
 
-function snapshot({ providers = ["claude", "codex", "antigravity"], request = {}, providerOverrides = {}, mcp = {}, skill = {}, workspace = {} } = {}) {
+function snapshot({ providers = ["claude", "codex", "antigravity"], request = {}, providerOverrides = {}, mcp = {}, skill = {}, workspace = {}, github = {} } = {}) {
   return {
     version: POLICY_REPORT_VERSION,
     workspace: {
@@ -101,6 +101,11 @@ function snapshot({ providers = ["claude", "codex", "antigravity"], request = {}
       source: src("/safe/github-apps.json"),
       repository: "owner/repo",
       allowPatFallback: false,
+      enforcement: {
+        configuredMode: "broker",
+        capabilities: {},
+      },
+      ...github,
     },
   };
 }
@@ -117,6 +122,37 @@ assert.match(readyHuman, /Result: READY/);
 assert.match(readyHuman, /3 eligible provider/);
 assert.match(readyHuman, /read-only/);
 assert.match(readyHuman, /Source:/);
+assert.equal(ready.github.mergeEnforcement.effectiveMode, "broker");
+assert.ok(ready.findings.some((finding) => finding.code === "github-enforcement-broker-only" && finding.severity === "notice"));
+assert.match(readyHuman, /GitHub merge enforcement: configured=broker; effective=broker/);
+
+const explicitRulesetUnavailable = analyzePolicy(snapshot({
+  github: {
+    enforcement: {
+      configuredMode: "organization-ruleset",
+      capabilities: {},
+    },
+  },
+}));
+assert.equal(explicitRulesetUnavailable.ok, false);
+assert.equal(explicitRulesetUnavailable.github.mergeEnforcement.effectiveMode, null);
+assert.ok(explicitRulesetUnavailable.findings.some((finding) => (
+  finding.code === "github-enforcement-unverified" && finding.severity === "failure"
+)));
+
+const autoBranchProtection = analyzePolicy(snapshot({
+  github: {
+    enforcement: {
+      configuredMode: "auto",
+      capabilities: {
+        branchProtection: { verified: true, source: "github-api:branch-protection" },
+      },
+    },
+  },
+}));
+assert.equal(autoBranchProtection.ok, true);
+assert.equal(autoBranchProtection.github.mergeEnforcement.effectiveMode, "branch-protection");
+assert.ok(autoBranchProtection.findings.some((finding) => finding.code === "github-enforcement-auto-downgrade"));
 
 const secretCommand = "deploy token=super-secret-value";
 const redacted = analyzePolicy(snapshot({

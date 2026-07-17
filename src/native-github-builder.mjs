@@ -33,6 +33,10 @@ export async function mergePullRequestWithBuilder({
     appRoles.roles?.reviewer?.expectedLogin,
     ...Object.values(appRoles.roles?.reviewers || {}).map((reviewer) => reviewer.expectedLogin),
   ].filter(Boolean);
+  const trustedReviewAppIds = [
+    appRoles.roles?.reviewer?.appId,
+    ...Object.values(appRoles.roles?.reviewers || {}).map((reviewer) => reviewer.appId),
+  ].filter(Boolean).map(Number);
   const builder = clientFactory({
     repository,
     prNumber,
@@ -43,7 +47,9 @@ export async function mergePullRequestWithBuilder({
     allowedOperations: ["merge"],
     requiredReviewStatusContext: "agent-review",
     trustedReviewLogins,
+    trustedReviewAppIds,
     trustedHumanReviewLogins: appRoles.mergePolicy?.trustedHumanReviewers || [],
+    mergeEnforcement: appRoles.github?.mergeEnforcement || "broker",
   });
   return builder.merge({ method });
 }

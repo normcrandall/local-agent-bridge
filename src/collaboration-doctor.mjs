@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { probeProviderCapabilities } from "./provider-cli-capabilities.mjs";
+import { resolveGitHubMergeEnforcement } from "./github-merge-enforcement.mjs";
 
 export const POLICY_REPORT_VERSION = 1;
 export const POLICY_PROVIDERS = ["claude", "codex", "antigravity"];
@@ -268,6 +269,9 @@ export function collectPolicySnapshot({
     || resolve(home, ".config/local-agent-bridge/github-apps.json");
   const appParsed = readJson(appConfigPath);
   const appConfig = appParsed.value || {};
+  const enforcementVerification = githubVerification?.repository === repository
+    ? githubVerification.enforcement || {}
+    : {};
   const mcp = configuredMcpServers({ host, home });
   const mcpRequired = new Set(expectedPeerServers(host));
   const selectedSkill = skillObservation({ root, name: skill });
@@ -369,6 +373,17 @@ export function collectPolicySnapshot({
       source: source(appConfigPath),
       repository,
       allowPatFallback: appConfig.compatibility?.allowPatFallback !== false,
+      enforcement: {
+        configuredMode: appConfig.github?.mergeEnforcement ?? "broker",
+        capabilities: {
+          ...(enforcementVerification.branchProtection?.verified === true
+            ? { branchProtection: enforcementVerification.branchProtection }
+            : {}),
+          ...(enforcementVerification.organizationRuleset?.verified === true
+            ? { organizationRuleset: enforcementVerification.organizationRuleset }
+            : {}),
+        },
+      },
     },
   };
 }
@@ -387,11 +402,37 @@ export function analyzePolicy(snapshot) {
   const findings = [];
   const strictProviders = request.strictProviders || [];
   const matrix = {};
+  const mergeEnforcement = resolveGitHubMergeEnforcement({
+    configuredMode: snapshot.github?.enforcement?.configuredMode ?? "broker",
+    capabilities: snapshot.github?.enforcement?.capabilities || {},
+  });
   if (!snapshot.workspace?.exists || !snapshot.workspace?.git?.ok) {
     findings.push(policyFinding({
       code: "workspace-unavailable", severity: "failure", state: "missing", source: source(snapshot.workspace?.path || "."),
       impact: "The requested workspace cannot be inspected as a Git worktree.",
       remediation: "Select an existing repository worktree; do not delegate until its exact path is verified.",
+    }));
+  }
+  if (mergeEnforcement.blocked) {
+    findings.push(policyFinding({
+      code: "github-enforcement-unverified", severity: "failure", state: "unverifiable", role: "host",
+      source: snapshot.github?.source || source("policy:github", "mergeEnforcement"),
+      impact: `${mergeEnforcement.configuredMode} was explicitly required, so autonomous merge must stop until that GitHub gate is verified.`,
+      remediation: "Verify the requested App-bound GitHub enforcement for this repository, choose another explicit supported mode, or intentionally select broker enforcement.",
+    }));
+  } else if (mergeEnforcement.configuredMode === "broker") {
+    findings.push(policyFinding({
+      code: "github-enforcement-broker-only", severity: "notice", state: "available", role: "host",
+      source: snapshot.github?.source || source("policy:github", "mergeEnforcement"),
+      impact: "The bridge enforces exact-head review and merge authorization, but GitHub does not independently enforce the agent-review gate.",
+      remediation: "No action is required; opt into verified branch protection or an organization ruleset when the repository and GitHub plan support it.",
+    }));
+  } else if (mergeEnforcement.configuredMode === "auto" && mergeEnforcement.downgraded) {
+    findings.push(policyFinding({
+      code: "github-enforcement-auto-downgrade", severity: "notice", state: "available", role: "host",
+      source: snapshot.github?.source || source("policy:github", "mergeEnforcement"),
+      impact: `Auto mode selected ${mergeEnforcement.effectiveMode}; stronger GitHub enforcement was not verified.`,
+      remediation: "No action is required; provide trusted verification evidence if stronger GitHub enforcement becomes available.",
     }));
   }
   for (const [server, observed] of Object.entries(snapshot.mcp?.servers || {})) {
@@ -568,6 +609,7 @@ export function analyzePolicy(snapshot) {
     ok: findings.every((item) => item.severity !== "failure"),
     workspace: safeWorkspace,
     request: safeRequest,
+    github: { mergeEnforcement },
     matrix,
     findings,
     summary: {
@@ -585,6 +627,7 @@ export function renderPolicyReport(report) {
     `Result: ${report.ok ? "READY" : "BLOCKED"}`,
     `Workspace: ${report.workspace.path}`,
     `Request: ${report.request.mode}/${report.request.role}/${report.request.workProfile} on ${report.request.providers.join(", ")}`,
+    `GitHub merge enforcement: configured=${report.github.mergeEnforcement.configuredMode}; effective=${report.github.mergeEnforcement.effectiveMode || "blocked"}; verification=${report.github.mergeEnforcement.verificationSource}`,
     `Summary: ${report.summary.eligibleProviders} eligible provider(s); ${report.summary.failures} failures; ${report.summary.constraints} constraints; ${report.summary.notices} notices`,
     "",
     "Provider matrix:",

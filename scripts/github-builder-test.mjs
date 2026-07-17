@@ -190,6 +190,7 @@ function fakeGitHub({
   currentSha = headSha, wrongThread = false, existingPull = false,
   reviewStatus = "success", reviewLogin = "reviewer[bot]", reviewStatuses = null, reviews = [],
   statusPermissionDenied = false, branchShas = {}, graphqlReplyLogin = "builder[bot]", graphqlReplyType = "Bot",
+  rules = [], branchProtection = null, branchProtectionStatus = 200,
 } = {}) {
   const calls = [];
   const branchState = { ...branchShas };
@@ -216,6 +217,12 @@ function fakeGitHub({
       } catch {
         return json({ message: "Not Found" }, 404);
       }
+    }
+    if (path === "/repos/owner/repo/rules/branches/main") return json(rules);
+    if (path === "/repos/owner/repo/branches/main/protection") {
+      return branchProtectionStatus === 200
+        ? json(branchProtection || {})
+        : json({ message: "Branch protection evidence unavailable" }, branchProtectionStatus);
     }
     if (path.startsWith("/repos/owner/repo/branches/")) {
       const parts = path.split("/");
@@ -305,6 +312,46 @@ assert.equal((await builder.markReady()).operation, "mark_ready");
 const merged = await builder.merge({ method: "squash" });
 assert.equal(merged.operation, "merge");
 assert.equal(merged.reviewGate.login, "reviewer[bot]");
+assert.equal(merged.mergeEnforcement.effectiveMode, "broker");
+
+const organizationRulesetApi = fakeGitHub({
+  rules: [{
+    type: "required_status_checks",
+    ruleset_source_type: "Organization",
+    ruleset_id: 56,
+    parameters: { required_status_checks: [{ context: "agent-review", integration_id: 101 }] },
+  }],
+});
+const organizationRulesetMerge = await createBoundBuilderClient({
+  ...base,
+  mergeEnforcement: "organization-ruleset",
+  trustedReviewAppIds: [101],
+  fetchImpl: organizationRulesetApi.fetchImpl,
+}).merge({ method: "squash" });
+assert.equal(organizationRulesetMerge.mergeEnforcement.effectiveMode, "organization-ruleset");
+assert.ok(organizationRulesetApi.calls.some((call) => call.path === "/repos/owner/repo/rules/branches/main"));
+
+const missingRulesetApi = fakeGitHub();
+await assert.rejects(
+  createBoundBuilderClient({
+    ...base,
+    mergeEnforcement: "organization-ruleset",
+    trustedReviewAppIds: [101],
+    fetchImpl: missingRulesetApi.fetchImpl,
+  }).merge({ method: "squash" }),
+  /organization-ruleset.*not verified/i,
+);
+assert.equal(missingRulesetApi.calls.some((call) => call.path === "/repos/owner/repo/pulls/42/merge"), false);
+
+const autoBrokerApi = fakeGitHub({ branchProtectionStatus: 403 });
+const autoBrokerMerge = await createBoundBuilderClient({
+  ...base,
+  mergeEnforcement: "auto",
+  trustedReviewAppIds: [101],
+  fetchImpl: autoBrokerApi.fetchImpl,
+}).merge({ method: "squash" });
+assert.equal(autoBrokerMerge.mergeEnforcement.effectiveMode, "broker");
+assert.equal(autoBrokerMerge.mergeEnforcement.downgraded, true);
 const paginatedStatuses = Array.from({ length: 101 }, (_, index) => ({
   context: index === 100 ? "agent-review" : `historical-${index}`,
   state: "success",
