@@ -241,6 +241,10 @@ async function reconcileInterruptedCleanup() {
       await appendEvent(WORKSPACE_ROOT, state.id, { type: "cleanup_reconciled", at: new Date().toISOString(), action });
     }
   }
+  try {
+    const { reconcileClaimsAndPortfolios } = await import("./github-issue-claims.mjs");
+    await reconcileClaimsAndPortfolios(WORKSPACE_ROOT);
+  } catch {}
 }
 
 function compactStatusView(view) {
@@ -440,6 +444,21 @@ const githubBuilderSchema = z.object({
 }).strict().optional().describe(
   "Authorize only target-bound builder GitHub operations for one repository and head SHA. Available only to the work-mode writer.",
 );
+const issueClaimSchema = z.object({
+  repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
+  issueNumber: z.number().int().min(1),
+  expectedLogin: z.string().regex(GITHUB_LOGIN_PATTERN),
+  portfolioId: z.string().min(1).optional(),
+  itemId: z.string().min(1).optional(),
+  writer: z.string().min(1).optional(),
+  branch: z.string().min(1).optional(),
+  worktree: z.string().min(1).optional(),
+  baseSha: z.string().regex(/^[0-9a-f]{40}$/i).optional(),
+  headSha: z.string().regex(/^[0-9a-f]{40}$/i).optional(),
+  allowedOperations: z.array(z.string()).optional(),
+}).strict().optional().describe(
+  "Durable issue claim lease configuration.",
+);
 const budgetSchema = z.object({
   maxCostUsd: z.number().positive().optional(),
   maxTokens: z.number().int().positive().optional(),
@@ -554,6 +573,7 @@ server.registerTool(
       handoffPath: handoffPathSchema,
       githubReview: githubReviewSchema,
       githubBuilder: githubBuilderSchema,
+      issueClaim: issueClaimSchema,
       taskNumber: z.number().int().nonnegative().optional().describe("When supplied, rotate the writer deterministically across the selected agents unless writer is explicit."),
       rotationOffset: z.number().int().default(0),
       worktree: worktreeSchema,
@@ -591,86 +611,161 @@ server.registerTool(
     }
     if (writer && !delegatedAgents.includes(writer)) throw new Error("writer must be included in delegated agents.");
     const requestedWorkspace = projectDirectory(input.workspace);
-    const worktree = input.worktree
-      ? createWorktree({
+    const collaborationId = `bridge-${randomUUID()}`;
+    let leaseAcquired = false;
+    let claimClient = null;
+
+    if (input.issueClaim) {
+      const { acquireClaimLease } = await import("./github-issue-claims.mjs");
+      const { createInstallationToken } = await import("./github-app-auth.mjs");
+      const { createBoundBuilderClient } = await import("./github-builder-client.mjs");
+      const repository = input.issueClaim.repository;
+      const expectedLogin = input.issueClaim.expectedLogin;
+      const credential = await createInstallationToken({ role: "builder", repository });
+      claimClient = createBoundBuilderClient({
+        apiUrl: input.issueClaim.apiUrl || process.env.GITHUB_BUILDER_API_URL || "https://api.github.com",
+        token: credential.token,
+        verifiedLogin: credential.verifiedLogin,
+        repository,
+        expectedLogin,
+        headSha: input.issueClaim.headSha || "0000000000000000000000000000000000000000",
+        issueNumber: input.issueClaim.issueNumber,
+        allowedOperations: ["get_issue", "add_issue_label", "remove_issue_label", "get_issue_comments", "post_issue_comment", "update_issue_comment", "delete_issue_comment", "create_ref", "delete_ref"],
         workspace: requestedWorkspace,
-        taskId: input.worktree.taskId,
-        branch: input.worktree.branch,
-        base: input.worktree.base,
-        worktreeRoot: input.worktree.root,
-      })
-      : null;
-    const workspace = worktree?.path || requestedWorkspace;
-    if (input.chair?.workspace && projectDirectory(input.chair.workspace) !== realpathSync(workspace)) {
-      throw new Error("Native chair workspace must match the collaboration workspace.");
+        fetchImpl: fetch,
+      });
+
+      let portfolioId = input.issueClaim.portfolioId || null;
+      let itemId = input.issueClaim.itemId || null;
+      if (!portfolioId || !itemId) {
+        try {
+          const portfolios = await listPortfolios(PORTFOLIO_ROOT);
+          for (const p of portfolios) {
+            const item = p.items.find(i => i.issueNumber === input.issueClaim.issueNumber || i.id === String(input.issueClaim.issueNumber));
+            if (item) {
+              portfolioId = p.id;
+              itemId = item.id;
+              break;
+            }
+          }
+        } catch {}
+      }
+
+      await acquireClaimLease({
+        client: claimClient,
+        issueNumber: input.issueClaim.issueNumber,
+        portfolioId,
+        itemId,
+        writer: writer || input.writer || startAgent,
+        collaborationId,
+        branch: input.worktree?.branch || input.issueClaim.branch || null,
+        worktree: input.worktree?.root || input.issueClaim.worktree || null,
+        baseSha: input.worktree?.base || input.issueClaim.baseSha || null,
+        headSha: input.issueClaim.headSha || null,
+        workspaceRoot: WORKSPACE_ROOT,
+      });
+      leaseAcquired = true;
     }
-    const readiness = preflight({ workspace, agents: delegatedAgents, mode: effectiveMode, workProfile: input.workProfile || "exact", permissionProfile: effectivePermissionProfile });
-    if (!readiness.checks.find((check) => check.name === "workspace")?.ok
-      || !readiness.checks.find((check) => check.name === "git-repository")?.ok) {
-      throw new Error("Collaboration preflight failed: workspace must exist and be a Git repository.");
-    }
-    const existing = await listCollaborations(WORKSPACE_ROOT, { status: "indeterminate", limit: 100 });
-    const ownershipConflict = existing.find((candidate) => candidate.workspace === workspace);
-    if (ownershipConflict) {
-      throw new Error(`Workspace ownership is preserved by indeterminate collaboration ${ownershipConflict.id}; inspect and cancel it before starting replacement work.`);
-    }
-    const state = await createCollaboration(WORKSPACE_ROOT, {
-      task: input.task,
-      workspace,
-      agents: delegatedAgents,
-      participants: input.chair ? [input.chair.provider, ...delegatedAgents.filter((agent) => agent !== input.chair.provider)] : delegatedAgents,
-      chair: native.chair,
-      startAgent,
-      mode: effectiveMode,
-      requestedMode: input.mode,
-      chairOwnsWork: native.chairOwnsWork,
-      writer,
-      browser: input.browser,
-      models: input.models || {},
-      modelFallbacks: input.modelFallbacks || {},
-      providerConcurrency: await loadProviderConcurrency({ overrides: input.providerConcurrency || {} }),
-      verificationCommands: input.verificationCommands || [],
-      workCommands: input.workCommands || [],
-      workProfile: input.workProfile || "exact",
-      permissionProfile: effectivePermissionProfile,
-      requestedPermissionProfile: input.permissionProfile || "standard",
-      handoffPath: input.handoffPath || null,
-      githubReview: input.githubReview || null,
-      githubBuilder: input.githubBuilder || null,
-      rotation: rotated ? { taskNumber: input.taskNumber, offset: input.rotationOffset, ...rotated } : null,
-      worktree,
-      preflight: readiness,
-      capabilities: readiness.capabilities,
-      budget: input.budget || {},
-      providerRecovery: input.providerRecovery || { enabled: true, maxAttempts: 3, backoffSeconds: [15, 60, 180] },
-      providerRecoveryState: { attempts: 0, status: "idle" },
-      usage: {},
-      ciTracking: input.ciTracking || null,
-      ci: null,
-      decisionPolicy: input.decisionPolicy || { additionalEscalations: [], maxDialogueTurns: 4 },
-      decisionPolicyEnabled: Boolean(input.decisionPolicy),
-      decisions: [],
-      handoffs: [],
-      completion: null,
-      runSequence: 1,
-      coordinatorWake: null,
-      nativeChairTurns: [],
-      turnTimeoutSeconds: input.turnTimeoutSeconds,
-      run: { maxTurns: input.decisionPolicy ? Math.min(input.maxTurns, input.decisionPolicy.maxDialogueTurns) : input.maxTurns },
-      runtime: {
-        sessions: Object.fromEntries(delegatedAgents.map((agent) => [agent, null])),
-        nextAgent: startAgent,
-        previousMessage: null,
-        previousAgent: null,
-        agreementStreak: 0,
-        turnCount: 0,
-        availableAgents: delegatedAgents,
-        unavailableAgents: {},
+
+    try {
+      const worktree = input.worktree
+        ? createWorktree({
+          workspace: requestedWorkspace,
+          taskId: input.worktree.taskId,
+          branch: input.worktree.branch,
+          base: input.worktree.base,
+          worktreeRoot: input.worktree.root,
+        })
+        : null;
+      const workspace = worktree?.path || requestedWorkspace;
+      if (input.chair?.workspace && projectDirectory(input.chair.workspace) !== realpathSync(workspace)) {
+        throw new Error("Native chair workspace must match the collaboration workspace.");
+      }
+      const readiness = preflight({ workspace, agents: delegatedAgents, mode: effectiveMode, workProfile: input.workProfile || "exact", permissionProfile: effectivePermissionProfile });
+      if (!readiness.checks.find((check) => check.name === "workspace")?.ok
+        || !readiness.checks.find((check) => check.name === "git-repository")?.ok) {
+        throw new Error("Collaboration preflight failed: workspace must exist and be a Git repository.");
+      }
+      const existing = await listCollaborations(WORKSPACE_ROOT, { status: "indeterminate", limit: 100 });
+      const ownershipConflict = existing.find((candidate) => candidate.workspace === workspace);
+      if (ownershipConflict) {
+        throw new Error(`Workspace ownership is preserved by indeterminate collaboration ${ownershipConflict.id}; inspect and cancel it before starting replacement work.`);
+      }
+      const state = await createCollaboration(WORKSPACE_ROOT, {
+        id: collaborationId,
+        task: input.task,
+        workspace,
+        agents: delegatedAgents,
+        participants: input.chair ? [input.chair.provider, ...delegatedAgents.filter((agent) => agent !== input.chair.provider)] : delegatedAgents,
+        chair: native.chair,
+        startAgent,
+        mode: effectiveMode,
+        requestedMode: input.mode,
+        chairOwnsWork: native.chairOwnsWork,
         writer,
-      },
-    });
-    startWorker(state.id);
-    return toolResponse(await collaborationView(WORKSPACE_ROOT, state.id, 1));
+        browser: input.browser,
+        models: input.models || {},
+        modelFallbacks: input.modelFallbacks || {},
+        providerConcurrency: await loadProviderConcurrency({ overrides: input.providerConcurrency || {} }),
+        verificationCommands: input.verificationCommands || [],
+        workCommands: input.workCommands || [],
+        workProfile: input.workProfile || "exact",
+        permissionProfile: effectivePermissionProfile,
+        requestedPermissionProfile: input.permissionProfile || "standard",
+        handoffPath: input.handoffPath || null,
+        githubReview: input.githubReview || null,
+        githubBuilder: input.githubBuilder || null,
+        issueClaim: input.issueClaim || null,
+        rotation: rotated ? { taskNumber: input.taskNumber, offset: input.rotationOffset, ...rotated } : null,
+        worktree,
+        preflight: readiness,
+        capabilities: readiness.capabilities,
+        budget: input.budget || {},
+        providerRecovery: input.providerRecovery || { enabled: true, maxAttempts: 3, backoffSeconds: [15, 60, 180] },
+        providerRecoveryState: { attempts: 0, status: "idle" },
+        usage: {},
+        ciTracking: input.ciTracking || null,
+        ci: null,
+        decisionPolicy: input.decisionPolicy || { additionalEscalations: [], maxDialogueTurns: 4 },
+        decisionPolicyEnabled: Boolean(input.decisionPolicy),
+        decisions: [],
+        handoffs: [],
+        completion: null,
+        runSequence: 1,
+        coordinatorWake: null,
+        nativeChairTurns: [],
+        turnTimeoutSeconds: input.turnTimeoutSeconds,
+        run: { maxTurns: input.decisionPolicy ? Math.min(input.maxTurns, input.decisionPolicy.maxDialogueTurns) : input.maxTurns },
+        runtime: {
+          sessions: Object.fromEntries(delegatedAgents.map((agent) => [agent, null])),
+          nextAgent: startAgent,
+          previousMessage: null,
+          previousAgent: null,
+          agreementStreak: 0,
+          turnCount: 0,
+          availableAgents: delegatedAgents,
+          unavailableAgents: {},
+          writer,
+        },
+      });
+      startWorker(state.id);
+      return toolResponse(await collaborationView(WORKSPACE_ROOT, state.id, 1));
+    } catch (startError) {
+      if (leaseAcquired && claimClient && input.issueClaim) {
+        try {
+          const { releaseClaimLease } = await import("./github-issue-claims.mjs");
+          await releaseClaimLease({
+            client: claimClient,
+            issueNumber: input.issueClaim.issueNumber,
+            collaborationId,
+            outcome: "rolled_back",
+          });
+        } catch (rollbackError) {
+          console.error("Failed to roll back claim lease:", rollbackError);
+        }
+      }
+      throw startError;
+    }
   },
 );
 
@@ -1110,6 +1205,7 @@ server.registerTool(
       handoffPath: handoffPathSchema,
       githubReview: githubReviewSchema,
       githubBuilder: githubBuilderSchema,
+      issueClaim: issueClaimSchema,
       budget: budgetSchema,
       providerRecovery: providerRecoverySchema,
       ciTracking: ciTrackingSchema,

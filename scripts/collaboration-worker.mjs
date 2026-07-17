@@ -25,6 +25,8 @@ import {
 } from "../src/review-publication.mjs";
 import { acquireProviderCapacity, loadProviderConcurrency } from "../src/provider-concurrency.mjs";
 import { enqueueCoordinatorWake } from "../src/coordinator-wake.mjs";
+import { createBoundBuilderClient } from "../src/github-builder-client.mjs";
+import { createInstallationToken } from "../src/github-app-auth.mjs";
 
 const runtimeRoot = realpathSync(
   process.env.BRIDGE_RUNTIME_ROOT || process.env.BRIDGE_ROOT || fileURLToPath(new URL("..", import.meta.url)),
@@ -126,6 +128,27 @@ try {
     process.exit(0);
   }
 
+  let claimClient = null;
+  if (state.issueClaim) {
+    try {
+      const repository = state.issueClaim.repository;
+      const expectedLogin = state.issueClaim.expectedLogin;
+      const credential = await createInstallationToken({ role: "builder", repository });
+      claimClient = createBoundBuilderClient({
+        apiUrl: state.issueClaim.apiUrl || "https://api.github.com",
+        token: credential.token,
+        verifiedLogin: credential.verifiedLogin,
+        repository,
+        expectedLogin,
+        headSha: state.issueClaim.headSha || "0000000000000000000000000000000000000000",
+        issueNumber: state.issueClaim.issueNumber,
+        allowedOperations: ["get_issue", "add_issue_label", "remove_issue_label", "get_issue_comments", "post_issue_comment", "update_issue_comment", "delete_issue_comment", "create_ref", "delete_ref"],
+        workspace: state.workspace,
+        fetchImpl: fetch,
+      });
+    } catch {}
+  }
+
   state = await updateCollaboration(workspaceRoot, id, (current) => ({
     ...current,
     status: "running",
@@ -138,6 +161,17 @@ try {
     runStartedAt: current.runStartedAt || new Date().toISOString(),
   }));
   await appendEvent(workspaceRoot, id, { type: "run_started", at: new Date().toISOString(), pid: process.pid });
+
+  if (claimClient) {
+    const { refreshClaimLease } = await import("../src/github-issue-claims.mjs");
+    await refreshClaimLease({
+      client: claimClient,
+      issueNumber: state.issueClaim.issueNumber,
+      collaborationId: id,
+      phase: "running",
+      headSha: state.issueClaim.headSha || (state.githubBuilder && state.githubBuilder.headSha) || "0000000000000000000000000000000000000000",
+    }).catch(() => {});
+  }
 
   if (state.mode === "work") releaseWorkspace = await acquireWorkspaceLock(workspaceRoot, state.workspace);
 
@@ -481,6 +515,16 @@ try {
           activeCall: runtime.activeCall === undefined ? current.runtime?.activeCall || null : runtime.activeCall,
         },
       }));
+      if (claimClient) {
+        const { refreshClaimLease } = await import("../src/github-issue-claims.mjs");
+        await refreshClaimLease({
+          client: claimClient,
+          issueNumber: state.issueClaim.issueNumber,
+          collaborationId: id,
+          phase: runtime.activeCall?.phase || "running",
+          headSha: state.issueClaim.headSha || (state.githubBuilder && state.githubBuilder.headSha) || "0000000000000000000000000000000000000000",
+        }).catch(() => {});
+      }
     },
   });
 
@@ -508,6 +552,15 @@ try {
       reason: outcome.reason,
       turnCount: outcome.state.turnCount,
     });
+    if (claimClient && (outcome.reason === "cancelled" || outcome.reason === "obsolete")) {
+      const { releaseClaimLease } = await import("../src/github-issue-claims.mjs");
+      await releaseClaimLease({
+        client: claimClient,
+        issueNumber: state.issueClaim.issueNumber,
+        collaborationId: id,
+        outcome: outcome.reason,
+      }).catch(() => {});
+    }
     await enqueueCoordinatorWake(workspaceRoot, id);
   }
 } catch (error) {
@@ -530,6 +583,7 @@ try {
       at: new Date().toISOString(),
       error: error.stack || error.message,
     }).catch(() => {});
+
     await enqueueCoordinatorWake(workspaceRoot, id).catch(() => {});
     process.exitCode = 1;
   }

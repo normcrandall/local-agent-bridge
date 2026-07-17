@@ -13,8 +13,9 @@ Use the persistent collaboration broker. Keep exactly one writer and make the PR
 2. Run `bridge capabilities` and `bridge preflight --workspace <path> --agents <csv> --mode work --profile <implement|deliver>`.
 3. Run `bridge roles --task <number> --agents <csv>`. Honor an explicit user-selected writer over rotation.
 4. Default to an isolated worktree. Pass `worktree: { taskId, branch, base }` to `start_collaboration`; omit it only when repository policy forbids worktrees or the task already owns one.
-5. Refuse to start on an indeterminate ownership conflict. Use `bridge recover <id>` to inspect it.
-6. If the active host is the implementer, declare `chair` and call only peer providers. Same-provider delegation requires an explicit opt-in.
+5. Acquire a durable GitHub issue claim lease before worktree creation or delegation.
+6. Refuse to start on an indeterminate ownership conflict. Use `bridge recover <id>` to inspect it.
+7. If the active host is the implementer, declare `chair` and call only peer providers. Same-provider delegation requires an explicit opt-in.
 
 ## Start
 
@@ -63,5 +64,6 @@ Resolve reversible technical disagreements with `decisionPolicy` and one `DECISI
 - Use `bridge recover <id> --cancel` only after inspecting Git state; cancellation terminates the worker group and releases ownership.
 - Stop after the current turn when a configured budget is reached.
 - Archive terminal history with `archive_collaboration` or retention-based `prune_collaborations`; never prune active or indeterminate ownership.
+- Ensure claim leases are released only at terminal delivery (merge, cancel, obsolete) or explicit recovery.
 
 Finish only when acceptance criteria, local gates, hosted CI, durable handoff, formal reviewer publication, and clean ownership state are all verified.

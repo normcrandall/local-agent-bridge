@@ -83,7 +83,7 @@ async function atomicWriteJson(path, value) {
 }
 
 export async function createCollaboration(root, input) {
-  const id = `bridge-${randomUUID()}`;
+  const id = input.id || `bridge-${randomUUID()}`;
   const target = paths(root, id);
   await mkdir(target.directory, { recursive: true, mode: 0o700 });
   const now = new Date().toISOString();

@@ -229,6 +229,7 @@ export function createBoundBuilderClient({
   verifiedLogin = null,
   headSha,
   prNumber = null,
+  issueNumber = null,
   headRef = null,
   baseRef = null,
   requiredReviewStatusContext = "agent-review",
@@ -257,6 +258,9 @@ export function createBoundBuilderClient({
   if (trustedHumanReviewLogins.includes(expectedLogin)) {
     throw new Error("The builder identity cannot be a trusted human reviewer.");
   }
+  if (trustedReviewLogins.some((login) => typeof login !== "string" || !login || !login.endsWith("[bot]"))) {
+    throw new Error("Trusted reviewer logins must be bot logins.");
+  }
   if (trustedHumanReviewLogins.some((login) => typeof login !== "string" || !login || login.endsWith("[bot]"))) {
     throw new Error("Trusted human reviewer logins must be non-bot GitHub logins.");
   }
@@ -264,10 +268,16 @@ export function createBoundBuilderClient({
   let cachedToken = token || null;
   let cachedVerifiedLogin = verifiedLogin || null;
 
-  const context = { fetchImpl, apiUrl, token: cachedToken, repository, expectedLogin, verifiedLogin: cachedVerifiedLogin, headSha, prNumber };
+  const context = { fetchImpl, apiUrl, token: cachedToken, repository, expectedLogin, verifiedLogin: cachedVerifiedLogin, headSha, prNumber, issueNumber };
   const allowed = new Set(allowedOperations);
   const authorize = (operation) => {
     if (!allowed.has(operation)) throw new Error(`GitHub builder operation is not authorized: ${operation}.`);
+  };
+
+  const assertIssueBound = (num) => {
+    if (issueNumber === null || Number(issueNumber) !== Number(num)) {
+      throw new Error(`Client is bound to issue ${issueNumber}, cannot mutate issue ${num}.`);
+    }
   };
 
   async function ensureToken() {
@@ -883,5 +893,111 @@ export function createBoundBuilderClient({
     });
   }
 
-  return { identity, ensurePullRequest, reviewThreads, replyReviewThread, resolveReviewThread, markReady, merge, createBranch, pushBranch, replaceBranch };
+  async function getIssue(issueNum) {
+    authorize("get_issue");
+    assertIssueBound(issueNum);
+    await identity();
+    return await request({
+      ...context,
+      path: `/repos/${repository}/issues/${issueNum}`,
+    });
+  }
+
+  async function addIssueLabel(issueNum, label) {
+    authorize("add_issue_label");
+    assertIssueBound(issueNum);
+    await identity();
+    return await request({
+      ...context,
+      path: `/repos/${repository}/issues/${issueNum}/labels`,
+      method: "POST",
+      body: { labels: [label] },
+    });
+  }
+
+  async function removeIssueLabel(issueNum, label) {
+    authorize("remove_issue_label");
+    assertIssueBound(issueNum);
+    await identity();
+    return await request({
+      ...context,
+      path: `/repos/${repository}/issues/${issueNum}/labels/${encodeURIComponent(label)}`,
+      method: "DELETE",
+    });
+  }
+
+  async function getIssueComments(issueNum) {
+    authorize("get_issue_comments");
+    assertIssueBound(issueNum);
+    await identity();
+    return await request({
+      ...context,
+      path: `/repos/${repository}/issues/${issueNum}/comments?per_page=100`,
+    });
+  }
+
+  async function postIssueComment(issueNum, body) {
+    authorize("post_issue_comment");
+    assertIssueBound(issueNum);
+    await identity();
+    return await request({
+      ...context,
+      path: `/repos/${repository}/issues/${issueNum}/comments`,
+      method: "POST",
+      body: { body },
+    });
+  }
+
+  async function updateIssueComment(commentId, body) {
+    authorize("update_issue_comment");
+    const comments = await getIssueComments(issueNumber);
+    if (!comments.some(c => c.id === commentId)) {
+      throw new Error(`Comment ${commentId} does not belong to bound issue ${issueNumber}.`);
+    }
+    await identity();
+    return await request({
+      ...context,
+      path: `/repos/${repository}/issues/comments/${commentId}`,
+      method: "PATCH",
+      body: { body },
+    });
+  }
+
+  async function deleteIssueComment(commentId) {
+    authorize("delete_issue_comment");
+    const comments = await getIssueComments(issueNumber);
+    if (!comments.some(c => c.id === commentId)) {
+      throw new Error(`Comment ${commentId} does not belong to bound issue ${issueNumber}.`);
+    }
+    await identity();
+    return await request({
+      ...context,
+      path: `/repos/${repository}/issues/comments/${commentId}`,
+      method: "DELETE",
+    });
+  }
+
+  async function createRef(ref, sha) {
+    authorize("create_ref");
+    await identity();
+    return await request({
+      ...context,
+      path: `/repos/${repository}/git/refs`,
+      method: "POST",
+      body: { ref, sha },
+    });
+  }
+
+  async function deleteRef(ref) {
+    authorize("delete_ref");
+    await identity();
+    const cleanRef = ref.startsWith("refs/") ? ref.slice(5) : ref;
+    return await request({
+      ...context,
+      path: `/repos/${repository}/git/refs/${cleanRef}`,
+      method: "DELETE",
+    });
+  }
+
+  return { identity, ensurePullRequest, reviewThreads, replyReviewThread, resolveReviewThread, markReady, merge, createBranch, pushBranch, replaceBranch, getIssue, addIssueLabel, removeIssueLabel, getIssueComments, postIssueComment, updateIssueComment, deleteIssueComment, createRef, deleteRef };
 }
