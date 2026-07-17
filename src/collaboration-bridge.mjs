@@ -778,7 +778,7 @@ server.registerTool(
             outcome: "rolled_back",
           });
         } catch (rollbackError) {
-          console.error("Failed to roll back claim lease:", rollbackError);
+          throw new Error(`Failed to roll back claim lease after start error (${startError.message}): ${rollbackError.message}`);
         }
       }
       throw startError;
@@ -1112,32 +1112,30 @@ server.registerTool(
   },
   async ({ portfolioId: id, expectedRevision, itemId, expectedTargetSha, expectedHeadSha, mergedSha }) => {
     blockNestedCollaboration();
+    const updatedState = await updatePortfolio(PORTFOLIO_ROOT, id, expectedRevision, (current) => updatePortfolioItemState({
+      ...current,
+      mergeTrain: recordMergeResult(current.mergeTrain, { itemId, expectedTargetSha, expectedHeadSha, mergedSha }),
+    }, itemId, { status: "merged", summary: `Merged as ${mergedSha}` }));
+
     const portfolioState = await readPortfolio(PORTFOLIO_ROOT, id);
     const item = portfolioState.items.find(i => i.id === itemId);
     const collabId = item?.collaborationId;
     if (collabId) {
       const collab = await readCollaboration(WORKSPACE_ROOT, collabId).catch(() => null);
       if (collab && collab.issueClaim) {
-        try {
-          const { getBuilderClientForWorkspace, releaseClaimLease } = await import("./github-issue-claims.mjs");
-          const claimClient = await getBuilderClientForWorkspace(collab.workspace || WORKSPACE_ROOT, collab.issueClaim.issueNumber);
-          if (claimClient) {
-            await releaseClaimLease({
-              client: claimClient,
-              issueNumber: collab.issueClaim.issueNumber,
-              collaborationId: collabId,
-              outcome: "merged",
-            });
-          }
-        } catch (err) {
-          console.error("Failed to release claim lease during record_portfolio_merge:", err);
+        const { getBuilderClientForWorkspace, releaseClaimLease } = await import("./github-issue-claims.mjs");
+        const claimClient = await getBuilderClientForWorkspace(collab.workspace || WORKSPACE_ROOT, collab.issueClaim.issueNumber);
+        if (claimClient) {
+          await releaseClaimLease({
+            client: claimClient,
+            issueNumber: collab.issueClaim.issueNumber,
+            collaborationId: collabId,
+            outcome: "merged",
+          });
         }
       }
     }
-    return toolResponse(await updatePortfolio(PORTFOLIO_ROOT, id, expectedRevision, (current) => updatePortfolioItemState({
-      ...current,
-      mergeTrain: recordMergeResult(current.mergeTrain, { itemId, expectedTargetSha, expectedHeadSha, mergedSha }),
-    }, itemId, { status: "merged", summary: `Merged as ${mergedSha}` })));
+    return toolResponse(updatedState);
   },
 );
 
@@ -1445,19 +1443,15 @@ server.registerTool(
     }, { status: "cancelled" }));
 
     if (before.issueClaim) {
-      try {
-        const { getBuilderClientForWorkspace, releaseClaimLease } = await import("./github-issue-claims.mjs");
-        const claimClient = await getBuilderClientForWorkspace(before.workspace || WORKSPACE_ROOT, before.issueClaim.issueNumber);
-        if (claimClient) {
-          await releaseClaimLease({
-            client: claimClient,
-            issueNumber: before.issueClaim.issueNumber,
-            collaborationId: id,
-            outcome: "cancelled",
-          });
-        }
-      } catch (err) {
-        console.error("Failed to release claim lease during cancel_collaboration:", err);
+      const { getBuilderClientForWorkspace, releaseClaimLease } = await import("./github-issue-claims.mjs");
+      const claimClient = await getBuilderClientForWorkspace(before.workspace || WORKSPACE_ROOT, before.issueClaim.issueNumber);
+      if (claimClient) {
+        await releaseClaimLease({
+          client: claimClient,
+          issueNumber: before.issueClaim.issueNumber,
+          collaborationId: id,
+          outcome: "cancelled",
+        });
       }
     }
 
@@ -1482,7 +1476,7 @@ server.registerTool(
       issueNumber: z.number().int().min(1),
       expectedLogin: z.string().regex(GITHUB_LOGIN_PATTERN),
       collaborationId: z.string().min(1),
-      outcome: z.enum(["merged", "cancelled", "obsolete", "rolled_back", "taken_over"]).default("cancelled"),
+      outcome: z.enum(["merged", "cancelled", "obsolete", "rolled_back", "taken_over", "recovered"]).default("cancelled"),
     },
   },
   async ({ repository, issueNumber, expectedLogin, collaborationId, outcome }) => {

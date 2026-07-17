@@ -18,7 +18,8 @@ const CANONICAL_PHASES = [
   "cancelled",
   "obsolete",
   "rolled_back",
-  "taken_over"
+  "taken_over",
+  "recovered"
 ];
 
 function processAlive(pid) {
@@ -56,6 +57,7 @@ function normalizePhase(phase) {
   if (p === "obsolete") return "obsolete";
   if (p === "rolled_back") return "rolled_back";
   if (p === "taken_over") return "taken_over";
+  if (p === "recovered") return "recovered";
   return "working";
 }
 
@@ -74,7 +76,7 @@ function getRepositoryFromWorkspace(workspacePath) {
   return process.env.GITHUB_BUILDER_REPOSITORY || null;
 }
 
-function getHeadShaFromWorkspace(workspacePath) {
+export function getHeadShaFromWorkspace(workspacePath) {
   const result = spawnSync("git", ["rev-parse", "HEAD"], { cwd: workspacePath, encoding: "utf8" });
   if (result.status === 0) {
     return result.stdout.trim();
@@ -123,16 +125,21 @@ function generateCommentBody(payload) {
 
 async function isClaimActive(claim, workspaceRoot, ttlMs) {
   const phase = claim.data.phase;
-  if (["completed", "merged", "obsolete", "rolled_back", "taken_over"].includes(phase)) {
+  if (["merged", "cancelled", "obsolete", "rolled_back", "taken_over", "recovered"].includes(phase)) {
     return false;
   }
   if (claim.data.collaboration) {
+    let collab = null;
     try {
-      const collab = await readCollaboration(workspaceRoot, claim.data.collaboration);
-      if (collab) {
-        return !["completed", "cancelled", "obsolete"].includes(collab.status);
+      collab = await readCollaboration(workspaceRoot, claim.data.collaboration);
+    } catch (err) {
+      if (err.code !== "ENOENT") {
+        throw err;
       }
-    } catch {}
+    }
+    if (collab) {
+      return !["cancelled", "obsolete"].includes(collab.status);
+    }
   }
   const updated = claim.data.timestamps?.updated || claim.data.timestamps?.created;
   if (updated) {
@@ -159,20 +166,21 @@ export async function parseClaims(client, issueNumber) {
         try {
           const parsedData = JSON.parse(jsonMatch[1]);
           const mappedData = {
-            portfolio: parsedData.portfolio || null,
-            item: parsedData.item || null,
+            portfolio: parsedData.portfolioId || parsedData.portfolio || null,
+            item: parsedData.itemId || parsedData.item || null,
             writer: parsedData.writer || null,
-            collaboration: parsedData.collaboration || parsedData.collaborationId || null,
+            collaboration: parsedData.collaborationId || parsedData.collaboration || null,
             branch: parsedData.branch || null,
             worktree: parsedData.worktree || null,
-            base: parsedData.base || null,
-            head: parsedData.head || null,
+            base: parsedData.baseSha || parsedData.base || null,
+            head: parsedData.headSha || parsedData.head || null,
             phase: parsedData.phase || "working",
             generation: parsedData.generation || 1,
             timestamps: {
-              created: parsedData.timestamps?.created || parsedData.claimedAt || new Date().toISOString(),
-              updated: parsedData.timestamps?.updated || parsedData.updatedAt || new Date().toISOString(),
+              created: parsedData.claimedAt || parsedData.timestamps?.created || new Date().toISOString(),
+              updated: parsedData.updatedAt || parsedData.timestamps?.updated || new Date().toISOString(),
             },
+            leaseExpiresAt: parsedData.leaseExpiresAt || null,
             history: parsedData.history || [],
           };
           claims.push({ commentId: c.id, data: mappedData, author: authorLogin, isLegacyV1: true });
@@ -219,38 +227,43 @@ export async function acquireClaimLease({
     }
   }
 
-  // 2. Check for active comments
+  // 2. Parse claims from GitHub comments
   const claims = await parseClaims(client, issueNumber);
-  let activeClaim = null;
-  for (const claim of claims) {
-    if (await isClaimActive(claim, workspaceRoot, ttlMs)) {
-      activeClaim = claim;
-      break;
-    }
-  }
 
-  if (activeClaim) {
-    if (activeClaim.data.collaboration !== collaborationId) {
-      throw new Error(`Issue #${issueNumber} is already claimed by active collaboration ${activeClaim.data.collaboration} (writer: ${activeClaim.data.writer}).`);
-    }
-    await refreshClaimLease({ client, issueNumber, collaborationId, phase: "claiming", headSha });
-    return;
-  }
-
-  // 3. Contender publication window delay
+  // 3. Fail-closed generation check derived from canonical claim comment
   if (maxGen > 0) {
-    const latestGenClaim = claims.find(c => c.data.generation === maxGen);
+    let latestGenClaim = claims.find(c => c.data.generation === maxGen);
     if (!latestGenClaim) {
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 2000));
       const reClaims = await parseClaims(client, issueNumber);
-      const reLatestGenClaim = reClaims.find(c => c.data.generation === maxGen);
-      if (reLatestGenClaim && await isClaimActive(reLatestGenClaim, workspaceRoot, ttlMs)) {
-        if (reLatestGenClaim.data.collaboration !== collaborationId) {
-          throw new Error(`Issue #${issueNumber} is already claimed by active collaboration ${reLatestGenClaim.data.collaboration} (writer: ${reLatestGenClaim.data.writer}).`);
-        }
-        await refreshClaimLease({ client, issueNumber, collaborationId, phase: "claiming", headSha });
-        return;
+      latestGenClaim = reClaims.find(c => c.data.generation === maxGen);
+      if (!latestGenClaim) {
+        throw new Error(`Interrupted claim lease lock: ref for generation ${maxGen} exists but no matching comment found. Inspected recovery required.`);
       }
+    }
+
+    if (await isClaimActive(latestGenClaim, workspaceRoot, ttlMs)) {
+      if (latestGenClaim.data.collaboration !== collaborationId) {
+        throw new Error(`Issue #${issueNumber} is already claimed by active collaboration ${latestGenClaim.data.collaboration} (writer: ${latestGenClaim.data.writer}).`);
+      }
+      await refreshClaimLease({ client, issueNumber, collaborationId, phase: "claiming", headSha });
+      return;
+    }
+  } else {
+    // Safety check for active legacy claims when maxGen === 0
+    let activeClaim = null;
+    for (const claim of claims) {
+      if (await isClaimActive(claim, workspaceRoot, ttlMs)) {
+        activeClaim = claim;
+        break;
+      }
+    }
+    if (activeClaim) {
+      if (activeClaim.data.collaboration !== collaborationId) {
+        throw new Error(`Issue #${issueNumber} is already claimed by active collaboration ${activeClaim.data.collaboration} (writer: ${activeClaim.data.writer}).`);
+      }
+      await refreshClaimLease({ client, issueNumber, collaborationId, phase: "claiming", headSha });
+      return;
     }
   }
 
@@ -292,7 +305,7 @@ export async function acquireClaimLease({
 
       // Delete other comments to avoid pile-up
       for (let i = 1; i < staleClaims.length; i++) {
-        await client.deleteIssueComment(staleClaims[i].commentId).catch(() => {});
+        await client.deleteIssueComment(staleClaims[i].commentId);
       }
     }
 
@@ -339,7 +352,7 @@ export async function refreshClaimLease({ client, issueNumber, collaborationId, 
   // Clean up duplicate comments
   const duplicates = claims.filter(c => c.data.collaboration === collaborationId && c.commentId !== ours.commentId);
   for (const dup of duplicates) {
-    await client.deleteIssueComment(dup.commentId).catch(() => {});
+    await client.deleteIssueComment(dup.commentId);
   }
 
   const currentIdx = CANONICAL_PHASES.indexOf(normalizePhase(ours.data.phase));
@@ -376,7 +389,7 @@ export async function refreshClaimLease({ client, issueNumber, collaborationId, 
 }
 
 export async function releaseClaimLease({ client, issueNumber, collaborationId, outcome }) {
-  const allowedOutcomes = ["merged", "cancelled", "obsolete", "rolled_back", "taken_over", "failed", "indeterminate"];
+  const allowedOutcomes = ["merged", "cancelled", "obsolete", "rolled_back", "taken_over", "recovered"];
   if (!allowedOutcomes.includes(outcome)) {
     throw new Error(`Invalid claim lease release outcome: ${outcome}.`);
   }
@@ -387,7 +400,7 @@ export async function releaseClaimLease({ client, issueNumber, collaborationId, 
 
   const duplicates = claims.filter(c => c.data.collaboration === collaborationId && c.commentId !== ours.commentId);
   for (const dup of duplicates) {
-    await client.deleteIssueComment(dup.commentId).catch(() => {});
+    await client.deleteIssueComment(dup.commentId);
   }
 
   ours.data.phase = outcome;
@@ -400,18 +413,14 @@ export async function releaseClaimLease({ client, issueNumber, collaborationId, 
   const commentBody = generateCommentBody(ours.data);
   await client.updateIssueComment(ours.commentId, commentBody);
 
-  const terminal = ["merged", "cancelled", "obsolete", "rolled_back", "taken_over"].includes(outcome);
+  const generation = ours.data.generation || 1;
+  await client.releaseTagLock(generation);
 
-  if (terminal) {
-    const generation = ours.data.generation || 1;
-    await client.releaseTagLock(generation);
-
-    const remainingClaims = (await parseClaims(client, issueNumber)).filter(
-      c => c.data.collaboration !== collaborationId && !["completed", "merged", "cancelled", "obsolete", "rolled_back", "taken_over"].includes(c.data.phase)
-    );
-    if (remainingClaims.length === 0) {
-      await client.removeIssueLabel(issueNumber, "agent:in-progress").catch(() => {});
-    }
+  const remainingClaims = (await parseClaims(client, issueNumber)).filter(
+    c => c.data.collaboration !== collaborationId && !["completed", "merged", "cancelled", "obsolete", "rolled_back", "taken_over", "recovered"].includes(c.data.phase)
+  );
+  if (remainingClaims.length === 0) {
+    await client.removeIssueLabel(issueNumber, "agent:in-progress").catch(() => {});
   }
 }
 
@@ -422,8 +431,12 @@ async function updatePortfolioWithRetry(portfoliosPath, pId, updater, maxAttempt
       await updatePortfolio(portfoliosPath, pId, currentPortfolio.revision, updater);
       return;
     } catch (err) {
-      if (attempt === maxAttempts) throw err;
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+      if (err.message && err.message.includes("Portfolio revision changed")) {
+        if (attempt === maxAttempts) throw err;
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+        continue;
+      }
+      throw err;
     }
   }
 }
@@ -438,7 +451,11 @@ export async function reconcileClaimsAndPortfolios(workspaceRoot, fetchImpl = fe
         let collab = null;
         try {
           collab = await readCollaboration(workspaceRoot, item.collaborationId);
-        } catch {}
+        } catch (err) {
+          if (err.code !== "ENOENT") {
+            throw err;
+          }
+        }
 
         const issueNum = item.issueNumber || collab?.issueClaim?.issueNumber;
         if (!issueNum) continue;

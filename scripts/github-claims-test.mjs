@@ -391,7 +391,7 @@ async function runTests() {
     collaborationId: "bridge-33333333-3333-3333-4444-555555555555",
     phase: "working"
   });
-  
+
   const claimsAfterRefresh = await parseClaims(client, 42);
   const stateWorking = claimsAfterRefresh.find(c => c.data.collaboration === "bridge-33333333-3333-3333-4444-555555555555").data;
   assert.equal(stateWorking.phase, "working");
@@ -434,11 +434,11 @@ async function runTests() {
   });
   assert.ok(mock.getRefs().has("refs/tags/claims/issue-42-generation-1"));
 
-  await releaseClaimLease({
+  await refreshClaimLease({
     client,
     issueNumber: 42,
     collaborationId: "bridge-failed-id",
-    outcome: "failed"
+    phase: "failed"
   });
   // Mutex lock is NOT released for failed
   assert.ok(mock.getRefs().has("refs/tags/claims/issue-42-generation-1"));
@@ -548,6 +548,51 @@ async function runTests() {
   // Reconciled failed status did NOT release lease on GitHub (retains ownership)
   const finalCommentsAfterReconcile = mock.getComments();
   assert.ok(finalCommentsAfterReconcile[0].body.includes('"phase": "working"'));
+
+  console.log("14. Testing fail-closed behavior for ref without comment...");
+  mock.clear();
+  mock.getRefs().set("refs/tags/claims/issue-42-generation-1", "1111111111111111111111111111111111111111");
+  await assert.rejects(
+    acquireClaimLease({
+      client,
+      issueNumber: 42,
+      portfolioId: "p1",
+      itemId: "42",
+      writer: "codex",
+      collaborationId: "bridge-fail-closed",
+      headSha: "1111111111111111111111111111111111111111",
+      workspaceRoot: tempWorkspaceRoot
+    }),
+    /Interrupted claim lease lock: ref for generation 1 exists but no matching comment found/
+  );
+
+  console.log("15. Testing tool-path import and force release logic...");
+  mock.clear();
+  mock.getRepoLabels().add("agent:in-progress");
+  await acquireClaimLease({
+    client,
+    issueNumber: 42,
+    portfolioId: "p1",
+    itemId: "42",
+    writer: "codex",
+    collaborationId: "bridge-force-release-collab",
+    headSha: "1111111111111111111111111111111111111111",
+    workspaceRoot: tempWorkspaceRoot
+  });
+
+  const { releaseClaimLease: toolReleaseClaimLease, getHeadShaFromWorkspace: toolGetHeadShaFromWorkspace } = await import("../src/github-issue-claims.mjs");
+  const toolHeadSha = toolGetHeadShaFromWorkspace(process.cwd());
+  assert.equal(toolHeadSha.length, 40);
+
+  const toolClient = createBoundBuilderClient({
+    ...baseClientConfig,
+    headSha: toolHeadSha
+  });
+
+  await toolReleaseClaimLease({ client: toolClient, issueNumber: 42, collaborationId: "bridge-force-release-collab", outcome: "recovered" });
+
+  const commentsAfterTool = mock.getComments();
+  assert.ok(commentsAfterTool[0].body.includes('"phase": "recovered"'));
 
   fs.rmSync(tempWorkspaceRoot, { recursive: true, force: true });
   console.log("All claim subsystem unit tests passed successfully!");

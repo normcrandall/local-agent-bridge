@@ -572,13 +572,22 @@ try {
           phase: "completed",
           headSha: workerHeadSha,
         });
-      } else if (["cancelled", "obsolete", "failed", "indeterminate"].includes(outcome.reason)) {
+      } else if (["cancelled", "obsolete"].includes(outcome.reason)) {
         const { releaseClaimLease } = await import("../src/github-issue-claims.mjs");
         await releaseClaimLease({
           client: claimClient,
           issueNumber: state.issueClaim.issueNumber,
           collaborationId: id,
           outcome: outcome.reason,
+        });
+      } else if (["failed", "indeterminate"].includes(outcome.reason)) {
+        const { refreshClaimLease } = await import("../src/github-issue-claims.mjs");
+        await refreshClaimLease({
+          client: claimClient,
+          issueNumber: state.issueClaim.issueNumber,
+          collaborationId: id,
+          phase: outcome.reason,
+          headSha: workerHeadSha,
         });
       }
     }
@@ -588,15 +597,16 @@ try {
   if (!(await scheduleProviderRecovery(error).catch(() => false))) {
     if (claimClient) {
       try {
-        const { releaseClaimLease } = await import("../src/github-issue-claims.mjs");
-        await releaseClaimLease({
+        const { refreshClaimLease } = await import("../src/github-issue-claims.mjs");
+        await refreshClaimLease({
           client: claimClient,
           issueNumber: state.issueClaim.issueNumber,
           collaborationId: id,
-          outcome: error?.indeterminate ? "indeterminate" : "failed",
+          phase: error?.indeterminate ? "indeterminate" : "failed",
+          headSha: workerHeadSha,
         });
       } catch (claimErr) {
-        console.error("Failed to release claim lease during worker catch block:", claimErr);
+        console.error("Failed to refresh claim lease during worker catch block:", claimErr);
       }
     }
     await updateCollaboration(workspaceRoot, id, (current) => error?.indeterminate
