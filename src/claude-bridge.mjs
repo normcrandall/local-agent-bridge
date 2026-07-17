@@ -474,7 +474,7 @@ const sharedInput = {
     expectedLogin: z.string().regex(GITHUB_LOGIN_PATTERN),
     headRef: z.string().min(1).optional(),
     baseRef: z.string().min(1).optional(),
-    allowedOperations: z.array(z.enum(["ensure_pull_request", "read_review_threads", "reply_review_thread", "resolve_review_thread", "mark_ready", "merge", "create_branch", "push_branch"])).min(1).max(8)
+    allowedOperations: z.array(z.enum(["ensure_pull_request", "read_review_threads", "reply_review_thread", "resolve_review_thread", "mark_ready", "merge", "create_branch", "push_branch", "replace_branch"])).min(1).max(9)
       .default(["ensure_pull_request", "read_review_threads", "reply_review_thread", "resolve_review_thread", "mark_ready"]),
   }).strict().optional().describe(
     "Explicit work-mode authorization for target-bound GitHub builder operations at one repository and head SHA.",
