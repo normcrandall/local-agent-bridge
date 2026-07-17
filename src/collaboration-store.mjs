@@ -277,7 +277,8 @@ export async function queryControlPlane(stateRoot, options = {}) {
     }
   }
 
-  const portfolios = await loadJsonFiles(resolve(stateRoot, "portfolios"), /^helm-[0-9a-f-]{36}\.json$/);
+  const portfolioRoot = process.env.BRIDGE_PORTFOLIO_DIR || resolve(stateRoot, "portfolios");
+  const portfolios = await loadJsonFiles(portfolioRoot, /^helm-[0-9a-f-]{36}\.json$/);
 
   const lanes = [];
   const processedCollaborationIds = new Set();
@@ -299,7 +300,7 @@ export async function queryControlPlane(stateRoot, options = {}) {
   }
 
   function buildCollaborationLane(cState, archived) {
-    const participants = cState.agents || [];
+    const participants = cState.participants || cState.agents || [];
     const writer = cState.writer || cState.runtime?.writer || null;
     const activeCall = cState.runtime?.activeCall || null;
 
@@ -325,12 +326,14 @@ export async function queryControlPlane(stateRoot, options = {}) {
       summary: activeCall.summary || null,
       updatedAt: activeCall.summaryAt || null,
       ageSeconds: parseAge(activeCall.summaryAt),
-      source: activeCall.summarySource || null
+      source: activeCall.summarySource || null,
+      isPlaceholder: activeCall.summarySource === "broker"
     } : {
       summary: null,
       updatedAt: null,
       ageSeconds: null,
-      source: null
+      source: null,
+      isPlaceholder: false
     };
 
     const heartbeat = activeCall ? {
@@ -346,10 +349,23 @@ export async function queryControlPlane(stateRoot, options = {}) {
       nextAction: cState.completion.nextAction || null
     } : null;
 
+    const lastDecision = cState.decisions?.at(-1) || null;
+    const isPending = lastDecision && lastDecision.action !== "resolved";
     const blocker = {
       error: cState.error || null,
       needsUser: cState.status === "needs_user",
-      pendingDecision: cState.decisions?.find(d => d.action !== "resolved") || null
+      pendingDecision: isPending ? {
+        question: lastDecision.question || null,
+        category: lastDecision.category || null,
+        owner: lastDecision.owner || null,
+        reason: lastDecision.reason || null
+      } : null,
+      decisionEscalation: cState.decisionEscalation ? {
+        question: cState.decisionEscalation.question || null,
+        category: cState.decisionEscalation.category || null,
+        owner: cState.decisionEscalation.owner || null,
+        reason: cState.decisionEscalation.reason || null
+      } : null
     };
 
     const recovery = {
@@ -357,12 +373,15 @@ export async function queryControlPlane(stateRoot, options = {}) {
       recommendation: cState.status === "indeterminate"
         ? "Execution ownership is ambiguous. Inspect with bridge recover <id>; do not start replacement work. Cancel only after verifying workspace and provider state."
         : null,
-      processAlive: processAlive(cState.workerPid)
+      processAlive: processAlive(cState.workerPid),
+      unavailableAgents: cState.runtime?.unavailableAgents || null,
+      availableAgents: cState.runtime?.availableAgents || null,
+      providerRecoveryState: cState.providerRecoveryState || null
     };
 
     const budget = cState.budget ? {
       limit: cState.budget,
-      exceeded: cState.budgetExceeded || false
+      exceeded: cState.runtime?.budgetExceeded || false
     } : null;
 
     let nextAction = "none";
@@ -384,7 +403,7 @@ export async function queryControlPlane(stateRoot, options = {}) {
       workspace: cState.workspace || null,
       participants,
       writer,
-      lifecyclePhase: cState.status,
+      lifecyclePhase: cState.status || "unknown",
       narrative,
       heartbeat,
       handoff,
@@ -404,7 +423,19 @@ export async function queryControlPlane(stateRoot, options = {}) {
       const colId = item.collaborationId;
       const matched = colId ? collaborations.find(c => c.state.id === colId) : null;
 
-      const mtEntry = p.mergeTrain?.find(mt => mt.itemId === item.id) || null;
+      let mtEntry = null;
+      if (p.mergeTrain) {
+        if (Array.isArray(p.mergeTrain)) {
+          mtEntry = p.mergeTrain.find(mt => mt.itemId === item.id) || null;
+        } else {
+          if (Array.isArray(p.mergeTrain.queue)) {
+            mtEntry = p.mergeTrain.queue.find(mt => mt.itemId === item.id) || null;
+          }
+          if (!mtEntry && Array.isArray(p.mergeTrain.history)) {
+            mtEntry = p.mergeTrain.history.find(mt => mt.itemId === item.id) || null;
+          }
+        }
+      }
       const portfolioInfo = {
         portfolioId: p.id,
         itemId: item.id,
@@ -444,7 +475,7 @@ export async function queryControlPlane(stateRoot, options = {}) {
           workspace: p.workspace || null,
           participants,
           writer,
-          lifecyclePhase: item.status,
+          lifecyclePhase: item.status || "unknown",
           narrative: {
             summary: item.summary || null,
             updatedAt: p.updatedAt || null,
@@ -471,6 +502,7 @@ export async function queryControlPlane(stateRoot, options = {}) {
     }
   }
 
+  lanes.sort((left, right) => left.id.localeCompare(right.id));
   let filteredLanes = lanes;
 
   if (options.workspace) {
@@ -484,7 +516,7 @@ export async function queryControlPlane(stateRoot, options = {}) {
 
   if (options.status) {
     const filterStatus = options.status.toLowerCase();
-    filteredLanes = filteredLanes.filter(lane => lane.lifecyclePhase.toLowerCase() === filterStatus);
+    filteredLanes = filteredLanes.filter(lane => (lane.lifecyclePhase || "unknown").toLowerCase() === filterStatus);
   }
 
   if (options.provider) {

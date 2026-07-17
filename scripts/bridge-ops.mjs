@@ -78,7 +78,8 @@ switch (command) {
             }
             if (lane.narrative.summary) {
               const age = lane.narrative.ageSeconds !== null ? `${lane.narrative.ageSeconds}s ago` : "unknown age";
-              lines.push(`Narrative:      ${lane.narrative.summary} (${age}, source: ${lane.narrative.source})`);
+              const label = lane.narrative.isPlaceholder ? "Broker Placeholder" : "Agent/Adapter";
+              lines.push(`Narrative (${label}): ${lane.narrative.summary} (${age})`);
             }
             if (lane.heartbeat) {
               const age = lane.heartbeat.ageSeconds !== null ? `${lane.heartbeat.ageSeconds}s ago` : "unknown age";
@@ -87,10 +88,15 @@ switch (command) {
             if (lane.handoff) {
               lines.push(`Handoff:        Seq ${lane.handoff.sequence}, Outcome: ${lane.handoff.outcome}, Acknowledged: ${lane.handoff.acknowledged}`);
             }
-            if (lane.blocker.error || lane.blocker.needsUser) {
-              lines.push(`Blocker:        Error: ${lane.blocker.error}, Needs User: ${lane.blocker.needsUser}`);
+            if (lane.blocker && (lane.blocker.error || lane.blocker.needsUser || lane.blocker.pendingDecision || lane.blocker.decisionEscalation)) {
+              const parts = [];
+              if (lane.blocker.error) parts.push(`Error: ${lane.blocker.error}`);
+              if (lane.blocker.needsUser) parts.push("Needs User: true");
+              if (lane.blocker.pendingDecision) parts.push(`Pending: ${lane.blocker.pendingDecision.question}`);
+              if (lane.blocker.decisionEscalation) parts.push(`Escalation: ${lane.blocker.decisionEscalation.reason || lane.blocker.decisionEscalation.question}`);
+              lines.push(`Blocker:        ${parts.join(", ")}`);
             }
-            if (lane.recovery.status) {
+            if (lane.recovery && lane.recovery.status) {
               lines.push(`Recovery:       Status: ${lane.recovery.status}, Process Alive: ${lane.recovery.processAlive}`);
             }
             if (lane.portfolio) {
