@@ -1,4 +1,178 @@
 import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
+
+const LFS_POINTER_REGEX = /^version https:\/\/git-lfs\.github\.com\/spec\/v1\r?\noid sha256:[0-9a-f]{64}\r?\nsize [0-9]+\r?\n$/;
+
+function runGit(args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const cp = spawn("git", args, {
+      cwd: options.cwd || process.cwd(),
+      env: {
+        ...process.env,
+        ...options.env,
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_CONFIG_SYSTEM: "/dev/null",
+      },
+      stdio: options.stdio || ["pipe", "pipe", "pipe"],
+    });
+
+    const stdoutChunks = [];
+    const stderrChunks = [];
+    if (cp.stdout) {
+      cp.stdout.on("data", (chunk) => { stdoutChunks.push(chunk); });
+    }
+    if (cp.stderr) {
+      cp.stderr.on("data", (chunk) => { stderrChunks.push(chunk); });
+    }
+
+    cp.on("error", reject);
+    cp.on("close", (code) => {
+      const stdout = Buffer.concat(stdoutChunks);
+      const stderr = Buffer.concat(stderrChunks).toString("utf8");
+      if (code === 0) {
+        resolve({ code, stdout, stderr });
+      } else {
+        const err = new Error(`git ${args.join(" ")} failed with exit code ${code}\nstderr: ${stderr}`);
+        err.code = code;
+        err.stdout = stdout;
+        err.stderr = stderr;
+        reject(err);
+      }
+    });
+
+    if (options.input && cp.stdin) {
+      cp.stdin.write(options.input);
+      cp.stdin.end();
+    }
+  });
+}
+
+async function validateLocalGitState({ workspace, repository, ref, sha, oldSha }) {
+  if (!workspace) {
+    throw new Error("Workspace path GITHUB_BUILDER_WORKSPACE is not set or invalid.");
+  }
+  
+  // Verify HTTPS remote URL matches repository
+  let remoteUrl;
+  try {
+    const { stdout } = await runGit(["remote", "get-url", "origin"], { cwd: workspace });
+    remoteUrl = stdout.toString("utf8").trim();
+  } catch (error) {
+    throw new Error(`Failed to get git remote URL: ${error.message}`);
+  }
+  if (!remoteUrl.includes(repository)) {
+    throw new Error(`Remote URL mismatch: remote points to ${remoteUrl}, expected repository ${repository}.`);
+  }
+  if (!remoteUrl.startsWith("https://")) {
+    throw new Error("Repository remote must use HTTPS.");
+  }
+
+  // Verify local object availability
+  try {
+    await runGit(["cat-file", "-e", sha], { cwd: workspace });
+  } catch (error) {
+    throw new Error(`Local object availability check failed for SHA ${sha}: ${error.message}`);
+  }
+
+  // Ref validation and head SHA matching if ref exists locally
+  try {
+    const { stdout } = await runGit(["rev-parse", ref], { cwd: workspace });
+    const localSha = stdout.toString("utf8").trim();
+    if (localSha !== sha) {
+      throw new Error(`Local ref ${ref} points to ${localSha}, expected SHA ${sha}.`);
+    }
+  } catch (error) {
+    // If local ref doesn't exist, it's fine as long as the object is available
+  }
+
+  // Ancestry check
+  if (oldSha !== undefined) {
+    try {
+      await runGit(["merge-base", "--is-ancestor", oldSha, sha], { cwd: workspace });
+    } catch (error) {
+      throw new Error(`Push is not a fast-forward. Base ${oldSha} is not an ancestor of head ${sha}.`);
+    }
+  }
+
+  // Payload size, binaries, and LFS pointers validation
+  let filesOutput;
+  try {
+    if (oldSha) {
+      const { stdout } = await runGit(["diff", "--name-only", "-z", "--diff-filter=d", oldSha, sha], { cwd: workspace });
+      filesOutput = stdout;
+    } else {
+      const { stdout } = await runGit(["ls-tree", "-r", "--name-only", "-z", sha], { cwd: workspace });
+      filesOutput = stdout;
+    }
+  } catch (error) {
+    throw new Error(`Failed to list modified files: ${error.message}`);
+  }
+
+  const files = filesOutput.toString("utf8").split("\0").filter(Boolean);
+  for (const file of files) {
+    let sizeStr;
+    try {
+      const { stdout } = await runGit(["cat-file", "-s", `${sha}:${file}`], { cwd: workspace });
+      sizeStr = stdout.toString("utf8").trim();
+    } catch (error) {
+      throw new Error(`Failed to get size of ${file}: ${error.message}`);
+    }
+    const size = Number.parseInt(sizeStr, 10);
+    
+    // We enforce a 10 MB limit for non-LFS files
+    if (size > 10 * 1024 * 1024) {
+      throw new Error(`File ${file} exceeds size limit (10MB) and must be tracked via LFS.`);
+    }
+
+    let buffer;
+    try {
+      const { stdout } = await runGit(["cat-file", "blob", `${sha}:${file}`], { cwd: workspace });
+      buffer = stdout;
+    } catch (error) {
+      throw new Error(`Failed to read contents of ${file}: ${error.message}`);
+    }
+
+    const isLfs = buffer.toString("utf8").startsWith("version https://git-lfs.github.com/spec/v1");
+    if (isLfs) {
+      if (!LFS_POINTER_REGEX.test(buffer.toString("utf8"))) {
+        throw new Error(`LFS validation failed: file ${file} has an invalid LFS pointer format.`);
+      }
+    } else {
+      const isBinary = buffer.includes(0);
+      if (isBinary) {
+        throw new Error(`File ${file} is binary and must be tracked via LFS.`);
+      }
+    }
+  }
+}
+
+async function gitPushTransport({ workspace, repository, ref, sha, oldSha, token }) {
+  const pushArgs = [
+    "-c", "core.hooksPath=/dev/null",
+    "-c", "credential.helper=",
+    "-c", 'credential.helper=!f() { echo "password=$GITHUB_TOKEN"; }; f',
+    "push",
+    `https://x-access-token@github.com/${repository}.git`,
+    `--force-with-lease=${ref}:${oldSha || ""}`,
+    `${sha}:${ref}`
+  ];
+
+  try {
+    await runGit(pushArgs, {
+      cwd: workspace,
+      env: {
+        GITHUB_TOKEN: token,
+      },
+    });
+  } catch (error) {
+    const stderr = error.stderr || "";
+    if (stderr.includes("[rejected]") || stderr.includes("non-fast-forward") || stderr.includes("fetch first")) {
+      throw new Error(`Push is not a fast-forward. Remote rejection: ${stderr}`);
+    }
+    throw error;
+  }
+}
 
 function headers(token) {
   return {
@@ -79,7 +253,7 @@ async function boundPullRequest(context) {
 export function createBoundBuilderClient({
   fetchImpl = fetch,
   apiUrl = "https://api.github.com",
-  token,
+  token = null,
   repository,
   expectedLogin,
   verifiedLogin = null,
@@ -91,9 +265,19 @@ export function createBoundBuilderClient({
   trustedReviewLogins = [],
   trustedHumanReviewLogins = [],
   allowedOperations = ["ensure_pull_request", "read_review_threads", "reply_review_thread", "resolve_review_thread", "mark_ready"],
+  getToken = null,
+  workspace = null,
 }) {
   assertRepository(repository);
   assertSha(headSha);
+  if (!apiUrl.startsWith("https://")) {
+    throw new Error("API URL must use HTTPS.");
+  }
+  if (!getToken) {
+    if (!token || typeof token !== "string" || !token.startsWith("ghs_")) {
+      throw new Error("Only short-lived GitHub App installation tokens (ghs_...) are permitted for builder operations.");
+    }
+  }
   if (!expectedLogin) throw new Error("expectedLogin is required.");
   if (prNumber !== null && (!Number.isInteger(prNumber) || prNumber < 1)) throw new Error("prNumber is invalid.");
   if (trustedHumanReviewLogins.includes(expectedLogin)) {
@@ -102,14 +286,37 @@ export function createBoundBuilderClient({
   if (trustedHumanReviewLogins.some((login) => typeof login !== "string" || !login || login.endsWith("[bot]"))) {
     throw new Error("Trusted human reviewer logins must be non-bot GitHub logins.");
   }
-  const context = { fetchImpl, apiUrl, token, repository, expectedLogin, verifiedLogin, headSha, prNumber };
+
+  let cachedToken = token || null;
+  let cachedVerifiedLogin = verifiedLogin || null;
+
+  const context = { fetchImpl, apiUrl, token: cachedToken, repository, expectedLogin, verifiedLogin: cachedVerifiedLogin, headSha, prNumber };
   const allowed = new Set(allowedOperations);
   const authorize = (operation) => {
     if (!allowed.has(operation)) throw new Error(`GitHub builder operation is not authorized: ${operation}.`);
   };
 
+  async function ensureToken() {
+    if (cachedToken) {
+      return { token: cachedToken, verifiedLogin: cachedVerifiedLogin };
+    }
+    if (!getToken) {
+      throw new Error("Token factory 'getToken' is required.");
+    }
+    const credential = await getToken();
+    if (!credential.token || typeof credential.token !== "string" || !credential.token.startsWith("ghs_")) {
+      throw new Error("Only short-lived GitHub App installation tokens (ghs_...) are permitted for builder operations.");
+    }
+    cachedToken = credential.token;
+    cachedVerifiedLogin = credential.verifiedLogin;
+    context.token = cachedToken;
+    context.verifiedLogin = cachedVerifiedLogin;
+    return credential;
+  }
+
   async function identity() {
-    return verifyIdentity(context);
+    const cred = await ensureToken();
+    return verifyIdentity({ ...context, token: cred.token, verifiedLogin: cred.verifiedLogin });
   }
 
   async function ensurePullRequest({ title, body, draft = false }) {
@@ -352,5 +559,237 @@ export function createBoundBuilderClient({
     };
   }
 
-  return { identity, ensurePullRequest, reviewThreads, replyReviewThread, resolveReviewThread, markReady, merge };
+  async function createBranch({ ref, sha }) {
+    authorize("create_branch");
+    if (!ref || typeof ref !== "string" || !ref.startsWith("refs/heads/")) {
+      throw new Error("Ref must start with refs/heads/.");
+    }
+    assertSha(sha);
+    if (sha !== headSha) {
+      throw new Error(`SHA mismatch: expected ${headSha}, received ${sha}.`);
+    }
+    const expectedRef = headRef ? (headRef.startsWith("refs/heads/") ? headRef : `refs/heads/${headRef}`) : null;
+    if (expectedRef && ref !== expectedRef) {
+      throw new Error(`Ref mismatch: expected ${expectedRef}, received ${ref}.`);
+    }
+    await identity();
+
+    // Check default branch
+    const repoInfo = await request({ ...context, path: `/repos/${repository}` });
+    const defaultBranch = repoInfo.default_branch || "main";
+    const branchName = ref.slice("refs/heads/".length);
+    const protectedNames = ["main", "master", "production", "release", "develop"];
+    if (protectedNames.includes(branchName) || branchName === defaultBranch) {
+      throw new Error(`Cannot modify a protected or default branch: ${branchName}.`);
+    }
+
+    const encodedBranch = branchName.split("/").map(encodeURIComponent).join("/");
+    
+    // 1. Local validations BEFORE token issuance
+    await validateLocalGitState({ workspace, repository, ref, sha });
+
+    // 2. Token issuance AFTER validations
+    const credential = await ensureToken();
+    const activeToken = credential.token;
+
+    let isProtected = false;
+    try {
+      const branchInfo = await request({ ...context, token: activeToken, path: `/repos/${repository}/branches/${encodedBranch}` });
+      if (branchInfo?.protected === true) {
+        isProtected = true;
+      }
+    } catch (error) {
+      if (error.status !== 404) throw error;
+    }
+    if (isProtected) {
+      throw new Error(`Cannot modify a protected or default branch: ${branchName}.`);
+    }
+
+    const currentRef = await request({ ...context, token: activeToken, path: `/repos/${repository}/git/ref/heads/${encodedBranch}` }).catch((err) => {
+      if (err.status === 404) return null;
+      throw err;
+    });
+    if (currentRef?.object?.sha === sha) {
+      return {
+        operation: "create_branch",
+        repository,
+        ref,
+        sha,
+        readBackSha: sha,
+        idempotent: true,
+        login: expectedLogin,
+      };
+    }
+
+    // 3. Mutate via git push transport
+    try {
+      await gitPushTransport({ workspace, repository, ref, sha, token: activeToken });
+    } catch (error) {
+      const stderr = error.stderr || "";
+      if (stderr.includes("[rejected]") || stderr.includes("already exists")) {
+        const readBack = await request({ ...context, token: activeToken, path: `/repos/${repository}/git/ref/heads/${encodedBranch}` }).catch(() => null);
+        if (readBack?.object?.sha === sha) {
+          return {
+            operation: "create_branch",
+            repository,
+            ref,
+            sha,
+            readBackSha: sha,
+            idempotent: true,
+            login: expectedLogin,
+          };
+        }
+      }
+      
+      // Reconciliation via remote read-back
+      const readBack = await request({ ...context, token: activeToken, path: `/repos/${repository}/git/ref/heads/${encodedBranch}` }).catch(() => null);
+      if (readBack?.object?.sha === sha) {
+        return {
+          operation: "create_branch",
+          repository,
+          ref,
+          sha,
+          readBackSha: sha,
+          idempotent: false,
+          login: expectedLogin,
+          reconciled: true,
+        };
+      }
+      throw error;
+    }
+
+    const readBack = await request({ ...context, token: activeToken, path: `/repos/${repository}/git/ref/heads/${encodedBranch}` });
+    if (readBack?.object?.sha !== sha) {
+      throw new Error(`Read-back validation failed: expected ${sha}, found ${readBack?.object?.sha || "none"}`);
+    }
+    return {
+      operation: "create_branch",
+      repository,
+      ref,
+      sha,
+      readBackSha: readBack.object.sha,
+      idempotent: false,
+      login: expectedLogin,
+    };
+  }
+
+  async function pushBranch({ ref, sha, oldSha }) {
+    authorize("push_branch");
+    if (!ref || typeof ref !== "string" || !ref.startsWith("refs/heads/")) {
+      throw new Error("Ref must start with refs/heads/.");
+    }
+    assertSha(sha);
+    if (sha !== headSha) {
+      throw new Error(`SHA mismatch: expected ${headSha}, received ${sha}.`);
+    }
+    const expectedRef = headRef ? (headRef.startsWith("refs/heads/") ? headRef : `refs/heads/${headRef}`) : null;
+    if (expectedRef && ref !== expectedRef) {
+      throw new Error(`Ref mismatch: expected ${expectedRef}, received ${ref}.`);
+    }
+    if (oldSha !== undefined) assertSha(oldSha);
+
+    // 1. Local validations BEFORE token issuance
+    await validateLocalGitState({ workspace, repository, ref, sha, oldSha });
+
+    // 2. Token issuance AFTER validations
+    const credential = await ensureToken();
+    const activeToken = credential.token;
+
+    // Check default branch
+    const repoInfo = await request({ ...context, token: activeToken, path: `/repos/${repository}` });
+    const defaultBranch = repoInfo.default_branch || "main";
+    const branchName = ref.slice("refs/heads/".length);
+    const protectedNames = ["main", "master", "production", "release", "develop"];
+    if (protectedNames.includes(branchName) || branchName === defaultBranch) {
+      throw new Error(`Cannot modify a protected or default branch: ${branchName}.`);
+    }
+
+    const encodedBranch = branchName.split("/").map(encodeURIComponent).join("/");
+    let isProtected = false;
+    try {
+      const branchInfo = await request({ ...context, token: activeToken, path: `/repos/${repository}/branches/${encodedBranch}` });
+      if (branchInfo?.protected === true) {
+        isProtected = true;
+      }
+    } catch (error) {
+      if (error.status !== 404) throw error;
+    }
+    if (isProtected) {
+      throw new Error(`Cannot modify a protected or default branch: ${branchName}.`);
+    }
+
+    const currentRef = await request({ ...context, token: activeToken, path: `/repos/${repository}/git/ref/heads/${encodedBranch}` }).catch((err) => {
+      if (err.status === 404) return null;
+      throw err;
+    });
+    const remoteSha = currentRef?.object?.sha;
+
+    if (oldSha !== undefined) {
+      if (!remoteSha) {
+        throw new Error(`Remote branch refs/heads/${branchName} does not exist, but oldSha was provided.`);
+      }
+      if (remoteSha !== oldSha) {
+        throw new Error(`Remote branch ref changed: expected ${oldSha}, current ${remoteSha}.`);
+      }
+    } else {
+      if (!remoteSha) {
+        throw new Error(`Remote branch refs/heads/${branchName} does not exist.`);
+      }
+    }
+    const baseSha = remoteSha;
+
+    if (baseSha === sha) {
+      return {
+        operation: "push_branch",
+        repository,
+        ref,
+        sha,
+        readBackSha: sha,
+        idempotent: true,
+        login: expectedLogin,
+      };
+    }
+
+    // Since we verified remoteSha (baseSha) matches remote, now run git push transport with compare-and-swap lease
+    try {
+      await gitPushTransport({ workspace, repository, ref, sha, oldSha: baseSha, token: activeToken });
+    } catch (error) {
+      const stderr = error.stderr || "";
+      if (stderr.includes("[rejected]") || stderr.includes("non-fast-forward") || stderr.includes("fetch first")) {
+        throw new Error(`Push is not a fast-forward. Remote rejection: ${stderr}`);
+      }
+
+      // Reconciliation for network/ambiguous error
+      const readBack = await request({ ...context, token: activeToken, path: `/repos/${repository}/git/ref/heads/${encodedBranch}` }).catch(() => null);
+      if (readBack?.object?.sha === sha) {
+        return {
+          operation: "push_branch",
+          repository,
+          ref,
+          sha,
+          readBackSha: sha,
+          idempotent: false,
+          login: expectedLogin,
+          reconciled: true,
+        };
+      }
+      throw error;
+    }
+
+    const readBack = await request({ ...context, token: activeToken, path: `/repos/${repository}/git/ref/heads/${encodedBranch}` });
+    if (readBack?.object?.sha !== sha) {
+      throw new Error(`Read-back validation failed: expected ${sha}, found ${readBack?.object?.sha || "none"}`);
+    }
+    return {
+      operation: "push_branch",
+      repository,
+      ref,
+      sha,
+      readBackSha: readBack.object.sha,
+      idempotent: false,
+      login: expectedLogin,
+    };
+  }
+
+  return { identity, ensurePullRequest, reviewThreads, replyReviewThread, resolveReviewThread, markReady, merge, createBranch, pushBranch };
 }
