@@ -19,7 +19,7 @@ export function normalizeHandoff(value) {
     if (typeof value[field] !== "string") throw new Error(`HANDOFF ${field} must be a string.`);
     return value[field].trim();
   };
-  return {
+  const normalized = {
     outcome: value.outcome,
     summary: value.summary.trim(),
     artifacts: strings(value.artifacts, "artifacts"),
@@ -29,6 +29,10 @@ export function normalizeHandoff(value) {
     remaining: strings(value.remaining, "remaining"),
     nextAction: value.nextAction,
   };
+  if (value.capsule !== undefined) {
+    normalized.capsule = value.capsule;
+  }
+  return normalized;
 }
 
 export function completionAfterHandoff(previous, { handoff, agent, turn, at = new Date().toISOString() }) {

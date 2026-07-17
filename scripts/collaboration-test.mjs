@@ -101,6 +101,7 @@ try {
     "create_portfolio",
     "enqueue_portfolio_merge",
     "get_collaboration",
+    "get_context_capsule",
     "get_portfolio",
     "list_collaborations",
     "list_portfolios",

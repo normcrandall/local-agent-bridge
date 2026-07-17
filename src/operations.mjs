@@ -191,7 +191,7 @@ export function exportPortableManifest({ destination, sourceRoot }) {
     version: 1,
     createdAt: new Date().toISOString(),
     source: resolve(sourceRoot),
-    excludes: ["node_modules", ".git", ".bridge", "~/.config/ghtoken", "~/.config/local-agent-bridge/github-apps", "provider credentials", "collaboration state"],
+    excludes: ["node_modules", ".git", ".bridge", "~/.config/ghtoken", "~/.config/local-agent-bridge/github-apps", "provider credentials", "collaboration state", "capsule files"],
     install: ["npm ci", "npm run install:global", "npm run doctor"],
     launchers: ["claude", "codex", "antigravity", "collaboration", "playwright"],
   };
