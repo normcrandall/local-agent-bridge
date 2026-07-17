@@ -240,3 +240,280 @@ export async function pruneTerminalCollaborations(root, { olderThanDays = 30, no
   }
   return archived;
 }
+
+export async function queryControlPlane(stateRoot, options = {}) {
+  const includeArchived = options.includeArchived || false;
+  const now = options.now || Date.now();
+  const collaborations = [];
+
+  async function loadJsonFiles(directory, pattern) {
+    try {
+      const names = await readdir(directory);
+      const results = [];
+      for (const name of names) {
+        if (pattern.test(name)) {
+          try {
+            const content = await readFile(resolve(directory, name), "utf8");
+            results.push(JSON.parse(content));
+          } catch {}
+        }
+      }
+      return results;
+    } catch (error) {
+      if (error.code === "ENOENT") return [];
+      throw error;
+    }
+  }
+
+  const colStates = await loadJsonFiles(stateRoot, /^bridge-[0-9a-f-]{36}\.json$/);
+  for (const c of colStates) {
+    collaborations.push({ state: c, archived: false });
+  }
+
+  if (includeArchived) {
+    const archStates = await loadJsonFiles(resolve(stateRoot, "archive"), /^bridge-[0-9a-f-]{36}\.json$/);
+    for (const c of archStates) {
+      collaborations.push({ state: c, archived: true });
+    }
+  }
+
+  const portfolios = await loadJsonFiles(resolve(stateRoot, "portfolios"), /^helm-[0-9a-f-]{36}\.json$/);
+
+  const lanes = [];
+  const processedCollaborationIds = new Set();
+
+  function processAlive(pid) {
+    if (!Number.isInteger(pid) || pid <= 1) return false;
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return error.code === "EPERM";
+    }
+  }
+
+  function parseAge(dateStr) {
+    if (!dateStr) return null;
+    const parsed = Date.parse(dateStr);
+    return Number.isFinite(parsed) ? Math.max(0, Math.floor((now - parsed) / 1000)) : null;
+  }
+
+  function buildCollaborationLane(cState, archived) {
+    const participants = cState.agents || [];
+    const writer = cState.writer || cState.runtime?.writer || null;
+    const activeCall = cState.runtime?.activeCall || null;
+
+    const usage = {};
+    for (const agent of participants) {
+      const entry = cState.usage?.[agent];
+      if (entry && (entry.costUsd !== undefined || entry.tokens !== undefined)) {
+        usage[agent] = {
+          costUsd: entry.costUsd !== undefined ? entry.costUsd : null,
+          tokens: entry.tokens !== undefined ? entry.tokens : null,
+          metadata: { source: "recorded", confidence: "high" }
+        };
+      } else {
+        usage[agent] = {
+          costUsd: null,
+          tokens: null,
+          metadata: { source: "unknown", confidence: "unknown" }
+        };
+      }
+    }
+
+    const narrative = activeCall ? {
+      summary: activeCall.summary || null,
+      updatedAt: activeCall.summaryAt || null,
+      ageSeconds: parseAge(activeCall.summaryAt),
+      source: activeCall.summarySource || null
+    } : {
+      summary: null,
+      updatedAt: null,
+      ageSeconds: null,
+      source: null
+    };
+
+    const heartbeat = activeCall ? {
+      heartbeatAt: activeCall.heartbeatAt || null,
+      ageSeconds: parseAge(activeCall.heartbeatAt)
+    } : null;
+
+    const handoff = cState.completion ? {
+      sequence: cState.completion.sequence,
+      outcome: cState.completion.lastHandoff?.outcome || null,
+      summary: cState.completion.lastHandoff?.summary || null,
+      acknowledged: cState.completion.acknowledged || false,
+      nextAction: cState.completion.nextAction || null
+    } : null;
+
+    const blocker = {
+      error: cState.error || null,
+      needsUser: cState.status === "needs_user",
+      pendingDecision: cState.decisions?.find(d => d.action !== "resolved") || null
+    };
+
+    const recovery = {
+      status: ["indeterminate", "recovering"].includes(cState.status) ? cState.status : null,
+      recommendation: cState.status === "indeterminate"
+        ? "Execution ownership is ambiguous. Inspect with bridge recover <id>; do not start replacement work. Cancel only after verifying workspace and provider state."
+        : null,
+      processAlive: processAlive(cState.workerPid)
+    };
+
+    const budget = cState.budget ? {
+      limit: cState.budget,
+      exceeded: cState.budgetExceeded || false
+    } : null;
+
+    let nextAction = "none";
+    if (handoff) {
+      nextAction = handoff.nextAction || "none";
+    } else if (cState.status === "needs_user") {
+      nextAction = "needs_user";
+    } else if (cState.status === "indeterminate") {
+      nextAction = "inspect_recovery";
+    } else if (["queued", "running", "recovering", "cancelling"].includes(cState.status)) {
+      nextAction = "continue";
+    } else if (["failed", "cancelled", "budget"].includes(cState.status)) {
+      nextAction = "requeue_or_cancel";
+    }
+
+    return {
+      id: cState.id,
+      type: "collaboration",
+      workspace: cState.workspace || null,
+      participants,
+      writer,
+      lifecyclePhase: cState.status,
+      narrative,
+      heartbeat,
+      handoff,
+      blocker,
+      recovery,
+      budget,
+      usage,
+      portfolio: null,
+      nextAction,
+      archived
+    };
+  }
+
+  for (const p of portfolios) {
+    if (!p.items) continue;
+    for (const item of p.items) {
+      const colId = item.collaborationId;
+      const matched = colId ? collaborations.find(c => c.state.id === colId) : null;
+
+      const mtEntry = p.mergeTrain?.find(mt => mt.itemId === item.id) || null;
+      const portfolioInfo = {
+        portfolioId: p.id,
+        itemId: item.id,
+        priority: item.priority !== undefined ? item.priority : null,
+        blockedBy: item.blockedBy || [],
+        conflictsWith: item.conflictsWith || [],
+        paths: item.paths || [],
+        mergeTrain: mtEntry ? {
+          prNumber: mtEntry.prNumber,
+          headSha: mtEntry.headSha,
+          priority: mtEntry.priority !== undefined ? mtEntry.priority : null
+        } : null
+      };
+
+      if (matched) {
+        processedCollaborationIds.add(matched.state.id);
+        const colLane = buildCollaborationLane(matched.state, matched.archived);
+        colLane.type = "combined";
+        colLane.portfolio = portfolioInfo;
+        lanes.push(colLane);
+      } else {
+        const participants = item.writer ? [item.writer] : [];
+        const writer = item.writer || null;
+
+        const usage = {};
+        for (const agent of participants) {
+          usage[agent] = {
+            costUsd: null,
+            tokens: null,
+            metadata: { source: "unknown", confidence: "unknown" }
+          };
+        }
+
+        lanes.push({
+          id: `${p.id}:${item.id}`,
+          type: "portfolio_lane",
+          workspace: p.workspace || null,
+          participants,
+          writer,
+          lifecyclePhase: item.status,
+          narrative: {
+            summary: item.summary || null,
+            updatedAt: p.updatedAt || null,
+            ageSeconds: parseAge(p.updatedAt),
+            source: "portfolio"
+          },
+          heartbeat: null,
+          handoff: null,
+          blocker: null,
+          recovery: null,
+          budget: null,
+          usage,
+          portfolio: portfolioInfo,
+          nextAction: item.status === "ready" ? "start_collaboration" : "none",
+          archived: false
+        });
+      }
+    }
+  }
+
+  for (const c of collaborations) {
+    if (!processedCollaborationIds.has(c.state.id)) {
+      lanes.push(buildCollaborationLane(c.state, c.archived));
+    }
+  }
+
+  let filteredLanes = lanes;
+
+  if (options.workspace) {
+    const filterW = resolve(options.workspace);
+    filteredLanes = filteredLanes.filter(lane => {
+      if (!lane.workspace) return false;
+      const laneW = resolve(lane.workspace);
+      return laneW === filterW || laneW.startsWith(filterW + "/");
+    });
+  }
+
+  if (options.status) {
+    const filterStatus = options.status.toLowerCase();
+    filteredLanes = filteredLanes.filter(lane => lane.lifecyclePhase.toLowerCase() === filterStatus);
+  }
+
+  if (options.provider) {
+    const filterProv = options.provider.toLowerCase();
+    filteredLanes = filteredLanes.filter(lane => {
+      const matchWriter = lane.writer && lane.writer.toLowerCase() === filterProv;
+      const matchPart = lane.participants.some(p => p.toLowerCase() === filterProv);
+      return matchWriter || matchPart;
+    });
+  }
+
+  if (options.portfolio) {
+    const filterPort = options.portfolio;
+    filteredLanes = filteredLanes.filter(lane => lane.portfolio && lane.portfolio.portfolioId === filterPort);
+  }
+
+  return {
+    version: "1.0.0",
+    query: {
+      stateRoot: resolve(stateRoot),
+      filters: {
+        workspace: options.workspace || null,
+        status: options.status || null,
+        provider: options.provider || null,
+        portfolio: options.portfolio || null
+      },
+      includeArchived
+    },
+    lanes: filteredLanes
+  };
+}
+

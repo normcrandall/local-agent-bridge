@@ -18,7 +18,7 @@ import {
   summarizeStates,
   usageDecision,
 } from "../src/operations.mjs";
-import { appendEvent, archiveCollaboration, pruneTerminalCollaborations, readCollaboration, updateCollaboration } from "../src/collaboration-store.mjs";
+import { appendEvent, archiveCollaboration, pruneTerminalCollaborations, readCollaboration, updateCollaboration, queryControlPlane } from "../src/collaboration-store.mjs";
 import { clearTerminalRuntime, workerCancellationMatches } from "../src/collaboration-cleanup.mjs";
 
 const root = resolve(import.meta.dirname, "..");
@@ -41,9 +41,76 @@ function firstValue(flags, fallback = null) {
 }
 
 switch (command) {
-  case "status":
-    json(summarizeStates(collaborationStates(stateRoot)));
+  case "status": {
+    if (args.includes("--legacy")) {
+      json(summarizeStates(collaborationStates(stateRoot)));
+      break;
+    }
+    const includeArchived = args.includes("--include-archived") || args.includes("--archive");
+    const workspaceFilter = value("--workspace");
+    const statusFilter = value("--status");
+    const providerFilter = value("--provider");
+    const portfolioFilter = value("--portfolio");
+    const human = args.includes("--human") || args.includes("--format=human");
+
+    const result = await queryControlPlane(stateRoot, {
+      includeArchived,
+      workspace: workspaceFilter,
+      status: statusFilter,
+      provider: providerFilter,
+      portfolio: portfolioFilter
+    });
+
+    if (human) {
+      const formatHumanView = (res) => {
+        const lines = [];
+        lines.push(`Local Council Control Plane Status (Root: ${res.query.stateRoot})`);
+        lines.push(`================================================================================`);
+        if (res.lanes.length === 0) {
+          lines.push("No active lanes found matching filters.");
+        } else {
+          for (const lane of res.lanes) {
+            lines.push(`Lane ID:        ${lane.id} [${lane.type}]`);
+            lines.push(`Workspace:      ${lane.workspace}`);
+            lines.push(`Status:         ${lane.lifecyclePhase}`);
+            if (lane.writer || lane.participants.length) {
+              lines.push(`Writer:         ${lane.writer || "none"} (Participants: ${lane.participants.join(", ")})`);
+            }
+            if (lane.narrative.summary) {
+              const age = lane.narrative.ageSeconds !== null ? `${lane.narrative.ageSeconds}s ago` : "unknown age";
+              lines.push(`Narrative:      ${lane.narrative.summary} (${age}, source: ${lane.narrative.source})`);
+            }
+            if (lane.heartbeat) {
+              const age = lane.heartbeat.ageSeconds !== null ? `${lane.heartbeat.ageSeconds}s ago` : "unknown age";
+              lines.push(`Heartbeat:      ${age}`);
+            }
+            if (lane.handoff) {
+              lines.push(`Handoff:        Seq ${lane.handoff.sequence}, Outcome: ${lane.handoff.outcome}, Acknowledged: ${lane.handoff.acknowledged}`);
+            }
+            if (lane.blocker.error || lane.blocker.needsUser) {
+              lines.push(`Blocker:        Error: ${lane.blocker.error}, Needs User: ${lane.blocker.needsUser}`);
+            }
+            if (lane.recovery.status) {
+              lines.push(`Recovery:       Status: ${lane.recovery.status}, Process Alive: ${lane.recovery.processAlive}`);
+            }
+            if (lane.portfolio) {
+              lines.push(`Portfolio:      ${lane.portfolio.portfolioId} (Item: ${lane.portfolio.itemId}, Priority: ${lane.portfolio.priority})`);
+              if (lane.portfolio.mergeTrain) {
+                lines.push(`Merge Train:    PR #${lane.portfolio.mergeTrain.prNumber}, Head: ${lane.portfolio.mergeTrain.headSha}`);
+              }
+            }
+            lines.push(`Next Action:    ${lane.nextAction}`);
+            lines.push(`--------------------------------------------------------------------------------`);
+          }
+        }
+        return lines.join("\n");
+      };
+      process.stdout.write(formatHumanView(result) + "\n");
+    } else {
+      json(result);
+    }
     break;
+  }
   case "capabilities":
     json(providerCapabilities());
     break;
