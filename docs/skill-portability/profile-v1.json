@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/normcrandall/local-agent-bridge/docs/skill-portability/profile-v1.json",
+  "title": "Local Agent Bridge portable skill profile",
+  "type": "object",
+  "required": [
+    "name",
+    "description",
+    "requiredCapabilities",
+    "contracts",
+    "permissionIdentityBoundaries",
+    "referencedResources"
+  ],
+  "properties": {
+    "name": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+    "description": { "type": "string", "minLength": 1 },
+    "requiredCapabilities": {
+      "type": "object",
+      "required": ["mcpServers"],
+      "properties": { "mcpServers": { "type": "array", "items": { "type": "string" }, "uniqueItems": true } }
+    },
+    "contracts": {
+      "type": "object",
+      "required": ["progress", "completion"],
+      "properties": {
+        "progress": { "type": "object" },
+        "completion": { "type": "object" }
+      }
+    },
+    "permissionIdentityBoundaries": { "type": "object" },
+    "referencedResources": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+  }
+}
