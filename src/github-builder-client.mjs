@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { appendFileSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import {
   assertBranchRef,
   pushCommit,
@@ -51,6 +53,18 @@ async function validateLocalGitState({ gitPath, workspace, repository, ref, sha,
   }
   if (rewriteConfig) {
     throw new Error("Local url.<base>.insteadOf rewrite configuration is present; the bounded transport rejects rewritten remotes.");
+  }
+
+  // Ambient local HTTP authorization (http.extraHeader or per-URL variants)
+  // could inject credentials or override the askpass channel.
+  let extraHeaderConfig = "";
+  try {
+    extraHeaderConfig = (await local(["config", "--local", "--get-regexp", "^http\\.(.*\\.)?extraheader$"])).stdout.toString("utf8").trim();
+  } catch (error) {
+    if (error.code !== 1) throw new Error(`Failed to inspect local HTTP header configuration: ${error.message}`);
+  }
+  if (extraHeaderConfig) {
+    throw new Error("Local http.extraHeader configuration is present; the bounded transport rejects ambient HTTP authorization.");
   }
 
   try {
@@ -224,6 +238,7 @@ export function createBoundBuilderClient({
   getToken = null,
   workspace = null,
   transportUrl = null,
+  receiptPath = null,
 }) {
   assertRepository(repository);
   assertSha(headSha);
@@ -560,20 +575,156 @@ export function createBoundBuilderClient({
     });
   }
 
-  function branchReceipt({ operation, ref, sha, readBackSha, idempotent, verifiedLogin: receiptLogin, reconciled = false }) {
-    return {
+  // Refs whose last mutation attempt ended without a provable outcome. A
+  // retry must complete a read-only remote reconciliation before any push.
+  const indeterminateRefs = new Map();
+
+  function persistReceipt(receipt) {
+    if (!receiptPath) return receipt;
+    try {
+      mkdirSync(dirname(receiptPath), { recursive: true });
+      appendFileSync(receiptPath, `${JSON.stringify(receipt)}\n`);
+    } catch (error) {
+      throw new Error(`Failed to record durable builder receipt: ${error.message}`);
+    }
+    return receipt;
+  }
+
+  function appIdentity(receiptLogin) {
+    return { expectedLogin, verifiedLogin: receiptLogin || cachedVerifiedLogin || expectedLogin };
+  }
+
+  function branchReceipt({ operation, ref, requestedSha, expectedOldSha = null, observedRemoteSha, outcome, idempotent, verifiedLogin: receiptLogin, reconciled = false }) {
+    const identity = appIdentity(receiptLogin);
+    return persistReceipt({
       operation,
       repository,
       ref,
-      sha,
-      readBackSha,
+      requestedSha,
+      expectedOldSha,
+      observedRemoteSha,
+      outcome,
+      sha: requestedSha,
+      readBackSha: observedRemoteSha,
       idempotent,
       ...(reconciled ? { reconciled: true } : {}),
+      appIdentity: identity,
       login: expectedLogin,
-      verifiedLogin: receiptLogin || cachedVerifiedLogin || expectedLogin,
+      verifiedLogin: identity.verifiedLogin,
       transport: "git-https-app-token",
       remoteVerified: true,
-    };
+      recordedAt: new Date().toISOString(),
+    });
+  }
+
+  function recordFailureReceipt({ operation, ref, requestedSha, expectedOldSha = null, outcome, detail, verifiedLogin: receiptLogin }) {
+    persistReceipt({
+      operation,
+      repository,
+      ref,
+      requestedSha,
+      expectedOldSha,
+      observedRemoteSha: null,
+      outcome,
+      appIdentity: appIdentity(receiptLogin),
+      transport: "git-https-app-token",
+      remoteVerified: false,
+      detail,
+      recordedAt: new Date().toISOString(),
+    });
+  }
+
+  // Read the remote ref while honoring a pending indeterminate marker: the
+  // read must succeed before any further mutation is considered, and a read
+  // proving the requested SHA resolves the marker as reconciled.
+  async function reconcileBeforeMutation({ operation, ref, sha, encodedBranch, activeToken, verifiedLogin: receiptLogin }) {
+    const pending = indeterminateRefs.get(ref);
+    let currentRef;
+    try {
+      currentRef = await readRemoteBranch({ encodedBranch, activeToken });
+    } catch (error) {
+      if (pending) {
+        throw new Error(`Ref ${ref} has an indeterminate prior mutation and remote read-back is still unavailable; read-only reconciliation must succeed before retry: ${error.message}`);
+      }
+      throw error;
+    }
+    if (pending) {
+      indeterminateRefs.delete(ref);
+      if (currentRef?.object?.sha === sha) {
+        return {
+          currentRef,
+          reconciledReceipt: branchReceipt({
+            operation, ref, requestedSha: sha, expectedOldSha: pending.expectedOldSha,
+            observedRemoteSha: sha, outcome: "reconciled", idempotent: false, reconciled: true,
+            verifiedLogin: receiptLogin,
+          }),
+        };
+      }
+    }
+    return { currentRef, reconciledReceipt: null };
+  }
+
+  // Shared handling for a failed push: one bounded read-back decides between
+  // reconciled success, determinate failure, and explicit indeterminate state.
+  async function resolvePushFailure({ operation, ref, sha, expectedOldSha, encodedBranch, activeToken, error, verifiedLogin: receiptLogin }) {
+    let readBack = null;
+    let readBackError = null;
+    try {
+      readBack = await readRemoteBranch({ encodedBranch, activeToken });
+    } catch (caught) {
+      readBackError = caught;
+    }
+    if (readBackError) {
+      indeterminateRefs.set(ref, { operation, requestedSha: sha, expectedOldSha, recordedAt: new Date().toISOString() });
+      recordFailureReceipt({
+        operation, ref, requestedSha: sha, expectedOldSha, outcome: "indeterminate",
+        detail: `push transport failed and remote read-back is unavailable: ${readBackError.message}`,
+        verifiedLogin: receiptLogin,
+      });
+      throw new Error(`Mutation outcome for ${ref} is indeterminate: the push transport failed (${error.message}) and remote read-back is unavailable (${readBackError.message}). Perform read-only reconciliation before any retry.`);
+    }
+    if (readBack?.object?.sha === sha) {
+      return branchReceipt({
+        operation, ref, requestedSha: sha, expectedOldSha, observedRemoteSha: sha,
+        outcome: "reconciled", idempotent: false, reconciled: true, verifiedLogin: receiptLogin,
+      });
+    }
+    recordFailureReceipt({
+      operation, ref, requestedSha: sha, expectedOldSha, outcome: "failed",
+      detail: error.message, verifiedLogin: receiptLogin,
+    });
+    if (isRemoteCasRejection(error.stderr)) {
+      throw new Error(operation === "create_branch"
+        ? `Branch creation lost the compare-and-swap race for ${ref}. Remote rejection: ${error.stderr}`
+        : `Push is not a fast-forward. Remote rejection: ${error.stderr}`);
+    }
+    throw error;
+  }
+
+  // Post-push verification: a successful transport result still requires a
+  // remote read-back at the exact SHA before a receipt is issued.
+  async function verifyMutation({ operation, ref, sha, expectedOldSha, encodedBranch, activeToken, verifiedLogin: receiptLogin, outcome }) {
+    let readBack;
+    try {
+      readBack = await readRemoteBranch({ encodedBranch, activeToken });
+    } catch (error) {
+      indeterminateRefs.set(ref, { operation, requestedSha: sha, expectedOldSha, recordedAt: new Date().toISOString() });
+      recordFailureReceipt({
+        operation, ref, requestedSha: sha, expectedOldSha, outcome: "indeterminate",
+        detail: `push succeeded at the transport but read-back verification is unavailable: ${error.message}`,
+        verifiedLogin: receiptLogin,
+      });
+      throw new Error(`Mutation for ${ref} completed at the transport but remote read-back verification is unavailable; state is indeterminate and requires read-only reconciliation before retry: ${error.message}`);
+    }
+    if (readBack?.object?.sha !== sha) {
+      recordFailureReceipt({
+        operation, ref, requestedSha: sha, expectedOldSha, outcome: "failed",
+        detail: `read-back mismatch: expected ${sha}, found ${readBack?.object?.sha || "none"}`,
+        verifiedLogin: receiptLogin,
+      });
+      throw new Error(`Read-back validation failed: expected ${sha}, found ${readBack?.object?.sha || "none"}`);
+    }
+    return branchReceipt({ operation, ref, requestedSha: sha, expectedOldSha, observedRemoteSha: sha, outcome, idempotent: false, verifiedLogin: receiptLogin });
   }
 
   async function createBranch({ ref, sha }) {
@@ -590,11 +741,14 @@ export function createBoundBuilderClient({
     const activeToken = credential.token;
     await verifyIdentity({ ...context, token: activeToken, verifiedLogin: credential.verifiedLogin });
 
-    // 3. Remote-side gate: default branch, protection, and current ref state.
+    // 3. Remote-side gate, then reconciliation-aware current ref state.
     await assertRemoteBranchMutable({ branchName, encodedBranch, activeToken });
-    const currentRef = await readRemoteBranch({ encodedBranch, activeToken });
+    const { currentRef, reconciledReceipt } = await reconcileBeforeMutation({
+      operation: "create_branch", ref, sha, encodedBranch, activeToken, verifiedLogin: credential.verifiedLogin,
+    });
+    if (reconciledReceipt) return reconciledReceipt;
     if (currentRef?.object?.sha === sha) {
-      return branchReceipt({ operation: "create_branch", ref, sha, readBackSha: sha, idempotent: true, verifiedLogin: credential.verifiedLogin });
+      return branchReceipt({ operation: "create_branch", ref, requestedSha: sha, expectedOldSha: null, observedRemoteSha: sha, outcome: "idempotent", idempotent: true, verifiedLogin: credential.verifiedLogin });
     }
     if (currentRef?.object?.sha) {
       throw new Error(`Branch ${branchName} already exists at ${currentRef.object.sha}; create_branch requires the ref to be absent or already at the bound SHA.`);
@@ -604,23 +758,11 @@ export function createBoundBuilderClient({
     try {
       await pushCommit({ gitPath, workspace, repository, ref, sha, expectedRemoteSha: null, token: activeToken, transportUrl });
     } catch (error) {
-      // Bounded reconciliation: one remote read-back decides the outcome.
-      const readBack = await readRemoteBranch({ encodedBranch, activeToken }).catch(() => null);
-      if (readBack?.object?.sha === sha) {
-        return branchReceipt({ operation: "create_branch", ref, sha, readBackSha: sha, idempotent: false, reconciled: true, verifiedLogin: credential.verifiedLogin });
-      }
-      if (isRemoteCasRejection(error.stderr)) {
-        throw new Error(`Branch creation lost the compare-and-swap race for ${branchName}. Remote rejection: ${error.stderr}`);
-      }
-      throw error;
+      return resolvePushFailure({ operation: "create_branch", ref, sha, expectedOldSha: null, encodedBranch, activeToken, error, verifiedLogin: credential.verifiedLogin });
     }
 
     // 5. Remote read-back proves the mutation landed at the exact SHA.
-    const readBack = await request({ ...context, token: activeToken, path: `/repos/${repository}/git/ref/heads/${encodedBranch}` });
-    if (readBack?.object?.sha !== sha) {
-      throw new Error(`Read-back validation failed: expected ${sha}, found ${readBack?.object?.sha || "none"}`);
-    }
-    return branchReceipt({ operation: "create_branch", ref, sha, readBackSha: readBack.object.sha, idempotent: false, verifiedLogin: credential.verifiedLogin });
+    return verifyMutation({ operation: "create_branch", ref, sha, expectedOldSha: null, encodedBranch, activeToken, verifiedLogin: credential.verifiedLogin, outcome: "created" });
   }
 
   async function pushBranch({ ref, sha, oldSha }) {
@@ -637,9 +779,12 @@ export function createBoundBuilderClient({
     const activeToken = credential.token;
     await verifyIdentity({ ...context, token: activeToken, verifiedLogin: credential.verifiedLogin });
 
-    // 3. Remote-side gate and exact base discovery.
+    // 3. Remote-side gate, then reconciliation-aware exact base discovery.
     await assertRemoteBranchMutable({ branchName, encodedBranch, activeToken });
-    const currentRef = await readRemoteBranch({ encodedBranch, activeToken });
+    const { currentRef, reconciledReceipt } = await reconcileBeforeMutation({
+      operation: "push_branch", ref, sha, encodedBranch, activeToken, verifiedLogin: credential.verifiedLogin,
+    });
+    if (reconciledReceipt) return reconciledReceipt;
     const remoteSha = currentRef?.object?.sha;
     if (!remoteSha) {
       throw new Error(oldSha !== undefined
@@ -650,7 +795,7 @@ export function createBoundBuilderClient({
       throw new Error(`Remote branch ref changed: expected ${oldSha}, current ${remoteSha}.`);
     }
     if (remoteSha === sha) {
-      return branchReceipt({ operation: "push_branch", ref, sha, readBackSha: sha, idempotent: true, verifiedLogin: credential.verifiedLogin });
+      return branchReceipt({ operation: "push_branch", ref, requestedSha: sha, expectedOldSha: oldSha ?? null, observedRemoteSha: sha, outcome: "idempotent", idempotent: true, verifiedLogin: credential.verifiedLogin });
     }
     if (oldSha === undefined) {
       // The caller did not pin a base; the observed remote SHA becomes the CAS
@@ -662,23 +807,11 @@ export function createBoundBuilderClient({
     try {
       await pushCommit({ gitPath, workspace, repository, ref, sha, expectedRemoteSha: remoteSha, token: activeToken, transportUrl });
     } catch (error) {
-      // Bounded reconciliation: one remote read-back decides the outcome.
-      const readBack = await readRemoteBranch({ encodedBranch, activeToken }).catch(() => null);
-      if (readBack?.object?.sha === sha) {
-        return branchReceipt({ operation: "push_branch", ref, sha, readBackSha: sha, idempotent: false, reconciled: true, verifiedLogin: credential.verifiedLogin });
-      }
-      if (isRemoteCasRejection(error.stderr)) {
-        throw new Error(`Push is not a fast-forward. Remote rejection: ${error.stderr}`);
-      }
-      throw error;
+      return resolvePushFailure({ operation: "push_branch", ref, sha, expectedOldSha: remoteSha, encodedBranch, activeToken, error, verifiedLogin: credential.verifiedLogin });
     }
 
     // 5. Remote read-back proves the mutation landed at the exact SHA.
-    const readBack = await request({ ...context, token: activeToken, path: `/repos/${repository}/git/ref/heads/${encodedBranch}` });
-    if (readBack?.object?.sha !== sha) {
-      throw new Error(`Read-back validation failed: expected ${sha}, found ${readBack?.object?.sha || "none"}`);
-    }
-    return branchReceipt({ operation: "push_branch", ref, sha, readBackSha: readBack.object.sha, idempotent: false, verifiedLogin: credential.verifiedLogin });
+    return verifyMutation({ operation: "push_branch", ref, sha, expectedOldSha: remoteSha, encodedBranch, activeToken, verifiedLogin: credential.verifiedLogin, outcome: "fast_forwarded" });
   }
 
   return { identity, ensurePullRequest, reviewThreads, replyReviewThread, resolveReviewThread, markReady, merge, createBranch, pushBranch };

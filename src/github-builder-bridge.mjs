@@ -23,6 +23,8 @@ if (!GITHUB_LOGIN_PATTERN.test(expectedLogin || "")) throw new Error("GITHUB_BUI
 if (!/^[0-9a-f]{40}$/i.test(headSha || "")) throw new Error("GITHUB_BUILDER_HEAD_SHA must be a full SHA.");
 
 const workspace = process.env.GITHUB_BUILDER_WORKSPACE || process.cwd();
+const receiptPath = process.env.GITHUB_BUILDER_RECEIPT_PATH
+  || `${workspace}/.bridge/github-builder-receipts.jsonl`;
 const appRoles = await inspectGitHubAppRoles();
 const trustedReviewLogins = [
   appRoles.roles?.reviewer?.expectedLogin,
@@ -41,6 +43,7 @@ const client = createBoundBuilderClient({
   apiUrl,
   getToken,
   workspace,
+  receiptPath,
   repository,
   expectedLogin,
   headSha,

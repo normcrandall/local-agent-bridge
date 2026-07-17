@@ -208,6 +208,7 @@ export async function pushCommit({
   try {
     const args = [
       "-c", "credential.helper=",
+      "-c", "http.extraHeader=",
       "-c", "core.hooksPath=/dev/null",
       "push",
       "--atomic",
