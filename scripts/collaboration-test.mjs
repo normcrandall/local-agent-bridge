@@ -250,6 +250,7 @@ try {
       agents: ["claude"],
       maxTurns: 2,
       modelFallbacks: { claude: ["claude-opus-4-6", "claude-sonnet-5"], codex: ["5.6 terra"] },
+      allowClaudeFable: true,
       verificationCommands: ["npm test"],
       handoffPath: ".bridge/test-handoffs/collaboration-review.md",
     },
@@ -269,6 +270,7 @@ try {
     claude: ["claude-opus-4-6", "claude-sonnet-5"],
     codex: ["5.6 terra"],
   });
+  assert.equal(firstRun.allowClaudeFable, true);
   assert.match(firstRun.turns[0].message, /--fallback-model/);
   assert.match(firstRun.turns[0].message, /claude-opus-4-6,claude-sonnet-5/);
   assert.match(firstRun.turns[0].message, /Bash\(npm test\)/);
@@ -423,6 +425,7 @@ try {
     claude: ["claude-opus-4-6", "claude-sonnet-5"],
     codex: ["5.6 base"],
   });
+  assert.equal(secondRun.allowClaudeFable, false, "Fable authorization must not survive collaboration continuation");
   assert.match(secondRun.turns[2].message, /Continue from this second app/);
   assert.match(secondRun.turns[2].message, /Bash\(npm test\)/);
   assert.match(secondRun.turns[2].message, /collaboration-review\.md/);

@@ -9,6 +9,7 @@ export function claudeToolRequest({
   browser = false,
   model = null,
   fallbackModels,
+  allowFable = false,
   timeoutSeconds = 7200,
   verificationCommands = [],
   workCommands = [],
@@ -27,6 +28,7 @@ export function claudeToolRequest({
   if (githubBuilder) arguments_.githubBuilder = githubBuilder;
   if (model) arguments_.model = model;
   if (fallbackModels !== undefined) arguments_.fallbackModels = fallbackModels;
+  if (allowFable) arguments_.allowFable = true;
   if (sessionId) {
     arguments_.sessionId = sessionId;
     return { name: "continue_claude", arguments: arguments_ };

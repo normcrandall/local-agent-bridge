@@ -16,6 +16,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { configuredReviewerLogin, GITHUB_LOGIN_PATTERN } from "./github-app-auth.mjs";
+import { loadConfiguredClaudeModel, resolveClaudeModelPolicy } from "./claude-model-policy.mjs";
 import { loadConfiguredFallbackModels, normalizeFallbackModels } from "./model-fallbacks.mjs";
 import { negotiateProviderCapabilities } from "./provider-cli-capabilities.mjs";
 
@@ -139,6 +140,7 @@ function runClaude({
   browser,
   model,
   fallbackModels,
+  allowFable = false,
   timeoutSeconds,
   resume,
   verificationCommands = [],
@@ -172,6 +174,20 @@ function runClaude({
   } else {
     resolvedFallbackModels = normalizeFallbackModels(fallbackModels, "fallbackModels");
   }
+  const requestedModel = model || null;
+  const modelPolicy = resolveClaudeModelPolicy({
+    model,
+    fallbackModels: resolvedFallbackModels,
+    allowFable,
+    configuredModel: loadConfiguredClaudeModel({ cwd: actualCwd }),
+  });
+  const resolvedModel = modelPolicy.model;
+  resolvedFallbackModels = modelPolicy.fallbackModels;
+  if (modelPolicy.blockedModels.length) {
+    onProgress(`Fable is not authorized for this request; using ${resolvedModel} and removing ${modelPolicy.blockedModels.join(", ")} from Claude routing.`);
+  } else if (allowFable && [resolvedModel, ...resolvedFallbackModels].some((value) => typeof value === "string" && value.toLowerCase().includes("fable"))) {
+    onProgress("Fable use was explicitly authorized for this request.");
+  }
   const actualHandoffPath = mode === "review" ? projectFile(actualCwd, handoffPath) : null;
   if (githubReview && mode !== "review") {
     throw new Error("githubReview is available only in review mode.");
@@ -189,7 +205,7 @@ function runClaude({
   if (!CLAUDE_CAPABILITIES.strictMcpConfig) {
     throw new Error(`Installed Claude ${CLAUDE_CAPABILITIES.version} lacks required --strict-mcp-config isolation; upgrade Claude Code before delegation.`);
   }
-  if (model && !CLAUDE_CAPABILITIES.model) throw new Error(`Installed Claude ${CLAUDE_CAPABILITIES.version} cannot select a model.`);
+  if (resolvedModel && !CLAUDE_CAPABILITIES.model) throw new Error(`Installed Claude ${CLAUDE_CAPABILITIES.version} cannot select a model.`);
   if (resume && !CLAUDE_CAPABILITIES.resume) throw new Error(`Installed Claude ${CLAUDE_CAPABILITIES.version} cannot resume a session.`);
   if (resolvedFallbackModels.length && !CLAUDE_CAPABILITIES.fallbackModel) {
     throw new Error(`Installed Claude ${CLAUDE_CAPABILITIES.version} cannot use the configured fallback model chain; upgrade Claude Code or remove the chain.`);
@@ -252,7 +268,7 @@ function runClaude({
     "stream-json",
   ];
   if (CLAUDE_CAPABILITIES.verbose) args.push("--verbose");
-  if (model) args.push("--model", model);
+  if (resolvedModel) args.push("--model", resolvedModel);
   if (resolvedFallbackModels.length) args.push("--fallback-model", resolvedFallbackModels.join(","));
   if (mode === "review") {
     const allowedTools = [
@@ -387,12 +403,13 @@ Work permission contract:
               + (parsed.usage?.cache_creation_input_tokens || 0)
               + (parsed.usage?.cache_read_input_tokens || 0),
           },
-          requestedModel: model || null,
+          requestedModel,
           model: modelsUsed.length === 1 ? modelsUsed[0] : null,
           modelsUsed,
           fallbackUsed: null,
           modelFallbacks: resolvedFallbackModels,
           fallbackManagedBy: resolvedFallbackModels.length ? "claude-cli" : null,
+          modelPolicy,
           handoffPath: actualHandoffPath,
         });
       } catch {
@@ -402,12 +419,13 @@ Work permission contract:
           isError: false,
           durationMs: null,
           usage: { costUsd: 0, tokens: 0 },
-          requestedModel: model || null,
+          requestedModel,
           model: null,
           modelsUsed: [],
           fallbackUsed: null,
           modelFallbacks: resolvedFallbackModels,
           fallbackManagedBy: resolvedFallbackModels.length ? "claude-cli" : null,
+          modelPolicy,
           handoffPath: actualHandoffPath,
         });
       }
@@ -437,6 +455,9 @@ const sharedInput = {
   ),
   fallbackModels: z.array(z.string().trim().min(1)).max(5).optional().describe(
     "Ordered Claude models passed to Claude Code's native --fallback-model overload handling. Omit to use ~/.config/local-agent-bridge/model-fallbacks.json; pass [] to disable configured fallbacks.",
+  ),
+  allowFable: z.boolean().default(false).describe(
+    "Explicit Fable authorization. Set true only when the user's current request asks for Fable by name; saved settings and earlier requests do not count.",
   ),
   timeoutSeconds: z.number().int().min(10).max(14400).optional(),
   verificationCommands: z.array(
@@ -485,7 +506,7 @@ const server = new McpServer(
   { name: "codex-claude-bridge", version: "0.1.0" },
   {
     instructions:
-      "Use ask_claude for a bounded independent review or delegated task. Use continue_claude only with the returned sessionId. In review mode, pass exact verificationCommands and an optional project-relative handoffPath. In work mode, choose workProfile implement for local ownership through commit or deliver when Claude also owns push and PR delivery; use exact workCommands only for unusual additions. File edits are allowed but commands outside the profile and additions are denied. When project policy requires the reviewer to post to the PR, pass githubReview with the exact repository, PR number, and head SHA; the configured Claude reviewer App is selected when expectedLogin is omitted. Omit model to honor the user's configured Claude Code model. Never ask Claude to call Codex from a delegated session.",
+      "Use ask_claude for a bounded independent review or delegated task. Use continue_claude only with the returned sessionId. In review mode, pass exact verificationCommands and an optional project-relative handoffPath. In work mode, choose workProfile implement for local ownership through commit or deliver when Claude also owns push and PR delivery; use exact workCommands only for unusual additions. File edits are allowed but commands outside the profile and additions are denied. When project policy requires the reviewer to post to the PR, pass githubReview with the exact repository, PR number, and head SHA; the configured Claude reviewer App is selected when expectedLogin is omitted. Fable is denied by default; set allowFable only when the user's current request explicitly asks for Fable by name. Never ask Claude to call Codex from a delegated session.",
   },
 );
 

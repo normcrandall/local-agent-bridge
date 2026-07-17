@@ -1,24 +1,32 @@
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
-import { hostname, tmpdir } from "node:os";
+import { homedir, hostname, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { exportSkills, lintSkillCatalog, verifySkillExport } from "./skill-portability.mjs";
 
 const root = resolve(import.meta.dirname, "..");
+const home = process.env.HOME || homedir();
+const verifyInstalledSkills = process.env.AGENT_BRIDGE_VERIFY_INSTALLED_SKILLS === "1";
 const canonicalCodexDialoguePath = resolve(root, ".agents/skills/agent-dialogue/SKILL.md");
 const canonicalClaudeDialoguePath = resolve(root, "assets/skills/claude/agent-dialogue/SKILL.md");
-const codexPath = resolve(process.env.HOME, ".codex/skills/agent-dialogue/SKILL.md");
-const claudePath = resolve(process.env.HOME, ".claude/skills/agent-dialogue/SKILL.md");
-const [canonicalCodexDialogue, canonicalClaudeDialogue, codex, claude] = await Promise.all([
+const [canonicalCodexDialogue, canonicalClaudeDialogue] = await Promise.all([
   readFile(canonicalCodexDialoguePath, "utf8"),
   readFile(canonicalClaudeDialoguePath, "utf8"),
-  readFile(codexPath, "utf8"),
-  readFile(claudePath, "utf8"),
 ]);
+let codex = canonicalCodexDialogue;
+let claude = canonicalClaudeDialogue;
+if (verifyInstalledSkills) {
+  [codex, claude] = await Promise.all([
+    readFile(resolve(home, ".codex/skills/agent-dialogue/SKILL.md"), "utf8"),
+    readFile(resolve(home, ".claude/skills/agent-dialogue/SKILL.md"), "utf8"),
+  ]);
+}
 const claudeFablePolicy = /Never select, inherit, or fall back to Fable unless the user's current request explicitly asks for Fable by name/;
 
-assert.equal(codex, canonicalCodexDialogue, "Codex agent-dialogue skill is stale");
-assert.equal(claude, canonicalClaudeDialogue, "Claude agent-dialogue skill is stale");
+if (verifyInstalledSkills) {
+  assert.equal(codex, canonicalCodexDialogue, "Codex agent-dialogue skill is stale");
+  assert.equal(claude, canonicalClaudeDialogue, "Claude agent-dialogue skill is stale");
+}
 
 for (const [name, content] of [["Codex", codex], ["Claude", claude]]) {
   assert.match(content, /^---\n[\s\S]+?\n---\n/);
@@ -38,6 +46,7 @@ assert.match(codex, /--codex-model/);
 assert.match(codex, /model: <claude-model>/);
 assert.match(codex, /flag is absent, omit the MCP `model` field/);
 assert.match(codex, /githubReview/);
+assert.match(codex, /allowFable: true/);
 assert.match(claude, /mcp__codex__codex/);
 assert.match(claude, /mcp__codex__codex-reply/);
 assert.match(claude, /\$ARGUMENTS/);
@@ -45,6 +54,7 @@ assert.match(claude, /--claude-model/);
 assert.match(claude, /--codex-model/);
 assert.match(claude, /\/model <alias-or-id>/);
 assert.match(claude, /flag is absent, omit the MCP `model` field/);
+assert.match(claude, /allowFable: true/);
 
 console.log("CLI dialogue skill tests passed without invoking either model.");
 
@@ -195,6 +205,7 @@ for (const name of bridgeSkillNames) {
   assert.doesNotMatch(canonical, /TODO/);
   if (/\bClaude\b/.test(canonical)) {
     assert.match(canonical, claudeFablePolicy, `${name} can invoke Claude but lacks the deny-by-default Fable policy`);
+    assert.match(canonical, /allowClaudeFable: true|allowFable: true/, `${name} does not explain the explicit runtime opt-in`);
   }
   for (const [index, skillRoot] of globalSkillRoots.entries()) {
     const installed = await readFile(resolve(skillRoot, name, "SKILL.md"), "utf8");
@@ -326,7 +337,11 @@ for (const guidance of [claudeGuidance, codexGuidance]) {
 assert.match(readme, /collaboration_wake/);
 assert.match(readme, /coordinatorWake/);
 assert.match(readme, /Do not replace broker polling with one long-running Bash/);
-const aiHeroSkillNames = (await readdir(resolve(process.env.HOME, ".agents/skills"), { withFileTypes: true }))
+const aiHeroSkillEntries = await readdir(resolve(home, ".agents/skills"), { withFileTypes: true }).catch((error) => {
+  if (error?.code === "ENOENT") return [];
+  throw error;
+});
+const aiHeroSkillNames = aiHeroSkillEntries
   .filter((entry) => entry.isDirectory())
   .map((entry) => entry.name)
   .sort();
@@ -664,5 +679,8 @@ await rm(symlinkHome, { recursive: true, force: true });
 await rm(symlinkOutside, { recursive: true, force: true });
 console.log("Partial-export merge, orphan cleanup, and symlink-rejection tests passed.");
 
-console.log("Global bridge skills are synchronized across Codex, Claude, Antigravity App, and Antigravity CLI.");
+console.log("Portable bridge skill sources and exports are valid.");
+if (verifyInstalledSkills) {
+  console.log("Installed bridge skills are synchronized across Codex and Claude.");
+}
 await rm(portableHome, { recursive: true, force: true });

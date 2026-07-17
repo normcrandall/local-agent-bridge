@@ -101,6 +101,34 @@ async function callBridgeWithoutModel() {
     if (noFallbackInvocation.args.includes("--fallback-model")) {
       throw new Error("An explicit empty Claude fallback list did not disable the machine policy");
     }
+    const blockedFable = await client.callTool({
+      name: "ask_claude",
+      arguments: {
+        prompt: "Fable must be replaced without current-request authorization",
+        model: "fable",
+        fallbackModels: ["claude-fable-latest", "claude-opus-4-6"],
+      },
+    });
+    if (blockedFable.isError) throw new Error("Default-deny Fable bridge path returned an error");
+    const blockedFableInvocation = JSON.parse(blockedFable.structuredContent.result);
+    const blockedModelIndex = blockedFableInvocation.args.indexOf("--model");
+    const blockedFallbackIndex = blockedFableInvocation.args.indexOf("--fallback-model");
+    if (blockedFableInvocation.args[blockedModelIndex + 1].toLowerCase().includes("fable")) {
+      throw new Error("Unauthorized Fable primary model reached Claude Code");
+    }
+    if (blockedFableInvocation.args[blockedFallbackIndex + 1].toLowerCase().includes("fable")) {
+      throw new Error("Unauthorized Fable fallback reached Claude Code");
+    }
+    const allowedFable = await client.callTool({
+      name: "ask_claude",
+      arguments: { prompt: "Explicit Fable authorization", model: "fable", allowFable: true },
+    });
+    if (allowedFable.isError) throw new Error("Explicit Fable opt-in bridge path returned an error");
+    const allowedFableInvocation = JSON.parse(allowedFable.structuredContent.result);
+    const allowedModelIndex = allowedFableInvocation.args.indexOf("--model");
+    if (allowedFableInvocation.args[allowedModelIndex + 1] !== "fable") {
+      throw new Error("Explicitly authorized Fable model was not preserved");
+    }
     const yolo = await client.callTool({
       name: "ask_claude",
       arguments: { prompt: "explicit yolo smoke test", mode: "work", permissionProfile: "yolo" },
@@ -134,8 +162,10 @@ async function callBridgeWithoutModel() {
       arguments: { prompt: "configured model smoke test" },
     });
     if (configuredDefault.isError) throw new Error("Default-model bridge tool returned an error");
-    if (JSON.stringify(configuredDefault.content).includes("--model")) {
-      throw new Error("Bridge injected a model when the user did not request one");
+    const configuredDefaultInvocation = JSON.parse(configuredDefault.structuredContent.result);
+    const configuredModelIndex = configuredDefaultInvocation.args.indexOf("--model");
+    if (configuredModelIndex < 0 || !configuredDefaultInvocation.args[configuredModelIndex + 1]) {
+      throw new Error("Bridge did not enforce a non-Fable configured/default model");
     }
     const work = await client.callTool({
       name: "ask_claude",
@@ -265,7 +295,7 @@ async function callBridgeWithoutModel() {
     if (implementAllowed.includes("Bash(git push:*)") || implementAllowed.some((rule) => /^Bash\(gh(?::| )/.test(rule))) {
       throw new Error("Claude implement profile unexpectedly grants delivery permissions");
     }
-    console.log("Claude bridge call paths: explicit model forwarded; configured default preserved");
+    console.log("Claude bridge call paths: explicit model forwarded; default-deny Fable policy enforced");
   } finally {
     await client.close();
     await rm(resolve(root, ".bridge/test-handoffs"), { recursive: true, force: true });
@@ -453,6 +483,7 @@ for (const property of [
   "browser",
   "model",
   "fallbackModels",
+  "allowFable",
   "verificationCommands",
   "workCommands",
   "workProfile",
@@ -476,6 +507,7 @@ for (const property of [
   "maxTurns",
   "models",
   "modelFallbacks",
+  "allowClaudeFable",
   "providerRecovery",
   "verificationCommands",
   "workCommands",

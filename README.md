@@ -473,7 +473,7 @@ In work mode, `writer` defaults to the starting agent. The designated writer rec
 
 Provider capacity is acquired for every turn, not merely when the collaboration starts. This means a coordinator may call the same provider repeatedly and several portfolios may share it safely. Work and review limits are independent, so an active writer does not consume a review slot. A transport-indeterminate call keeps its capacity reservation until the collaboration is explicitly cancelled or otherwise reconciled.
 
-Model fields are optional. Omitting them preserves each provider's configured model. Explicit values pass through unchanged except for the Claude Fable policy: Fable is denied unless the user's current request explicitly asks for Fable by name. Saved defaults, earlier requests, aliases, and fallback chains do not grant permission. Without that explicit request, collaboration skills preserve any configured non-Fable Claude model, substitute `claude-opus-4-8[1m]` if the configured/default model resolves to Fable, and remove Fable from the Claude fallback chain.
+Model fields are optional. Omitting them preserves each provider's configured model. Explicit values pass through unchanged except for the Claude Fable policy: the bridge runtime denies Fable unless the user's current request explicitly asks for Fable by name. Saved defaults, earlier requests, aliases, and fallback chains do not grant permission. Without that explicit request, the runtime preserves any configured non-Fable Claude model, substitutes `claude-opus-4-8[1m]` if the configured/default model resolves to Fable, and removes Fable from the Claude fallback chain.
 
 `modelFallbacks.claude`, `modelFallbacks.codex`, and `modelFallbacks.antigravity` are optional. Omitting them loads the machine-local overload policy; an explicit provider array replaces that policy for the collaboration. Overload retries happen inside one provider turn, so they do not consume another broker turn or trigger writer reassignment.
 
@@ -615,7 +615,7 @@ Codex and Antigravity emit a visible downgrade narrative and record `requestedMo
 
 #### Explicit Fable opt-in
 
-Fable is never selected, inherited, or used as a fallback by the collaboration skills unless the user's current request explicitly asks for Fable by name. A saved Fable setting or earlier request is not permission. When the current request does explicitly opt in, announce that exception before starting. For example, a user may explicitly request that Fable plan, a selected Codex model implement, and Fable review:
+Fable is never selected, inherited, or used as a fallback by the collaboration skills or raw bridge tools unless the user's current request explicitly asks for Fable by name. A saved Fable setting or earlier request is not permission. When the current request does explicitly opt in, announce that exception before starting and pass `allowClaudeFable: true` to that collaboration phase or `allowFable: true` to that direct Claude call. These flags default to false, and collaboration continuation resets authorization rather than inheriting it. For example, a user may explicitly request that Fable plan, a selected Codex model implement, and Fable review:
 
 ```sh
 claude --model fable
