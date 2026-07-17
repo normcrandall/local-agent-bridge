@@ -7,6 +7,13 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { updateModelPolicy } from "../src/model-policy.mjs";
 
 const root = resolve(import.meta.dirname, "..");
+const cleanProcessEnvironment = Object.fromEntries(
+  Object.entries(process.env).filter(([name]) => ![
+    "CLAUDE_BRIDGE_ACTIVE",
+    "CODEX_BRIDGE_ACTIVE",
+    "ANTIGRAVITY_BRIDGE_ACTIVE",
+  ].includes(name)),
+);
 const temporary = await mkdtemp(join(tmpdir(), "bridge-model-policy-adapters-"));
 const configPath = join(temporary, "model-policy.json");
 const fakeCodex = join(temporary, "codex");
@@ -26,7 +33,7 @@ async function callBridge({ source, binaryEnvironment, tool, arguments: argument
     args: [resolve(root, source)],
     cwd: root,
     env: {
-      ...process.env,
+      ...cleanProcessEnvironment,
       BRIDGE_RUNTIME_ROOT: root,
       BRIDGE_WORKSPACE_ROOT: root,
       AGENT_BRIDGE_MODEL_POLICY_CONFIG: configPath,
