@@ -189,7 +189,7 @@ function json(value, status = 200) {
 function fakeGitHub({
   currentSha = headSha, wrongThread = false, existingPull = false,
   reviewStatus = "success", reviewLogin = "reviewer[bot]", reviewStatuses = null, reviews = [],
-  statusPermissionDenied = false, branchShas = {},
+  statusPermissionDenied = false, branchShas = {}, graphqlReplyLogin = "builder[bot]", graphqlReplyType = "Bot",
 } = {}) {
   const calls = [];
   const branchState = { ...branchShas };
@@ -255,7 +255,7 @@ function fakeGitHub({
          id: "thread-1", isResolved: false, comments: { nodes: [] },
       }] } } } } });
       if (body.query.includes("addPullRequestReviewThreadReply")) return json({ data: { addPullRequestReviewThreadReply: {
-        comment: { id: "comment-1", url: "https://github.test/comment/1", author: { login: "builder[bot]" } },
+        comment: { id: "comment-1", url: "https://github.test/comment/1", author: { login: graphqlReplyLogin, __typename: graphqlReplyType } },
       } } });
       if (body.query.includes("resolveReviewThread")) return json({ data: { resolveReviewThread: { thread: { id: "thread-1", isResolved: true } } } });
       if (body.query.includes("markPullRequestReadyForReview")) return json({ data: { markPullRequestReadyForReview: {
@@ -286,6 +286,20 @@ assert.equal(threads[0].id, "thread-1");
 const replied = await builder.replyReviewThread({ threadId: "thread-1", body: "Fixed." });
 assert.equal(replied.url, "https://github.test/comment/1");
 assert.match(api.calls.find((call) => call.body?.variables?.body)?.body.variables.body, /agent-bridge-builder:reply/);
+const graphqlAppSlugApi = fakeGitHub({ graphqlReplyLogin: "builder" });
+const graphqlAppSlugReply = await createBoundBuilderClient({ ...base, fetchImpl: graphqlAppSlugApi.fetchImpl })
+  .replyReviewThread({ threadId: "thread-1", body: "Fixed through GraphQL." });
+assert.equal(graphqlAppSlugReply.login, "builder[bot]");
+await assert.rejects(
+  createBoundBuilderClient({ ...base, fetchImpl: fakeGitHub({ graphqlReplyLogin: "different-builder" }).fetchImpl })
+    .replyReviewThread({ threadId: "thread-1", body: "Wrong identity." }),
+  /unexpected identity/i,
+);
+await assert.rejects(
+  createBoundBuilderClient({ ...base, fetchImpl: fakeGitHub({ graphqlReplyLogin: "builder", graphqlReplyType: "User" }).fetchImpl })
+    .replyReviewThread({ threadId: "thread-1", body: "Spoofed identity." }),
+  /unexpected identity/i,
+);
 assert.equal((await builder.resolveReviewThread({ threadId: "thread-1" })).idempotent, false);
 assert.equal((await builder.markReady()).operation, "mark_ready");
 const merged = await builder.merge({ method: "squash" });

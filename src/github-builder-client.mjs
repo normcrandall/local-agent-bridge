@@ -201,10 +201,14 @@ function marker(operation, headSha, value) {
   return `<!-- agent-bridge-builder:${operation}:${headSha}:${digest} -->`;
 }
 
+function normalizeBotLogin(login) {
+  const normalized = (login || "").toLowerCase();
+  return normalized.endsWith("[bot]") ? normalized.slice(0, -5) : normalized;
+}
+
 async function verifyIdentity({ fetchImpl, apiUrl, token, expectedLogin, verifiedLogin }) {
   const login = verifiedLogin || (await request({ fetchImpl, apiUrl, token, path: "/user" }))?.login;
-  const normLogin = (l) => (l || "").toLowerCase().endsWith("[bot]") ? (l || "").toLowerCase().slice(0, -5) : (l || "").toLowerCase();
-  if (normLogin(login) !== normLogin(expectedLogin)) {
+  if (normalizeBotLogin(login) !== normalizeBotLogin(expectedLogin)) {
     throw new Error(`GitHub builder identity mismatch: expected ${expectedLogin}, received ${login || "unknown"}.`);
   }
   return login;
@@ -345,7 +349,7 @@ export function createBoundBuilderClient({
     await identity();
     await boundPullRequest(context);
     const [owner, name] = repository.split("/");
-    const query = `query($owner:String!,$name:String!,$number:Int!,$after:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$after){nodes{id isResolved comments(first:100){nodes{id body url author{login}} pageInfo{hasNextPage endCursor}}} pageInfo{hasNextPage endCursor}}}}}`;
+    const query = `query($owner:String!,$name:String!,$number:Int!,$after:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$after){nodes{id isResolved comments(first:100){nodes{id body url author{login __typename}} pageInfo{hasNextPage endCursor}}} pageInfo{hasNextPage endCursor}}}}}`;
     const threads = [];
     let after = null;
     do {
@@ -358,7 +362,7 @@ export function createBoundBuilderClient({
       threads.push(...(connection?.nodes || []));
       after = connection?.pageInfo?.hasNextPage ? connection.pageInfo.endCursor : null;
     } while (after);
-    const commentsQuery = `query($id:ID!,$after:String){node(id:$id){... on PullRequestReviewThread{comments(first:100,after:$after){nodes{id body url author{login}} pageInfo{hasNextPage endCursor}}}}}`;
+    const commentsQuery = `query($id:ID!,$after:String){node(id:$id){... on PullRequestReviewThread{comments(first:100,after:$after){nodes{id body url author{login __typename}} pageInfo{hasNextPage endCursor}}}}}`;
     for (const thread of threads) {
       let commentsAfter = thread.comments?.pageInfo?.hasNextPage ? thread.comments.pageInfo.endCursor : null;
       while (commentsAfter) {
@@ -387,10 +391,12 @@ export function createBoundBuilderClient({
     if (!thread) throw new Error("Review thread is not part of the bound pull request.");
     const receiptMarker = marker("reply", headSha, `${threadId}:${body}`);
     const existing = thread.comments?.nodes?.find((comment) => (
-      comment.author?.login === expectedLogin && comment.body?.includes(receiptMarker)
+      comment.author?.__typename === "Bot"
+      && normalizeBotLogin(comment.author?.login) === normalizeBotLogin(expectedLogin)
+      && comment.body?.includes(receiptMarker)
     ));
     if (existing) return { operation: "reply_review_thread", threadId, url: existing.url, idempotent: true, login: expectedLogin, headSha };
-    const query = `mutation($threadId:ID!,$body:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$threadId,body:$body}){comment{id url author{login}}}}`;
+    const query = `mutation($threadId:ID!,$body:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$threadId,body:$body}){comment{id url author{login __typename}}}}`;
     const result = await request({
       ...context,
       path: "/graphql",
@@ -399,7 +405,9 @@ export function createBoundBuilderClient({
     });
     if (result?.errors?.length) throw new Error(`GitHub review-thread reply failed: ${result.errors[0].message}`);
     const comment = result?.data?.addPullRequestReviewThreadReply?.comment;
-    if (comment?.author?.login !== expectedLogin) throw new Error("GitHub posted the thread reply with an unexpected identity.");
+    if (comment?.author?.__typename !== "Bot" || normalizeBotLogin(comment?.author?.login) !== normalizeBotLogin(expectedLogin)) {
+      throw new Error("GitHub posted the thread reply with an unexpected identity.");
+    }
     return { operation: "reply_review_thread", threadId, url: comment.url, idempotent: false, login: expectedLogin, headSha };
   }
 
