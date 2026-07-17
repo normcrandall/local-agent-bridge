@@ -1,4 +1,148 @@
 import { createHash } from "node:crypto";
+import { appendFileSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import {
+  assertBranchRef,
+  pushCommit,
+  resolveGitBinary,
+  resolveTransportUrl,
+  runGit,
+  sanitizedGitEnv,
+} from "./github-builder-transport.mjs";
+
+const LFS_POINTER_REGEX = /^version https:\/\/git-lfs\.github\.com\/spec\/v1\r?\noid sha256:[0-9a-f]{64}\r?\nsize [0-9]+\r?\n$/;
+const MAX_PUSH_FILES = 2000;
+const PROTECTED_BRANCH_NAMES = ["main", "master", "production", "release", "develop"];
+
+async function assertLocalAncestry({ gitPath, workspace, ancestor, descendant }) {
+  try {
+    await runGit(["merge-base", "--is-ancestor", ancestor, descendant], {
+      gitPath, cwd: workspace, env: sanitizedGitEnv(),
+    });
+  } catch (error) {
+    if (error.code === 1) {
+      throw new Error(`Push is not a fast-forward. Base ${ancestor} is not an ancestor of head ${descendant}.`);
+    }
+    throw new Error(`Fast-forward ancestry could not be verified for base ${ancestor}: ${error.message}`);
+  }
+}
+
+async function validateLocalGitState({ gitPath, workspace, repository, ref, sha, oldSha }) {
+  if (!workspace || typeof workspace !== "string") {
+    throw new Error("Workspace path GITHUB_BUILDER_WORKSPACE is not set or invalid.");
+  }
+  const local = (args) => runGit(args, { gitPath, cwd: workspace, env: sanitizedGitEnv() });
+
+  // The origin remote must be bound exactly to the authorized GitHub HTTPS repository.
+  let remoteUrl;
+  try {
+    remoteUrl = (await local(["remote", "get-url", "origin"])).stdout.toString("utf8").trim();
+  } catch (error) {
+    throw new Error(`Failed to get git remote URL: ${error.message}`);
+  }
+  if (remoteUrl !== `https://github.com/${repository}.git` && remoteUrl !== `https://github.com/${repository}`) {
+    throw new Error(`Remote URL mismatch: origin points to ${remoteUrl}, expected exactly https://github.com/${repository} (.git optional).`);
+  }
+
+  // Local url.<base>.insteadOf rewrites could silently redirect the transport.
+  let rewriteConfig = "";
+  try {
+    rewriteConfig = (await local(["config", "--local", "--get-regexp", "^url\\..*\\.(insteadof|pushinsteadof)$"])).stdout.toString("utf8").trim();
+  } catch (error) {
+    if (error.code !== 1) throw new Error(`Failed to inspect local URL-rewrite configuration: ${error.message}`);
+  }
+  if (rewriteConfig) {
+    throw new Error("Local url.<base>.insteadOf rewrite configuration is present; the bounded transport rejects rewritten remotes.");
+  }
+
+  // Ambient local HTTP authorization (http.extraHeader or per-URL variants)
+  // could inject credentials or override the askpass channel.
+  let extraHeaderConfig = "";
+  try {
+    extraHeaderConfig = (await local(["config", "--local", "--get-regexp", "^http\\.(.*\\.)?extraheader$"])).stdout.toString("utf8").trim();
+  } catch (error) {
+    if (error.code !== 1) throw new Error(`Failed to inspect local HTTP header configuration: ${error.message}`);
+  }
+  if (extraHeaderConfig) {
+    throw new Error("Local http.extraHeader configuration is present; the bounded transport rejects ambient HTTP authorization.");
+  }
+
+  try {
+    await local(["cat-file", "-e", `${sha}^{commit}`]);
+  } catch (error) {
+    throw new Error(`Local object availability check failed for SHA ${sha}: ${error.message}`);
+  }
+
+  // If the ref exists locally it must match the bound SHA; a missing local ref
+  // is acceptable because the commit object itself was verified above.
+  let localRefSha = null;
+  try {
+    localRefSha = (await local(["rev-parse", "--verify", "--quiet", "--end-of-options", ref])).stdout.toString("utf8").trim();
+  } catch {
+    localRefSha = null;
+  }
+  if (localRefSha && localRefSha !== sha) {
+    throw new Error(`Local ref ${ref} points to ${localRefSha}, expected SHA ${sha}.`);
+  }
+
+  if (oldSha !== undefined) {
+    await assertLocalAncestry({ gitPath, workspace, ancestor: oldSha, descendant: sha });
+  }
+
+  // Payload size, binaries, and LFS pointers validation
+  let filesOutput;
+  try {
+    if (oldSha) {
+      filesOutput = (await local(["diff", "--name-only", "-z", "--diff-filter=d", oldSha, sha])).stdout;
+    } else {
+      filesOutput = (await local(["ls-tree", "-r", "--name-only", "-z", sha])).stdout;
+    }
+  } catch (error) {
+    throw new Error(`Failed to list modified files: ${error.message}`);
+  }
+
+  const files = filesOutput.toString("utf8").split("\0").filter(Boolean);
+  if (files.length > MAX_PUSH_FILES) {
+    throw new Error(`Payload validation failed: ${files.length} files exceed the ${MAX_PUSH_FILES}-file bound.`);
+  }
+  for (const file of files) {
+    let sizeStr;
+    try {
+      sizeStr = (await local(["cat-file", "-s", `${sha}:${file}`])).stdout.toString("utf8").trim();
+    } catch (error) {
+      throw new Error(`Failed to get size of ${file}: ${error.message}`);
+    }
+    const size = Number.parseInt(sizeStr, 10);
+
+    // We enforce a 10 MB limit for non-LFS files
+    if (size > 10 * 1024 * 1024) {
+      throw new Error(`File ${file} exceeds size limit (10MB) and must be tracked via LFS.`);
+    }
+
+    let buffer;
+    try {
+      buffer = (await local(["cat-file", "blob", `${sha}:${file}`])).stdout;
+    } catch (error) {
+      throw new Error(`Failed to read contents of ${file}: ${error.message}`);
+    }
+
+    const text = buffer.toString("utf8");
+    if (text.startsWith("version https://git-lfs.github.com/spec/v1")) {
+      if (!LFS_POINTER_REGEX.test(text)) {
+        throw new Error(`LFS validation failed: file ${file} has an invalid LFS pointer format.`);
+      }
+      // Fail closed: remote LFS object availability cannot be proven before mutation.
+      throw new Error(`LFS validation failed: file ${file} is an LFS pointer, but LFS object availability on the remote cannot be proven before mutation; rejecting.`);
+    }
+    if (buffer.includes(0)) {
+      throw new Error(`File ${file} is binary and must be tracked via LFS.`);
+    }
+  }
+}
+
+function isRemoteCasRejection(stderr) {
+  return /\[rejected\]|\[remote rejected\]|stale info|non-fast-forward|fetch first|already exists/.test(stderr || "");
+}
 
 function headers(token) {
   return {
@@ -79,7 +223,7 @@ async function boundPullRequest(context) {
 export function createBoundBuilderClient({
   fetchImpl = fetch,
   apiUrl = "https://api.github.com",
-  token,
+  token = null,
   repository,
   expectedLogin,
   verifiedLogin = null,
@@ -91,9 +235,23 @@ export function createBoundBuilderClient({
   trustedReviewLogins = [],
   trustedHumanReviewLogins = [],
   allowedOperations = ["ensure_pull_request", "read_review_threads", "reply_review_thread", "resolve_review_thread", "mark_ready"],
+  getToken = null,
+  workspace = null,
+  transportUrl = null,
+  receiptPath = null,
 }) {
   assertRepository(repository);
   assertSha(headSha);
+  if (!apiUrl.startsWith("https://")) {
+    throw new Error("API URL must use HTTPS.");
+  }
+  // Test-only loopback seam; rejects anything that is not 127.0.0.1.
+  if (transportUrl !== null) resolveTransportUrl({ repository, transportUrl });
+  if (!getToken) {
+    if (!token || typeof token !== "string" || !token.startsWith("ghs_")) {
+      throw new Error("Only short-lived GitHub App installation tokens (ghs_...) are permitted for builder operations.");
+    }
+  }
   if (!expectedLogin) throw new Error("expectedLogin is required.");
   if (prNumber !== null && (!Number.isInteger(prNumber) || prNumber < 1)) throw new Error("prNumber is invalid.");
   if (trustedHumanReviewLogins.includes(expectedLogin)) {
@@ -102,14 +260,37 @@ export function createBoundBuilderClient({
   if (trustedHumanReviewLogins.some((login) => typeof login !== "string" || !login || login.endsWith("[bot]"))) {
     throw new Error("Trusted human reviewer logins must be non-bot GitHub logins.");
   }
-  const context = { fetchImpl, apiUrl, token, repository, expectedLogin, verifiedLogin, headSha, prNumber };
+
+  let cachedToken = token || null;
+  let cachedVerifiedLogin = verifiedLogin || null;
+
+  const context = { fetchImpl, apiUrl, token: cachedToken, repository, expectedLogin, verifiedLogin: cachedVerifiedLogin, headSha, prNumber };
   const allowed = new Set(allowedOperations);
   const authorize = (operation) => {
     if (!allowed.has(operation)) throw new Error(`GitHub builder operation is not authorized: ${operation}.`);
   };
 
+  async function ensureToken() {
+    if (cachedToken) {
+      return { token: cachedToken, verifiedLogin: cachedVerifiedLogin };
+    }
+    if (!getToken) {
+      throw new Error("Token factory 'getToken' is required.");
+    }
+    const credential = await getToken();
+    if (!credential.token || typeof credential.token !== "string" || !credential.token.startsWith("ghs_")) {
+      throw new Error("Only short-lived GitHub App installation tokens (ghs_...) are permitted for builder operations.");
+    }
+    cachedToken = credential.token;
+    cachedVerifiedLogin = credential.verifiedLogin;
+    context.token = cachedToken;
+    context.verifiedLogin = cachedVerifiedLogin;
+    return credential;
+  }
+
   async function identity() {
-    return verifyIdentity(context);
+    const cred = await ensureToken();
+    return verifyIdentity({ ...context, token: cred.token, verifiedLogin: cred.verifiedLogin });
   }
 
   async function ensurePullRequest({ title, body, draft = false }) {
@@ -352,5 +533,286 @@ export function createBoundBuilderClient({
     };
   }
 
-  return { identity, ensurePullRequest, reviewThreads, replyReviewThread, resolveReviewThread, markReady, merge };
+  function assertBranchOperationInput({ ref, sha, oldSha }) {
+    const branchName = assertBranchRef(ref);
+    assertSha(sha);
+    if (sha !== headSha) {
+      throw new Error(`SHA mismatch: expected ${headSha}, received ${sha}.`);
+    }
+    const expectedRef = headRef ? (headRef.startsWith("refs/heads/") ? headRef : `refs/heads/${headRef}`) : null;
+    if (expectedRef && ref !== expectedRef) {
+      throw new Error(`Ref mismatch: expected ${expectedRef}, received ${ref}.`);
+    }
+    if (oldSha !== undefined) assertSha(oldSha);
+    if (PROTECTED_BRANCH_NAMES.includes(branchName)) {
+      throw new Error(`Cannot modify a protected or default branch: ${branchName}.`);
+    }
+    return branchName;
+  }
+
+  async function assertRemoteBranchMutable({ branchName, encodedBranch, activeToken }) {
+    const repoInfo = await request({ ...context, token: activeToken, path: `/repos/${repository}` });
+    const defaultBranch = repoInfo?.default_branch || "main";
+    if (branchName === defaultBranch) {
+      throw new Error(`Cannot modify a protected or default branch: ${branchName}.`);
+    }
+    let isProtected = false;
+    try {
+      const branchInfo = await request({ ...context, token: activeToken, path: `/repos/${repository}/branches/${encodedBranch}` });
+      if (branchInfo?.protected === true) isProtected = true;
+    } catch (error) {
+      if (error.status !== 404) throw error;
+    }
+    if (isProtected) {
+      throw new Error(`Cannot modify a protected or default branch: ${branchName}.`);
+    }
+  }
+
+  async function readRemoteBranch({ encodedBranch, activeToken }) {
+    return request({ ...context, token: activeToken, path: `/repos/${repository}/git/ref/heads/${encodedBranch}` }).catch((error) => {
+      if (error.status === 404) return null;
+      throw error;
+    });
+  }
+
+  // Refs whose last mutation attempt ended without a provable outcome. A
+  // retry must complete a read-only remote reconciliation before any push.
+  const indeterminateRefs = new Map();
+
+  function persistReceipt(receipt) {
+    if (!receiptPath) return receipt;
+    try {
+      mkdirSync(dirname(receiptPath), { recursive: true });
+      appendFileSync(receiptPath, `${JSON.stringify(receipt)}\n`);
+    } catch (error) {
+      throw new Error(`Failed to record durable builder receipt: ${error.message}`);
+    }
+    return receipt;
+  }
+
+  function appIdentity(receiptLogin) {
+    return { expectedLogin, verifiedLogin: receiptLogin || cachedVerifiedLogin || expectedLogin };
+  }
+
+  function branchReceipt({ operation, ref, requestedSha, expectedOldSha = null, observedRemoteSha, outcome, idempotent, verifiedLogin: receiptLogin, reconciled = false }) {
+    const identity = appIdentity(receiptLogin);
+    return persistReceipt({
+      operation,
+      repository,
+      ref,
+      requestedSha,
+      expectedOldSha,
+      observedRemoteSha,
+      outcome,
+      sha: requestedSha,
+      readBackSha: observedRemoteSha,
+      idempotent,
+      ...(reconciled ? { reconciled: true } : {}),
+      appIdentity: identity,
+      login: expectedLogin,
+      verifiedLogin: identity.verifiedLogin,
+      transport: "git-https-app-token",
+      remoteVerified: true,
+      recordedAt: new Date().toISOString(),
+    });
+  }
+
+  function recordFailureReceipt({ operation, ref, requestedSha, expectedOldSha = null, outcome, detail, verifiedLogin: receiptLogin }) {
+    persistReceipt({
+      operation,
+      repository,
+      ref,
+      requestedSha,
+      expectedOldSha,
+      observedRemoteSha: null,
+      outcome,
+      appIdentity: appIdentity(receiptLogin),
+      transport: "git-https-app-token",
+      remoteVerified: false,
+      detail,
+      recordedAt: new Date().toISOString(),
+    });
+  }
+
+  // Read the remote ref while honoring a pending indeterminate marker: the
+  // read must succeed before any further mutation is considered, and a read
+  // proving the requested SHA resolves the marker as reconciled.
+  async function reconcileBeforeMutation({ operation, ref, sha, encodedBranch, activeToken, verifiedLogin: receiptLogin }) {
+    const pending = indeterminateRefs.get(ref);
+    let currentRef;
+    try {
+      currentRef = await readRemoteBranch({ encodedBranch, activeToken });
+    } catch (error) {
+      if (pending) {
+        throw new Error(`Ref ${ref} has an indeterminate prior mutation and remote read-back is still unavailable; read-only reconciliation must succeed before retry: ${error.message}`);
+      }
+      throw error;
+    }
+    if (pending) {
+      indeterminateRefs.delete(ref);
+      if (currentRef?.object?.sha === sha) {
+        return {
+          currentRef,
+          reconciledReceipt: branchReceipt({
+            operation, ref, requestedSha: sha, expectedOldSha: pending.expectedOldSha,
+            observedRemoteSha: sha, outcome: "reconciled", idempotent: false, reconciled: true,
+            verifiedLogin: receiptLogin,
+          }),
+        };
+      }
+    }
+    return { currentRef, reconciledReceipt: null };
+  }
+
+  // Shared handling for a failed push: one bounded read-back decides between
+  // reconciled success, determinate failure, and explicit indeterminate state.
+  async function resolvePushFailure({ operation, ref, sha, expectedOldSha, encodedBranch, activeToken, error, verifiedLogin: receiptLogin }) {
+    let readBack = null;
+    let readBackError = null;
+    try {
+      readBack = await readRemoteBranch({ encodedBranch, activeToken });
+    } catch (caught) {
+      readBackError = caught;
+    }
+    if (readBackError) {
+      indeterminateRefs.set(ref, { operation, requestedSha: sha, expectedOldSha, recordedAt: new Date().toISOString() });
+      recordFailureReceipt({
+        operation, ref, requestedSha: sha, expectedOldSha, outcome: "indeterminate",
+        detail: `push transport failed and remote read-back is unavailable: ${readBackError.message}`,
+        verifiedLogin: receiptLogin,
+      });
+      throw new Error(`Mutation outcome for ${ref} is indeterminate: the push transport failed (${error.message}) and remote read-back is unavailable (${readBackError.message}). Perform read-only reconciliation before any retry.`);
+    }
+    if (readBack?.object?.sha === sha) {
+      return branchReceipt({
+        operation, ref, requestedSha: sha, expectedOldSha, observedRemoteSha: sha,
+        outcome: "reconciled", idempotent: false, reconciled: true, verifiedLogin: receiptLogin,
+      });
+    }
+    recordFailureReceipt({
+      operation, ref, requestedSha: sha, expectedOldSha, outcome: "failed",
+      detail: error.message, verifiedLogin: receiptLogin,
+    });
+    if (isRemoteCasRejection(error.stderr)) {
+      throw new Error(operation === "create_branch"
+        ? `Branch creation lost the compare-and-swap race for ${ref}. Remote rejection: ${error.stderr}`
+        : `Push is not a fast-forward. Remote rejection: ${error.stderr}`);
+    }
+    throw error;
+  }
+
+  // Post-push verification: a successful transport result still requires a
+  // remote read-back at the exact SHA before a receipt is issued.
+  async function verifyMutation({ operation, ref, sha, expectedOldSha, encodedBranch, activeToken, verifiedLogin: receiptLogin, outcome }) {
+    let readBack;
+    try {
+      readBack = await readRemoteBranch({ encodedBranch, activeToken });
+    } catch (error) {
+      indeterminateRefs.set(ref, { operation, requestedSha: sha, expectedOldSha, recordedAt: new Date().toISOString() });
+      recordFailureReceipt({
+        operation, ref, requestedSha: sha, expectedOldSha, outcome: "indeterminate",
+        detail: `push succeeded at the transport but read-back verification is unavailable: ${error.message}`,
+        verifiedLogin: receiptLogin,
+      });
+      throw new Error(`Mutation for ${ref} completed at the transport but remote read-back verification is unavailable; state is indeterminate and requires read-only reconciliation before retry: ${error.message}`);
+    }
+    if (readBack?.object?.sha !== sha) {
+      recordFailureReceipt({
+        operation, ref, requestedSha: sha, expectedOldSha, outcome: "failed",
+        detail: `read-back mismatch: expected ${sha}, found ${readBack?.object?.sha || "none"}`,
+        verifiedLogin: receiptLogin,
+      });
+      throw new Error(`Read-back validation failed: expected ${sha}, found ${readBack?.object?.sha || "none"}`);
+    }
+    return branchReceipt({ operation, ref, requestedSha: sha, expectedOldSha, observedRemoteSha: sha, outcome, idempotent: false, verifiedLogin: receiptLogin });
+  }
+
+  async function createBranch({ ref, sha }) {
+    authorize("create_branch");
+    const branchName = assertBranchOperationInput({ ref, sha });
+    const encodedBranch = branchName.split("/").map(encodeURIComponent).join("/");
+
+    // 1. Local validation completes before any token issuance or API call.
+    const gitPath = resolveGitBinary();
+    await validateLocalGitState({ gitPath, workspace, repository, ref, sha });
+
+    // 2. Token issuance and identity verification after validation.
+    const credential = await ensureToken();
+    const activeToken = credential.token;
+    await verifyIdentity({ ...context, token: activeToken, verifiedLogin: credential.verifiedLogin });
+
+    // 3. Remote-side gate, then reconciliation-aware current ref state.
+    await assertRemoteBranchMutable({ branchName, encodedBranch, activeToken });
+    const { currentRef, reconciledReceipt } = await reconcileBeforeMutation({
+      operation: "create_branch", ref, sha, encodedBranch, activeToken, verifiedLogin: credential.verifiedLogin,
+    });
+    if (reconciledReceipt) return reconciledReceipt;
+    if (currentRef?.object?.sha === sha) {
+      return branchReceipt({ operation: "create_branch", ref, requestedSha: sha, expectedOldSha: null, observedRemoteSha: sha, outcome: "idempotent", idempotent: true, verifiedLogin: credential.verifiedLogin });
+    }
+    if (currentRef?.object?.sha) {
+      throw new Error(`Branch ${branchName} already exists at ${currentRef.object.sha}; create_branch requires the ref to be absent or already at the bound SHA.`);
+    }
+
+    // 4. Exact create CAS: the lease requires the remote ref to not exist.
+    try {
+      await pushCommit({ gitPath, workspace, repository, ref, sha, expectedRemoteSha: null, token: activeToken, transportUrl });
+    } catch (error) {
+      return resolvePushFailure({ operation: "create_branch", ref, sha, expectedOldSha: null, encodedBranch, activeToken, error, verifiedLogin: credential.verifiedLogin });
+    }
+
+    // 5. Remote read-back proves the mutation landed at the exact SHA.
+    return verifyMutation({ operation: "create_branch", ref, sha, expectedOldSha: null, encodedBranch, activeToken, verifiedLogin: credential.verifiedLogin, outcome: "created" });
+  }
+
+  async function pushBranch({ ref, sha, oldSha }) {
+    authorize("push_branch");
+    const branchName = assertBranchOperationInput({ ref, sha, oldSha });
+    const encodedBranch = branchName.split("/").map(encodeURIComponent).join("/");
+
+    // 1. Local validation (including ancestry when oldSha is given) before token issuance.
+    const gitPath = resolveGitBinary();
+    await validateLocalGitState({ gitPath, workspace, repository, ref, sha, oldSha });
+
+    // 2. Token issuance and identity verification after validation.
+    const credential = await ensureToken();
+    const activeToken = credential.token;
+    await verifyIdentity({ ...context, token: activeToken, verifiedLogin: credential.verifiedLogin });
+
+    // 3. Remote-side gate, then reconciliation-aware exact base discovery.
+    await assertRemoteBranchMutable({ branchName, encodedBranch, activeToken });
+    const { currentRef, reconciledReceipt } = await reconcileBeforeMutation({
+      operation: "push_branch", ref, sha, encodedBranch, activeToken, verifiedLogin: credential.verifiedLogin,
+    });
+    if (reconciledReceipt) return reconciledReceipt;
+    const remoteSha = currentRef?.object?.sha;
+    if (!remoteSha) {
+      throw new Error(oldSha !== undefined
+        ? `Remote branch refs/heads/${branchName} does not exist, but oldSha was provided.`
+        : `Remote branch refs/heads/${branchName} does not exist.`);
+    }
+    if (oldSha !== undefined && remoteSha !== oldSha) {
+      throw new Error(`Remote branch ref changed: expected ${oldSha}, current ${remoteSha}.`);
+    }
+    if (remoteSha === sha) {
+      return branchReceipt({ operation: "push_branch", ref, requestedSha: sha, expectedOldSha: oldSha ?? null, observedRemoteSha: sha, outcome: "idempotent", idempotent: true, verifiedLogin: credential.verifiedLogin });
+    }
+    if (oldSha === undefined) {
+      // The caller did not pin a base; the observed remote SHA becomes the CAS
+      // base and must be a local ancestor of the head, fail-closed.
+      await assertLocalAncestry({ gitPath, workspace, ancestor: remoteSha, descendant: sha });
+    }
+
+    // 4. Exact fast-forward CAS pinned to the observed remote SHA.
+    try {
+      await pushCommit({ gitPath, workspace, repository, ref, sha, expectedRemoteSha: remoteSha, token: activeToken, transportUrl });
+    } catch (error) {
+      return resolvePushFailure({ operation: "push_branch", ref, sha, expectedOldSha: remoteSha, encodedBranch, activeToken, error, verifiedLogin: credential.verifiedLogin });
+    }
+
+    // 5. Remote read-back proves the mutation landed at the exact SHA.
+    return verifyMutation({ operation: "push_branch", ref, sha, expectedOldSha: remoteSha, encodedBranch, activeToken, verifiedLogin: credential.verifiedLogin, outcome: "fast_forwarded" });
+  }
+
+  return { identity, ensurePullRequest, reviewThreads, replyReviewThread, resolveReviewThread, markReady, merge, createBranch, pushBranch };
 }

@@ -111,6 +111,8 @@ export function createAgentPool({
       requiredReviewStatusContext: "agent-review",
       trustedReviewLogins,
       trustedHumanReviewLogins: appRoles.mergePolicy?.trustedHumanReviewers || [],
+      workspace: githubBuilder.workspace || workspace,
+      receiptPath: githubBuilder.receiptPath || resolve(workspace, ".bridge", "github-builder-receipts.jsonl"),
     });
   }
 
@@ -125,6 +127,8 @@ export function createAgentPool({
       else if (name === "resolve_review_thread") receipts.push(await builder.resolveReviewThread(input));
       else if (name === "mark_ready") receipts.push(await builder.markReady());
       else if (name === "merge") receipts.push(await builder.merge(input));
+      else if (name === "create_branch") receipts.push(await builder.createBranch(input));
+      else if (name === "push_branch") receipts.push(await builder.pushBranch(input));
     }
     return receipts;
   }

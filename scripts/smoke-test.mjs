@@ -279,7 +279,7 @@ async function callAntigravityWithoutModel() {
     args: [resolve(root, "scripts/antigravity-bridge-mcp.sh")],
     cwd: root,
     env: {
-      ...process.env,
+      ...cleanProcessEnv,
       AGY_BIN: resolve(root, "scripts/fake-antigravity.mjs"),
       FAKE_ANTIGRAVITY_OVERLOAD_MODELS: "overloaded-antigravity-model",
     },

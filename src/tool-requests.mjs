@@ -108,6 +108,7 @@ export function codexToolRequest({
       GITHUB_BUILDER_HEAD_REF: githubBuilder.headRef || null,
       GITHUB_BUILDER_BASE_REF: githubBuilder.baseRef || null,
       GITHUB_BUILDER_ALLOWED_OPERATIONS: githubBuilder.allowedOperations?.join(",") || null,
+      GITHUB_BUILDER_WORKSPACE: cwd,
     })) if (value) arguments_.config[`mcp_servers.github_builder.env.${key}`] = value;
     arguments_.config["mcp_servers.github_builder.default_tools_approval_mode"] = "approve";
   }

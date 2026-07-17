@@ -6,6 +6,8 @@ const operation = z.discriminatedUnion("operation", [
   z.object({ operation: z.literal("resolve_review_thread"), threadId: z.string().min(1) }).strict(),
   z.object({ operation: z.literal("mark_ready") }).strict(),
   z.object({ operation: z.literal("merge"), method: z.enum(["merge", "squash", "rebase"]).default("squash") }).strict(),
+  z.object({ operation: z.literal("create_branch"), ref: z.string().min(1).max(220), sha: z.string().regex(/^[0-9a-f]{40}$/i) }).strict(),
+  z.object({ operation: z.literal("push_branch"), ref: z.string().min(1).max(220), sha: z.string().regex(/^[0-9a-f]{40}$/i), oldSha: z.string().regex(/^[0-9a-f]{40}$/i).optional() }).strict(),
 ]);
 
 const envelope = z.object({ operations: z.array(operation).min(1).max(20) }).strict();

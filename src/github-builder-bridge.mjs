@@ -22,19 +22,28 @@ if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository || "")) throw new Erro
 if (!GITHUB_LOGIN_PATTERN.test(expectedLogin || "")) throw new Error("GITHUB_BUILDER_EXPECTED_LOGIN is invalid.");
 if (!/^[0-9a-f]{40}$/i.test(headSha || "")) throw new Error("GITHUB_BUILDER_HEAD_SHA must be a full SHA.");
 
-const credential = await createInstallationToken({ role: "builder", repository });
-if (credential.expectedLogin !== expectedLogin) {
-  throw new Error(`Configured builder identity ${credential.expectedLogin} does not match authorized identity ${expectedLogin}.`);
-}
+const workspace = process.env.GITHUB_BUILDER_WORKSPACE || process.cwd();
+const receiptPath = process.env.GITHUB_BUILDER_RECEIPT_PATH
+  || `${workspace}/.bridge/github-builder-receipts.jsonl`;
 const appRoles = await inspectGitHubAppRoles();
 const trustedReviewLogins = [
   appRoles.roles?.reviewer?.expectedLogin,
   ...Object.values(appRoles.roles?.reviewers || {}).map((reviewer) => reviewer.expectedLogin),
 ].filter(Boolean);
+
+const getToken = async () => {
+  const credential = await createInstallationToken({ role: "builder", repository });
+  if (credential.expectedLogin !== expectedLogin) {
+    throw new Error(`Configured builder identity ${credential.expectedLogin} does not match authorized identity ${expectedLogin}.`);
+  }
+  return { token: credential.token, verifiedLogin: credential.verifiedLogin };
+};
+
 const client = createBoundBuilderClient({
   apiUrl,
-  token: credential.token,
-  verifiedLogin: credential.verifiedLogin,
+  getToken,
+  workspace,
+  receiptPath,
   repository,
   expectedLogin,
   headSha,
@@ -96,5 +105,24 @@ server.registerTool("merge", {
   description: "Merge only the pre-bound pull request at the pre-bound head SHA.",
   inputSchema: { method: z.enum(["merge", "squash", "rebase"]).default("squash") },
 }, async (input) => response(await client.merge(input)));
+
+server.registerTool("create_branch", {
+  title: "Create branch",
+  description: "Create a branch for the pre-bound repository and head SHA.",
+  inputSchema: {
+    ref: z.string().min(1),
+    sha: z.string().regex(/^[0-9a-f]{40}$/i),
+  },
+}, async (input) => response(await client.createBranch(input)));
+
+server.registerTool("push_branch", {
+  title: "Push branch",
+  description: "Update a branch for the pre-bound repository and head SHA using fast-forward push.",
+  inputSchema: {
+    ref: z.string().min(1),
+    sha: z.string().regex(/^[0-9a-f]{40}$/i),
+    oldSha: z.string().regex(/^[0-9a-f]{40}$/i).optional(),
+  },
+}, async (input) => response(await client.pushBranch(input)));
 
 await server.connect(new StdioServerTransport());
