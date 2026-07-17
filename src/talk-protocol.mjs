@@ -1,4 +1,5 @@
 import { normalizeHandoff } from "./handoff-protocol.mjs";
+import { extractAndSaveCapsuleBeforeObserve } from "./context-capsule.mjs";
 
 const STATUSES = new Set(["CONTINUE", "AGREED", "NEEDS_USER"]);
 export const KNOWN_AGENTS = ["claude", "codex", "antigravity"];
@@ -23,6 +24,9 @@ export function parseStatus(message) {
 export function parseHandoffEnvelope(message) {
   const lines = String(message || "").split("\n").filter((line) => /^HANDOFF:\s*/i.test(line));
   if (!lines.length) return null;
+  if (lines.length > 1) {
+    throw new Error("Multiple HANDOFF lines are not allowed.");
+  }
   const raw = lines.at(-1).replace(/^HANDOFF:\s*/i, "");
   let parsed;
   try { parsed = JSON.parse(raw); } catch { throw new Error("HANDOFF must contain valid single-line JSON."); }
@@ -124,6 +128,8 @@ export async function runConversation({
   onState = async () => {},
   onAgentUnavailable = async () => {},
   shouldStop = async () => false,
+  workspace = null,
+  collaborationId = null,
 }) {
   if (!task?.trim()) throw new Error("A task is required.");
   if (!Number.isInteger(maxTurns) || maxTurns < 1 || maxTurns > 20) {
@@ -177,6 +183,15 @@ export async function runConversation({
     try {
       response = await send({ agent, prompt, sessionId: sessions[agent], mode: agentMode, browser });
       if (!response?.message?.trim()) throw new Error(`${agent} returned an empty message.`);
+      if (workspace && collaborationId) {
+        const { sanitizedMessage } = await extractAndSaveCapsuleBeforeObserve(response.message, {
+          agent,
+          turn: number,
+          workspace,
+          collaborationId,
+        });
+        response.message = sanitizedMessage;
+      }
     } catch (error) {
       const reason = error?.message || String(error);
       if (error?.indeterminate) {
