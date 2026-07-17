@@ -244,7 +244,9 @@ async function reconcileInterruptedCleanup() {
   try {
     const { reconcileClaimsAndPortfolios } = await import("./github-issue-claims.mjs");
     await reconcileClaimsAndPortfolios(WORKSPACE_ROOT);
-  } catch {}
+  } catch (error) {
+    console.error(`GitHub issue claim reconciliation failed: ${error.message}`);
+  }
 }
 
 function compactStatusView(view) {
@@ -282,6 +284,27 @@ function updatePortfolioItemState(state, itemId, patch) {
   });
   if (!found) throw new Error(`Portfolio item ${itemId} does not exist.`);
   return refreshPortfolioState({ ...state, items });
+}
+
+async function releaseLinkedIssueClaim(item, outcome) {
+  if (!item?.collaborationId) return { released: false, reason: "no_collaboration" };
+  const collaboration = await readCollaboration(WORKSPACE_ROOT, item.collaborationId);
+  if (!collaboration.issueClaim) return { released: false, reason: "no_issue_claim" };
+  const { getBuilderClientForWorkspace, releaseClaimLease } = await import("./github-issue-claims.mjs");
+  const claimClient = await getBuilderClientForWorkspace(
+    collaboration.workspace || WORKSPACE_ROOT,
+    collaboration.issueClaim.issueNumber,
+  );
+  if (!claimClient) {
+    throw new Error(`No builder App client is configured for claimed issue #${collaboration.issueClaim.issueNumber}.`);
+  }
+  await releaseClaimLease({
+    client: claimClient,
+    issueNumber: collaboration.issueClaim.issueNumber,
+    collaborationId: item.collaborationId,
+    outcome,
+  });
+  return { released: true, issueNumber: collaboration.issueClaim.issueNumber };
 }
 
 function portfolioLaneOutcome(item, collaboration, expectedHeadSha) {
@@ -615,6 +638,9 @@ server.registerTool(
     const collaborationId = `bridge-${randomUUID()}`;
     let leaseAcquired = false;
     let claimClient = null;
+    let claimHeadSha = null;
+    let claimBaseSha = null;
+    let resolvedIssueClaim = input.issueClaim ? { ...input.issueClaim } : null;
 
     if (input.issueClaim) {
       const { acquireClaimLease } = await import("./github-issue-claims.mjs");
@@ -632,6 +658,11 @@ server.registerTool(
           throw new Error("Unable to retrieve HEAD SHA from workspace.");
         }
       }
+      claimHeadSha = headSha;
+      const baseRef = input.worktree?.base || input.issueClaim.baseSha || headSha;
+      const baseRevision = spawnSync("git", ["rev-parse", baseRef], { cwd: requestedWorkspace, encoding: "utf8" });
+      if (baseRevision.status !== 0) throw new Error(`Unable to resolve claim base revision ${baseRef}.`);
+      claimBaseSha = baseRevision.stdout.trim();
 
       claimClient = createBoundBuilderClient({
         apiUrl: input.issueClaim.apiUrl || process.env.GITHUB_BUILDER_API_URL || "https://api.github.com",
@@ -677,8 +708,8 @@ server.registerTool(
         collaborationId,
         branch: input.worktree?.branch || input.issueClaim.branch || null,
         worktree: plannedWorktreePath || input.issueClaim.worktree || null,
-        baseSha: input.worktree?.base || input.issueClaim.baseSha || null,
-        headSha: input.issueClaim.headSha || null,
+        baseSha: claimBaseSha,
+        headSha: claimHeadSha,
         workspaceRoot: WORKSPACE_ROOT,
       });
       leaseAcquired = true;
@@ -708,6 +739,29 @@ server.registerTool(
       if (ownershipConflict) {
         throw new Error(`Workspace ownership is preserved by indeterminate collaboration ${ownershipConflict.id}; inspect and cancel it before starting replacement work.`);
       }
+      if (input.issueClaim) {
+        const actualHead = spawnSync("git", ["rev-parse", "HEAD"], { cwd: workspace, encoding: "utf8" });
+        if (actualHead.status !== 0) throw new Error("Unable to resolve the claimed worktree HEAD.");
+        resolvedIssueClaim = {
+          ...input.issueClaim,
+          writer: writer || input.writer || startAgent,
+          branch: worktree?.branch || input.issueClaim.branch || null,
+          worktree: workspace,
+          baseSha: claimBaseSha,
+          headSha: actualHead.stdout.trim(),
+        };
+        const { refreshClaimLease } = await import("./github-issue-claims.mjs");
+        await refreshClaimLease({
+          client: claimClient,
+          issueNumber: input.issueClaim.issueNumber,
+          collaborationId,
+          phase: "preflight",
+          summary: "Worktree created and collaboration preflight passed.",
+          headSha: resolvedIssueClaim.headSha,
+          branch: resolvedIssueClaim.branch,
+          worktree: resolvedIssueClaim.worktree,
+        });
+      }
       const state = await createCollaboration(WORKSPACE_ROOT, {
         id: collaborationId,
         task: input.task,
@@ -732,7 +786,7 @@ server.registerTool(
         handoffPath: input.handoffPath || null,
         githubReview: input.githubReview || null,
         githubBuilder: input.githubBuilder || null,
-        issueClaim: input.issueClaim || null,
+        issueClaim: resolvedIssueClaim,
         rotation: rotated ? { taskNumber: input.taskNumber, offset: input.rotationOffset, ...rotated } : null,
         worktree,
         preflight: readiness,
@@ -778,7 +832,10 @@ server.registerTool(
             outcome: "rolled_back",
           });
         } catch (rollbackError) {
-          throw new Error(`Failed to roll back claim lease after start error (${startError.message}): ${rollbackError.message}`);
+          throw new AggregateError(
+            [startError, rollbackError],
+            `Collaboration start failed and its issue-claim rollback also failed: ${startError.message}; ${rollbackError.message}`,
+          );
         }
       }
       throw startError;
@@ -937,24 +994,7 @@ server.registerTool(
     const result = await updatePortfolio(PORTFOLIO_ROOT, id, expectedRevision, (current) => updatePortfolioItemState(current, itemId, patch));
 
     if (status === "obsolete") {
-      const portfolioState = await readPortfolio(PORTFOLIO_ROOT, id);
-      const item = portfolioState.items.find(i => i.id === itemId);
-      const collabId = item?.collaborationId;
-      if (collabId) {
-        const collab = await readCollaboration(WORKSPACE_ROOT, collabId).catch(() => null);
-        if (collab && collab.issueClaim) {
-          const { getBuilderClientForWorkspace, releaseClaimLease } = await import("./github-issue-claims.mjs");
-          const claimClient = await getBuilderClientForWorkspace(collab.workspace || WORKSPACE_ROOT, collab.issueClaim.issueNumber);
-          if (claimClient) {
-            await releaseClaimLease({
-              client: claimClient,
-              issueNumber: collab.issueClaim.issueNumber,
-              collaborationId: collabId,
-              outcome: "obsolete",
-            });
-          }
-        }
-      }
+      await releaseLinkedIssueClaim(result.items.find((item) => item.id === itemId), "obsolete");
     }
 
     return toolResponse(result);
@@ -1117,24 +1157,7 @@ server.registerTool(
       mergeTrain: recordMergeResult(current.mergeTrain, { itemId, expectedTargetSha, expectedHeadSha, mergedSha }),
     }, itemId, { status: "merged", summary: `Merged as ${mergedSha}` }));
 
-    const portfolioState = await readPortfolio(PORTFOLIO_ROOT, id);
-    const item = portfolioState.items.find(i => i.id === itemId);
-    const collabId = item?.collaborationId;
-    if (collabId) {
-      const collab = await readCollaboration(WORKSPACE_ROOT, collabId).catch(() => null);
-      if (collab && collab.issueClaim) {
-        const { getBuilderClientForWorkspace, releaseClaimLease } = await import("./github-issue-claims.mjs");
-        const claimClient = await getBuilderClientForWorkspace(collab.workspace || WORKSPACE_ROOT, collab.issueClaim.issueNumber);
-        if (claimClient) {
-          await releaseClaimLease({
-            client: claimClient,
-            issueNumber: collab.issueClaim.issueNumber,
-            collaborationId: collabId,
-            outcome: "merged",
-          });
-        }
-      }
-    }
+    await releaseLinkedIssueClaim(updatedState.items.find((item) => item.id === itemId), "merged");
     return toolResponse(updatedState);
   },
 );
@@ -1327,6 +1350,31 @@ server.registerTool(
         ),
       })
       : current.providerConcurrency || await loadProviderConcurrency();
+    let resolvedContinuationIssueClaim = current.issueClaim || null;
+    if (issueClaim) {
+      if (!current.issueClaim) {
+        throw new Error("A GitHub issue claim cannot be added during continuation; acquire it atomically with start_collaboration.");
+      }
+      if (issueClaim.repository !== current.issueClaim.repository
+        || issueClaim.issueNumber !== current.issueClaim.issueNumber
+        || issueClaim.expectedLogin !== current.issueClaim.expectedLogin) {
+        throw new Error("Continuation cannot change the repository, issue number, or builder identity of an existing claim.");
+      }
+      resolvedContinuationIssueClaim = { ...current.issueClaim, ...issueClaim };
+      const { getBuilderClientForWorkspace, refreshClaimLease } = await import("./github-issue-claims.mjs");
+      const claimClient = await getBuilderClientForWorkspace(current.workspace, current.issueClaim.issueNumber);
+      if (!claimClient) throw new Error(`No builder App client is configured for claimed issue #${current.issueClaim.issueNumber}.`);
+      await refreshClaimLease({
+        client: claimClient,
+        issueNumber: current.issueClaim.issueNumber,
+        collaborationId: id,
+        phase: "working",
+        summary: "Collaboration continuation queued.",
+        headSha: resolvedContinuationIssueClaim.headSha,
+        branch: resolvedContinuationIssueClaim.branch,
+        worktree: resolvedContinuationIssueClaim.worktree || current.workspace,
+      });
+    }
     const state = await updateCollaboration(WORKSPACE_ROOT, id, (previous) => ({
       ...previous,
       status: "queued",
@@ -1345,7 +1393,7 @@ server.registerTool(
       handoffPath: handoffPath || previous.handoffPath || null,
       githubReview: githubReview || previous.githubReview || null,
       githubBuilder: githubBuilder || previous.githubBuilder || null,
-      issueClaim: issueClaim || previous.issueClaim || null,
+      issueClaim: resolvedContinuationIssueClaim,
       budget: budget || previous.budget || {},
       providerRecovery: providerRecovery || previous.providerRecovery || { enabled: true, maxAttempts: 3, backoffSeconds: [15, 60, 180] },
       providerRecoveryState: { attempts: 0, status: "idle" },
@@ -1442,16 +1490,12 @@ server.registerTool(
       cancelRequested: true,
     }, { status: "cancelled" }));
 
+    let claimReleaseError = null;
     if (before.issueClaim) {
-      const { getBuilderClientForWorkspace, releaseClaimLease } = await import("./github-issue-claims.mjs");
-      const claimClient = await getBuilderClientForWorkspace(before.workspace || WORKSPACE_ROOT, before.issueClaim.issueNumber);
-      if (claimClient) {
-        await releaseClaimLease({
-          client: claimClient,
-          issueNumber: before.issueClaim.issueNumber,
-          collaborationId: id,
-          outcome: "cancelled",
-        });
+      try {
+        await releaseLinkedIssueClaim({ collaborationId: id }, "cancelled");
+      } catch (error) {
+        claimReleaseError = error;
       }
     }
 
@@ -1461,7 +1505,11 @@ server.registerTool(
       at: new Date().toISOString(),
       terminatedWorkerPid: before.workerPid || null,
       releasedProviderCapacity,
+      claimRelease: claimReleaseError ? { ok: false, error: claimReleaseError.message } : { ok: true },
     });
+    if (claimReleaseError) {
+      throw new Error(`Collaboration ${id} was cancelled, but its GitHub issue claim remains held: ${claimReleaseError.message}`, { cause: claimReleaseError });
+    }
     return toolResponse({ ...state, turns: [] });
   },
 );
@@ -1469,39 +1517,32 @@ server.registerTool(
 server.registerTool(
   "release_issue_claim",
   {
-    title: "Release issue claim lease",
-    description: "Force-release a claim lease for an issue, deleting its tag lock ref and removing the progress label.",
+    title: "Recover an inspected issue claim",
+    description: "Release one target-bound issue claim after explicit inspection. Orphaned refs require their exact generation.",
     inputSchema: {
       repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
       issueNumber: z.number().int().min(1),
       expectedLogin: z.string().regex(GITHUB_LOGIN_PATTERN),
       collaborationId: z.string().min(1),
-      outcome: z.enum(["merged", "cancelled", "obsolete", "rolled_back", "taken_over", "recovered"]).default("cancelled"),
+      generation: z.number().int().min(1).optional(),
+      outcome: z.enum(["merged", "cancelled", "obsolete", "rolled_back", "taken_over", "recovered"]).default("recovered"),
     },
   },
-  async ({ repository, issueNumber, expectedLogin, collaborationId, outcome }) => {
+  async ({ repository, issueNumber, expectedLogin, collaborationId, generation, outcome }) => {
     blockNestedCollaboration();
-    const { createInstallationToken } = await import("./github-app-auth.mjs");
-    const { createBoundBuilderClient } = await import("./github-builder-client.mjs");
-    const { releaseClaimLease, getHeadShaFromWorkspace } = await import("./github-issue-claims.mjs");
-    const credential = await createInstallationToken({ role: "builder", repository });
-    const headSha = getHeadShaFromWorkspace(WORKSPACE_ROOT);
-    const claimClient = createBoundBuilderClient({
-      apiUrl: process.env.GITHUB_BUILDER_API_URL || "https://api.github.com",
-      token: credential.token,
-      verifiedLogin: credential.verifiedLogin,
-      repository,
-      expectedLogin,
-      headSha,
-      issueNumber,
-      allowedOperations: ["get_issue", "add_issue_label", "remove_issue_label", "get_issue_comments", "post_issue_comment", "update_issue_comment", "delete_issue_comment", "list_tag_locks", "acquire_tag_lock", "release_tag_lock"],
-      workspace: WORKSPACE_ROOT,
-      fetchImpl: fetch,
-    });
-    const recoveryReceipt = `Force-release receipt: administrator initiated inspected recovery for issue #${issueNumber}, releasing collaboration ${collaborationId} lease with outcome ${outcome}.`;
+    const { getBuilderClientForWorkspace, recoverIssueClaim, releaseClaimLease } = await import("./github-issue-claims.mjs");
+    const claimClient = await getBuilderClientForWorkspace(WORKSPACE_ROOT, issueNumber);
+    if (!claimClient) throw new Error(`No builder App client is configured for claimed issue #${issueNumber}.`);
+    const normalizeLogin = (login) => String(login || "").toLowerCase().replace(/\[bot\]$/, "");
+    if (claimClient.repository !== repository || normalizeLogin(claimClient.expectedLogin) !== normalizeLogin(expectedLogin)) {
+      throw new Error("Inspected recovery target does not match the bound repository and builder App identity.");
+    }
+    const recovery = outcome === "recovered"
+      ? await recoverIssueClaim({ client: claimClient, issueNumber, collaborationId, generation })
+      : (await releaseClaimLease({ client: claimClient, issueNumber, collaborationId, outcome }), { recovered: true, generation, canonical: true });
+    const recoveryReceipt = `Inspected recovery receipt: issue #${issueNumber}, collaboration ${collaborationId}, generation ${recovery.generation || generation || "canonical"}, outcome ${outcome}.`;
     await claimClient.postIssueComment(issueNumber, recoveryReceipt);
-    await releaseClaimLease({ client: claimClient, issueNumber, collaborationId, outcome });
-    return toolResponse({ ok: true });
+    return toolResponse({ ok: true, ...recovery, outcome });
   }
 );
 

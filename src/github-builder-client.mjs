@@ -1004,14 +1004,25 @@ export function createBoundBuilderClient({
   async function listTagLocks() {
     authorize("list_tag_locks");
     await identity();
-    return await request({
+    const locks = await request({
       ...context,
       path: `/repos/${repository}/git/matching-refs/tags/claims/issue-${issueNumber}`,
+    });
+    const exactPrefix = `refs/tags/claims/issue-${issueNumber}-generation-`;
+    return locks.filter((lock) => {
+      if (!String(lock?.ref || "").startsWith(exactPrefix)) return false;
+      const generation = Number.parseInt(lock.ref.slice(exactPrefix.length), 10);
+      return Number.isInteger(generation)
+        && generation > 0
+        && lock.ref === `${exactPrefix}${generation}`;
     });
   }
 
   async function acquireTagLock(generation, sha) {
     authorize("acquire_tag_lock");
+    if (!Number.isInteger(generation) || generation < 1) {
+      throw new Error("Claim lock generation must be a positive integer.");
+    }
     await identity();
     return await request({
       ...context,
@@ -1023,6 +1034,9 @@ export function createBoundBuilderClient({
 
   async function releaseTagLock(generation) {
     authorize("release_tag_lock");
+    if (!Number.isInteger(generation) || generation < 1) {
+      throw new Error("Claim lock generation must be a positive integer.");
+    }
     await identity();
     return await request({
       ...context,

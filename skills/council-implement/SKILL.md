@@ -11,7 +11,7 @@ Apply the installed AI Hero `implement` workflow with a visible three-model coun
 
 Read `~/.agents/skills/implement/SKILL.md` completely before acting. Follow every ordering rule, evidence gate, confirmation point, and output contract in that skill. If it is missing, stop and report the missing path instead of improvising a substitute.
 
-Acquire a durable GitHub issue claim lease before worktree creation or delegation, and ensure it is released only at terminal delivery (merge, cancel, obsolete) or explicit recovery.
+Inspect the issue's `agent:in-progress` label and trusted builder-App claim comment before scheduling it. Exclude a fresh claim owned by another collaboration, acquire a durable GitHub issue claim lease before worktree creation or delegation, and release it only at terminal delivery (merge, cancel, obsolete) or explicit recovery. Failed, indeterminate, completed, and review-pending work remains claimed.
 
 ## Start visibly
 

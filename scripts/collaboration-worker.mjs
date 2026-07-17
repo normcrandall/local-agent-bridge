@@ -41,6 +41,20 @@ let releaseWorker = null;
 let releaseWorkspace = null;
 let pool = null;
 
+function gitValue(workspace, args, label) {
+  const result = spawnSync("git", args, { cwd: workspace, encoding: "utf8" });
+  if (result.status !== 0) throw new Error(`Unable to resolve ${label} in ${workspace}.`);
+  return result.stdout.trim();
+}
+
+function claimWorkspaceMetadata(state) {
+  return {
+    headSha: gitValue(state.workspace, ["rev-parse", "HEAD"], "claim HEAD"),
+    branch: gitValue(state.workspace, ["branch", "--show-current"], "claim branch") || state.issueClaim?.branch || null,
+    worktree: state.workspace,
+  };
+}
+
 async function scheduleProviderRecovery(error) {
   if (!/No requested model is currently available/i.test(error?.message || String(error))) return false;
   const current = await readCollaboration(workspaceRoot, id);
@@ -135,15 +149,7 @@ try {
     const expectedLogin = state.issueClaim.expectedLogin;
     const credential = await createInstallationToken({ role: "builder", repository });
 
-    workerHeadSha = state.issueClaim.headSha;
-    if (!workerHeadSha) {
-      const rev = spawnSync("git", ["rev-parse", "HEAD"], { cwd: state.workspace, encoding: "utf8" });
-      if (rev.status === 0) {
-        workerHeadSha = rev.stdout.trim();
-      } else {
-        throw new Error("Unable to retrieve HEAD SHA from workspace.");
-      }
-    }
+    workerHeadSha = claimWorkspaceMetadata(state).headSha;
 
     claimClient = createBoundBuilderClient({
       apiUrl: state.issueClaim.apiUrl || "https://api.github.com",
@@ -174,12 +180,15 @@ try {
 
   if (claimClient) {
     const { refreshClaimLease } = await import("../src/github-issue-claims.mjs");
+    const metadata = claimWorkspaceMetadata(state);
+    workerHeadSha = metadata.headSha;
     await refreshClaimLease({
       client: claimClient,
       issueNumber: state.issueClaim.issueNumber,
       collaborationId: id,
       phase: "running",
-      headSha: workerHeadSha,
+      summary: "Starting provider work.",
+      ...metadata,
     });
   }
 
@@ -518,8 +527,11 @@ try {
       }));
     },
     onState: async (runtime) => {
+      const metadata = claimClient ? claimWorkspaceMetadata(state) : null;
+      if (metadata) workerHeadSha = metadata.headSha;
       await updateCollaboration(workspaceRoot, id, (current) => ({
         ...current,
+        issueClaim: metadata ? { ...current.issueClaim, ...metadata } : current.issueClaim,
         runtime: {
           ...runtime,
           activeCall: runtime.activeCall === undefined ? current.runtime?.activeCall || null : runtime.activeCall,
@@ -532,8 +544,9 @@ try {
           issueNumber: state.issueClaim.issueNumber,
           collaborationId: id,
           phase: runtime.activeCall?.phase || "running",
-          headSha: workerHeadSha,
-        }).catch(() => {});
+          summary: runtime.activeCall?.summary || "Provider work is active.",
+          ...metadata,
+        });
       }
     },
   });
@@ -542,8 +555,11 @@ try {
     const recoveryExhausted = outcome.reason === "failed"
       && /No requested model is currently available/i.test(outcome.error || "");
     const finalRuntime = outcome.reason === "indeterminate" ? outcome.state : { ...outcome.state, activeCall: null };
+    const finalClaimMetadata = claimClient ? claimWorkspaceMetadata(state) : null;
+    if (finalClaimMetadata) workerHeadSha = finalClaimMetadata.headSha;
     await updateCollaboration(workspaceRoot, id, (current) => clearTerminalRuntime({
       ...current, runtime: finalRuntime, writer: outcome.state.writer,
+      issueClaim: finalClaimMetadata ? { ...current.issueClaim, ...finalClaimMetadata } : current.issueClaim,
       cancelRequested: outcome.reason === "cancelled",
       providerRecoveryState: recoveryExhausted
         ? {
@@ -570,7 +586,8 @@ try {
           issueNumber: state.issueClaim.issueNumber,
           collaborationId: id,
           phase: "completed",
-          headSha: workerHeadSha,
+          summary: "Provider work completed; the claim remains held through review and merge.",
+          ...finalClaimMetadata,
         });
       } else if (["cancelled", "obsolete"].includes(outcome.reason)) {
         const { releaseClaimLease } = await import("../src/github-issue-claims.mjs");
@@ -587,7 +604,8 @@ try {
           issueNumber: state.issueClaim.issueNumber,
           collaborationId: id,
           phase: outcome.reason,
-          headSha: workerHeadSha,
+          summary: outcome.error || `Provider work stopped with ${outcome.reason}; the claim remains held.`,
+          ...finalClaimMetadata,
         });
       }
     }
@@ -595,22 +613,29 @@ try {
   }
 } catch (error) {
   if (!(await scheduleProviderRecovery(error).catch(() => false))) {
+    let failure = error;
     if (claimClient) {
       try {
         const { refreshClaimLease } = await import("../src/github-issue-claims.mjs");
+        const metadata = claimWorkspaceMetadata(state);
+        workerHeadSha = metadata.headSha;
         await refreshClaimLease({
           client: claimClient,
           issueNumber: state.issueClaim.issueNumber,
           collaborationId: id,
           phase: error?.indeterminate ? "indeterminate" : "failed",
-          headSha: workerHeadSha,
+          summary: error.message,
+          ...metadata,
         });
       } catch (claimErr) {
-        console.error("Failed to refresh claim lease during worker catch block:", claimErr);
+        failure = new AggregateError(
+          [error, claimErr],
+          `Provider work failed and the GitHub claim could not be refreshed: ${error.message}; ${claimErr.message}`,
+        );
       }
     }
     await updateCollaboration(workspaceRoot, id, (current) => error?.indeterminate
-      ? ({ ...current, status: "indeterminate", error: error.stack || error.message })
+      ? ({ ...current, status: "indeterminate", error: failure.stack || failure.message })
       : clearTerminalRuntime({
         ...current,
         providerRecoveryState: /No requested model is currently available/i.test(error.message || "")
@@ -621,11 +646,11 @@ try {
             lastError: error.message,
           }
           : current.providerRecoveryState,
-      }, { status: "failed", error: error.stack || error.message })).catch(() => {});
+      }, { status: "failed", error: failure.stack || failure.message })).catch(() => {});
     await appendEvent(workspaceRoot, id, {
       type: "run_failed",
       at: new Date().toISOString(),
-      error: error.stack || error.message,
+      error: failure.stack || failure.message,
     }).catch(() => {});
 
     await enqueueCoordinatorWake(workspaceRoot, id).catch(() => {});
