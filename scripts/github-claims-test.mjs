@@ -32,6 +32,10 @@ function createPausableMockGitHub() {
   let pauseResolver = null;
   let pauseMethod = "POST";
   let pauseSuffix = "/comments";
+  let pauseAfterRefPost = false;
+  let refPostObserved = false;
+  let pauseEnteredPromise = null;
+  let pauseEnteredResolver = null;
   let nextRefPostFailure = null;
   let nextIssueLabelFailure = null;
 
@@ -42,7 +46,11 @@ function createPausableMockGitHub() {
     const body = options.body ? JSON.parse(options.body) : null;
 
     // Optional pause hook before returning Git ref POST or comment POST
-    if (pausePromise && pathname.endsWith(pauseSuffix) && method === pauseMethod) {
+    if (pausePromise
+      && pathname.endsWith(pauseSuffix)
+      && method === pauseMethod
+      && (!pauseAfterRefPost || refPostObserved)) {
+      pauseEnteredResolver?.();
       await pausePromise;
     }
 
@@ -113,7 +121,7 @@ function createPausableMockGitHub() {
       const comment = {
         id: nextCommentId++,
         body: body.body,
-        user: { login: isClient2 ? "builder-app[bot]" : "builder-app[bot]" }
+        user: { login: isClient2 ? "builder-app[bot]" : "builder-app[bot]", type: "Bot" }
       };
       comments.push(comment);
       return json(comment);
@@ -144,6 +152,7 @@ function createPausableMockGitHub() {
         return json({ message: "Reference already exists" }, 422);
       }
       gitRefs.set(body.ref, body.sha);
+      refPostObserved = true;
       return json({ ref: body.ref, object: { sha: body.sha } }, 201);
     }
 
@@ -173,13 +182,21 @@ function createPausableMockGitHub() {
       repoLabels.clear();
       gitRefs.clear();
       nextCommentId = 5003486000;
+      refPostObserved = false;
     },
     setComments: (c) => {
-      comments = c;
+      comments = c.map((comment) => ({
+        ...comment,
+        user: comment.user ? { type: "Bot", ...comment.user } : comment.user,
+      }));
     },
-    setupPause: ({ method = "POST", suffix = "/comments" } = {}) => {
+    setupPause: ({ method = "POST", suffix = "/comments", afterRefPost = false } = {}) => {
       pauseMethod = method;
       pauseSuffix = suffix;
+      pauseAfterRefPost = afterRefPost;
+      pauseEnteredPromise = new Promise((resolve) => {
+        pauseEnteredResolver = resolve;
+      });
       pausePromise = new Promise((resolve) => {
         pauseResolver = resolve;
       });
@@ -189,8 +206,10 @@ function createPausableMockGitHub() {
         pauseResolver();
         pausePromise = null;
         pauseResolver = null;
+        pauseEnteredResolver = null;
       }
     },
+    waitForPause: () => pauseEnteredPromise,
     failNextRefPost: (status, message) => {
       nextRefPostFailure = { status, message };
     },
@@ -361,6 +380,12 @@ async function runTests() {
   const parsedNorm = await parseClaims(clientNormalized, 42);
   assert.equal(parsedNorm.length, 1);
   assert.equal(parsedNorm[0].data.collaboration, "bridge-norm");
+  mock.setComments([{
+    id: 1001,
+    body: `### Agent Bridge Issue Claim Lease\n<!-- agent-bridge-issue-claim\n{"collaboration": "bridge-human-spoof"}\n-->`,
+    user: { login: "veliqon-builder", type: "User" },
+  }]);
+  assert.equal((await parseClaims(clientNormalized, 42)).length, 0);
 
   console.log("6. Testing stale lease takeover (generation increment)...");
   mock.clear();
@@ -489,6 +514,46 @@ async function runTests() {
   assert.equal(staleRaceClaims[0].data.collaboration, "bridge-66666666-3333-4444-5555-666666666666");
   assert.deepEqual([...mock.getRefs().keys()], ["refs/tags/claims/issue-42-generation-2"]);
 
+  console.log("8aa. Testing post-lock revalidation prevents stale-snapshot takeover...");
+  mock.clear();
+  mock.getRepoLabels().add("agent:in-progress");
+  mock.setComments([{
+    id: 5003485002,
+    body: `### Agent Bridge Issue Claim Lease\n<!-- agent-bridge-issue-claim\n${JSON.stringify(oldPayload, null, 2)}\n-->`,
+    user: { login: "builder-app[bot]" },
+  }]);
+  mock.getRefs().set("refs/tags/claims/issue-42-generation-1", "9999999999999999999999999999999999999999");
+  mock.setupPause({ method: "GET", suffix: "/comments", afterRefPost: true });
+  const staleSnapshotTakeover = acquireClaimLease({
+    client,
+    issueNumber: 42,
+    writer: "codex",
+    collaborationId: "bridge-cccccccc-3333-4444-5555-666666666666",
+    headSha: "1111111111111111111111111111111111111111",
+    workspaceRoot: tempWorkspaceRoot,
+  }).then(
+    () => ({ ok: true }),
+    (error) => ({ ok: false, error }),
+  );
+  await mock.waitForPause();
+  const refreshedPayload = {
+    ...oldPayload,
+    collaboration: "bridge-dddddddd-3333-4444-5555-666666666666",
+    timestamps: { created: new Date().toISOString(), updated: new Date().toISOString() },
+    leaseExpiresAt: new Date(Date.now() + 300_000).toISOString(),
+  };
+  mock.setComments([{
+    id: 5003485002,
+    body: `### Agent Bridge Issue Claim Lease\n<!-- agent-bridge-issue-claim\n${JSON.stringify(refreshedPayload, null, 2)}\n-->`,
+    user: { login: "builder-app[bot]" },
+  }]);
+  mock.triggerResume();
+  const staleSnapshotResult = await staleSnapshotTakeover;
+  assert.equal(staleSnapshotResult.ok, false);
+  assert.match(staleSnapshotResult.error.message, /became active for collaboration bridge-dddddddd/);
+  assert.deepEqual([...mock.getRefs().keys()], ["refs/tags/claims/issue-42-generation-1"]);
+  assert.equal((await parseClaims(client, 42))[0].data.collaboration, "bridge-dddddddd-3333-4444-5555-666666666666");
+
   console.log("8b. Testing lock authorization failures propagate without cleanup mutation...");
   mock.clear();
   mock.getRepoLabels().add("agent:in-progress");
@@ -600,6 +665,25 @@ async function runTests() {
   assert.equal(legacyClaims[0].data.head, "1111111111111111111111111111111111111111");
   assert.equal(legacyClaims[0].data.timestamps.updated, "2026-07-17T00:01:00Z");
   assert.equal(legacyClaims[0].data.leaseExpiresAt, "2026-07-17T00:06:00Z");
+
+  console.log("11a. Testing timestamp-less legacy claims expire instead of renewing on parse...");
+  mock.setComments([{
+    id: 5003486006,
+    body: `### Agent Bridge Legacy Claim\n<!-- agent-claim:v1 issue=42 -->\n<!-- {"writer":"claude","collaborationId":"bridge-eeeeeeee-3333-4444-5555-666666666666","phase":"working"} -->`,
+    user: { login: "builder-app[bot]" },
+  }]);
+  const timestampLessLegacy = await parseClaims(client, 42);
+  assert.equal(timestampLessLegacy[0].data.timestamps.created, null);
+  assert.equal(timestampLessLegacy[0].data.timestamps.updated, null);
+  await acquireClaimLease({
+    client,
+    issueNumber: 42,
+    writer: "codex",
+    collaborationId: "bridge-ffffffff-3333-4444-5555-666666666666",
+    headSha: "1111111111111111111111111111111111111111",
+    workspaceRoot: tempWorkspaceRoot,
+  });
+  assert.equal((await parseClaims(client, 42))[0].data.generation, 2);
 
   console.log("12. Testing label existence and auto-creation check...");
   mock.clear();
@@ -780,12 +864,68 @@ async function runTests() {
     /Invalid claim lease release outcome/,
   );
 
-  console.log("17. Testing inspected orphan recovery cannot disturb a canonical claim...");
+  console.log("17. Testing inspected orphan recovery cannot disturb a fresh canonical claim...");
+  mock.getRefs().set("refs/tags/claims/issue-42-generation-2", "2222222222222222222222222222222222222222");
   await assert.rejects(
-    recoverIssueClaim({ client, issueNumber: 42, collaborationId: "bridge-missing", generation: 1 }),
-    /Refusing orphan recovery while canonical collaboration bridge-44444444-3333-4444-5555-666666666666 exists/,
+    recoverIssueClaim({
+      client,
+      issueNumber: 42,
+      collaborationId: "bridge-missing",
+      generation: 2,
+      workspaceRoot: tempWorkspaceRoot,
+    }),
+    /canonical collaboration bridge-44444444-3333-4444-5555-666666666666 is still active/,
   );
   await releaseClaimLease({ client, issueNumber: 42, collaborationId: "bridge-44444444-3333-4444-5555-666666666666", outcome: "cancelled" });
+  assert.ok(mock.getRefs().has("refs/tags/claims/issue-42-generation-2"));
+  const recoveredBesideCanonical = await recoverIssueClaim({
+    client,
+    issueNumber: 42,
+    collaborationId: "bridge-orphan-after-release",
+    generation: 2,
+    workspaceRoot: tempWorkspaceRoot,
+  });
+  assert.deepEqual(recoveredBesideCanonical, {
+    recovered: true,
+    generation: 2,
+    canonical: false,
+    previousCanonicalGeneration: 1,
+  });
+  assert.equal(mock.getRefs().size, 0);
+
+  console.log("17a. Testing release repairs a concurrent claim-label removal race...");
+  mock.clear();
+  mock.getRepoLabels().add("agent:in-progress");
+  await acquireClaimLease({
+    client,
+    issueNumber: 42,
+    writer: "codex",
+    collaborationId: "bridge-12121212-3333-4444-5555-666666666666",
+    headSha: "1111111111111111111111111111111111111111",
+    workspaceRoot: tempWorkspaceRoot,
+  });
+  mock.setupPause({ method: "DELETE", suffix: "/labels/agent%3Ain-progress" });
+  const releasingClaim = releaseClaimLease({
+    client,
+    issueNumber: 42,
+    collaborationId: "bridge-12121212-3333-4444-5555-666666666666",
+    outcome: "cancelled",
+  });
+  await mock.waitForPause();
+  await acquireClaimLease({
+    client: client2,
+    issueNumber: 42,
+    writer: "claude",
+    collaborationId: "bridge-13131313-3333-4444-5555-666666666666",
+    headSha: "2222222222222222222222222222222222222222",
+    workspaceRoot: tempWorkspaceRoot,
+  });
+  mock.triggerResume();
+  await releasingClaim;
+  assert.ok(mock.getLabels().has("agent:in-progress"));
+  assert.equal((await parseClaims(client, 42))[0].data.collaboration, "bridge-13131313-3333-4444-5555-666666666666");
+
+  console.log("17b. Testing orphan recovery without any canonical comment...");
   mock.clear();
   mock.getLabels().add("agent:in-progress");
   mock.getRefs().set("refs/tags/claims/issue-42-generation-3", "1111111111111111111111111111111111111111");
@@ -794,7 +934,7 @@ async function runTests() {
     /Generation 2 does not exist/,
   );
   const recoveredOrphan = await recoverIssueClaim({ client, issueNumber: 42, collaborationId: "bridge-orphan", generation: 3 });
-  assert.deepEqual(recoveredOrphan, { recovered: true, generation: 3, canonical: false });
+  assert.deepEqual(recoveredOrphan, { recovered: true, generation: 3, canonical: false, previousCanonicalGeneration: null });
   assert.equal(mock.getRefs().size, 0);
   assert.ok(!mock.getLabels().has("agent:in-progress"));
 

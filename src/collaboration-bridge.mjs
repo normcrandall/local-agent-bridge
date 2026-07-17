@@ -1561,7 +1561,7 @@ server.registerTool(
       throw new Error("Inspected recovery target does not match the bound repository and builder App identity.");
     }
     const recovery = outcome === "recovered"
-      ? await recoverIssueClaim({ client: claimClient, issueNumber, collaborationId, generation })
+      ? await recoverIssueClaim({ client: claimClient, issueNumber, collaborationId, generation, workspaceRoot: WORKSPACE_ROOT })
       : (await releaseClaimLease({ client: claimClient, issueNumber, collaborationId, outcome }), { recovered: true, generation, canonical: true });
     const recoveryReceipt = `Inspected recovery receipt: issue #${issueNumber}, collaboration ${collaborationId}, generation ${recovery.generation || generation || "canonical"}, outcome ${outcome}.`;
     await claimClient.postIssueComment(issueNumber, recoveryReceipt);

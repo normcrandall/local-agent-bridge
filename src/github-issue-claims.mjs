@@ -83,6 +83,18 @@ async function deleteGenerations(client, generations) {
   }
 }
 
+async function removeClaimLabelAndRepairRace(client, issueNumber) {
+  try {
+    await client.removeIssueLabel(issueNumber, "agent:in-progress");
+  } catch (error) {
+    if (error.status !== 404) throw error;
+  }
+  const current = canonicalClaim(await parseClaims(client, issueNumber));
+  if (current && !RELEASED_PHASES.has(normalizePhase(current.data.phase))) {
+    await client.addIssueLabel(issueNumber, "agent:in-progress");
+  }
+}
+
 function aggregateFailure(message, primary, rollback) {
   return new AggregateError([primary, rollback], `${message}: ${primary.message}; rollback failed: ${rollback.message}`);
 }
@@ -158,7 +170,7 @@ function claimSummary(value) {
 async function isClaimActive(claim, workspaceRoot, ttlMs) {
   const phase = normalizePhase(claim.data.phase);
   if (RELEASED_PHASES.has(phase)) return false;
-  if (claim.data.collaboration) {
+  if (claim.data.collaboration && workspaceRoot) {
     let collab = null;
     try {
       collab = await readCollaboration(workspaceRoot, claim.data.collaboration);
@@ -186,7 +198,8 @@ export async function parseClaims(client, issueNumber) {
   const claims = [];
   for (const c of comments) {
     const authorLogin = c.user?.login || c.author?.login;
-    if (normalizeLogin(authorLogin) !== normalizeLogin(client.expectedLogin)) {
+    const authorType = c.user?.type || c.author?.type || c.author?.__typename;
+    if (authorType !== "Bot" || normalizeLogin(authorLogin) !== normalizeLogin(client.expectedLogin)) {
       continue;
     }
 
@@ -210,8 +223,8 @@ export async function parseClaims(client, issueNumber) {
             phase: parsedData.phase || "working",
             generation: parsedData.generation || 1,
             timestamps: {
-              created: parsedData.claimedAt || parsedData.timestamps?.created || new Date().toISOString(),
-              updated: parsedData.updatedAt || parsedData.timestamps?.updated || new Date().toISOString(),
+              created: parsedData.claimedAt || parsedData.timestamps?.created || null,
+              updated: parsedData.updatedAt || parsedData.timestamps?.updated || null,
             },
             leaseExpiresAt: parsedData.leaseExpiresAt || null,
             history: parsedData.history || [],
@@ -301,16 +314,27 @@ export async function acquireClaimLease({
 
   let canonicalPublished = false;
   try {
+    const publicationClaims = await parseClaims(client, issueNumber);
+    const publicationCanonical = canonicalClaim(publicationClaims);
+    const publicationGeneration = publicationCanonical?.data.generation || 0;
+    if (publicationGeneration !== canonicalGeneration) {
+      throw new Error(`Claim changed while generation ${nextGen} was being acquired; retry from the new canonical generation.`);
+    }
+    if (publicationCanonical
+      && await isClaimActive(publicationCanonical, workspaceRoot, ttlMs)
+      && publicationCanonical.data.collaboration !== collaborationId) {
+      throw new Error(`Issue #${issueNumber} became active for collaboration ${publicationCanonical.data.collaboration} while generation ${nextGen} was being acquired.`);
+    }
     const now = new Date().toISOString();
-    const event = canonical ? "takeover" : "claimed";
+    const event = publicationCanonical ? "takeover" : "claimed";
     const history = [{
       event,
       collaboration: collaborationId,
       writer,
       phase: "claiming",
       at: now,
-      ...(canonical?.data.collaboration ? { previousCollaboration: canonical.data.collaboration } : {}),
-    }, ...(canonical?.data.history || [])].slice(0, 10);
+      ...(publicationCanonical?.data.collaboration ? { previousCollaboration: publicationCanonical.data.collaboration } : {}),
+    }, ...(publicationCanonical?.data.history || [])].slice(0, 10);
 
     const payload = {
       portfolio: portfolioId || null,
@@ -333,7 +357,7 @@ export async function acquireClaimLease({
     };
 
     const commentBody = generateCommentBody(payload);
-    let canonicalCommentId = canonical?.commentId || null;
+    let canonicalCommentId = publicationCanonical?.commentId || null;
     if (canonicalCommentId) {
       await client.updateIssueComment(canonicalCommentId, commentBody);
     } else {
@@ -343,10 +367,11 @@ export async function acquireClaimLease({
     canonicalPublished = true;
 
     await client.addIssueLabel(issueNumber, "agent:in-progress");
-    for (const duplicate of claims.filter((claim) => claim.commentId !== canonicalCommentId)) {
+    for (const duplicate of publicationClaims.filter((claim) => claim.commentId !== canonicalCommentId)) {
       await client.deleteIssueComment(duplicate.commentId);
     }
-    await deleteGenerations(client, generations.filter((generation) => generation < nextGen));
+    const publishedRefs = await client.listTagLocks();
+    await deleteGenerations(client, publishedRefs.map(generationFromRef).filter((generation) => generation && generation < nextGen));
   } catch (mutationError) {
     if (canonicalPublished) {
       try {
@@ -453,15 +478,11 @@ export async function releaseClaimLease({ client, issueNumber, collaborationId, 
     c => c.data.collaboration !== collaborationId && !RELEASED_PHASES.has(normalizePhase(c.data.phase))
   );
   if (remainingClaims.length === 0) {
-    try {
-      await client.removeIssueLabel(issueNumber, "agent:in-progress");
-    } catch (error) {
-      if (error.status !== 404) throw error;
-    }
+    await removeClaimLabelAndRepairRace(client, issueNumber);
   }
 }
 
-export async function recoverIssueClaim({ client, issueNumber, collaborationId, generation }) {
+export async function recoverIssueClaim({ client, issueNumber, collaborationId, generation, workspaceRoot, ttlMs = 300_000 }) {
   const claims = await parseClaims(client, issueNumber);
   const canonical = canonicalClaim(claims);
   const ours = canonicalClaim(claims.filter((claim) => claim.data.collaboration === collaborationId));
@@ -471,9 +492,6 @@ export async function recoverIssueClaim({ client, issueNumber, collaborationId, 
     }
     await releaseClaimLease({ client, issueNumber, collaborationId, outcome: "recovered" });
     return { recovered: true, generation: ours.data.generation || 1, canonical: true };
-  }
-  if (canonical) {
-    throw new Error(`Refusing orphan recovery while canonical collaboration ${canonical.data.collaboration} exists.`);
   }
   if (!Number.isInteger(generation) || generation < 1) {
     throw new Error("Inspected recovery without a canonical claim requires the exact positive generation.");
@@ -486,15 +504,20 @@ export async function recoverIssueClaim({ client, issueNumber, collaborationId, 
   if (generations.some((candidate) => candidate > generation)) {
     throw new Error(`Refusing recovery of generation ${generation}: a newer issue generation exists.`);
   }
-  await deleteGenerationIfPresent(client, generation);
-  if (claims.every((claim) => RELEASED_PHASES.has(normalizePhase(claim.data.phase)))) {
-    try {
-      await client.removeIssueLabel(issueNumber, "agent:in-progress");
-    } catch (error) {
-      if (error.status !== 404) throw error;
+  if (canonical) {
+    const canonicalGeneration = canonical.data.generation || 1;
+    if (generation <= canonicalGeneration) {
+      throw new Error(`Refusing orphan recovery of generation ${generation}: canonical generation ${canonicalGeneration} is not older.`);
+    }
+    if (await isClaimActive(canonical, workspaceRoot, ttlMs)) {
+      throw new Error(`Refusing orphan recovery while canonical collaboration ${canonical.data.collaboration} is still active.`);
     }
   }
-  return { recovered: true, generation, canonical: false };
+  await deleteGenerationIfPresent(client, generation);
+  if (claims.every((claim) => RELEASED_PHASES.has(normalizePhase(claim.data.phase)))) {
+    await removeClaimLabelAndRepairRace(client, issueNumber);
+  }
+  return { recovered: true, generation, canonical: false, previousCanonicalGeneration: canonical?.data.generation || null };
 }
 
 async function updatePortfolioWithRetry(portfoliosPath, pId, updater, maxAttempts = 5) {
