@@ -645,6 +645,31 @@ chmod 600 ~/.config/local-agent-bridge/model-fallbacks.json
 
 Codex and Antigravity emit a visible downgrade narrative and record `requestedModel`, selected `model`, `fallbackUsed`, and `attemptedModels` in turn metadata. Claude Code owns its native retry and session continuity while the bridge records the configured fallback policy in turn metadata. None of these paths use model fallback for authentication, permission, quota, configuration, ordinary command failure, timeout, or lost transport. If a chain is exhausted, the final error names every attempted model so the broker can continue with another available provider.
 
+#### Machine-wide model deny policy
+
+Disable a model once for every new delegated bridge turn instead of repeating the choice in Codex, Claude, and Antigravity chats:
+
+```sh
+bridge models disable claude fable
+bridge models disable codex gpt-5.6-sol
+bridge models disable antigravity "Gemini 3.1 Pro (High)"
+bridge models status
+```
+
+Re-enable a model with the same provider and model name:
+
+```sh
+bridge models enable claude fable
+```
+
+The commands atomically maintain the mode-`0600` file `~/.config/local-agent-bridge/model-policy.json`. The file contains no credentials and may be copied to another machine; [`config/model-policy.example.json`](config/model-policy.example.json) shows its versioned format. Provider names are `claude`, `codex`, and `antigravity`. Model comparisons are case-insensitive exact matches, except the Claude entry `fable`, which blocks the whole Fable alias family.
+
+The deny policy is read for every new direct MCP call and every provider turn started by a persistent collaboration, so changing it does not require an app or MCP restart. It does not interrupt an in-flight turn. A native host chat in Codex App, Claude Code, or Antigravity owns its already-selected host model; switch that chat's model or begin a new host chat if the host itself is using a newly disabled model.
+
+A machine deny is stronger than a per-request override. For example, `allowFable: true` cannot use Fable while `claude fable` is disabled globally. After Fable is re-enabled globally, the existing safety rule still requires the current user request to ask for Fable explicitly. When a disabled primary has an allowed configured fallback, the bridge promotes that fallback before launching the provider and emits a routing narrative. When every requested candidate is disabled, the call fails immediately with a command to inspect or repair the policy instead of waiting for a provider timeout.
+
+The bridge can inspect Claude's saved/environment model and Codex's top-level `config.toml`/environment model. Antigravity exposes an environment-selected model through `AGY_MODEL`, `ANTIGRAVITY_MODEL`, or `GEMINI_MODEL`; its opaque app-selected default cannot be named before launch, so set one of those variables or pass an explicit model when a strict Antigravity default guarantee is required.
+
 #### Explicit Fable opt-in
 
 Fable is never selected, inherited, or used as a fallback by the collaboration skills or raw bridge tools unless the user's current request explicitly asks for Fable by name. A saved Fable setting or earlier request is not permission. When the current request does explicitly opt in, announce that exception before starting and pass `allowClaudeFable: true` to that collaboration phase or `allowFable: true` to that direct Claude call. These flags default to false, and collaboration continuation resets authorization rather than inheriting it. For example, a user may explicitly request that Fable plan, a selected Codex model implement, and Fable review:

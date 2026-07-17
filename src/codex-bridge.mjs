@@ -8,6 +8,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { loadConfiguredFallbackModels, normalizeFallbackModels } from "./model-fallbacks.mjs";
+import { resolveModelRoute } from "./model-policy.mjs";
+import { loadConfiguredCodexModel } from "./provider-model-settings.mjs";
 import { negotiateProviderCapabilities } from "./provider-cli-capabilities.mjs";
 
 const WORKSPACE_ROOT = realpathSync(process.env.BRIDGE_WORKSPACE_ROOT || process.env.BRIDGE_ROOT || process.cwd());
@@ -197,7 +199,17 @@ async function runCodex({
   } else {
     configured = normalizeFallbackModels(fallbackModels, "fallbackModels");
   }
-  const candidates = [model || null, ...configured]
+  const machineModelPolicy = resolveModelRoute({
+    provider: "codex",
+    model,
+    configuredModel: loadConfiguredCodexModel(),
+    fallbackModels: configured,
+  });
+  configured = machineModelPolicy.fallbackModels;
+  if (machineModelPolicy.blockedModels.length) {
+    onProgress(`Machine model policy skipped ${machineModelPolicy.blockedModels.join(", ")}; using ${machineModelPolicy.model || "the provider-configured model"}.`);
+  }
+  const candidates = [machineModelPolicy.model || null, ...configured]
     .filter((candidate, index, values) => values.indexOf(candidate) === index);
   const attemptedModels = [];
   const originalThreadId = threadId || null;
@@ -223,10 +235,11 @@ async function runCodex({
         ...result,
         requestedModel: model || null,
         model: candidate,
-        fallbackUsed: index > 0,
+        fallbackUsed: machineModelPolicy.source === "fallback" || index > 0,
         attemptedModels,
         modelFallbacks: configured,
         fallbackManagedBy: configured.length ? "bridge" : null,
+        modelPolicy: machineModelPolicy,
       };
     } catch (error) {
       const next = candidates[index + 1];

@@ -9,6 +9,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { negotiateProviderCapabilities } from "./provider-cli-capabilities.mjs";
 import { loadConfiguredFallbackModels, normalizeFallbackModels } from "./model-fallbacks.mjs";
+import { resolveModelRoute } from "./model-policy.mjs";
+import { loadConfiguredAntigravityModel } from "./provider-model-settings.mjs";
 
 const WORKSPACE_ROOT = realpathSync(process.env.BRIDGE_WORKSPACE_ROOT || process.env.BRIDGE_ROOT || process.cwd());
 const DEFAULT_TIMEOUT_MS = 2 * 60 * 60 * 1000;
@@ -197,7 +199,17 @@ async function runAntigravity(input) {
   } else {
     fallbackModels = normalizeFallbackModels(input.fallbackModels, "fallbackModels");
   }
-  const candidates = [input.model || null, ...fallbackModels.filter((model) => model !== input.model)];
+  const machineModelPolicy = resolveModelRoute({
+    provider: "antigravity",
+    model: input.model,
+    configuredModel: loadConfiguredAntigravityModel(),
+    fallbackModels,
+  });
+  fallbackModels = machineModelPolicy.fallbackModels;
+  if (machineModelPolicy.blockedModels.length) {
+    input.onProgress?.(`Machine model policy skipped ${machineModelPolicy.blockedModels.join(", ")}; using ${machineModelPolicy.model || "the provider-configured model"}.`);
+  }
+  const candidates = [machineModelPolicy.model || null, ...fallbackModels];
   const attemptedModels = [];
   let prompt = input.prompt;
   for (let index = 0; index < candidates.length; index += 1) {
@@ -211,10 +223,11 @@ async function runAntigravity(input) {
         modelRouting: {
           requestedModel: input.model || null,
           model,
-          fallbackUsed: index > 0,
+          fallbackUsed: machineModelPolicy.source === "fallback" || index > 0,
           attemptedModels,
           fallbackModels,
           fallbackManagedBy: fallbackModels.length ? "bridge" : null,
+          modelPolicy: machineModelPolicy,
         },
       };
     } catch (error) {

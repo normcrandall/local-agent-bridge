@@ -18,6 +18,7 @@ import { z } from "zod";
 import { configuredReviewerLogin, GITHUB_LOGIN_PATTERN } from "./github-app-auth.mjs";
 import { loadConfiguredClaudeModel, resolveClaudeModelPolicy } from "./claude-model-policy.mjs";
 import { loadConfiguredFallbackModels, normalizeFallbackModels } from "./model-fallbacks.mjs";
+import { resolveModelRoute } from "./model-policy.mjs";
 import { negotiateProviderCapabilities } from "./provider-cli-capabilities.mjs";
 
 const RUNTIME_ROOT = realpathSync(process.env.BRIDGE_RUNTIME_ROOT || process.env.BRIDGE_ROOT || process.cwd());
@@ -181,12 +182,22 @@ function runClaude({
     allowFable,
     configuredModel: loadConfiguredClaudeModel({ cwd: actualCwd }),
   });
-  const resolvedModel = modelPolicy.model;
+  let resolvedModel = modelPolicy.model;
   resolvedFallbackModels = modelPolicy.fallbackModels;
   if (modelPolicy.blockedModels.length) {
     onProgress(`Fable is not authorized for this request; using ${resolvedModel} and removing ${modelPolicy.blockedModels.join(", ")} from Claude routing.`);
   } else if (allowFable && [resolvedModel, ...resolvedFallbackModels].some((value) => typeof value === "string" && value.toLowerCase().includes("fable"))) {
     onProgress("Fable use was explicitly authorized for this request.");
+  }
+  const machineModelPolicy = resolveModelRoute({
+    provider: "claude",
+    model: resolvedModel,
+    fallbackModels: resolvedFallbackModels,
+  });
+  resolvedModel = machineModelPolicy.model;
+  resolvedFallbackModels = machineModelPolicy.fallbackModels;
+  if (machineModelPolicy.blockedModels.length) {
+    onProgress(`Machine model policy skipped ${machineModelPolicy.blockedModels.join(", ")}; using ${resolvedModel}.`);
   }
   const actualHandoffPath = mode === "review" ? projectFile(actualCwd, handoffPath) : null;
   if (githubReview && mode !== "review") {
@@ -409,7 +420,7 @@ Work permission contract:
           fallbackUsed: null,
           modelFallbacks: resolvedFallbackModels,
           fallbackManagedBy: resolvedFallbackModels.length ? "claude-cli" : null,
-          modelPolicy,
+          modelPolicy: { ...modelPolicy, machine: machineModelPolicy },
           handoffPath: actualHandoffPath,
         });
       } catch {
@@ -425,7 +436,7 @@ Work permission contract:
           fallbackUsed: null,
           modelFallbacks: resolvedFallbackModels,
           fallbackManagedBy: resolvedFallbackModels.length ? "claude-cli" : null,
-          modelPolicy,
+          modelPolicy: { ...modelPolicy, machine: machineModelPolicy },
           handoffPath: actualHandoffPath,
         });
       }
