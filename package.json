@@ -30,6 +30,7 @@
     "test:claims": "node scripts/github-claims-test.mjs",
     "test:native-github-builder": "node scripts/native-github-builder-test.mjs",
     "test:github-review": "node scripts/github-review-test.mjs",
+    "test:github-enforcement": "node scripts/github-merge-enforcement-test.mjs",
     "test:review-publication": "node scripts/review-publication-test.mjs",
     "test:skills": "node scripts/skill-test.mjs",
     "test:skills:installed": "AGENT_BRIDGE_VERIFY_INSTALLED_SKILLS=1 node scripts/skill-test.mjs",

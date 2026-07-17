@@ -3,6 +3,9 @@
   "compatibility": {
     "allowPatFallback": false
   },
+  "github": {
+    "mergeEnforcement": "broker"
+  },
   "mergePolicy": {
     "trustedHumanReviewers": ["your-github-login"],
     "autonomousMergeRepositories": [

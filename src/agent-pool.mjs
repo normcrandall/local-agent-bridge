@@ -105,13 +105,19 @@ export function createAgentPool({
       appRoles.roles?.reviewer?.expectedLogin,
       ...Object.values(appRoles.roles?.reviewers || {}).map((reviewer) => reviewer.expectedLogin),
     ].filter(Boolean);
+    const trustedReviewAppIds = [
+      appRoles.roles?.reviewer?.appId,
+      ...Object.values(appRoles.roles?.reviewers || {}).map((reviewer) => reviewer.appId),
+    ].filter(Boolean).map(Number);
     return createBoundBuilderClient({
       ...githubBuilder,
       token: credential.token,
       verifiedLogin: credential.verifiedLogin,
       requiredReviewStatusContext: "agent-review",
       trustedReviewLogins,
+      trustedReviewAppIds,
       trustedHumanReviewLogins: appRoles.mergePolicy?.trustedHumanReviewers || [],
+      mergeEnforcement: appRoles.github?.mergeEnforcement || "broker",
       workspace: githubBuilder.workspace || workspace,
       receiptPath: githubBuilder.receiptPath || resolve(workspace, ".bridge", "github-builder-receipts.jsonl"),
     });

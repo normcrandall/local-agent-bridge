@@ -34,6 +34,7 @@ try {
   await writeFile(tokenFile, "static-review-token\n", { mode: 0o600 });
   await writeFile(configPath, JSON.stringify({
     version: 1,
+    github: { mergeEnforcement: "auto" },
     mergePolicy: {
       trustedHumanReviewers: ["example-owner", "example-owner"],
       autonomousMergeRepositories: ["example-owner/*", "example-org/example-repo"],
@@ -143,9 +144,22 @@ try {
   assert.equal(inspected.roles.builder.privateKeySecure, true);
   assert.equal(inspected.roles.reviewers.claude.privateKeySecure, true);
   assert.equal(inspected.roles.reviewers.codex.expectedLogin, "example-codex-reviewer[bot]");
+  assert.equal(inspected.roles.reviewers.codex.appId, "777777");
   assert.deepEqual(inspected.roles.builder.installations, ["ExampleOrg"]);
   assert.deepEqual(inspected.mergePolicy.trustedHumanReviewers, ["example-owner"]);
   assert.deepEqual(inspected.mergePolicy.autonomousMergeRepositories, ["example-owner/*", "example-org/example-repo"]);
+  assert.equal(inspected.github.mergeEnforcement, "auto");
+
+  const invalidEnforcementConfig = join(temporary, "invalid-enforcement.json");
+  await writeFile(invalidEnforcementConfig, JSON.stringify({
+    version: 1,
+    github: { mergeEnforcement: "paid" },
+    roles: {},
+  }), { mode: 0o600 });
+  await assert.rejects(
+    inspectGitHubAppRoles({ configPath: invalidEnforcementConfig }),
+    /github\.mergeEnforcement must be one of/,
+  );
 
   await assert.rejects(
     createInstallationToken({

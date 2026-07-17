@@ -9,6 +9,10 @@ import {
   runGit,
   sanitizedGitEnv,
 } from "./github-builder-transport.mjs";
+import {
+  inspectGitHubMergeCapabilities,
+  resolveGitHubMergeEnforcement,
+} from "./github-merge-enforcement.mjs";
 
 const LFS_POINTER_REGEX = /^version https:\/\/git-lfs\.github\.com\/spec\/v1\r?\noid sha256:[0-9a-f]{64}\r?\nsize [0-9]+\r?\n$/;
 const MAX_PUSH_FILES = 2000;
@@ -239,7 +243,9 @@ export function createBoundBuilderClient({
   baseRef = null,
   requiredReviewStatusContext = "agent-review",
   trustedReviewLogins = [],
+  trustedReviewAppIds = [],
   trustedHumanReviewLogins = [],
+  mergeEnforcement = "broker",
   allowedOperations = ["ensure_pull_request", "read_review_threads", "reply_review_thread", "resolve_review_thread", "mark_ready"],
   getToken = null,
   workspace = null,
@@ -266,6 +272,10 @@ export function createBoundBuilderClient({
   if (trustedReviewLogins.some((login) => typeof login !== "string" || !login || !login.endsWith("[bot]"))) {
     throw new Error("Trusted reviewer logins must be bot logins.");
   }
+  if (trustedReviewAppIds.some((appId) => !Number.isInteger(Number(appId)) || Number(appId) < 1)) {
+    throw new Error("Trusted reviewer App IDs must be positive integers.");
+  }
+  resolveGitHubMergeEnforcement({ configuredMode: mergeEnforcement });
   if (trustedHumanReviewLogins.some((login) => typeof login !== "string" || !login || login.endsWith("[bot]"))) {
     throw new Error("Trusted human reviewer logins must be non-bot GitHub logins.");
   }
@@ -539,6 +549,40 @@ export function createBoundBuilderClient({
       }
       throw new Error(`Merge authorization found neither a trusted machine review nor a trusted human approval on exact head ${headSha}.`);
     }
+    let enforcement = resolveGitHubMergeEnforcement({ configuredMode: mergeEnforcement });
+    if (mergeEnforcement !== "broker") {
+      const branch = pull.base?.ref || baseRef;
+      if (!branch) throw new Error("GitHub merge enforcement verification requires the pull request base branch.");
+      const encodedBranch = branch.split("/").map(encodeURIComponent).join("/");
+      let rules = [];
+      let branchProtection = null;
+      const evidenceErrors = [];
+      if (["auto", "organization-ruleset"].includes(mergeEnforcement)) {
+        try {
+          rules = await request({ ...context, path: `/repos/${repository}/rules/branches/${encodedBranch}` });
+        } catch (error) {
+          evidenceErrors.push(`organization ruleset evidence unavailable: ${error.message}`);
+        }
+      }
+      if (["auto", "branch-protection"].includes(mergeEnforcement)) {
+        try {
+          branchProtection = await request({ ...context, path: `/repos/${repository}/branches/${encodedBranch}/protection` });
+        } catch (error) {
+          evidenceErrors.push(`branch protection evidence unavailable: ${error.message}`);
+        }
+      }
+      const capabilities = inspectGitHubMergeCapabilities({
+        rules,
+        branchProtection,
+        trustedAppIds: trustedReviewAppIds,
+        context: requiredReviewStatusContext,
+      });
+      enforcement = resolveGitHubMergeEnforcement({ configuredMode: mergeEnforcement, capabilities });
+      if (enforcement.blocked) {
+        const evidence = evidenceErrors.length ? ` ${evidenceErrors.join("; ")}.` : "";
+        throw new Error(`${enforcement.reason}${evidence}`);
+      }
+    }
     const merged = await request({
       ...context,
       path: `/repos/${repository}/pulls/${prNumber}/merge`,
@@ -548,7 +592,7 @@ export function createBoundBuilderClient({
     if (!merged?.merged) throw new Error(`GitHub did not merge the bound pull request: ${merged?.message || "unknown error"}`);
     return {
       operation: "merge", prNumber, sha: merged.sha, idempotent: false, login: expectedLogin, headSha,
-      reviewGate,
+      reviewGate, mergeEnforcement: enforcement,
     };
   }
 

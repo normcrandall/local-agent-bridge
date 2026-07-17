@@ -16,9 +16,10 @@ const receipt = await mergePullRequestWithBuilder({
       autonomousMergeRepositories: ["normcrandall/*"],
       trustedHumanReviewers: ["owner"],
     },
+    github: { mergeEnforcement: "auto" },
     roles: {
       reviewers: {
-        claude: { expectedLogin: "claude-reviewer[bot]" },
+        claude: { appId: "654321", expectedLogin: "claude-reviewer[bot]" },
       },
     },
   }),
@@ -36,6 +37,8 @@ assert.equal(receipt.method, "squash");
 assert.deepEqual(calls[0], { role: "builder", repository: "normcrandall/thriftybite" });
 assert.deepEqual(calls[1].allowedOperations, ["merge"]);
 assert.deepEqual(calls[1].trustedReviewLogins, ["claude-reviewer[bot]"]);
+assert.deepEqual(calls[1].trustedReviewAppIds, [654321]);
+assert.equal(calls[1].mergeEnforcement, "auto");
 
 await assert.rejects(
   mergePullRequestWithBuilder({

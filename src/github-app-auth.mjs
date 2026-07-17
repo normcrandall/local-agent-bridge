@@ -2,6 +2,7 @@ import { createSign } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, resolve } from "node:path";
+import { resolveGitHubMergeEnforcement } from "./github-merge-enforcement.mjs";
 
 export const DEFAULT_GITHUB_APPS_CONFIG = resolve(homedir(), ".config/local-agent-bridge/github-apps.json");
 export const GITHUB_LOGIN_PATTERN = /^[A-Za-z0-9-]+(?:\[bot\])?$/;
@@ -65,7 +66,9 @@ function resolveConfiguredPath(path, configPath) {
 async function readConfig(configPath) {
   const resolvedPath = expandHome(configPath);
   try {
-    return { config: JSON.parse(await readFile(resolvedPath, "utf8")), exists: true };
+    const config = JSON.parse(await readFile(resolvedPath, "utf8"));
+    resolveGitHubMergeEnforcement({ configuredMode: config.github?.mergeEnforcement ?? "broker" });
+    return { config, exists: true };
   } catch (error) {
     if (error?.code === "ENOENT") return { config: null, exists: false };
     throw new Error(`Unable to read GitHub Apps config at ${resolvedPath}: ${error.message}`);
@@ -103,6 +106,7 @@ export async function inspectGitHubAppRoles({ configPath = DEFAULT_GITHUB_APPS_C
     } catch (error) { keyError = error.message; }
     roles[role] = {
       configured: true,
+      appId: String(selected.appId || ""),
       appIdValid: /^\d+$/.test(String(selected.appId || "")),
       expectedLogin: selected.expectedLogin || null,
       expectedLoginValid: GITHUB_LOGIN_PATTERN.test(selected.expectedLogin || ""),
@@ -121,6 +125,7 @@ export async function inspectGitHubAppRoles({ configPath = DEFAULT_GITHUB_APPS_C
     } catch (error) { keyError = error.message; }
     roles.reviewers[provider] = {
       configured: true,
+      appId: String(selected.appId || ""),
       appIdValid: /^\d+$/.test(String(selected.appId || "")),
       expectedLogin: selected.expectedLogin || null,
       expectedLoginValid: GITHUB_LOGIN_PATTERN.test(selected.expectedLogin || ""),
@@ -137,6 +142,9 @@ export async function inspectGitHubAppRoles({ configPath = DEFAULT_GITHUB_APPS_C
     mergePolicy: {
       trustedHumanReviewers: [...new Set(trustedHumanReviewers)],
       autonomousMergeRepositories: [...new Set(autonomousMergeRepositories)],
+    },
+    github: {
+      mergeEnforcement: config.github?.mergeEnforcement ?? "broker",
     },
     roles,
   };
@@ -274,6 +282,7 @@ export async function createInstallationToken({
     expectedLogin: selected.expectedLogin,
     verifiedLogin,
     installationId: selected.installationId,
+    appId: selected.appId,
     permissions: result.permissions,
     credentialSource: "github-app",
   };
