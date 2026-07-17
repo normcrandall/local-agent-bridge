@@ -1,125 +1,105 @@
 import { createHash } from "node:crypto";
-import { spawn } from "node:child_process";
+import {
+  assertBranchRef,
+  pushCommit,
+  resolveGitBinary,
+  resolveTransportUrl,
+  runGit,
+  sanitizedGitEnv,
+} from "./github-builder-transport.mjs";
 
 const LFS_POINTER_REGEX = /^version https:\/\/git-lfs\.github\.com\/spec\/v1\r?\noid sha256:[0-9a-f]{64}\r?\nsize [0-9]+\r?\n$/;
+const MAX_PUSH_FILES = 2000;
+const PROTECTED_BRANCH_NAMES = ["main", "master", "production", "release", "develop"];
 
-function runGit(args, options = {}) {
-  return new Promise((resolve, reject) => {
-    const cp = spawn("git", args, {
-      cwd: options.cwd || process.cwd(),
-      env: {
-        ...process.env,
-        ...options.env,
-        GIT_CONFIG_NOSYSTEM: "1",
-        GIT_CONFIG_GLOBAL: "/dev/null",
-        GIT_CONFIG_SYSTEM: "/dev/null",
-      },
-      stdio: options.stdio || ["pipe", "pipe", "pipe"],
+async function assertLocalAncestry({ gitPath, workspace, ancestor, descendant }) {
+  try {
+    await runGit(["merge-base", "--is-ancestor", ancestor, descendant], {
+      gitPath, cwd: workspace, env: sanitizedGitEnv(),
     });
-
-    const stdoutChunks = [];
-    const stderrChunks = [];
-    if (cp.stdout) {
-      cp.stdout.on("data", (chunk) => { stdoutChunks.push(chunk); });
+  } catch (error) {
+    if (error.code === 1) {
+      throw new Error(`Push is not a fast-forward. Base ${ancestor} is not an ancestor of head ${descendant}.`);
     }
-    if (cp.stderr) {
-      cp.stderr.on("data", (chunk) => { stderrChunks.push(chunk); });
-    }
-
-    cp.on("error", reject);
-    cp.on("close", (code) => {
-      const stdout = Buffer.concat(stdoutChunks);
-      const stderr = Buffer.concat(stderrChunks).toString("utf8");
-      if (code === 0) {
-        resolve({ code, stdout, stderr });
-      } else {
-        const err = new Error(`git ${args.join(" ")} failed with exit code ${code}\nstderr: ${stderr}`);
-        err.code = code;
-        err.stdout = stdout;
-        err.stderr = stderr;
-        reject(err);
-      }
-    });
-
-    if (options.input && cp.stdin) {
-      cp.stdin.write(options.input);
-      cp.stdin.end();
-    }
-  });
+    throw new Error(`Fast-forward ancestry could not be verified for base ${ancestor}: ${error.message}`);
+  }
 }
 
-async function validateLocalGitState({ workspace, repository, ref, sha, oldSha }) {
-  if (!workspace) {
+async function validateLocalGitState({ gitPath, workspace, repository, ref, sha, oldSha }) {
+  if (!workspace || typeof workspace !== "string") {
     throw new Error("Workspace path GITHUB_BUILDER_WORKSPACE is not set or invalid.");
   }
-  
-  // Verify HTTPS remote URL matches repository
+  const local = (args) => runGit(args, { gitPath, cwd: workspace, env: sanitizedGitEnv() });
+
+  // The origin remote must be bound exactly to the authorized GitHub HTTPS repository.
   let remoteUrl;
   try {
-    const { stdout } = await runGit(["remote", "get-url", "origin"], { cwd: workspace });
-    remoteUrl = stdout.toString("utf8").trim();
+    remoteUrl = (await local(["remote", "get-url", "origin"])).stdout.toString("utf8").trim();
   } catch (error) {
     throw new Error(`Failed to get git remote URL: ${error.message}`);
   }
-  if (!remoteUrl.includes(repository)) {
-    throw new Error(`Remote URL mismatch: remote points to ${remoteUrl}, expected repository ${repository}.`);
-  }
-  if (!remoteUrl.startsWith("https://")) {
-    throw new Error("Repository remote must use HTTPS.");
+  if (remoteUrl !== `https://github.com/${repository}.git` && remoteUrl !== `https://github.com/${repository}`) {
+    throw new Error(`Remote URL mismatch: origin points to ${remoteUrl}, expected exactly https://github.com/${repository} (.git optional).`);
   }
 
-  // Verify local object availability
+  // Local url.<base>.insteadOf rewrites could silently redirect the transport.
+  let rewriteConfig = "";
   try {
-    await runGit(["cat-file", "-e", sha], { cwd: workspace });
+    rewriteConfig = (await local(["config", "--local", "--get-regexp", "^url\\..*\\.(insteadof|pushinsteadof)$"])).stdout.toString("utf8").trim();
+  } catch (error) {
+    if (error.code !== 1) throw new Error(`Failed to inspect local URL-rewrite configuration: ${error.message}`);
+  }
+  if (rewriteConfig) {
+    throw new Error("Local url.<base>.insteadOf rewrite configuration is present; the bounded transport rejects rewritten remotes.");
+  }
+
+  try {
+    await local(["cat-file", "-e", `${sha}^{commit}`]);
   } catch (error) {
     throw new Error(`Local object availability check failed for SHA ${sha}: ${error.message}`);
   }
 
-  // Ref validation and head SHA matching if ref exists locally
+  // If the ref exists locally it must match the bound SHA; a missing local ref
+  // is acceptable because the commit object itself was verified above.
+  let localRefSha = null;
   try {
-    const { stdout } = await runGit(["rev-parse", ref], { cwd: workspace });
-    const localSha = stdout.toString("utf8").trim();
-    if (localSha !== sha) {
-      throw new Error(`Local ref ${ref} points to ${localSha}, expected SHA ${sha}.`);
-    }
-  } catch (error) {
-    // If local ref doesn't exist, it's fine as long as the object is available
+    localRefSha = (await local(["rev-parse", "--verify", "--quiet", "--end-of-options", ref])).stdout.toString("utf8").trim();
+  } catch {
+    localRefSha = null;
+  }
+  if (localRefSha && localRefSha !== sha) {
+    throw new Error(`Local ref ${ref} points to ${localRefSha}, expected SHA ${sha}.`);
   }
 
-  // Ancestry check
   if (oldSha !== undefined) {
-    try {
-      await runGit(["merge-base", "--is-ancestor", oldSha, sha], { cwd: workspace });
-    } catch (error) {
-      throw new Error(`Push is not a fast-forward. Base ${oldSha} is not an ancestor of head ${sha}.`);
-    }
+    await assertLocalAncestry({ gitPath, workspace, ancestor: oldSha, descendant: sha });
   }
 
   // Payload size, binaries, and LFS pointers validation
   let filesOutput;
   try {
     if (oldSha) {
-      const { stdout } = await runGit(["diff", "--name-only", "-z", "--diff-filter=d", oldSha, sha], { cwd: workspace });
-      filesOutput = stdout;
+      filesOutput = (await local(["diff", "--name-only", "-z", "--diff-filter=d", oldSha, sha])).stdout;
     } else {
-      const { stdout } = await runGit(["ls-tree", "-r", "--name-only", "-z", sha], { cwd: workspace });
-      filesOutput = stdout;
+      filesOutput = (await local(["ls-tree", "-r", "--name-only", "-z", sha])).stdout;
     }
   } catch (error) {
     throw new Error(`Failed to list modified files: ${error.message}`);
   }
 
   const files = filesOutput.toString("utf8").split("\0").filter(Boolean);
+  if (files.length > MAX_PUSH_FILES) {
+    throw new Error(`Payload validation failed: ${files.length} files exceed the ${MAX_PUSH_FILES}-file bound.`);
+  }
   for (const file of files) {
     let sizeStr;
     try {
-      const { stdout } = await runGit(["cat-file", "-s", `${sha}:${file}`], { cwd: workspace });
-      sizeStr = stdout.toString("utf8").trim();
+      sizeStr = (await local(["cat-file", "-s", `${sha}:${file}`])).stdout.toString("utf8").trim();
     } catch (error) {
       throw new Error(`Failed to get size of ${file}: ${error.message}`);
     }
     const size = Number.parseInt(sizeStr, 10);
-    
+
     // We enforce a 10 MB limit for non-LFS files
     if (size > 10 * 1024 * 1024) {
       throw new Error(`File ${file} exceeds size limit (10MB) and must be tracked via LFS.`);
@@ -127,51 +107,27 @@ async function validateLocalGitState({ workspace, repository, ref, sha, oldSha }
 
     let buffer;
     try {
-      const { stdout } = await runGit(["cat-file", "blob", `${sha}:${file}`], { cwd: workspace });
-      buffer = stdout;
+      buffer = (await local(["cat-file", "blob", `${sha}:${file}`])).stdout;
     } catch (error) {
       throw new Error(`Failed to read contents of ${file}: ${error.message}`);
     }
 
-    const isLfs = buffer.toString("utf8").startsWith("version https://git-lfs.github.com/spec/v1");
-    if (isLfs) {
-      if (!LFS_POINTER_REGEX.test(buffer.toString("utf8"))) {
+    const text = buffer.toString("utf8");
+    if (text.startsWith("version https://git-lfs.github.com/spec/v1")) {
+      if (!LFS_POINTER_REGEX.test(text)) {
         throw new Error(`LFS validation failed: file ${file} has an invalid LFS pointer format.`);
       }
-    } else {
-      const isBinary = buffer.includes(0);
-      if (isBinary) {
-        throw new Error(`File ${file} is binary and must be tracked via LFS.`);
-      }
+      // Fail closed: remote LFS object availability cannot be proven before mutation.
+      throw new Error(`LFS validation failed: file ${file} is an LFS pointer, but LFS object availability on the remote cannot be proven before mutation; rejecting.`);
+    }
+    if (buffer.includes(0)) {
+      throw new Error(`File ${file} is binary and must be tracked via LFS.`);
     }
   }
 }
 
-async function gitPushTransport({ workspace, repository, ref, sha, oldSha, token }) {
-  const pushArgs = [
-    "-c", "core.hooksPath=/dev/null",
-    "-c", "credential.helper=",
-    "-c", 'credential.helper=!f() { echo "password=$GITHUB_TOKEN"; }; f',
-    "push",
-    `https://x-access-token@github.com/${repository}.git`,
-    `--force-with-lease=${ref}:${oldSha || ""}`,
-    `${sha}:${ref}`
-  ];
-
-  try {
-    await runGit(pushArgs, {
-      cwd: workspace,
-      env: {
-        GITHUB_TOKEN: token,
-      },
-    });
-  } catch (error) {
-    const stderr = error.stderr || "";
-    if (stderr.includes("[rejected]") || stderr.includes("non-fast-forward") || stderr.includes("fetch first")) {
-      throw new Error(`Push is not a fast-forward. Remote rejection: ${stderr}`);
-    }
-    throw error;
-  }
+function isRemoteCasRejection(stderr) {
+  return /\[rejected\]|\[remote rejected\]|stale info|non-fast-forward|fetch first|already exists/.test(stderr || "");
 }
 
 function headers(token) {
@@ -267,12 +223,15 @@ export function createBoundBuilderClient({
   allowedOperations = ["ensure_pull_request", "read_review_threads", "reply_review_thread", "resolve_review_thread", "mark_ready"],
   getToken = null,
   workspace = null,
+  transportUrl = null,
 }) {
   assertRepository(repository);
   assertSha(headSha);
   if (!apiUrl.startsWith("https://")) {
     throw new Error("API URL must use HTTPS.");
   }
+  // Test-only loopback seam; rejects anything that is not 127.0.0.1.
+  if (transportUrl !== null) resolveTransportUrl({ repository, transportUrl });
   if (!getToken) {
     if (!token || typeof token !== "string" || !token.startsWith("ghs_")) {
       throw new Error("Only short-lived GitHub App installation tokens (ghs_...) are permitted for builder operations.");
@@ -559,125 +518,8 @@ export function createBoundBuilderClient({
     };
   }
 
-  async function createBranch({ ref, sha }) {
-    authorize("create_branch");
-    if (!ref || typeof ref !== "string" || !ref.startsWith("refs/heads/")) {
-      throw new Error("Ref must start with refs/heads/.");
-    }
-    assertSha(sha);
-    if (sha !== headSha) {
-      throw new Error(`SHA mismatch: expected ${headSha}, received ${sha}.`);
-    }
-    const expectedRef = headRef ? (headRef.startsWith("refs/heads/") ? headRef : `refs/heads/${headRef}`) : null;
-    if (expectedRef && ref !== expectedRef) {
-      throw new Error(`Ref mismatch: expected ${expectedRef}, received ${ref}.`);
-    }
-    await identity();
-
-    // Check default branch
-    const repoInfo = await request({ ...context, path: `/repos/${repository}` });
-    const defaultBranch = repoInfo.default_branch || "main";
-    const branchName = ref.slice("refs/heads/".length);
-    const protectedNames = ["main", "master", "production", "release", "develop"];
-    if (protectedNames.includes(branchName) || branchName === defaultBranch) {
-      throw new Error(`Cannot modify a protected or default branch: ${branchName}.`);
-    }
-
-    const encodedBranch = branchName.split("/").map(encodeURIComponent).join("/");
-    
-    // 1. Local validations BEFORE token issuance
-    await validateLocalGitState({ workspace, repository, ref, sha });
-
-    // 2. Token issuance AFTER validations
-    const credential = await ensureToken();
-    const activeToken = credential.token;
-
-    let isProtected = false;
-    try {
-      const branchInfo = await request({ ...context, token: activeToken, path: `/repos/${repository}/branches/${encodedBranch}` });
-      if (branchInfo?.protected === true) {
-        isProtected = true;
-      }
-    } catch (error) {
-      if (error.status !== 404) throw error;
-    }
-    if (isProtected) {
-      throw new Error(`Cannot modify a protected or default branch: ${branchName}.`);
-    }
-
-    const currentRef = await request({ ...context, token: activeToken, path: `/repos/${repository}/git/ref/heads/${encodedBranch}` }).catch((err) => {
-      if (err.status === 404) return null;
-      throw err;
-    });
-    if (currentRef?.object?.sha === sha) {
-      return {
-        operation: "create_branch",
-        repository,
-        ref,
-        sha,
-        readBackSha: sha,
-        idempotent: true,
-        login: expectedLogin,
-      };
-    }
-
-    // 3. Mutate via git push transport
-    try {
-      await gitPushTransport({ workspace, repository, ref, sha, token: activeToken });
-    } catch (error) {
-      const stderr = error.stderr || "";
-      if (stderr.includes("[rejected]") || stderr.includes("already exists")) {
-        const readBack = await request({ ...context, token: activeToken, path: `/repos/${repository}/git/ref/heads/${encodedBranch}` }).catch(() => null);
-        if (readBack?.object?.sha === sha) {
-          return {
-            operation: "create_branch",
-            repository,
-            ref,
-            sha,
-            readBackSha: sha,
-            idempotent: true,
-            login: expectedLogin,
-          };
-        }
-      }
-      
-      // Reconciliation via remote read-back
-      const readBack = await request({ ...context, token: activeToken, path: `/repos/${repository}/git/ref/heads/${encodedBranch}` }).catch(() => null);
-      if (readBack?.object?.sha === sha) {
-        return {
-          operation: "create_branch",
-          repository,
-          ref,
-          sha,
-          readBackSha: sha,
-          idempotent: false,
-          login: expectedLogin,
-          reconciled: true,
-        };
-      }
-      throw error;
-    }
-
-    const readBack = await request({ ...context, token: activeToken, path: `/repos/${repository}/git/ref/heads/${encodedBranch}` });
-    if (readBack?.object?.sha !== sha) {
-      throw new Error(`Read-back validation failed: expected ${sha}, found ${readBack?.object?.sha || "none"}`);
-    }
-    return {
-      operation: "create_branch",
-      repository,
-      ref,
-      sha,
-      readBackSha: readBack.object.sha,
-      idempotent: false,
-      login: expectedLogin,
-    };
-  }
-
-  async function pushBranch({ ref, sha, oldSha }) {
-    authorize("push_branch");
-    if (!ref || typeof ref !== "string" || !ref.startsWith("refs/heads/")) {
-      throw new Error("Ref must start with refs/heads/.");
-    }
+  function assertBranchOperationInput({ ref, sha, oldSha }) {
+    const branchName = assertBranchRef(ref);
     assertSha(sha);
     if (sha !== headSha) {
       throw new Error(`SHA mismatch: expected ${headSha}, received ${sha}.`);
@@ -687,108 +529,156 @@ export function createBoundBuilderClient({
       throw new Error(`Ref mismatch: expected ${expectedRef}, received ${ref}.`);
     }
     if (oldSha !== undefined) assertSha(oldSha);
-
-    // 1. Local validations BEFORE token issuance
-    await validateLocalGitState({ workspace, repository, ref, sha, oldSha });
-
-    // 2. Token issuance AFTER validations
-    const credential = await ensureToken();
-    const activeToken = credential.token;
-
-    // Check default branch
-    const repoInfo = await request({ ...context, token: activeToken, path: `/repos/${repository}` });
-    const defaultBranch = repoInfo.default_branch || "main";
-    const branchName = ref.slice("refs/heads/".length);
-    const protectedNames = ["main", "master", "production", "release", "develop"];
-    if (protectedNames.includes(branchName) || branchName === defaultBranch) {
+    if (PROTECTED_BRANCH_NAMES.includes(branchName)) {
       throw new Error(`Cannot modify a protected or default branch: ${branchName}.`);
     }
+    return branchName;
+  }
 
-    const encodedBranch = branchName.split("/").map(encodeURIComponent).join("/");
+  async function assertRemoteBranchMutable({ branchName, encodedBranch, activeToken }) {
+    const repoInfo = await request({ ...context, token: activeToken, path: `/repos/${repository}` });
+    const defaultBranch = repoInfo?.default_branch || "main";
+    if (branchName === defaultBranch) {
+      throw new Error(`Cannot modify a protected or default branch: ${branchName}.`);
+    }
     let isProtected = false;
     try {
       const branchInfo = await request({ ...context, token: activeToken, path: `/repos/${repository}/branches/${encodedBranch}` });
-      if (branchInfo?.protected === true) {
-        isProtected = true;
-      }
+      if (branchInfo?.protected === true) isProtected = true;
     } catch (error) {
       if (error.status !== 404) throw error;
     }
     if (isProtected) {
       throw new Error(`Cannot modify a protected or default branch: ${branchName}.`);
     }
+  }
 
-    const currentRef = await request({ ...context, token: activeToken, path: `/repos/${repository}/git/ref/heads/${encodedBranch}` }).catch((err) => {
-      if (err.status === 404) return null;
-      throw err;
+  async function readRemoteBranch({ encodedBranch, activeToken }) {
+    return request({ ...context, token: activeToken, path: `/repos/${repository}/git/ref/heads/${encodedBranch}` }).catch((error) => {
+      if (error.status === 404) return null;
+      throw error;
     });
-    const remoteSha = currentRef?.object?.sha;
+  }
 
-    if (oldSha !== undefined) {
-      if (!remoteSha) {
-        throw new Error(`Remote branch refs/heads/${branchName} does not exist, but oldSha was provided.`);
-      }
-      if (remoteSha !== oldSha) {
-        throw new Error(`Remote branch ref changed: expected ${oldSha}, current ${remoteSha}.`);
-      }
-    } else {
-      if (!remoteSha) {
-        throw new Error(`Remote branch refs/heads/${branchName} does not exist.`);
-      }
+  function branchReceipt({ operation, ref, sha, readBackSha, idempotent, verifiedLogin: receiptLogin, reconciled = false }) {
+    return {
+      operation,
+      repository,
+      ref,
+      sha,
+      readBackSha,
+      idempotent,
+      ...(reconciled ? { reconciled: true } : {}),
+      login: expectedLogin,
+      verifiedLogin: receiptLogin || cachedVerifiedLogin || expectedLogin,
+      transport: "git-https-app-token",
+      remoteVerified: true,
+    };
+  }
+
+  async function createBranch({ ref, sha }) {
+    authorize("create_branch");
+    const branchName = assertBranchOperationInput({ ref, sha });
+    const encodedBranch = branchName.split("/").map(encodeURIComponent).join("/");
+
+    // 1. Local validation completes before any token issuance or API call.
+    const gitPath = resolveGitBinary();
+    await validateLocalGitState({ gitPath, workspace, repository, ref, sha });
+
+    // 2. Token issuance and identity verification after validation.
+    const credential = await ensureToken();
+    const activeToken = credential.token;
+    await verifyIdentity({ ...context, token: activeToken, verifiedLogin: credential.verifiedLogin });
+
+    // 3. Remote-side gate: default branch, protection, and current ref state.
+    await assertRemoteBranchMutable({ branchName, encodedBranch, activeToken });
+    const currentRef = await readRemoteBranch({ encodedBranch, activeToken });
+    if (currentRef?.object?.sha === sha) {
+      return branchReceipt({ operation: "create_branch", ref, sha, readBackSha: sha, idempotent: true, verifiedLogin: credential.verifiedLogin });
     }
-    const baseSha = remoteSha;
-
-    if (baseSha === sha) {
-      return {
-        operation: "push_branch",
-        repository,
-        ref,
-        sha,
-        readBackSha: sha,
-        idempotent: true,
-        login: expectedLogin,
-      };
+    if (currentRef?.object?.sha) {
+      throw new Error(`Branch ${branchName} already exists at ${currentRef.object.sha}; create_branch requires the ref to be absent or already at the bound SHA.`);
     }
 
-    // Since we verified remoteSha (baseSha) matches remote, now run git push transport with compare-and-swap lease
+    // 4. Exact create CAS: the lease requires the remote ref to not exist.
     try {
-      await gitPushTransport({ workspace, repository, ref, sha, oldSha: baseSha, token: activeToken });
+      await pushCommit({ gitPath, workspace, repository, ref, sha, expectedRemoteSha: null, token: activeToken, transportUrl });
     } catch (error) {
-      const stderr = error.stderr || "";
-      if (stderr.includes("[rejected]") || stderr.includes("non-fast-forward") || stderr.includes("fetch first")) {
-        throw new Error(`Push is not a fast-forward. Remote rejection: ${stderr}`);
-      }
-
-      // Reconciliation for network/ambiguous error
-      const readBack = await request({ ...context, token: activeToken, path: `/repos/${repository}/git/ref/heads/${encodedBranch}` }).catch(() => null);
+      // Bounded reconciliation: one remote read-back decides the outcome.
+      const readBack = await readRemoteBranch({ encodedBranch, activeToken }).catch(() => null);
       if (readBack?.object?.sha === sha) {
-        return {
-          operation: "push_branch",
-          repository,
-          ref,
-          sha,
-          readBackSha: sha,
-          idempotent: false,
-          login: expectedLogin,
-          reconciled: true,
-        };
+        return branchReceipt({ operation: "create_branch", ref, sha, readBackSha: sha, idempotent: false, reconciled: true, verifiedLogin: credential.verifiedLogin });
+      }
+      if (isRemoteCasRejection(error.stderr)) {
+        throw new Error(`Branch creation lost the compare-and-swap race for ${branchName}. Remote rejection: ${error.stderr}`);
       }
       throw error;
     }
 
+    // 5. Remote read-back proves the mutation landed at the exact SHA.
     const readBack = await request({ ...context, token: activeToken, path: `/repos/${repository}/git/ref/heads/${encodedBranch}` });
     if (readBack?.object?.sha !== sha) {
       throw new Error(`Read-back validation failed: expected ${sha}, found ${readBack?.object?.sha || "none"}`);
     }
-    return {
-      operation: "push_branch",
-      repository,
-      ref,
-      sha,
-      readBackSha: readBack.object.sha,
-      idempotent: false,
-      login: expectedLogin,
-    };
+    return branchReceipt({ operation: "create_branch", ref, sha, readBackSha: readBack.object.sha, idempotent: false, verifiedLogin: credential.verifiedLogin });
+  }
+
+  async function pushBranch({ ref, sha, oldSha }) {
+    authorize("push_branch");
+    const branchName = assertBranchOperationInput({ ref, sha, oldSha });
+    const encodedBranch = branchName.split("/").map(encodeURIComponent).join("/");
+
+    // 1. Local validation (including ancestry when oldSha is given) before token issuance.
+    const gitPath = resolveGitBinary();
+    await validateLocalGitState({ gitPath, workspace, repository, ref, sha, oldSha });
+
+    // 2. Token issuance and identity verification after validation.
+    const credential = await ensureToken();
+    const activeToken = credential.token;
+    await verifyIdentity({ ...context, token: activeToken, verifiedLogin: credential.verifiedLogin });
+
+    // 3. Remote-side gate and exact base discovery.
+    await assertRemoteBranchMutable({ branchName, encodedBranch, activeToken });
+    const currentRef = await readRemoteBranch({ encodedBranch, activeToken });
+    const remoteSha = currentRef?.object?.sha;
+    if (!remoteSha) {
+      throw new Error(oldSha !== undefined
+        ? `Remote branch refs/heads/${branchName} does not exist, but oldSha was provided.`
+        : `Remote branch refs/heads/${branchName} does not exist.`);
+    }
+    if (oldSha !== undefined && remoteSha !== oldSha) {
+      throw new Error(`Remote branch ref changed: expected ${oldSha}, current ${remoteSha}.`);
+    }
+    if (remoteSha === sha) {
+      return branchReceipt({ operation: "push_branch", ref, sha, readBackSha: sha, idempotent: true, verifiedLogin: credential.verifiedLogin });
+    }
+    if (oldSha === undefined) {
+      // The caller did not pin a base; the observed remote SHA becomes the CAS
+      // base and must be a local ancestor of the head, fail-closed.
+      await assertLocalAncestry({ gitPath, workspace, ancestor: remoteSha, descendant: sha });
+    }
+
+    // 4. Exact fast-forward CAS pinned to the observed remote SHA.
+    try {
+      await pushCommit({ gitPath, workspace, repository, ref, sha, expectedRemoteSha: remoteSha, token: activeToken, transportUrl });
+    } catch (error) {
+      // Bounded reconciliation: one remote read-back decides the outcome.
+      const readBack = await readRemoteBranch({ encodedBranch, activeToken }).catch(() => null);
+      if (readBack?.object?.sha === sha) {
+        return branchReceipt({ operation: "push_branch", ref, sha, readBackSha: sha, idempotent: false, reconciled: true, verifiedLogin: credential.verifiedLogin });
+      }
+      if (isRemoteCasRejection(error.stderr)) {
+        throw new Error(`Push is not a fast-forward. Remote rejection: ${error.stderr}`);
+      }
+      throw error;
+    }
+
+    // 5. Remote read-back proves the mutation landed at the exact SHA.
+    const readBack = await request({ ...context, token: activeToken, path: `/repos/${repository}/git/ref/heads/${encodedBranch}` });
+    if (readBack?.object?.sha !== sha) {
+      throw new Error(`Read-back validation failed: expected ${sha}, found ${readBack?.object?.sha || "none"}`);
+    }
+    return branchReceipt({ operation: "push_branch", ref, sha, readBackSha: readBack.object.sha, idempotent: false, verifiedLogin: credential.verifiedLogin });
   }
 
   return { identity, ensurePullRequest, reviewThreads, replyReviewThread, resolveReviewThread, markReady, merge, createBranch, pushBranch };
