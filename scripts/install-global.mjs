@@ -147,6 +147,9 @@ elif [[ "$COMMAND" == "smoke" ]]; then
 elif [[ "$COMMAND" == "skills" ]]; then
   shift
   exec "$NODE_BIN" "$RUNTIME/scripts/skill-portability.mjs" "$@"
+elif [[ "$COMMAND" == "models" ]]; then
+  shift
+  exec "$NODE_BIN" "$RUNTIME/scripts/model-policy-cli.mjs" "$@"
 else
   [[ "$COMMAND" == "help" ]] || shift
   exec "$NODE_BIN" "$RUNTIME/scripts/bridge-ops.mjs" "$COMMAND" "$@"

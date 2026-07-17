@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "providers": {
+    "claude": {
+      "disabledModels": [
+        "fable"
+      ]
+    },
+    "codex": {
+      "disabledModels": []
+    },
+    "antigravity": {
+      "disabledModels": []
+    }
+  }
+}
