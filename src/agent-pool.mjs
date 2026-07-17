@@ -129,6 +129,7 @@ export function createAgentPool({
       else if (name === "merge") receipts.push(await builder.merge(input));
       else if (name === "create_branch") receipts.push(await builder.createBranch(input));
       else if (name === "push_branch") receipts.push(await builder.pushBranch(input));
+      else if (name === "replace_branch") receipts.push(await builder.replaceBranch(input));
     }
     return receipts;
   }

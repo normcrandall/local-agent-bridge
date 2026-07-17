@@ -27,7 +27,7 @@ async function assertLocalAncestry({ gitPath, workspace, ancestor, descendant })
   }
 }
 
-async function validateLocalGitState({ gitPath, workspace, repository, ref, sha, oldSha }) {
+async function validateLocalGitState({ gitPath, workspace, repository, ref, sha, oldSha, requireFastForward = true }) {
   if (!workspace || typeof workspace !== "string") {
     throw new Error("Workspace path GITHUB_BUILDER_WORKSPACE is not set or invalid.");
   }
@@ -85,7 +85,7 @@ async function validateLocalGitState({ gitPath, workspace, repository, ref, sha,
     throw new Error(`Local ref ${ref} points to ${localRefSha}, expected SHA ${sha}.`);
   }
 
-  if (oldSha !== undefined) {
+  if (oldSha !== undefined && requireFastForward) {
     await assertLocalAncestry({ gitPath, workspace, ancestor: oldSha, descendant: sha });
   }
 
@@ -579,6 +579,12 @@ export function createBoundBuilderClient({
   // retry must complete a read-only remote reconciliation before any push.
   const indeterminateRefs = new Map();
 
+  function branchOperationId({ operation, ref, requestedSha, expectedOldSha = null }) {
+    return createHash("sha256")
+      .update(JSON.stringify({ operation, repository, ref, requestedSha, expectedOldSha }))
+      .digest("hex");
+  }
+
   function persistReceipt(receipt) {
     if (!receiptPath) return receipt;
     try {
@@ -597,6 +603,7 @@ export function createBoundBuilderClient({
   function branchReceipt({ operation, ref, requestedSha, expectedOldSha = null, observedRemoteSha, outcome, idempotent, verifiedLogin: receiptLogin, reconciled = false }) {
     const identity = appIdentity(receiptLogin);
     return persistReceipt({
+      operationId: branchOperationId({ operation, ref, requestedSha, expectedOldSha }),
       operation,
       repository,
       ref,
@@ -619,6 +626,7 @@ export function createBoundBuilderClient({
 
   function recordFailureReceipt({ operation, ref, requestedSha, expectedOldSha = null, outcome, detail, verifiedLogin: receiptLogin }) {
     persistReceipt({
+      operationId: branchOperationId({ operation, ref, requestedSha, expectedOldSha }),
       operation,
       repository,
       ref,
@@ -696,7 +704,9 @@ export function createBoundBuilderClient({
     if (isRemoteCasRejection(error.stderr)) {
       throw new Error(operation === "create_branch"
         ? `Branch creation lost the compare-and-swap race for ${ref}. Remote rejection: ${error.stderr}`
-        : `Push is not a fast-forward. Remote rejection: ${error.stderr}`);
+        : operation === "replace_branch"
+          ? `Branch replacement lost the compare-and-swap race for ${ref}. Remote rejection: ${error.stderr}`
+          : `Push is not a fast-forward. Remote rejection: ${error.stderr}`);
     }
     throw error;
   }
@@ -814,5 +824,64 @@ export function createBoundBuilderClient({
     return verifyMutation({ operation: "push_branch", ref, sha, expectedOldSha: remoteSha, encodedBranch, activeToken, verifiedLogin: credential.verifiedLogin, outcome: "fast_forwarded" });
   }
 
-  return { identity, ensurePullRequest, reviewThreads, replyReviewThread, resolveReviewThread, markReady, merge, createBranch, pushBranch };
+  async function replaceBranch({ ref, sha, oldSha }) {
+    authorize("replace_branch");
+    if (oldSha === undefined) {
+      throw new Error("replace_branch requires an exact oldSha lease.");
+    }
+    const branchName = assertBranchOperationInput({ ref, sha, oldSha });
+    const encodedBranch = branchName.split("/").map(encodeURIComponent).join("/");
+
+    // Replacement is intentionally allowed to be non-fast-forward, but all
+    // local binding and payload checks still complete before token issuance.
+    const gitPath = resolveGitBinary();
+    await validateLocalGitState({
+      gitPath, workspace, repository, ref, sha, oldSha, requireFastForward: false,
+    });
+
+    const credential = await ensureToken();
+    const activeToken = credential.token;
+    await verifyIdentity({ ...context, token: activeToken, verifiedLogin: credential.verifiedLogin });
+
+    await assertRemoteBranchMutable({ branchName, encodedBranch, activeToken });
+    const { currentRef, reconciledReceipt } = await reconcileBeforeMutation({
+      operation: "replace_branch", ref, sha, encodedBranch, activeToken, verifiedLogin: credential.verifiedLogin,
+    });
+    if (reconciledReceipt) return reconciledReceipt;
+    const remoteSha = currentRef?.object?.sha;
+    if (!remoteSha) {
+      throw new Error(`Remote branch refs/heads/${branchName} does not exist; replace_branch never creates refs.`);
+    }
+    // A retry of the same old/new/ref envelope is idempotent after a landed
+    // mutation, even though the oldSha lease no longer matches the remote.
+    if (remoteSha === sha) {
+      return branchReceipt({
+        operation: "replace_branch", ref, requestedSha: sha, expectedOldSha: oldSha,
+        observedRemoteSha: sha, outcome: "idempotent", idempotent: true,
+        verifiedLogin: credential.verifiedLogin,
+      });
+    }
+    if (remoteSha !== oldSha) {
+      throw new Error(`Remote branch ref changed: expected ${oldSha}, current ${remoteSha}.`);
+    }
+
+    try {
+      await pushCommit({
+        gitPath, workspace, repository, ref, sha, expectedRemoteSha: oldSha,
+        token: activeToken, transportUrl,
+      });
+    } catch (error) {
+      return resolvePushFailure({
+        operation: "replace_branch", ref, sha, expectedOldSha: oldSha,
+        encodedBranch, activeToken, error, verifiedLogin: credential.verifiedLogin,
+      });
+    }
+
+    return verifyMutation({
+      operation: "replace_branch", ref, sha, expectedOldSha: oldSha,
+      encodedBranch, activeToken, verifiedLogin: credential.verifiedLogin, outcome: "replaced",
+    });
+  }
+
+  return { identity, ensurePullRequest, reviewThreads, replyReviewThread, resolveReviewThread, markReady, merge, createBranch, pushBranch, replaceBranch };
 }

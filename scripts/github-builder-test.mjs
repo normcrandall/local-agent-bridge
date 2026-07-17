@@ -69,6 +69,9 @@ git(["push", bareRepoPath, `${baseCommitSha}:refs/heads/ff-branch`], { cwd: loca
 git(["push", bareRepoPath, `${baseCommitSha}:refs/heads/ff2-branch`], { cwd: localRepoPath });
 git(["push", bareRepoPath, `${divergedSha}:refs/heads/cas-branch`], { cwd: localRepoPath });
 git(["push", bareRepoPath, `${divergedSha}:refs/heads/diverged-branch`], { cwd: localRepoPath });
+git(["push", bareRepoPath, `${divergedSha}:refs/heads/replacement-branch`], { cwd: localRepoPath });
+git(["push", bareRepoPath, `${divergedSha}:refs/heads/replacement-lossy`], { cwd: localRepoPath });
+git(["push", bareRepoPath, `${divergedSha}:refs/heads/replacement-indeterminate`], { cwd: localRepoPath });
 
 // Git smart-HTTP servers that enforce exact Basic credentials from the askpass
 // channel. Every child process gets an error handler; timeouts are bounded.
@@ -173,7 +176,7 @@ const base = {
   baseRef: "main",
   requiredReviewStatusContext: "agent-review",
   trustedReviewLogins: ["reviewer[bot]"],
-  allowedOperations: ["ensure_pull_request", "read_review_threads", "reply_review_thread", "resolve_review_thread", "mark_ready", "merge", "create_branch", "push_branch"],
+  allowedOperations: ["ensure_pull_request", "read_review_threads", "reply_review_thread", "resolve_review_thread", "mark_ready", "merge", "create_branch", "push_branch", "replace_branch"],
   workspace: localRepoPath,
   transportUrl,
   receiptPath: receiptLogPath,
@@ -591,6 +594,14 @@ await assert.rejects(
   clientForBranches.pushBranch({ ref: "refs/heads/other-ref", sha: headSha }),
   /Ref mismatch/
 );
+await assert.rejects(
+  clientForBranches.replaceBranch({ ref: "refs/heads/other-ref", sha: headSha, oldSha: divergedSha }),
+  /Ref mismatch/
+);
+await assert.rejects(
+  clientForBranches.replaceBranch({ ref: "refs/heads/codex/feature", sha: headSha }),
+  /requires an exact oldSha lease/
+);
 
 // Real transport integration: bounded smart-HTTP pushes against the bare remote.
 console.log("Running real local-repository transport integration tests...");
@@ -711,6 +722,106 @@ assert.equal(reconciledAfterIndeterminate.outcome, "reconciled");
 assert.equal(reconciledAfterIndeterminate.reconciled, true);
 assert.equal(lossyServer.pushAttempts, pushAttemptsAfterIndeterminate);
 assert.equal(gitOut(["rev-parse", "refs/heads/indeterminate-branch"], { cwd: bareRepoPath }), headSha);
+
+// D3. Separately allowlisted branch replacement permits a non-fast-forward
+// update only for the bound feature ref and exact expected-old/new SHAs.
+const replacementClient = createBoundBuilderClient({
+  ...base,
+  headRef: "replacement-branch",
+  allowedOperations: ["replace_branch"],
+  fetchImpl: fakeGitHub().fetchImpl,
+});
+const replaced = await replacementClient.replaceBranch({
+  ref: "refs/heads/replacement-branch", sha: headSha, oldSha: divergedSha,
+});
+assert.equal(replaced.operation, "replace_branch");
+assert.equal(replaced.outcome, "replaced");
+assert.equal(replaced.expectedOldSha, divergedSha);
+assert.equal(replaced.observedRemoteSha, headSha);
+assert.equal(replaced.remoteVerified, true);
+assert.match(replaced.operationId, /^[0-9a-f]{64}$/);
+assert.equal(gitOut(["rev-parse", "refs/heads/replacement-branch"], { cwd: bareRepoPath }), headSha);
+
+// The same operation envelope is idempotent after the first response lands.
+const replacementRetry = await replacementClient.replaceBranch({
+  ref: "refs/heads/replacement-branch", sha: headSha, oldSha: divergedSha,
+});
+assert.equal(replacementRetry.outcome, "idempotent");
+assert.equal(replacementRetry.operationId, replaced.operationId);
+
+// A stale/competing writer cannot overwrite the advanced ref. Rejection
+// occurs before the transport push, even when its requested commit is local.
+const replacementAttempts = mockServer.pushAttempts;
+await assert.rejects(
+  createBoundBuilderClient({
+    ...base,
+    headSha: successHeadSha,
+    headRef: "replacement-branch",
+    allowedOperations: ["replace_branch"],
+    fetchImpl: fakeGitHub().fetchImpl,
+  }).replaceBranch({
+    ref: "refs/heads/replacement-branch", sha: successHeadSha, oldSha: divergedSha,
+  }),
+  new RegExp(`Remote branch ref changed: expected ${divergedSha}, current ${headSha}`),
+);
+assert.equal(mockServer.pushAttempts, replacementAttempts);
+assert.equal(gitOut(["rev-parse", "refs/heads/replacement-branch"], { cwd: bareRepoPath }), headSha);
+
+// Lost response after a successful replacement is reconciled by exact remote
+// SHA read-back, returning the same deterministic operation identity.
+const lossyReplacementClient = createBoundBuilderClient({
+  ...base,
+  headRef: "replacement-lossy",
+  allowedOperations: ["replace_branch"],
+  fetchImpl: fakeGitHub().fetchImpl,
+  transportUrl: lossyTransportUrl,
+});
+const lossyReplacement = await lossyReplacementClient.replaceBranch({
+  ref: "refs/heads/replacement-lossy", sha: headSha, oldSha: divergedSha,
+});
+assert.equal(lossyReplacement.outcome, "reconciled");
+assert.equal(lossyReplacement.reconciled, true);
+assert.equal(gitOut(["rev-parse", "refs/heads/replacement-lossy"], { cwd: bareRepoPath }), headSha);
+
+// If both the transport response and read-back are unavailable, retry is
+// blocked until read-only reconciliation succeeds; no duplicate push occurs.
+const indeterminateReplacementClient = createBoundBuilderClient({
+  ...base,
+  headRef: "replacement-indeterminate",
+  allowedOperations: ["replace_branch"],
+  fetchImpl: fakeGitHub({
+    branchShas: {
+      "replacement-indeterminate": [divergedSha, { error: 503 }, { error: 503 }, headSha],
+    },
+  }).fetchImpl,
+  transportUrl: lossyTransportUrl,
+});
+await assert.rejects(
+  indeterminateReplacementClient.replaceBranch({
+    ref: "refs/heads/replacement-indeterminate", sha: headSha, oldSha: divergedSha,
+  }),
+  /indeterminate.*read-only reconciliation|indeterminate/i,
+);
+const replacementPushAttempts = lossyServer.pushAttempts;
+await assert.rejects(
+  indeterminateReplacementClient.replaceBranch({
+    ref: "refs/heads/replacement-indeterminate", sha: headSha, oldSha: divergedSha,
+  }),
+  /read-only reconciliation must succeed before retry/,
+);
+assert.equal(lossyServer.pushAttempts, replacementPushAttempts);
+const reconciledReplacement = await indeterminateReplacementClient.replaceBranch({
+  ref: "refs/heads/replacement-indeterminate", sha: headSha, oldSha: divergedSha,
+});
+assert.equal(reconciledReplacement.outcome, "reconciled");
+assert.equal(lossyServer.pushAttempts, replacementPushAttempts);
+assert.equal(gitOut(["rev-parse", "refs/heads/replacement-indeterminate"], { cwd: bareRepoPath }), headSha);
+
+await assert.rejects(
+  createBoundBuilderClient({ ...base, headRef: "main", allowedOperations: ["replace_branch"], fetchImpl: fakeGitHub().fetchImpl })
+    .replaceBranch({ ref: "refs/heads/main", sha: headSha, oldSha: divergedSha }),
+  /Cannot modify a protected or default branch: main/,
+);
 
 // E. pushBranch idempotency and real fast-forward CAS delivery.
 const pushIdempotent = await createBoundBuilderClient({ ...base, headRef: "idempotent-branch", fetchImpl: fakeGitHub().fetchImpl })
@@ -997,17 +1108,18 @@ const rawReceiptLog = fs.readFileSync(receiptLogPath, "utf8");
 assert.ok(!rawReceiptLog.includes(BUILDER_TOKEN), "durable receipts must never contain the token");
 const receiptLines = rawReceiptLog.trim().split("\n").map((line) => JSON.parse(line));
 for (const receipt of receiptLines) {
-  assert.ok(["create_branch", "push_branch"].includes(receipt.operation));
+  assert.ok(["create_branch", "push_branch", "replace_branch"].includes(receipt.operation));
+  assert.match(receipt.operationId, /^[0-9a-f]{64}$/);
   assert.equal(receipt.repository, "owner/repo");
   assert.ok(receipt.ref.startsWith("refs/heads/"));
   assert.ok(Object.hasOwn(receipt, "requestedSha"));
   assert.ok(Object.hasOwn(receipt, "expectedOldSha"));
   assert.ok(Object.hasOwn(receipt, "observedRemoteSha"));
-  assert.ok(["created", "fast_forwarded", "idempotent", "reconciled", "indeterminate", "failed"].includes(receipt.outcome));
+  assert.ok(["created", "fast_forwarded", "replaced", "idempotent", "reconciled", "indeterminate", "failed"].includes(receipt.outcome));
   assert.equal(receipt.appIdentity.expectedLogin, "builder[bot]");
   assert.ok(receipt.recordedAt);
 }
-for (const expectedOutcome of ["created", "fast_forwarded", "idempotent", "reconciled", "indeterminate", "failed"]) {
+for (const expectedOutcome of ["created", "fast_forwarded", "replaced", "idempotent", "reconciled", "indeterminate", "failed"]) {
   assert.ok(receiptLines.some((receipt) => receipt.outcome === expectedOutcome), `missing durable receipt outcome ${expectedOutcome}`);
 }
 
@@ -1022,14 +1134,16 @@ const branchOpsEnvelope = parseBuilderEnvelope(`done\n---BEGIN BOUND_GITHUB_BUIL
   operations: [
     { operation: "create_branch", ref: "refs/heads/feature", sha: "a".repeat(40) },
     { operation: "push_branch", ref: "refs/heads/feature", sha: "a".repeat(40), oldSha: "b".repeat(40) },
+    { operation: "replace_branch", ref: "refs/heads/feature", sha: "a".repeat(40), oldSha: "b".repeat(40) },
   ],
 })}\n---END BOUND_GITHUB_BUILDER---`);
 assert.equal(branchOpsEnvelope.operations[0].operation, "create_branch");
 assert.equal(branchOpsEnvelope.operations[1].oldSha, "b".repeat(40));
+assert.equal(branchOpsEnvelope.operations[2].operation, "replace_branch");
 assert.throws(() => parseBuilderEnvelope(`x\n---BEGIN BOUND_GITHUB_BUILDER---\n${JSON.stringify({
   operations: [{ operation: "push_branch", ref: "refs/heads/feature", sha: "not-a-sha" }],
 })}\n---END BOUND_GITHUB_BUILDER---`));
 
 cleanup();
 clearTimeout(watchdog);
-console.log("Bound GitHub builder tests passed: PR lifecycle, exact head, trusted latest review gate, merge paths, bounded no-shell transport, create_branch, and fast-forward push_branch with fail-closed validations.");
+console.log("Bound GitHub builder tests passed: PR lifecycle, exact head, trusted latest review gate, merge paths, bounded no-shell transport, create_branch, fast-forward push_branch, and guarded replace_branch with fail-closed validations.");

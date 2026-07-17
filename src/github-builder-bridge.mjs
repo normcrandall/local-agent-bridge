@@ -125,4 +125,14 @@ server.registerTool("push_branch", {
   },
 }, async (input) => response(await client.pushBranch(input)));
 
+server.registerTool("replace_branch", {
+  title: "Replace branch head",
+  description: "Replace only the pre-bound bot-owned feature branch using exact old and new SHA compare-and-swap guards.",
+  inputSchema: {
+    ref: z.string().min(1),
+    sha: z.string().regex(/^[0-9a-f]{40}$/i),
+    oldSha: z.string().regex(/^[0-9a-f]{40}$/i),
+  },
+}, async (input) => response(await client.replaceBranch(input)));
+
 await server.connect(new StdioServerTransport());
