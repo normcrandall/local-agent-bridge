@@ -47,6 +47,26 @@ function run(binary, args) {
   return { ok: result.status === 0, output: `${result.stdout || ""}\n${result.stderr || ""}`.trim() };
 }
 
+export function probeProviderCapabilities({ provider, binary }) {
+  if (!existsSync(binary)) throw new Error(`${provider} binary does not exist: ${binary}`);
+  const versionResult = run(binary, ["--version"]);
+  const version = versionResult.ok ? versionResult.output.split("\n")[0] : "unknown";
+  let mainHelp = "";
+  let newHelp = "";
+  let resumeHelp = "";
+  if (provider === "codex") {
+    mainHelp = run(binary, ["--help"]).output;
+    newHelp = run(binary, ["exec", "--help"]).output;
+    resumeHelp = run(binary, ["exec", "resume", "--help"]).output;
+  } else {
+    mainHelp = run(binary, ["--help"]).output;
+  }
+  return {
+    ...parseProviderHelp(provider, { version, mainHelp, newHelp, resumeHelp }),
+    binary: resolve(binary), binaryName: basename(binary), source: "probe", probedAt: new Date().toISOString(),
+  };
+}
+
 function readCache(path) {
   try {
     const cache = JSON.parse(readFileSync(path, "utf8"));
@@ -85,20 +105,7 @@ export function negotiateProviderCapabilities({ provider, binary, cachePath = DE
   const key = `${CAPABILITY_SCHEMA_VERSION}:${provider}:${resolve(binary)}:${info.size}:${Math.floor(info.mtimeMs)}:${version}`;
   const cache = readCache(cachePath);
   if (useCache && cache.entries?.[key]) return { ...cache.entries[key], source: "cache" };
-  let mainHelp = "";
-  let newHelp = "";
-  let resumeHelp = "";
-  if (provider === "codex") {
-    mainHelp = run(binary, ["--help"]).output;
-    newHelp = run(binary, ["exec", "--help"]).output;
-    resumeHelp = run(binary, ["exec", "resume", "--help"]).output;
-  } else {
-    mainHelp = run(binary, ["--help"]).output;
-  }
-  const result = {
-    ...parseProviderHelp(provider, { version, mainHelp, newHelp, resumeHelp }),
-    binary: resolve(binary), binaryName: basename(binary), source: "probe", probedAt: new Date().toISOString(),
-  };
+  const result = probeProviderCapabilities({ provider, binary });
   const release = acquireCacheLock(cachePath);
   try {
     const latest = readCache(cachePath);

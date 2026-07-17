@@ -1,0 +1,4 @@
+interface:
+  display_name: "Collaboration Doctor"
+  short_description: "Audit agent policy before delegation"
+  default_prompt: "Use $collaboration-doctor to audit whether this workspace and provider roster can complete the requested role safely."

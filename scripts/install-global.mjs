@@ -137,7 +137,11 @@ elif [[ "$COMMAND" == "watchdog" ]]; then
   shift
   exec "$NODE_BIN" "$RUNTIME/scripts/codex-turn-watchdog.mjs" "$@"
 elif [[ "$COMMAND" == "doctor" ]]; then
-  exec "$NODE_BIN" "$RUNTIME/scripts/doctor.mjs"
+  shift
+  if (( \$# == 0 )); then
+    exec "$NODE_BIN" "$RUNTIME/scripts/doctor.mjs"
+  fi
+  exec "$NODE_BIN" "$RUNTIME/scripts/collaboration-doctor.mjs" "\$@"
 elif [[ "$COMMAND" == "smoke" ]]; then
   exec "$NODE_BIN" "$RUNTIME/scripts/smoke-test.mjs"
 elif [[ "$COMMAND" == "skills" ]]; then

@@ -263,6 +263,28 @@ assert.match(pairProgram, /provider-specific, user-owned Apps/);
 assert.match(pairProgram, /agent-review=success/);
 assert.match(pairProgram, /never replace the App with a personal PAT/);
 
+const collaborationDoctor = await readFile(resolve(root, "skills/collaboration-doctor/SKILL.md"), "utf8");
+for (const term of [
+  "bridge doctor",
+  "--workspace",
+  "--providers",
+  "--strict-provider",
+  "--required-command",
+  "--allow-command",
+  "--builder-operation",
+  "--require-review-app",
+  "--require-fallback",
+  "--require-budget",
+  "--json",
+  "--input",
+  "least-authority",
+]) assert.ok(collaborationDoctor.includes(term), `collaboration-doctor skill is missing ${term}`);
+assert.match(collaborationDoctor, /read-only/i);
+assert.match(collaborationDoctor, /must not:[\s\S]*change configuration/);
+assert.match(collaborationDoctor, /Do not enable PAT fallback/);
+assert.match(collaborationDoctor, /no provider is eligible/);
+assert.doesNotMatch(collaborationDoctor, /TODO/);
+
 const goalLoop = await readFile(resolve(root, "skills/goal-loop/SKILL.md"), "utf8");
 assert.match(goalLoop, /GOAL LOOP STARTING/);
 assert.match(goalLoop, /LOOP CHECKPOINT/);
@@ -288,6 +310,7 @@ assert.match(goalLoop, /acknowledge_coordinator_wake/);
 const readme = await readFile(resolve(root, "README.md"), "utf8");
 const localBridge = await readFile(resolve(root, "bridge"), "utf8");
 assert.match(localBridge, /\n  skills\)\n/);
+assert.match(localBridge, /scripts\/collaboration-doctor\.mjs/);
 const claudeGuidance = await readFile(resolve(root, "CLAUDE.md"), "utf8");
 const codexGuidance = await readFile(resolve(root, "AGENTS.md"), "utf8");
 for (const guidance of [claudeGuidance, codexGuidance]) {
