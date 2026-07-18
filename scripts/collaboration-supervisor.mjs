@@ -26,7 +26,9 @@ const endpoint = supervisorEndpoint(stateDirectory);
 const metadataPath = resolve(stateDirectory, "supervisor.json");
 const supervisorId = randomUUID();
 const monitored = new Map();
+const startOperations = new Map();
 let stopping = false;
+let ready = false;
 
 function processAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 1) return false;
@@ -64,15 +66,37 @@ function normalizeWorkerEnvironment(value) {
   return normalized;
 }
 
-function recordedWorkerAlive(state) {
-  if (!processAlive(state.workerPid)) return false;
-  const command = processCommand(state.workerPid);
-  const expected = state.workerOwner?.command || "collaboration-worker.mjs";
-  const expectedStart = state.workerOwner?.processStartedAt || null;
-  const observedStart = processStartIdentity(state.workerPid);
+function workerIdentityMatches({ pid, collaborationId, workerOwner }) {
+  if (!processAlive(pid)) return false;
+  const command = processCommand(pid);
+  const expected = workerOwner?.command || "collaboration-worker.mjs";
+  const expectedStart = workerOwner?.processStartedAt || null;
+  const observedStart = processStartIdentity(pid);
   return command.includes(expected)
-    && command.includes(state.id)
+    && command.includes(collaborationId)
     && (!expectedStart || expectedStart === observedStart);
+}
+
+function recordedWorkerAlive(state) {
+  return workerIdentityMatches({
+    pid: state.workerPid,
+    collaborationId: state.id,
+    workerOwner: state.workerOwner,
+  });
+}
+
+async function serializeStart(collaborationId, operation) {
+  const previous = startOperations.get(collaborationId) || Promise.resolve();
+  let release;
+  const current = new Promise((resolvePromise) => { release = resolvePromise; });
+  startOperations.set(collaborationId, current);
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (startOperations.get(collaborationId) === current) startOperations.delete(collaborationId);
+  }
 }
 
 async function atomicMetadata(value) {
@@ -130,8 +154,8 @@ async function recordWorkerExit({ collaborationId, pid, code = null, signal = nu
   monitored.delete(pid);
 }
 
-function monitorWorker({ collaborationId, pid, child = null, adopted = false }) {
-  monitored.set(pid, { collaborationId, pid, child, adopted, receipted: false });
+function monitorWorker({ collaborationId, pid, child = null, adopted = false, workerOwner = null }) {
+  monitored.set(pid, { collaborationId, pid, child, adopted, workerOwner, receipted: false, checking: false });
   if (child) {
     child.once("exit", (code, signal) => {
       void recordWorkerExit({ collaborationId, pid, code, signal, adopted: false });
@@ -146,7 +170,7 @@ async function adoptRecordedWorkers() {
     const state = await readCollaboration(workspaceRoot, summary.id).catch(() => null);
     if (!state || !Number.isInteger(state.workerPid)) continue;
     if (recordedWorkerAlive(state)) {
-      monitorWorker({ collaborationId: state.id, pid: state.workerPid, adopted: true });
+      monitorWorker({ collaborationId: state.id, pid: state.workerPid, adopted: true, workerOwner: state.workerOwner });
     } else if (!processAlive(state.workerPid)) {
       await recordWorkerExit({
         collaborationId: state.id,
@@ -167,7 +191,7 @@ async function startWorker({ collaborationId, requestedRuntimeRoot, requestedWor
   }
   if (recordedWorkerAlive(state)) {
     if (!monitored.has(state.workerPid)) {
-      monitorWorker({ collaborationId, pid: state.workerPid, adopted: true });
+      monitorWorker({ collaborationId, pid: state.workerPid, adopted: true, workerOwner: state.workerOwner });
     }
     await updateCollaboration(workspaceRoot, collaborationId, (current) => ({
       ...current,
@@ -219,6 +243,10 @@ async function startWorker({ collaborationId, requestedRuntimeRoot, requestedWor
     },
     detached: true,
     stdio: "ignore",
+  });
+  await new Promise((resolvePromise, rejectPromise) => {
+    child.once("spawn", resolvePromise);
+    child.once("error", rejectPromise);
   });
   child.unref();
   monitorWorker({ collaborationId, pid: child.pid, child });
@@ -287,16 +315,17 @@ const server = createServer((socket) => {
       try {
         const request = JSON.parse(raw);
         if (request.protocol !== PROTOCOL_VERSION) throw new Error("Unsupported supervisor protocol version.");
+        if (!ready) throw new Error("Collaboration supervisor is still starting.");
         let result;
         if (request.type === "ping") {
           result = { supervisorId, supervisorPid: process.pid, protocol: PROTOCOL_VERSION, monitoredWorkers: monitored.size };
         } else if (request.type === "start") {
-          result = await startWorker({
+          result = await serializeStart(request.collaborationId, () => startWorker({
             collaborationId: request.collaborationId,
             requestedRuntimeRoot: request.runtimeRoot,
             requestedWorkspaceRoot: request.workspaceRoot,
             workerEnvironment: request.workerEnvironment,
-          });
+          }));
         } else {
           throw new Error(`Unknown supervisor request: ${request.type}`);
         }
@@ -308,6 +337,11 @@ const server = createServer((socket) => {
   });
 });
 
+await new Promise((resolvePromise, rejectPromise) => {
+  server.once("error", rejectPromise);
+  server.listen(endpoint, resolvePromise);
+});
+if (process.platform !== "win32") await chmod(endpoint, 0o600);
 await atomicMetadata({
   protocol: PROTOCOL_VERSION,
   supervisorId,
@@ -317,22 +351,28 @@ await atomicMetadata({
   stateDirectory,
 });
 await adoptRecordedWorkers();
-await new Promise((resolvePromise, rejectPromise) => {
-  server.once("error", rejectPromise);
-  server.listen(endpoint, resolvePromise);
-});
-if (process.platform !== "win32") await chmod(endpoint, 0o600);
+ready = true;
 
 const monitor = setInterval(() => {
   for (const entry of monitored.values()) {
-    if (!entry.child && !processAlive(entry.pid)) {
+    if (entry.child || entry.checking) continue;
+    entry.checking = true;
+    const alive = processAlive(entry.pid);
+    const matches = alive && workerIdentityMatches({
+      pid: entry.pid,
+      collaborationId: entry.collaborationId,
+      workerOwner: entry.workerOwner,
+    });
+    if (!matches) {
       void recordWorkerExit({
         collaborationId: entry.collaborationId,
         pid: entry.pid,
         code: null,
-        signal: "UNKNOWN",
+        signal: alive ? "IDENTITY_MISMATCH" : "UNKNOWN",
         adopted: true,
       });
+    } else {
+      entry.checking = false;
     }
   }
 }, 1_000);

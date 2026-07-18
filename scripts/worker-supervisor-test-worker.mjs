@@ -10,4 +10,9 @@ if (process.env.BRIDGE_SUPERVISOR_TEST_OUTPUT) {
   })}\n`);
 }
 
+const changeTitleAfter = Number.parseInt(process.env.BRIDGE_SUPERVISOR_TEST_CHANGE_TITLE_MS || "", 10);
+if (Number.isInteger(changeTitleAfter) && changeTitleAfter > 0) {
+  setTimeout(() => { process.title = "agent-bridge-reused-process-identity"; }, changeTitleAfter).unref();
+}
+
 setInterval(() => {}, 60_000);
