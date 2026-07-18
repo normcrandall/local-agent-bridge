@@ -333,6 +333,8 @@ for (const guidance of [claudeGuidance, codexGuidance]) {
   assert.match(guidance, /Never substitute a long-running Bash, sleep/);
   assert.match(guidance, /get_collaboration/);
   assert.match(guidance, /acknowledge_coordinator_wake/);
+  assert.match(guidance, /five live work calls and ten concurrent review calls/);
+  assert.doesNotMatch(guidance, /one live work call and two concurrent review calls/);
 }
 assert.match(readme, /collaboration_wake/);
 assert.match(readme, /coordinatorWake/);
@@ -526,7 +528,7 @@ for (const term of [
   "Run parallel issue lanes",
   "configured live review limit per provider",
   "wakes the oldest queued call automatically",
-  "work: 1, review: 2",
+  "work: 5, review: 10",
   "enqueue_portfolio_merge",
   "begin_portfolio_merge_validation",
   "authorize_portfolio_merge",
@@ -537,6 +539,7 @@ for (const term of [
   "two read-only advocates and a third-model arbiter",
   "HELM <portfolio-id>",
 ]) assert.ok(takeTheHelm.includes(term), `Take the helm is missing ${term}`);
+assert.doesNotMatch(takeTheHelm, /Provider capacity: Claude work 1\/review 2/);
 assert.match(takeTheHelm, /Never leave the user at a static/);
 assert.match(takeTheHelm, /Never substitute a long-running Bash, sleep/);
 assert.match(takeTheHelm, /Merge only when repository policy contains standing auto-merge authority or the exact head SHA has been explicitly authorized/);

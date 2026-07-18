@@ -53,7 +53,7 @@ Define done from repository evidence: implementation, exact gates, independent r
 
 Default to `maxParallel: 2`. Increase it only when more independent issues, healthy distinct writers, isolated worktrees, provider capacity, and repository resources are available. Reduce it automatically when a provider is unavailable or the safe frontier is smaller. Sequential execution is the correct degraded mode when only one safe lane exists.
 
-Provider live-call capacity is separate from issue-lane capacity. Omit `providerConcurrency` to use the machine policy at `~/.config/local-agent-bridge/provider-concurrency.json`; without that file the broker defaults every provider to `{ work: 1, review: 2 }`. Per-collaboration values may lower but never raise this machine ceiling. Keep work at one unless the user deliberately configures a higher machine ceiling. Read-only reviews may use both default slots concurrently.
+Provider live-call capacity is separate from issue-lane capacity. Omit `providerConcurrency` to use the machine policy at `~/.config/local-agent-bridge/provider-concurrency.json`; without that file the broker defaults every provider to `{ work: 5, review: 10 }`. Per-collaboration values may lower but never raise this machine ceiling. Use all five writer slots only for a conflict-free frontier with isolated worktrees and distinct claims; lower the collaboration limit when fewer lanes are safe. Read-only reviews may use all ten default slots concurrently.
 
 ## Build the safe frontier
 
@@ -142,7 +142,7 @@ Completion: <evidence-based done condition>
 Portfolio: <helm-id after creation>
 Safe frontier: <selected issue IDs>
 Max parallel: <default 2>
-Provider capacity: Claude work 1/review 2 · Codex work 1/review 2 · Antigravity work 1/review 2
+Provider capacity: Claude work 5/review 10 · Codex work 5/review 10 · Antigravity work 5/review 10
 Participants: Claude, Codex, Antigravity
 Chair: <provider>
 Writer lanes: <issue -> provider, or pending>
@@ -170,7 +170,7 @@ For each selected lane:
 3. **Implement with one writer** — select `workProfile: implement` for local delivery through commit or `workProfile: deliver` for authorized push and PR creation. No other lane or reviewer may write that worktree.
 4. **Expand reservations before scope** — if implementation must touch an undeclared path, contract, migration, generated artifact, or shared resource, update the manifest and recompute the portfolio before editing it. Pause the lower-priority lane on a new collision.
 5. **Verify and hand off** — run exact issue gates and require a structured `HANDOFF`. The chair verifies and acknowledges that sequence before recording the lane as ready for review.
-6. **Review independently** — assign providers that did not write the lane. When the PR is the source of truth, use the exact PR head and configured reviewer Apps. Accept either their resulting exact-head `agent-review` gate or an exact-head approval from a machine-locally configured trusted human. A PAT compatibility comment is not approval. Submit every review-ready lane to the broker immediately. It permits up to the configured live review limit per provider—two by default—while retaining one live work call by default. Every blocking finding must carry a concrete proposed fix when one is determinable — preferably the review surface's directly applicable suggested-change mechanism (for example GitHub's `suggestion` block), otherwise a precise code or diff snippet. A finding with no clear fix (a genuine design question) still states what is wrong, why, and the acceptance criteria.
+6. **Review independently** — assign providers that did not write the lane. When the PR is the source of truth, use the exact PR head and configured reviewer Apps. Accept either their resulting exact-head `agent-review` gate or an exact-head approval from a machine-locally configured trusted human. A PAT compatibility comment is not approval. Submit every review-ready lane to the broker immediately. It permits up to the configured live review limit per provider—ten by default—alongside five live work calls by default. Every blocking finding must carry a concrete proposed fix when one is determinable — preferably the review surface's directly applicable suggested-change mechanism (for example GitHub's `suggestion` block), otherwise a precise code or diff snippet. A finding with no clear fix (a genuine design question) still states what is wrong, why, and the acceptance criteria.
 
    Start a review leg with an ordered roster containing the preferred reviewer and all eligible non-writer fallbacks in the same collaboration. Set `maxTurns` to the number of successful reviews required; a failed or disconnected provider does not consume a turn and the broker advances to the next candidate. Never make a single provider the only critical-review candidate unless the owner explicitly pins it. Reviewer-App publication is preflighted: publishable identities run first, unbound reviewers remain available for local handoff, and an all-unbound roster completes locally then waits for exact-head trusted-human approval instead of abandoning the portfolio.
 

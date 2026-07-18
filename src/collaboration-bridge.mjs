@@ -434,7 +434,7 @@ const providerConcurrencySchema = z.object({
   codex: providerConcurrencyRoleSchema.optional(),
   antigravity: providerConcurrencyRoleSchema.optional(),
 }).strict().optional().describe(
-  "Optional lower per-provider live-call limits. The machine-local provider-concurrency policy is a hard ceiling; defaults are work 1 and review 2.",
+  "Optional lower per-provider live-call limits. The machine-local provider-concurrency policy is a hard ceiling; defaults are work 5 and review 10.",
 );
 const verificationCommandsSchema = z.array(
   z.string().trim().min(1).max(500).refine((command) => !/[\r\n]/.test(command), "Commands must be single-line."),

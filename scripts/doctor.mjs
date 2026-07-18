@@ -67,7 +67,7 @@ check("Provider concurrency policy", () => {
       return (selected.work === undefined || validCapacity(selected.work))
         && (selected.review === undefined || validCapacity(selected.review));
     });
-}, "fix ~/.config/local-agent-bridge/provider-concurrency.json or remove it to use work 1 and review 2");
+}, "fix ~/.config/local-agent-bridge/provider-concurrency.json or remove it to use work 5 and review 10");
 
 check("Antigravity CLI", () => {
   const agy = process.env.AGY_BIN || resolve(homedir(), ".local/bin/agy");

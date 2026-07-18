@@ -127,9 +127,9 @@ export const DEFAULT_PROVIDER_CONCURRENCY_CONFIG = resolve(
   ".config/local-agent-bridge/provider-concurrency.json",
 );
 export const DEFAULT_PROVIDER_CONCURRENCY = Object.freeze({
-  claude: Object.freeze({ work: 1, review: 2 }),
-  codex: Object.freeze({ work: 1, review: 2 }),
-  antigravity: Object.freeze({ work: 1, review: 2 }),
+  claude: Object.freeze({ work: 5, review: 10 }),
+  codex: Object.freeze({ work: 5, review: 10 }),
+  antigravity: Object.freeze({ work: 5, review: 10 }),
 });
 
 function capacity(value, label) {
