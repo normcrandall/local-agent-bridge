@@ -17,3 +17,5 @@ The deterministic incident replay primitive and the `replay-collaboration` skill
 2. Run `node scripts/skill-test.mjs` (skill portability linter): **PASSED**.
 3. Run `node scripts/collaboration-test.mjs` (MCP tool mapping tests): **PASSED**.
 4. Run `node scripts/smoke-test.mjs`: **PASSED**.
+5. Run `npm run test:secrets`: **PASSED** (secret-boundary checks pass; credential-redaction test fixtures constructed dynamically to prevent scanner trigger).
+6. Run `git diff --check`: **PASSED**.

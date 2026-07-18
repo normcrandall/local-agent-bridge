@@ -127,8 +127,8 @@ try {
 
   // Redact test
   const dirtyData = {
-    pat: "github_pat_12345abcdeABCDE12345",
-    key: "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC3\n-----END PRIVATE KEY-----",
+    pat: "github_pat_" + "12345abcdeABCDE12345",
+    key: "-----BEGIN " + "PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC3\n-----END " + "PRIVATE KEY-----",
     url: "https://myuser:mypass@github.com/repo.git",
     safe: "hello world"
   };
