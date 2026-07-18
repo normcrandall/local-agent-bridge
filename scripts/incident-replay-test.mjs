@@ -139,9 +139,9 @@ try {
   assert.equal(cleanData.safe, "hello world");
 
   // Direct string-regex tests (excluding key-name redaction checks)
-  const freeTextTokens = "This is classic: " + "ghp_" + "12345abcdeABCDE1234512345abcdeABCDE1" + ", OAuth: " + "gho_" + "12345abcdeABCDE1234512345abcdeABCDE1" + ", App: " + "ghs_" + "12345abcdeABCDE1234512345abcdeABCDE1" + ", runner: " + "ghr_" + "12345abcdeABCDE1234512345abcdeABCDE1" + ", and pat: " + "github_pat_" + "12345abcdeABCDE12345" + ".";
+  const freeTextTokens = "This is classic: " + "ghp_" + "12345abcdeABCDE1234512345abcdeABCDE1" + ", OAuth: " + "gho_" + "12345abcdeABCDE1234512345abcdeABCDE1" + ", App: " + "ghs_" + "12345abcdeABCDE1234512345abcdeABCDE1" + ", runner: " + "ghr_" + "12345abcdeABCDE1234512345abcdeABCDE1" + ", user-to-server: " + "ghu_" + "12345abcdeABCDE1234512345abcdeABCDE1" + ", and pat: " + "github_pat_" + "12345abcdeABCDE12345" + ".";
   const cleanFreeText = redactSensitiveData(freeTextTokens);
-  assert.equal(cleanFreeText, "This is classic: [REDACTED_GITHUB_TOKEN], OAuth: [REDACTED_GITHUB_TOKEN], App: [REDACTED_GITHUB_TOKEN], runner: [REDACTED_GITHUB_TOKEN], and pat: [REDACTED_GITHUB_PAT].");
+  assert.equal(cleanFreeText, "This is classic: [REDACTED_GITHUB_TOKEN], OAuth: [REDACTED_GITHUB_TOKEN], App: [REDACTED_GITHUB_TOKEN], runner: [REDACTED_GITHUB_TOKEN], user-to-server: [REDACTED_GITHUB_TOKEN], and pat: [REDACTED_GITHUB_PAT].");
 
   const freeTextKey = "This is key:\n-----BEGIN " + "PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC3\n-----END " + "PRIVATE KEY-----";
   const cleanFreeTextKey = redactSensitiveData(freeTextKey);

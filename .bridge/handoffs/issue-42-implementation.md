@@ -13,7 +13,7 @@ The deterministic incident replay primitive and the `replay-collaboration` skill
 
 ## Verification Outcome
 
-1. Run `node scripts/incident-replay-test.mjs`: **PASSED** (tested against all 13 mock failure/sorting/redaction cases, including deterministic truncation, archived collaborations, builder receipt matching, zero-timestamp ordering, and bare-token permission checks).
+1. Run `node scripts/incident-replay-test.mjs`: **PASSED** (tested against all 13 mock failure/sorting/redaction cases, including deterministic truncation, archived collaborations, builder receipt matching, zero-timestamp ordering, and bare-token/ghu_ token permission checks).
 2. Run `node scripts/skill-test.mjs` (skill portability linter): **PASSED**.
 3. Run `node scripts/collaboration-test.mjs` (MCP tool mapping tests): **PASSED**.
 4. Run `node scripts/smoke-test.mjs`: **PASSED**.

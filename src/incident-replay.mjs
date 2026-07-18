@@ -8,7 +8,7 @@ export function redactSensitiveData(data) {
   if (typeof data === "string") {
     let result = data;
     result = result.replace(/github_pat_[a-zA-Z0-9_]+/g, "[REDACTED_GITHUB_PAT]");
-    result = result.replace(/gh[posr]_[a-zA-Z0-9_]+/g, "[REDACTED_GITHUB_TOKEN]");
+    result = result.replace(/gh[pousr]_[a-zA-Z0-9_]+/g, "[REDACTED_GITHUB_TOKEN]");
     result = result.replace(/-----BEGIN[A-Z ]+PRIVATE KEY-----\n[\s\S]+?-----END[A-Z ]+PRIVATE KEY-----/g, "[REDACTED_PRIVATE_KEY]");
     result = result.replace(/(https?:\/\/)[^/:]+:[^/]+@/g, "$1[REDACTED_CREDENTIALS]@");
     return result;
