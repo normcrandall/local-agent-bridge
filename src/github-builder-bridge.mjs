@@ -2,9 +2,9 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { z } from "zod";
 import { createInstallationToken, GITHUB_LOGIN_PATTERN, inspectGitHubAppRoles } from "./github-app-auth.mjs";
 import { createBoundBuilderClient } from "./github-builder-client.mjs";
+import { builderMcpInputSchema } from "./builder-contract.mjs";
 
 const repository = process.env.GITHUB_BUILDER_REPOSITORY;
 const expectedLogin = process.env.GITHUB_BUILDER_EXPECTED_LOGIN;
@@ -75,11 +75,7 @@ const response = (value) => ({
 server.registerTool("ensure_pull_request", {
   title: "Create or update bound pull request",
   description: "Create or update the pull request for the pre-bound repository, head ref, base ref, and head SHA.",
-  inputSchema: {
-    title: z.string().min(1).max(256),
-    body: z.string().max(60_000).default(""),
-    draft: z.boolean().default(false),
-  },
+  inputSchema: builderMcpInputSchema("ensure_pull_request"),
 }, async (input) => response(await client.ensurePullRequest(input)));
 
 server.registerTool("read_review_threads", {
@@ -91,13 +87,13 @@ server.registerTool("read_review_threads", {
 server.registerTool("reply_review_thread", {
   title: "Reply to bound review thread",
   description: "Reply as the builder App to an exact thread proven to belong to the bound pull request.",
-  inputSchema: { threadId: z.string().min(1), body: z.string().min(1).max(60_000) },
+  inputSchema: builderMcpInputSchema("reply_review_thread"),
 }, async (input) => response(await client.replyReviewThread(input)));
 
 server.registerTool("resolve_review_thread", {
   title: "Resolve bound review thread",
   description: "Resolve an exact thread proven to belong to the bound pull request.",
-  inputSchema: { threadId: z.string().min(1) },
+  inputSchema: builderMcpInputSchema("resolve_review_thread"),
 }, async (input) => response(await client.resolveReviewThread(input)));
 
 server.registerTool("mark_ready", {
@@ -109,36 +105,25 @@ server.registerTool("mark_ready", {
 server.registerTool("merge", {
   title: "Merge bound pull request",
   description: "Merge only the pre-bound pull request at the pre-bound head SHA.",
-  inputSchema: { method: z.enum(["merge", "squash", "rebase"]).default("squash") },
+  inputSchema: builderMcpInputSchema("merge"),
 }, async (input) => response(await client.merge(input)));
 
 server.registerTool("create_branch", {
   title: "Create branch",
   description: "Create a branch for the pre-bound repository and head SHA.",
-  inputSchema: {
-    ref: z.string().min(1),
-    sha: z.string().regex(/^[0-9a-f]{40}$/i),
-  },
+  inputSchema: builderMcpInputSchema("create_branch"),
 }, async (input) => response(await client.createBranch(input)));
 
 server.registerTool("push_branch", {
   title: "Push branch",
   description: "Update a branch for the pre-bound repository and head SHA using fast-forward push.",
-  inputSchema: {
-    ref: z.string().min(1),
-    sha: z.string().regex(/^[0-9a-f]{40}$/i),
-    oldSha: z.string().regex(/^[0-9a-f]{40}$/i).optional(),
-  },
+  inputSchema: builderMcpInputSchema("push_branch"),
 }, async (input) => response(await client.pushBranch(input)));
 
 server.registerTool("replace_branch", {
   title: "Replace branch head",
   description: "Replace only the pre-bound bot-owned feature branch using exact old and new SHA compare-and-swap guards.",
-  inputSchema: {
-    ref: z.string().min(1),
-    sha: z.string().regex(/^[0-9a-f]{40}$/i),
-    oldSha: z.string().regex(/^[0-9a-f]{40}$/i),
-  },
+  inputSchema: builderMcpInputSchema("replace_branch"),
 }, async (input) => response(await client.replaceBranch(input)));
 
 await server.connect(new StdioServerTransport());

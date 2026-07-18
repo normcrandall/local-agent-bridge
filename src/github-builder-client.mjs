@@ -13,6 +13,8 @@ import {
   inspectGitHubMergeCapabilities,
   resolveGitHubMergeEnforcement,
 } from "./github-merge-enforcement.mjs";
+import { loadBranchReconciliationState } from "./builder-operation-store.mjs";
+import { classifyDeliveryOutcome } from "./builder-contract.mjs";
 
 const LFS_POINTER_REGEX = /^version https:\/\/git-lfs\.github\.com\/spec\/v1\r?\noid sha256:[0-9a-f]{64}\r?\nsize [0-9]+\r?\n$/;
 const MAX_PUSH_FILES = 2000;
@@ -640,7 +642,9 @@ export function createBoundBuilderClient({
 
   // Refs whose last mutation attempt ended without a provable outcome. A
   // retry must complete a read-only remote reconciliation before any push.
-  const indeterminateRefs = new Map();
+  // Seeded from the durable receipt log so the fail-closed guard survives a
+  // process/agent restart, not only retries within one process lifetime.
+  const indeterminateRefs = loadBranchReconciliationState(receiptPath);
 
   function branchOperationId({ operation, ref, requestedSha, expectedOldSha = null }) {
     return createHash("sha256")
@@ -674,6 +678,7 @@ export function createBoundBuilderClient({
       expectedOldSha,
       observedRemoteSha,
       outcome,
+      deliveryOutcome: classifyDeliveryOutcome({ outcome }),
       sha: requestedSha,
       readBackSha: observedRemoteSha,
       idempotent,
@@ -697,6 +702,7 @@ export function createBoundBuilderClient({
       expectedOldSha,
       observedRemoteSha: null,
       outcome,
+      deliveryOutcome: classifyDeliveryOutcome({ outcome }),
       appIdentity: appIdentity(receiptLogin),
       transport: "git-https-app-token",
       remoteVerified: false,

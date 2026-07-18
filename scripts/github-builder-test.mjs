@@ -2,6 +2,14 @@ import assert from "node:assert/strict";
 import { createBoundBuilderClient } from "../src/github-builder-client.mjs";
 import { assertBranchRef, resolveTransportUrl } from "../src/github-builder-transport.mjs";
 import { builderEnvelopeInstructions, parseBuilderEnvelope } from "../src/builder-envelope.mjs";
+import {
+  builderMcpInputSchema,
+  builderEnvelopeOperationSchema,
+  classifyDeliveryOutcome,
+  BuilderUnsupportedError,
+  DELIVERY_OUTCOMES,
+} from "../src/builder-contract.mjs";
+import { loadBranchReconciliationState } from "../src/builder-operation-store.mjs";
 import { execFileSync, spawn } from "node:child_process";
 import http from "node:http";
 import path from "node:path";
@@ -1177,6 +1185,10 @@ for (const receipt of receiptLines) {
   assert.ok(Object.hasOwn(receipt, "expectedOldSha"));
   assert.ok(Object.hasOwn(receipt, "observedRemoteSha"));
   assert.ok(["created", "fast_forwarded", "replaced", "idempotent", "reconciled", "indeterminate", "failed"].includes(receipt.outcome));
+  // Every durable receipt carries its provider-neutral lifecycle outcome so a
+  // restarted process can inspect succeeded/rejected/indeterminate/reconciled.
+  assert.ok(["succeeded", "rejected", "indeterminate", "reconciled"].includes(receipt.deliveryOutcome));
+  assert.equal(receipt.deliveryOutcome, classifyDeliveryOutcome(receipt));
   assert.equal(receipt.appIdentity.expectedLogin, "builder[bot]");
   assert.ok(receipt.recordedAt);
 }
@@ -1205,6 +1217,91 @@ assert.throws(() => parseBuilderEnvelope(`x\n---BEGIN BOUND_GITHUB_BUILDER---\n$
   operations: [{ operation: "push_branch", ref: "refs/heads/feature", sha: "not-a-sha" }],
 })}\n---END BOUND_GITHUB_BUILDER---`));
 
+// Canonical contract: the Claude/Codex MCP inputSchema and the Antigravity
+// envelope schema are both derived from one source of truth and cannot drift.
+assert.deepEqual(Object.keys(builderMcpInputSchema("create_branch")).sort(), ["ref", "sha"]);
+assert.deepEqual(Object.keys(builderMcpInputSchema("push_branch")).sort(), ["oldSha", "ref", "sha"]);
+assert.throws(
+  () => builderMcpInputSchema("delete_repository"),
+  (error) => error instanceof BuilderUnsupportedError && error.code === "unsupported",
+);
+const canonicalEnvelopeOp = builderEnvelopeOperationSchema();
+assert.equal(
+  canonicalEnvelopeOp.parse({ operation: "create_branch", ref: "refs/heads/feature", sha: "a".repeat(40) }).operation,
+  "create_branch",
+);
+assert.throws(() => canonicalEnvelopeOp.parse({ operation: "create_branch", ref: "refs/heads/feature", sha: "not-a-sha" }));
+// The MCP create_branch schema now shares the envelope's 220-char ref bound.
+assert.throws(() => canonicalEnvelopeOp.parse({ operation: "create_branch", ref: `refs/heads/${"x".repeat(300)}`, sha: "a".repeat(40) }));
+
+// Lifecycle: every builder receipt maps to one provider-neutral delivery
+// outcome that distinguishes succeeded, rejected, indeterminate, and reconciled.
+assert.equal(classifyDeliveryOutcome({ outcome: "created" }), DELIVERY_OUTCOMES.SUCCEEDED);
+assert.equal(classifyDeliveryOutcome({ outcome: "idempotent" }), DELIVERY_OUTCOMES.SUCCEEDED);
+assert.equal(classifyDeliveryOutcome({ outcome: "reconciled" }), DELIVERY_OUTCOMES.RECONCILED);
+assert.equal(classifyDeliveryOutcome({ outcome: "indeterminate" }), DELIVERY_OUTCOMES.INDETERMINATE);
+assert.equal(classifyDeliveryOutcome({ outcome: "failed" }), DELIVERY_OUTCOMES.REJECTED);
+assert.equal(classifyDeliveryOutcome({ operation: "merge", prNumber: 42 }), DELIVERY_OUTCOMES.SUCCEEDED);
+assert.equal(classifyDeliveryOutcome({ error: "boom" }), DELIVERY_OUTCOMES.REJECTED);
+
+// Durable reconciliation store: replaying the receipt log rebuilds pending
+// indeterminate refs and clears them once a terminal outcome is recorded.
+const reconLogPath = path.join(tmpDir, "recon", "receipts.jsonl");
+fs.mkdirSync(path.dirname(reconLogPath), { recursive: true });
+fs.writeFileSync(reconLogPath, [
+  JSON.stringify({ operation: "create_branch", ref: "refs/heads/done", outcome: "created", requestedSha: headSha, recordedAt: "t1" }),
+  JSON.stringify({ operation: "push_branch", ref: "refs/heads/hanging", outcome: "indeterminate", requestedSha: headSha, expectedOldSha: baseCommitSha, recordedAt: "t2" }),
+  "{ this line is not valid json",
+  JSON.stringify({ operation: "create_branch", ref: "refs/heads/recovered", outcome: "indeterminate", requestedSha: headSha, recordedAt: "t3" }),
+  JSON.stringify({ operation: "create_branch", ref: "refs/heads/recovered", outcome: "reconciled", requestedSha: headSha, recordedAt: "t4" }),
+  "",
+].join("\n"));
+const rehydrated = loadBranchReconciliationState(reconLogPath);
+assert.equal(rehydrated.has("refs/heads/done"), false);
+assert.equal(rehydrated.has("refs/heads/recovered"), false);
+assert.equal(rehydrated.get("refs/heads/hanging").expectedOldSha, baseCommitSha);
+assert.equal(loadBranchReconciliationState(path.join(tmpDir, "recon", "missing.jsonl")).size, 0);
+assert.equal(loadBranchReconciliationState(null).size, 0);
+
+// Restart durability: a fresh client whose durable log records an indeterminate
+// prior mutation reconciles by remote read-back before any push, resuming
+// without a duplicate mutation across a process/agent restart.
+git(["push", bareRepoPath, `${headSha}:refs/heads/restart-recon`], { cwd: localRepoPath });
+const restartReconLog = path.join(tmpDir, "restart", "recon.jsonl");
+fs.mkdirSync(path.dirname(restartReconLog), { recursive: true });
+fs.writeFileSync(restartReconLog, `${JSON.stringify({
+  operation: "create_branch", ref: "refs/heads/restart-recon", outcome: "indeterminate",
+  requestedSha: headSha, expectedOldSha: null, recordedAt: "prior-process",
+})}\n`);
+const restartPushesBefore = mockServer.pushAttempts;
+const restartClient = createBoundBuilderClient({
+  ...base, headRef: "restart-recon", allowedOperations: ["create_branch"],
+  fetchImpl: fakeGitHub().fetchImpl, receiptPath: restartReconLog,
+});
+const restartResult = await restartClient.createBranch({ ref: "refs/heads/restart-recon", sha: headSha });
+assert.equal(restartResult.outcome, "reconciled");
+assert.equal(restartResult.reconciled, true);
+assert.equal(mockServer.pushAttempts, restartPushesBefore, "restart reconciliation must not re-push");
+
+// Restart durability, read-back unavailable: the fresh client stays fail-closed
+// and refuses any push until a read-only reconciliation succeeds.
+const restartBlockLog = path.join(tmpDir, "restart", "block.jsonl");
+fs.writeFileSync(restartBlockLog, `${JSON.stringify({
+  operation: "create_branch", ref: "refs/heads/restart-block", outcome: "indeterminate",
+  requestedSha: headSha, expectedOldSha: null, recordedAt: "prior-process",
+})}\n`);
+const blockPushesBefore = mockServer.pushAttempts;
+const restartBlockClient = createBoundBuilderClient({
+  ...base, headRef: "restart-block", allowedOperations: ["create_branch"],
+  fetchImpl: fakeGitHub({ branchShas: { "restart-block": { error: 503 } } }).fetchImpl,
+  receiptPath: restartBlockLog,
+});
+await assert.rejects(
+  restartBlockClient.createBranch({ ref: "refs/heads/restart-block", sha: headSha }),
+  /read-only reconciliation must succeed before retry/,
+);
+assert.equal(mockServer.pushAttempts, blockPushesBefore, "blocked restart must not push");
+
 cleanup();
 clearTimeout(watchdog);
-console.log("Bound GitHub builder tests passed: PR lifecycle, exact head, trusted latest review gate, merge paths, bounded no-shell transport, create_branch, fast-forward push_branch, and guarded replace_branch with fail-closed validations.");
+console.log("Bound GitHub builder tests passed: PR lifecycle, exact head, trusted latest review gate, merge paths, bounded no-shell transport, create_branch, fast-forward push_branch, guarded replace_branch, canonical contract derivation, delivery-outcome mapping, and durable restart reconciliation.");
