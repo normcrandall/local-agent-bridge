@@ -708,6 +708,21 @@ try {
   await completionClient?.close().catch(() => {});
   await capacityClient?.close().catch(() => {});
   await recoveryClient?.close().catch(() => {});
+  try {
+    const supervisor = JSON.parse(await readFile(join(stateDirectory, "supervisor.json"), "utf8"));
+    process.kill(supervisor.pid, "SIGTERM");
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      let alive = false;
+      try {
+        process.kill(supervisor.pid, 0);
+        alive = true;
+      } catch (error) {
+        alive = error.code === "EPERM";
+      }
+      if (!alive) break;
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+    }
+  } catch {}
   await rm(stateDirectory, { recursive: true, force: true });
   await rm(resolve(root, ".bridge/test-handoffs"), { recursive: true, force: true });
 }

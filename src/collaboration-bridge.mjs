@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
 import { randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { delimiter, isAbsolute, relative, resolve, sep } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -58,10 +57,10 @@ import {
   resolveClaimedWorktreeHead,
   resolveIssueClaimRevisions,
 } from "./collaboration-start-preflight.mjs";
+import { startSupervisedWorker } from "./worker-supervisor-client.mjs";
 
 const RUNTIME_ROOT = realpathSync(process.env.BRIDGE_RUNTIME_ROOT || process.env.BRIDGE_ROOT || process.cwd());
 const WORKSPACE_ROOT = realpathSync(process.env.BRIDGE_WORKSPACE_ROOT || process.env.BRIDGE_ROOT || process.cwd());
-const WORKER = resolve(RUNTIME_ROOT, "scripts/collaboration-worker.mjs");
 const PORTFOLIO_ROOT = resolve(process.env.BRIDGE_PORTFOLIO_DIR || collaborationDirectory(WORKSPACE_ROOT), "portfolios");
 const TERMINAL_STATUSES = new Set(["agreed", "needs_user", "turn_limit", "failed", "cancelled", "budget"]);
 const STATUS_VALUES = ["queued", "running", "recovering", "cancelling", "indeterminate", ...TERMINAL_STATUSES];
@@ -85,16 +84,12 @@ function projectDirectory(requested) {
   return actual;
 }
 
-function startWorker(id) {
-  const workerToken = randomUUID();
-  const child = spawn(process.execPath, [WORKER, id], {
-    cwd: RUNTIME_ROOT,
-    env: { ...process.env, BRIDGE_RUNTIME_ROOT: RUNTIME_ROOT, BRIDGE_WORKSPACE_ROOT: WORKSPACE_ROOT, BRIDGE_WORKER_TOKEN: workerToken },
-    detached: true,
-    stdio: "ignore",
+async function startWorker(id) {
+  return startSupervisedWorker({
+    collaborationId: id,
+    runtimeRoot: RUNTIME_ROOT,
+    workspaceRoot: WORKSPACE_ROOT,
   });
-  child.unref();
-  return { pid: child.pid, token: workerToken };
 }
 
 function summary(view) {
@@ -241,7 +236,7 @@ async function reconcileInterruptedCleanup() {
     if (action === "mark-indeterminate" || action === "retain-indeterminate-owner-mismatch") {
       await updateCollaboration(WORKSPACE_ROOT, state.id, (current) => ({
         ...current, status: "indeterminate",
-        error: !alive ? "Broker restart found no owned worker process." : "Worker PID exists but ownership command did not match; no process was terminated.",
+        error: !alive ? "Worker exited without a terminal receipt (exit reason unknown)." : "Worker PID exists but ownership command did not match; no process was terminated.",
         runtime: {
           ...(current.runtime || {}),
           activeCall: current.runtime?.activeCall ? { ...current.runtime.activeCall, status: "indeterminate", phase: "unknown" } : null,
@@ -833,7 +828,7 @@ server.registerTool(
           writer,
         },
       });
-      startWorker(state.id);
+      await startWorker(state.id);
       return toolResponse(await collaborationView(WORKSPACE_ROOT, state.id, 1));
     } catch (startError) {
       if (leaseAcquired && claimClient && input.issueClaim) {
@@ -1462,7 +1457,7 @@ server.registerTool(
         : null,
     }));
     await appendEvent(WORKSPACE_ROOT, id, { type: "user_continued", at: new Date().toISOString(), message });
-    startWorker(id);
+    await startWorker(id);
     return toolResponse(await collaborationView(WORKSPACE_ROOT, state.id, 1));
   },
 );
@@ -1518,11 +1513,17 @@ server.registerTool(
   },
   async ({ collaborationId: id }) => {
     const before = await readCollaboration(WORKSPACE_ROOT, id);
+    const workerIsLive = isSafeWorkerPid(before.workerPid) && processAlive(before.workerPid);
+    if (workerIsLive && !workerCancellationMatches(before)) {
+      throw new Error("Refusing to cancel: the live PID does not match this collaboration's owned worker metadata. Inspect with bridge recover; no process was terminated.");
+    }
+    await updateCollaboration(WORKSPACE_ROOT, id, (previous) => ({
+      ...previous,
+      status: "cancelling",
+      cancelRequested: true,
+    }));
     let reaped = null;
-    if (isSafeWorkerPid(before.workerPid) && processAlive(before.workerPid)) {
-      if (!workerCancellationMatches(before)) {
-        throw new Error("Refusing to cancel: the live PID does not match this collaboration's owned worker metadata. Inspect with bridge recover; no process was terminated.");
-      }
+    if (workerIsLive) {
       // Issue #55: reap the whole worker tree (process group + ps-discovered
       // descendants such as shell -> npm -> node), bounded grace, then SIGKILL.
       try {

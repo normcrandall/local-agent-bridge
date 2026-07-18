@@ -211,6 +211,9 @@ export async function replayIncident(root, id) {
   const hasFinished = timeline.some(e => e.type === "run_finished");
   const hasFailed = timeline.some(e => e.type === "run_failed");
   const hasStarted = timeline.some(e => e.type === "run_started");
+  const workerExitWithoutReceipt = timeline.find(e => e.type === "worker_exit" && e.terminalReceipt === false);
+  const reconciledMissingWorker = timeline.find(e => e.type === "cleanup_reconciled" && e.action === "mark-indeterminate");
+  const hasWorkerDisappearance = Boolean(workerExitWithoutReceipt || reconciledMissingWorker);
   const hasIndeterminate = timeline.some(e => e.type === "agent_indeterminate" || e.type === "recovery_marked_indeterminate") || redactedState?.status === "indeterminate";
   const hasPermissionErr = timeline.some(e => {
     const msg = String(e.error || e.reason || e.message || "").toLowerCase();
@@ -251,6 +254,17 @@ export async function replayIncident(root, id) {
       source: failEvent._source
     });
   }
+  if (workerExitWithoutReceipt) {
+    observedFacts.push({
+      description: `Worker PID ${workerExitWithoutReceipt.pid} exited without a terminal receipt${workerExitWithoutReceipt.signal ? ` after signal ${workerExitWithoutReceipt.signal}` : ""}`,
+      source: workerExitWithoutReceipt._source
+    });
+  } else if (reconciledMissingWorker) {
+    observedFacts.push({
+      description: "Reconciliation found that the recorded worker no longer existed before a terminal receipt was written",
+      source: reconciledMissingWorker._source
+    });
+  }
   if (hasPermissionErr) {
     const permEvent = timeline.find(e => {
       const msg = String(e.error || e.reason || e.message || "").toLowerCase();
@@ -273,6 +287,13 @@ export async function replayIncident(root, id) {
     nextSafeAction = "inspect_recovery";
     contributingFactors.push("History ends abruptly or contains malformed JSONLines at the end.");
     remediationSteps.push("Check log file integrity, inspect local workspace lock status, and run bridge recover to clear any stale worker locks.");
+  } else if (hasWorkerDisappearance) {
+    classification = "worker_disappeared";
+    lastConfirmedState = "indeterminate";
+    unresolvedOwnership = "system";
+    nextSafeAction = "inspect_recovery";
+    contributingFactors.push("The worker process disappeared before recording a terminal outcome; a later cancellation does not erase that original incident.");
+    remediationSteps.push("Inspect the workspace and provider state before replacement work. Verify the machine supervisor and the durable worker-exit receipt, then recover or cancel the preserved owner explicitly.");
   } else if (hasIndeterminate) {
     classification = "indeterminate_mutation";
     lastConfirmedState = "indeterminate";
