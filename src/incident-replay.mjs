@@ -4,20 +4,11 @@ import { resolve } from "node:path";
 import readline from "node:readline";
 import { collaborationDirectory } from "./collaboration-store.mjs";
 
-function pidAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 1) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error.code === "EPERM";
-  }
-}
-
 export function redactSensitiveData(data) {
   if (typeof data === "string") {
     let result = data;
     result = result.replace(/github_pat_[a-zA-Z0-9_]+/g, "[REDACTED_GITHUB_PAT]");
+    result = result.replace(/gh[posr]_[a-zA-Z0-9_]+/g, "[REDACTED_GITHUB_TOKEN]");
     result = result.replace(/-----BEGIN[A-Z ]+PRIVATE KEY-----\n[\s\S]+?-----END[A-Z ]+PRIVATE KEY-----/g, "[REDACTED_PRIVATE_KEY]");
     result = result.replace(/(https?:\/\/)[^/:]+:[^/]+@/g, "$1[REDACTED_CREDENTIALS]@");
     return result;
@@ -175,7 +166,20 @@ function mergeAndSortEvents(transcriptEvents, builderReceipts) {
     const timeA = getEventTimestamp(a);
     const timeB = getEventTimestamp(b);
     if (timeA !== timeB) return timeA - timeB;
-    return a._source.localeCompare(b._source);
+
+    const matchA = a._source?.match(/^([^:]+):(\d+)$/);
+    const matchB = b._source?.match(/^([^:]+):(\d+)$/);
+    if (matchA && matchB) {
+      const fileA = matchA[1];
+      const lineA = parseInt(matchA[2], 10);
+      const fileB = matchB[1];
+      const lineB = parseInt(matchB[2], 10);
+      if (fileA !== fileB) {
+        return fileA.localeCompare(fileB);
+      }
+      return lineA - lineB;
+    }
+    return String(a._source || "").localeCompare(String(b._source || ""));
   });
   return all;
 }
@@ -210,7 +214,11 @@ export async function replayIncident(root, id) {
   const hasIndeterminate = timeline.some(e => e.type === "agent_indeterminate" || e.type === "recovery_marked_indeterminate") || redactedState?.status === "indeterminate";
   const hasPermissionErr = timeline.some(e => {
     const msg = String(e.error || e.reason || e.message || "").toLowerCase();
-    return msg.includes("eperm") || msg.includes("permission denied") || msg.includes("eacces") || msg.includes("unauthorized") || msg.includes("token");
+    return msg.includes("eperm") ||
+           msg.includes("permission denied") ||
+           msg.includes("eacces") ||
+           msg.includes("unauthorized") ||
+           /(?:invalid|expired|missing|bad|denied|error).*token|token.*(?:invalid|expired|missing|bad|denied|error)/i.test(msg);
   });
   const hasOverload = timeline.some(e => e.type === "provider_recovery_scheduled" || String(e.error || e.reason || "").toLowerCase().includes("high demand") || String(e.error || e.reason || "").toLowerCase().includes("rate limit"));
   const hasWakeQueued = timeline.some(e => e.type === "coordinator_wake_queued");
@@ -246,7 +254,11 @@ export async function replayIncident(root, id) {
   if (hasPermissionErr) {
     const permEvent = timeline.find(e => {
       const msg = String(e.error || e.reason || e.message || "").toLowerCase();
-      return msg.includes("eperm") || msg.includes("permission denied") || msg.includes("eacces") || msg.includes("unauthorized") || msg.includes("token");
+      return msg.includes("eperm") ||
+             msg.includes("permission denied") ||
+             msg.includes("eacces") ||
+             msg.includes("unauthorized") ||
+             /(?:invalid|expired|missing|bad|denied|error).*token|token.*(?:invalid|expired|missing|bad|denied|error)/i.test(msg);
     });
     observedFacts.push({
       description: `Permission or configuration failure observed: '${permEvent.error || permEvent.reason || permEvent.message}'`,
@@ -254,7 +266,7 @@ export async function replayIncident(root, id) {
     });
   }
 
-  if (hasMalformed || (hasStarted && !hasFinished && !hasFailed && redactedState?.status === "running" && !pidAlive(redactedState?.workerPid))) {
+  if (hasMalformed) {
     classification = "truncated_history";
     lastConfirmedState = "running";
     unresolvedOwnership = "system";
