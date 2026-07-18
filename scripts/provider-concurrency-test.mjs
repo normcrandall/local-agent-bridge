@@ -256,6 +256,7 @@ try {
   // direct execution of a broker pool-entry script, the ./bridge CLI, wrapper forms.
   assert.equal(verificationCommandReentersProviderPool("npm run test:provider-concurrency", "claude"), true);
   assert.equal(verificationCommandReentersProviderPool("yarn test:provider-concurrency", "claude"), true);
+  assert.equal(verificationCommandReentersProviderPool("pnpm test:provider-concurrency", "claude"), true);
   assert.equal(verificationCommandReentersProviderPool("pnpm run test:provider-concurrency --silent", "claude"), true);
   assert.equal(verificationCommandReentersProviderPool("claude -p review", "claude"), true);
   assert.equal(verificationCommandReentersProviderPool("/usr/local/bin/claude review", "claude"), true);
@@ -267,6 +268,8 @@ try {
   // Negative: same substrings appearing only as file-path/argument data, unrelated
   // gates, and a cross-provider CLI that cannot deadlock on this provider's slot.
   assert.equal(verificationCommandReentersProviderPool("npm run test:collaboration", "claude"), false);
+  assert.equal(verificationCommandReentersProviderPool("npm test:provider-concurrency", "claude"), false);
+  assert.equal(verificationCommandReentersProviderPool("pnpm install", "claude"), false);
   assert.equal(verificationCommandReentersProviderPool("grep -rn provider-concurrency src", "claude"), false);
   assert.equal(verificationCommandReentersProviderPool("cat src/collaboration-bridge.mjs", "claude"), false);
   assert.equal(verificationCommandReentersProviderPool("eslint src/provider-concurrency.mjs", "claude"), false);

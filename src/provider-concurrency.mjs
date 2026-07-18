@@ -88,9 +88,10 @@ export function verificationCommandReentersProviderPool(command, provider) {
   // (c) A local package-script alias resolving to a known pool-entry gate.
   if (SCRIPT_RUNNERS.has(headName)) {
     const runIndex = rest.findIndex((token) => token === "run" || token === "run-script");
+    // yarn and pnpm accept a direct `<runner> <script>` shorthand; npm requires `run`.
     const script = runIndex >= 0
       ? rest[runIndex + 1]
-      : headName === "yarn"
+      : (headName === "yarn" || headName === "pnpm")
         ? firstOperand
         : null;
     if (script && POOL_ENTRY_PACKAGE_SCRIPTS.has(script)) return true;
