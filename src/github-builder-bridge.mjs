@@ -14,6 +14,7 @@ const prNumber = process.env.GITHUB_BUILDER_PR_NUMBER
   : null;
 const headRef = process.env.GITHUB_BUILDER_HEAD_REF || null;
 const baseRef = process.env.GITHUB_BUILDER_BASE_REF || null;
+const baseSha = process.env.GITHUB_BUILDER_BASE_SHA || null;
 const apiUrl = process.env.GITHUB_BUILDER_API_URL || "https://api.github.com";
 const allowedOperations = (process.env.GITHUB_BUILDER_ALLOWED_OPERATIONS || "ensure_pull_request,read_review_threads,reply_review_thread,resolve_review_thread,mark_ready")
   .split(",").map((value) => value.trim()).filter(Boolean);
@@ -21,6 +22,7 @@ const allowedOperations = (process.env.GITHUB_BUILDER_ALLOWED_OPERATIONS || "ens
 if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository || "")) throw new Error("GITHUB_BUILDER_REPOSITORY must be owner/name.");
 if (!GITHUB_LOGIN_PATTERN.test(expectedLogin || "")) throw new Error("GITHUB_BUILDER_EXPECTED_LOGIN is invalid.");
 if (!/^[0-9a-f]{40}$/i.test(headSha || "")) throw new Error("GITHUB_BUILDER_HEAD_SHA must be a full SHA.");
+if (baseSha !== null && !/^[0-9a-f]{40}$/i.test(baseSha)) throw new Error("GITHUB_BUILDER_BASE_SHA must be a full SHA.");
 
 const workspace = process.env.GITHUB_BUILDER_WORKSPACE || process.cwd();
 const receiptPath = process.env.GITHUB_BUILDER_RECEIPT_PATH
@@ -54,6 +56,7 @@ const client = createBoundBuilderClient({
   prNumber,
   headRef,
   baseRef,
+  baseSha,
   allowedOperations,
   requiredReviewStatusContext: process.env.GITHUB_BUILDER_REVIEW_STATUS_CONTEXT || "agent-review",
   trustedReviewLogins,

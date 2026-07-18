@@ -105,6 +105,7 @@ export function codexToolRequest({
     for (const [key, value] of Object.entries({
       GITHUB_BUILDER_REPOSITORY: githubBuilder.repository,
       GITHUB_BUILDER_PR_NUMBER: githubBuilder.prNumber ? String(githubBuilder.prNumber) : null,
+      GITHUB_BUILDER_BASE_SHA: githubBuilder.baseSha || null,
       GITHUB_BUILDER_HEAD_SHA: githubBuilder.headSha,
       GITHUB_BUILDER_EXPECTED_LOGIN: githubBuilder.expectedLogin,
       GITHUB_BUILDER_HEAD_REF: githubBuilder.headRef || null,

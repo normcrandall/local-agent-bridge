@@ -238,6 +238,7 @@ function runClaude({
       env: Object.fromEntries(Object.entries({
         GITHUB_BUILDER_REPOSITORY: githubBuilder.repository,
         GITHUB_BUILDER_PR_NUMBER: githubBuilder.prNumber ? String(githubBuilder.prNumber) : null,
+        GITHUB_BUILDER_BASE_SHA: githubBuilder.baseSha || null,
         GITHUB_BUILDER_HEAD_SHA: githubBuilder.headSha,
         GITHUB_BUILDER_EXPECTED_LOGIN: githubBuilder.expectedLogin,
         GITHUB_BUILDER_HEAD_REF: githubBuilder.headRef || null,
@@ -480,13 +481,21 @@ const sharedInput = {
   githubBuilder: z.object({
     repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
     prNumber: z.number().int().min(1).optional(),
+    baseSha: z.string().regex(/^[0-9a-f]{40}$/i).optional(),
     headSha: z.string().regex(/^[0-9a-f]{40}$/i),
     expectedLogin: z.string().regex(GITHUB_LOGIN_PATTERN),
     headRef: z.string().min(1).optional(),
     baseRef: z.string().min(1).optional(),
     allowedOperations: z.array(z.enum(["ensure_pull_request", "read_review_threads", "reply_review_thread", "resolve_review_thread", "mark_ready", "merge", "create_branch", "push_branch", "replace_branch"])).min(1).max(9)
       .default(["ensure_pull_request", "read_review_threads", "reply_review_thread", "resolve_review_thread", "mark_ready"]),
-  }).strict().optional().describe(
+  }).strict().superRefine((value, ctx) => {
+    if (value.allowedOperations.includes("create_branch") && !value.baseSha) {
+      ctx.addIssue({ code: "custom", path: ["baseSha"], message: "create_branch requires an exact baseSha authorization" });
+    }
+    if (value.allowedOperations.includes("create_branch") && !value.baseRef) {
+      ctx.addIssue({ code: "custom", path: ["baseRef"], message: "create_branch requires an exact baseRef authorization" });
+    }
+  }).optional().describe(
     "Explicit work-mode authorization for target-bound GitHub builder operations at one repository and head SHA.",
   ),
 };

@@ -470,13 +470,21 @@ const githubReviewSchema = z.object({
 const githubBuilderSchema = z.object({
   repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
   prNumber: z.number().int().min(1).optional(),
+  baseSha: z.string().regex(/^[0-9a-f]{40}$/i).optional(),
   headSha: z.string().regex(/^[0-9a-f]{40}$/i),
   expectedLogin: z.string().regex(GITHUB_LOGIN_PATTERN),
   headRef: z.string().min(1).optional(),
   baseRef: z.string().min(1).optional(),
   allowedOperations: z.array(z.enum(["ensure_pull_request", "read_review_threads", "reply_review_thread", "resolve_review_thread", "mark_ready", "merge", "create_branch", "push_branch", "replace_branch"])).min(1).max(9)
     .default(["ensure_pull_request", "read_review_threads", "reply_review_thread", "resolve_review_thread", "mark_ready"]),
-}).strict().optional().describe(
+}).strict().superRefine((value, ctx) => {
+  if (value.allowedOperations.includes("create_branch") && !value.baseSha) {
+    ctx.addIssue({ code: "custom", path: ["baseSha"], message: "create_branch requires an exact baseSha authorization" });
+  }
+  if (value.allowedOperations.includes("create_branch") && !value.baseRef) {
+    ctx.addIssue({ code: "custom", path: ["baseRef"], message: "create_branch requires an exact baseRef authorization" });
+  }
+}).optional().describe(
   "Authorize only target-bound builder GitHub operations for one repository and head SHA. Available only to the work-mode writer.",
 );
 const issueClaimSchema = z.object({

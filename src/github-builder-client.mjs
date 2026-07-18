@@ -243,6 +243,7 @@ export function createBoundBuilderClient({
   issueNumber = null,
   headRef = null,
   baseRef = null,
+  baseSha = null,
   requiredReviewStatusContext = "agent-review",
   trustedReviewLogins = [],
   trustedReviewAppIds = [],
@@ -256,6 +257,7 @@ export function createBoundBuilderClient({
 }) {
   assertRepository(repository);
   assertSha(headSha);
+  if (baseSha !== null) assertSha(baseSha);
   if (!apiUrl.startsWith("https://")) {
     throw new Error("API URL must use HTTPS.");
   }
@@ -926,12 +928,21 @@ export function createBoundBuilderClient({
 
   async function createBranch({ ref, sha }) {
     authorize("create_branch");
+    if (baseSha === null) {
+      throw new Error("create_branch requires an exact baseSha authorization.");
+    }
+    if (!baseRef) {
+      throw new Error("create_branch requires an exact baseRef authorization.");
+    }
     const branchName = assertBranchOperationInput({ ref, sha });
     const encodedBranch = branchName.split("/").map(encodeURIComponent).join("/");
 
     // 1. Local validation completes before any token issuance or API call.
     const gitPath = resolveGitBinary();
-    await validateLocalGitState({ gitPath, workspace, repository, ref, sha });
+    await validateLocalGitState({
+      gitPath, workspace, repository, ref, sha,
+      ...(baseSha === null ? {} : { oldSha: baseSha }),
+    });
 
     // 2. Token issuance and identity verification after validation.
     const credential = await ensureToken();
@@ -949,6 +960,19 @@ export function createBoundBuilderClient({
     }
     if (currentRef?.object?.sha) {
       throw new Error(`Branch ${branchName} already exists at ${currentRef.object.sha}; create_branch requires the ref to be absent or already at the bound SHA.`);
+    }
+
+    // A prior mutation is reconciled above even if the base has since moved.
+    // A genuinely new branch still requires its exact authorized base to be
+    // current immediately before the push.
+    const encodedBaseRef = baseRef.split("/").map(encodeURIComponent).join("/");
+    const remoteBase = await request({
+      ...context,
+      token: activeToken,
+      path: `/repos/${repository}/git/ref/heads/${encodedBaseRef}`,
+    });
+    if (remoteBase?.object?.sha !== baseSha) {
+      throw new Error(`Base ref ${baseRef} changed: authorized ${baseSha}, current ${remoteBase?.object?.sha || "unknown"}.`);
     }
 
     // 4. Exact create CAS: the lease requires the remote ref to not exist.
