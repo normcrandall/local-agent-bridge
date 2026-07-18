@@ -142,7 +142,7 @@ Completion: <evidence-based done condition>
 Portfolio: <helm-id after creation>
 Safe frontier: <selected issue IDs>
 Max parallel: <default 2>
-Provider capacity: Claude work 1/review 2 · Codex work 1/review 2 · Antigravity work 1/review 2
+Provider capacity: Claude work 5/review 10 · Codex work 5/review 10 · Antigravity work 5/review 10
 Participants: Claude, Codex, Antigravity
 Chair: <provider>
 Writer lanes: <issue -> provider, or pending>
