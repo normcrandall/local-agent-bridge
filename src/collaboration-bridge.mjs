@@ -18,9 +18,11 @@ import {
   listCollaborations,
   pruneTerminalCollaborations,
   readCollaboration,
+  releaseOwnedCollaborationLocks,
   updateCollaboration,
   waitForCollaborationChange,
 } from "./collaboration-store.mjs";
+import { reapProcessTree } from "./process-reaper.mjs";
 import { KNOWN_AGENTS, validateAgents } from "./talk-protocol.mjs";
 import { createWorktree, isSafeWorkerPid, preflight, selectRoles } from "./operations.mjs";
 import { createDecisionReceipt, DECISION_CATEGORIES } from "./decision-policy.mjs";
@@ -1508,16 +1510,32 @@ server.registerTool(
   },
   async ({ collaborationId: id }) => {
     const before = await readCollaboration(WORKSPACE_ROOT, id);
+    let reaped = null;
     if (isSafeWorkerPid(before.workerPid) && processAlive(before.workerPid)) {
       if (!workerCancellationMatches(before)) {
         throw new Error("Refusing to cancel: the live PID does not match this collaboration's owned worker metadata. Inspect with bridge recover; no process was terminated.");
       }
-      try { process.kill(-before.workerPid, "SIGTERM"); } catch (error) { if (error.code !== "ESRCH") throw error; }
+      // Issue #55: reap the whole worker tree (process group + ps-discovered
+      // descendants such as shell -> npm -> node), bounded grace, then SIGKILL.
+      try {
+        reaped = await reapProcessTree(before.workerPid);
+      } catch (error) {
+        if (error.code !== "ESRCH") throw error;
+      }
     }
     const state = await updateCollaboration(WORKSPACE_ROOT, id, (previous) => clearTerminalRuntime({
       ...previous,
       cancelRequested: true,
     }, { status: "cancelled" }));
+
+    // Issue #55: deterministically release the reaped worker's own worker/workspace
+    // locks. Ownership guards are preserved: locks held by a different live process are
+    // never removed.
+    const releasedLocks = await releaseOwnedCollaborationLocks(WORKSPACE_ROOT, {
+      id,
+      workspace: before.workspace,
+      ownerPid: before.workerPid,
+    });
 
     let claimReleaseError = null;
     if (before.issueClaim) {
@@ -1533,6 +1551,13 @@ server.registerTool(
       type: "cancelled",
       at: new Date().toISOString(),
       terminatedWorkerPid: before.workerPid || null,
+      reaped: reaped ? {
+        descendants: reaped.descendants.length,
+        signalled: reaped.signalled.length,
+        killed: reaped.killed.length,
+        escalated: reaped.escalated,
+      } : null,
+      releasedLocks: releasedLocks.released.length,
       releasedProviderCapacity,
       claimRelease: claimReleaseError ? { ok: false, error: claimReleaseError.message } : { ok: true },
     });

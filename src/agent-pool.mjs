@@ -8,6 +8,7 @@ import { configuredReviewerLogin, createInstallationToken, inspectGitHubAppRoles
 import { createBoundBuilderClient } from "./github-builder-client.mjs";
 import { localReviewPrompt, republishValidatedReview, resolveReviewPublication } from "./review-publication.mjs";
 import { resolveContainedHandoffPath } from "./handoff-path.mjs";
+import { admitProviderCommands, assertProviderVerificationCapability } from "./verification-allowlist.mjs";
 import { resolve } from "node:path";
 
 function textFrom(result) {
@@ -198,6 +199,16 @@ export function createAgentPool({
       }
     },
     async send({ agent, prompt, sessionId, mode, browser }, onProgress = () => {}) {
+      // Issue #55: fail-closed provider capability boundary. A bounded command-running
+      // review is dispatched only to a provider that can enforce an exact command grant
+      // (Claude). Codex/Antigravity carry no enforceable grant, so a review with
+      // verification commands is rejected here, before the provider spawns; they may
+      // still run static review with no verification commands.
+      assertProviderVerificationCapability({ provider: agent, mode, verificationCommands });
+      // Enforce the coordinator command allowlist on every provider request path before
+      // dispatch. Review calls may run only the verification gates; work calls also cover
+      // the coordinator work commands. Any command outside the allowlist fails here.
+      admitProviderCommands({ mode, verificationCommands, workCommands });
       const client = await clientFor(agent);
       const effectivePermissionProfile = mode === "work" ? permissionProfile : "standard";
       const publication = mode === "review" ? await reviewPublicationFor(agent) : { available: true, binding: null, reason: null };

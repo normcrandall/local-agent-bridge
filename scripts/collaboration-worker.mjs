@@ -23,7 +23,8 @@ import {
   orderReviewProbes,
   recordReviewPublicationResult,
 } from "../src/review-publication.mjs";
-import { acquireProviderCapacity, loadProviderConcurrency } from "../src/provider-concurrency.mjs";
+import { acquireProviderCapacity, assertNoProviderPoolReentry, loadProviderConcurrency } from "../src/provider-concurrency.mjs";
+import { activeVerificationCommand, capacityWaitNarrative, verificationNarrative } from "../src/collaboration-narrative.mjs";
 import { enqueueCoordinatorWake } from "../src/coordinator-wake.mjs";
 import { createBoundBuilderClient } from "../src/github-builder-client.mjs";
 import { createInstallationToken } from "../src/github-app-auth.mjs";
@@ -286,6 +287,16 @@ try {
       let lastCapacityWaitSignature = null;
       let capacityLease;
       try {
+        // Issue #55: before acquiring capacity, reject a verification command that would
+        // re-enter this same live provider-capacity pool — it would deadlock on the slot
+        // this call is about to hold. Fail fast; register no waiter.
+        assertNoProviderPoolReentry({
+          provider: call.agent,
+          role: capacityRole,
+          collaborationId: id,
+          limit: capacityLimits?.[call.agent]?.[capacityRole],
+          verificationCommands: state.verificationCommands || [],
+        });
         capacityLease = await acquireProviderCapacity(workspaceRoot, {
           provider: call.agent,
           role: capacityRole,
@@ -293,7 +304,8 @@ try {
           limits: capacityLimits,
           onWait: async ({ limit, inUse, position }) => {
             const now = new Date().toISOString();
-            const summary = `Waiting for ${call.agent} ${capacityRole} capacity (${inUse}/${limit} slots in use; queue position ${position}).`;
+            // Issue #55: put the explicit capacity-wait reason into the live narrative.
+            const wait = capacityWaitNarrative({ agent: call.agent, role: capacityRole, limit, inUse, position });
             await updateCollaboration(workspaceRoot, id, (current) => ({
               ...current,
               runtime: {
@@ -305,10 +317,11 @@ try {
                   phase: "waiting_capacity",
                   startedAt,
                   heartbeatAt: now,
-                  summary,
+                  summary: wait.summary,
                   summaryAt: now,
                   summarySource: "broker",
-                  capacity: { role: capacityRole, limit, inUse, position },
+                  waitReason: wait.reason,
+                  capacity: wait.capacity,
                 },
               },
             }));
@@ -323,6 +336,7 @@ try {
                 limit,
                 inUse,
                 position,
+                reason: wait.reason,
               });
             }
           },
@@ -332,11 +346,14 @@ try {
           ...current,
           runtime: { ...current.runtime, activeCall: null },
         })).catch(() => {});
+        // Issue #55: a self-deadlock is a distinct, typed terminal signal — no waiter
+        // was registered, so surface it explicitly rather than as a generic failure.
         await appendEvent(workspaceRoot, id, {
-          type: "provider_capacity_failed",
+          type: error?.selfDeadlock ? "provider_self_deadlock" : "provider_capacity_failed",
           at: new Date().toISOString(),
           agent: call.agent,
           role: capacityRole,
+          code: error?.code || null,
           error: error.message,
         }).catch(() => {});
         throw error;
@@ -390,11 +407,19 @@ try {
           writeActiveCall().catch(() => {});
         }, 5_000);
         heartbeat.unref?.();
+        let activeCommand = null;
         const response = await pool.send(call, async (progress) => {
           const incoming = progress.summary?.trim().slice(0, 500);
           if (incoming && isTransportLivenessSummary(incoming)) livenessMessage = incoming;
           else if (incoming) {
-            lastSummary = incoming;
+            // Issue #55: name the active verification command in the live narrative.
+            activeCommand = activeVerificationCommand(incoming, state.verificationCommands || []);
+            const narrative = verificationNarrative({
+              agent: call.agent,
+              providerSummary: incoming,
+              command: activeCommand,
+            });
+            lastSummary = narrative.summary;
             summaryAt = progress.at || new Date().toISOString();
             summarySource = "provider_or_adapter";
           }
@@ -406,6 +431,7 @@ try {
             summaryAt,
             summarySource,
             livenessMessage,
+            verificationCommand: activeCommand,
           });
           if (incoming) {
             await appendEvent(workspaceRoot, id, {

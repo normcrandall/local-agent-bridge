@@ -14,6 +14,114 @@ import { resolve } from "node:path";
 import { collaborationDirectory } from "./collaboration-store.mjs";
 
 export const PROVIDER_NAMES = ["claude", "codex", "antigravity"];
+
+// Issue #55: a collaboration that already holds every capacity slot for a
+// provider/role would wait forever on its own live slot. Fail fast instead of
+// registering a waiter that can never be satisfied.
+export class ProviderSelfDeadlockError extends Error {
+  constructor({ provider, role, collaborationId, limit, ownedSlots, reason, commands }) {
+    super(reason
+      ? `Collaboration ${collaborationId} would deadlock on its own live ${provider} ${role} capacity slot: ${reason}.`
+      : `Collaboration ${collaborationId} already owns ${ownedSlots}/${limit} live ${provider} ${role} capacity slot${limit === 1 ? "" : "s"}; waiting would deadlock on its own slot.`);
+    this.name = "ProviderSelfDeadlockError";
+    this.code = "provider_self_deadlock";
+    this.selfDeadlock = true;
+    this.provider = provider;
+    this.role = role;
+    this.collaborationId = collaborationId;
+    this.limit = limit;
+    this.ownedSlots = ownedSlots;
+    if (reason) this.reason = reason;
+    if (commands) this.commands = commands;
+  }
+}
+
+export function detectProviderSelfDeadlock({ ownedSlots, limit } = {}) {
+  return Number.isInteger(ownedSlots) && Number.isInteger(limit) && ownedSlots >= limit;
+}
+
+// A verification command "exercises the same live provider-capacity pool" when running
+// it would itself consume the same provider's live capacity — because it drives this
+// broker's provider dispatch/capacity acquisition, or directly invokes the same provider
+// CLI. Dispatching such a review would deadlock on the very slot this call holds.
+//
+// The match is STRUCTURAL, not substring-based: a name that merely appears in a file
+// path or argument (e.g. `cat src/collaboration-bridge.mjs`, `grep provider-concurrency`)
+// is never a match. Only a directly executed entrypoint counts.
+const POOL_ENTRY_PACKAGE_SCRIPTS = new Set(["test:provider-concurrency"]);
+const POOL_ENTRY_EXECUTABLES = new Set([
+  "collaboration-worker.mjs",
+  "collaboration-bridge.mjs",
+  "bridge",
+]);
+const SCRIPT_RUNNERS = new Set(["npm", "pnpm", "yarn"]);
+const NODE_RUNNERS = new Set(["node", "node.exe"]);
+
+function commandBasename(token) {
+  const cleaned = String(token || "").replace(/^['"]|['"]$/g, "");
+  const segments = cleaned.split(/[\\/]/);
+  return segments[segments.length - 1] || cleaned;
+}
+
+export function verificationCommandReentersProviderPool(command, provider) {
+  const tokens = String(command || "").trim().split(/\s+/).filter(Boolean);
+  if (!tokens.length) return false;
+  // Skip a leading `env` and any leading VAR=value environment assignments.
+  let index = 0;
+  if (commandBasename(tokens[index]) === "env") index += 1;
+  while (index < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[index])) index += 1;
+  const head = tokens[index];
+  if (!head) return false;
+  const headName = commandBasename(head);
+  const rest = tokens.slice(index + 1);
+  const firstOperand = rest.find((token) => !token.startsWith("-"));
+
+  // (a) Direct same-provider CLI invocation: `claude ...`, `/usr/local/bin/claude ...`.
+  if (provider && headName === provider) return true;
+
+  // (b) A known broker pool-entry executable, run directly or via node.
+  if (POOL_ENTRY_EXECUTABLES.has(headName)) return true;
+  if (NODE_RUNNERS.has(headName) && firstOperand && POOL_ENTRY_EXECUTABLES.has(commandBasename(firstOperand))) {
+    return true;
+  }
+
+  // (c) A local package-script alias resolving to a known pool-entry gate.
+  if (SCRIPT_RUNNERS.has(headName)) {
+    const runIndex = rest.findIndex((token) => token === "run" || token === "run-script");
+    // yarn and pnpm accept a direct `<runner> <script>` shorthand; npm requires `run`.
+    const script = runIndex >= 0
+      ? rest[runIndex + 1]
+      : (headName === "yarn" || headName === "pnpm")
+        ? firstOperand
+        : null;
+    if (script && POOL_ENTRY_PACKAGE_SCRIPTS.has(script)) return true;
+  }
+
+  return false;
+}
+
+export function verificationCommandsReenteringPool({ provider, verificationCommands = [] } = {}) {
+  return verificationCommands
+    .map((command) => String(command || "").trim())
+    .filter((command) => command && verificationCommandReentersProviderPool(command, provider));
+}
+
+// Worker/dispatch guard: run BEFORE acquiring capacity. If any verification command
+// would re-enter the same live provider-capacity pool, fail fast with a typed
+// provider_self_deadlock and register no waiter.
+export function assertNoProviderPoolReentry({ provider, role, collaborationId, limit, verificationCommands = [] } = {}) {
+  const reentrant = verificationCommandsReenteringPool({ provider, verificationCommands });
+  if (reentrant.length) {
+    throw new ProviderSelfDeadlockError({
+      provider,
+      role,
+      collaborationId,
+      limit,
+      reason: `verification command re-enters the same live provider-capacity pool (${reentrant.join(", ")})`,
+      commands: reentrant,
+    });
+  }
+}
 export const DEFAULT_PROVIDER_CONCURRENCY_CONFIG = resolve(
   homedir(),
   ".config/local-agent-bridge/provider-concurrency.json",
@@ -192,6 +300,19 @@ async function liveEntries(root, directory, suffix) {
   return live;
 }
 
+async function countOwnedSlots(root, directory, collaborationId) {
+  let owned = 0;
+  for (const entry of await liveEntries(root, directory, ".slot")) {
+    try {
+      const parsed = JSON.parse(await readFile(entry.path, "utf8"));
+      if (parsed.collaborationId === collaborationId) owned += 1;
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
+  return owned;
+}
+
 export async function releaseProviderCapacityForCollaboration(root, collaborationId) {
   if (!/^bridge-[0-9a-f-]{36}$/.test(collaborationId || "")) {
     throw new Error("A valid collaborationId is required for provider capacity cleanup.");
@@ -243,6 +364,10 @@ export async function acquireProviderCapacity(root, {
   const limit = normalized[provider][role];
   const directory = resolve(collaborationDirectory(root), "capacity", provider, role);
   await mkdir(directory, { recursive: true, mode: 0o700 });
+  const ownedSlots = await countOwnedSlots(root, directory, collaborationId);
+  if (detectProviderSelfDeadlock({ ownedSlots, limit })) {
+    throw new ProviderSelfDeadlockError({ provider, role, collaborationId, limit, ownedSlots });
+  }
   const queuedAt = Date.now();
   const { waiterName, waiterPath } = await registerWaiter(directory, {
     collaborationId,

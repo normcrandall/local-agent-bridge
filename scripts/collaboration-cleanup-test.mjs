@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { clearTerminalRuntime, legacyWorkerCommandMatches, reconciliationAction, workerCancellationMatches, workerCommandMatches } from "../src/collaboration-cleanup.mjs";
+// Issue #55 cleanup-path fixtures: descendant reaping and deterministic owned-lock release.
+import "./issue-55-reaping-test.mjs";
+import "./issue-55-locks-test.mjs";
 
 for (const status of ["agreed", "cancelled", "failed", "turn_limit", "budget", "needs_user"]) {
   const state = clearTerminalRuntime({ status: "running", workerPid: 99, workerOwner: { id: "bridge-x", pid: 99 }, runtime: { activeCall: { agent: "codex" } } }, { status });

@@ -18,6 +18,7 @@ import { configuredReviewerLogin, GITHUB_LOGIN_PATTERN } from "./github-app-auth
 import { loadConfiguredClaudeModel, resolveClaudeModelPolicy } from "./claude-model-policy.mjs";
 import { loadConfiguredFallbackModels, normalizeFallbackModels } from "./model-fallbacks.mjs";
 import { resolveModelRoute } from "./model-policy.mjs";
+import { admitProviderCommands } from "./verification-allowlist.mjs";
 import { negotiateProviderCapabilities } from "./provider-cli-capabilities.mjs";
 import { ensureContainedHandoffPath } from "./handoff-path.mjs";
 
@@ -263,7 +264,7 @@ function runClaude({
       "Read",
       "Glob",
       "Grep",
-      ...verificationCommands.map((command) => `Bash(${command})`),
+      ...admitProviderCommands({ mode: "review", verificationCommands }).map((command) => `Bash(${command})`),
     ];
     if (actualHandoffPath) {
       const permissionPath = actualHandoffPath.startsWith("/")
@@ -280,7 +281,7 @@ function runClaude({
     const allowedTools = [
       "Read", "Glob", "Grep", "Edit", "Write",
       ...profileTools(workProfile),
-      ...[...new Set([...workCommands, ...verificationCommands])].map((command) => `Bash(${command})`),
+      ...admitProviderCommands({ mode: "work", verificationCommands, workCommands }).map((command) => `Bash(${command})`),
     ];
     if (browser) allowedTools.push("mcp__playwright__*");
     if (githubBuilder) allowedTools.push("mcp__github_builder__*");
