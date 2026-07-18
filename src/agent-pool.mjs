@@ -8,7 +8,11 @@ import { configuredReviewerLogin, createInstallationToken, inspectGitHubAppRoles
 import { createBoundBuilderClient } from "./github-builder-client.mjs";
 import { localReviewPrompt, republishValidatedReview, resolveReviewPublication } from "./review-publication.mjs";
 import { resolveContainedHandoffPath } from "./handoff-path.mjs";
-import { admitProviderCommands, assertProviderVerificationCapability } from "./verification-allowlist.mjs";
+import {
+  admitProviderCommands,
+  assertProviderVerificationCapability,
+  providerPermissionProfileForRequest,
+} from "./verification-allowlist.mjs";
 import { resolve } from "node:path";
 
 function textFrom(result) {
@@ -244,7 +248,12 @@ export function createAgentPool({
       // the coordinator work commands. Any command outside the allowlist fails here.
       admitProviderCommands({ mode, verificationCommands, workCommands });
       const client = await clientFor(agent);
-      const effectivePermissionProfile = mode === "work" ? permissionProfile : "standard";
+      const effectivePermissionProfile = providerPermissionProfileForRequest({
+        provider: agent,
+        mode,
+        verificationCommands,
+        permissionProfile,
+      });
       // Autonomous work with a bound builder runs on an implement-equivalent
       // shell/network grant; the bound builder tools remain the delivery path.
       const effectiveWorkProfile = autonomousWorkProfile({ autonomous, githubBuilder, mode, workProfile });
@@ -310,6 +319,7 @@ export function createAgentPool({
           fallbackModels: modelFallbacks.antigravity,
           timeoutSeconds: turnTimeoutSeconds,
           permissionProfile: effectivePermissionProfile,
+          verificationCommands,
         });
       }
       request._meta = { progressToken: `${agent}-${Date.now()}` };
@@ -363,6 +373,10 @@ export function createAgentPool({
         metadata: {
           usage: structured.usage || structured.tokenUsage || null,
           durationMs: structured.durationMs || structured.duration_ms || null,
+          permissionProfile: effectivePermissionProfile,
+          permissionReason: agent === "antigravity" && mode === "review" && verificationCommands.length
+            ? "automatic_unrestricted_verification"
+            : "configured",
           modelRouting: ["claude", "codex"].includes(agent) ? {
             requestedModel: structured.requestedModel ?? null,
             model: structured.model ?? null,

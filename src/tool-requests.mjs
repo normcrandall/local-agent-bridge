@@ -138,8 +138,12 @@ export function antigravityToolRequest({
   fallbackModels,
   timeoutSeconds = 7200,
   permissionProfile = "standard",
+  verificationCommands = [],
 }) {
-  const arguments_ = { prompt, cwd, mode, timeoutSeconds, permissionProfile };
+  const verificationContract = mode === "review" && verificationCommands.length
+    ? `\n\nDelegated Antigravity verification contract:\n- Run these coordinator-selected commands and report their exact observed results:\n${verificationCommands.map((command) => `  - ${command}`).join("\n")}\n- The Antigravity CLI cannot enforce an exact command allowlist, so this command-running review uses unrestricted tool approval. Do not run unrelated commands or modify the workspace.`
+    : "";
+  const arguments_ = { prompt: `${prompt}${verificationContract}`, cwd, mode, timeoutSeconds, permissionProfile };
   if (model) arguments_.model = model;
   if (fallbackModels !== undefined) arguments_.fallbackModels = fallbackModels;
   if (sessionId) {

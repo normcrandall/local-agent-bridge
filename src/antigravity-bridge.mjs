@@ -96,10 +96,6 @@ function runAntigravityAttempt({ prompt, cwd, mode, model, timeoutSeconds, permi
   if (process.env.ANTIGRAVITY_BRIDGE_ACTIVE === "1") {
     throw new Error("Nested Antigravity bridge invocation blocked to prevent an agent loop.");
   }
-  if (permissionProfile === "yolo" && mode !== "work") {
-    throw new Error("permissionProfile yolo is available only in work mode.");
-  }
-
   const actualCwd = projectDirectory(cwd);
   const duration = timeoutMs(timeoutSeconds);
   const temporaryDirectory = AGY_CAPABILITIES.logFile ? mkdtempSync(join(tmpdir(), "antigravity-agent-bridge-")) : null;
@@ -126,7 +122,7 @@ function runAntigravityAttempt({ prompt, cwd, mode, model, timeoutSeconds, permi
   for (const directory of [actualCwd, ...gitMetadataDirectories(actualCwd)]) {
     args.push("--add-dir", directory);
   }
-  if (mode === "work" && permissionProfile === "yolo") {
+  if (permissionProfile === "yolo") {
     if (!AGY_CAPABILITIES.yolo) throw new Error(`Installed Antigravity ${AGY_CAPABILITIES.version} cannot enable YOLO mode.`);
     args.push("--dangerously-skip-permissions");
   } else if (AGY_CAPABILITIES.sandbox) args.push("--sandbox");
@@ -257,7 +253,7 @@ const sharedInput = {
   prompt: z.string().min(1).describe("A self-contained task or question for Antigravity."),
   cwd: z.string().optional().describe("Project-relative directory. Defaults to the project root."),
   mode: z.enum(["review", "work"]).default("review").describe(
-    "review uses Antigravity plan mode; work uses accept-edits. Both run inside Antigravity's terminal sandbox.",
+    "review uses Antigravity plan mode; work uses accept-edits. Standard calls run inside Antigravity's terminal sandbox.",
   ),
   model: z.string().min(1).optional().describe(
     "Optional Antigravity model label. Omit it to use the model selected in the user's Antigravity settings.",
@@ -267,7 +263,7 @@ const sharedInput = {
   ),
   timeoutSeconds: z.number().int().min(10).max(14400).optional(),
   permissionProfile: z.enum(["standard", "yolo"]).default("standard").describe(
-    "Explicit work-mode permission policy. yolo auto-approves tools and disables the terminal sandbox; it must never be inferred.",
+    "Permission policy. yolo auto-approves tools and disables the terminal sandbox. The collaboration broker selects it automatically for Antigravity command-running reviews because agy exposes no narrower non-interactive command grant.",
   ),
 };
 
@@ -275,7 +271,7 @@ const server = new McpServer(
   { name: "codex-antigravity-bridge", version: "0.1.0" },
   {
     instructions:
-      "Use ask_antigravity for a bounded independent task and continue_antigravity only with the exact returned conversationId. Omit model to honor the user's configured Antigravity model. Delegated sessions run sandboxed; review is plan mode and work is accept-edits. Never ask Antigravity to call Codex or Claude through MCP from a delegated session.",
+      "Use ask_antigravity for a bounded independent task and continue_antigravity only with the exact returned conversationId. Omit model to honor the user's configured Antigravity model. Standard delegated sessions run sandboxed; review is plan mode and work is accept-edits. The collaboration broker uses unrestricted tool approval for command-running Antigravity reviews because agy exposes no exact command grant. Never ask Antigravity to call Codex or Claude through MCP from a delegated session.",
   },
 );
 

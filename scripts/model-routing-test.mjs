@@ -94,6 +94,17 @@ assert.deepEqual(claudeWorkPermissions.arguments.workCommands, ["npm test", "git
 assert.equal(claudeWorkPermissions.arguments.workProfile, "deliver");
 assert.equal(claudeToolRequest({ prompt: "go", mode: "work", permissionProfile: "yolo" }).arguments.permissionProfile, "yolo");
 
+const antigravityCommandReview = antigravityToolRequest({
+  prompt: "review",
+  mode: "review",
+  permissionProfile: "yolo",
+  verificationCommands: ["npm test", "git diff --check"],
+});
+assert.equal(antigravityCommandReview.arguments.permissionProfile, "yolo");
+assert.match(antigravityCommandReview.arguments.prompt, /npm test/);
+assert.match(antigravityCommandReview.arguments.prompt, /git diff --check/);
+assert.match(antigravityCommandReview.arguments.prompt, /unrestricted tool approval/);
+
 const codexDefault = codexToolRequest({ prompt: "test", cwd: "/workspace" });
 assert.equal(codexDefault.name, "codex");
 assert.equal(Object.hasOwn(codexDefault.arguments, "model"), false);

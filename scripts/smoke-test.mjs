@@ -374,11 +374,17 @@ async function callAntigravityWithoutModel() {
     if (!yoloSerialized.includes("--dangerously-skip-permissions") || yoloSerialized.includes("--sandbox")) {
       throw new Error("Antigravity YOLO mode did not replace the terminal sandbox with auto-approval");
     }
-    const rejectedReviewYolo = await client.callTool({
+    const reviewYolo = await client.callTool({
       name: "ask_antigravity",
-      arguments: { prompt: "must reject", mode: "review", permissionProfile: "yolo" },
+      arguments: { prompt: "command-running review", mode: "review", permissionProfile: "yolo" },
     });
-    if (!rejectedReviewYolo.isError) throw new Error("Antigravity accepted YOLO permissions in review mode");
+    if (reviewYolo.isError) throw new Error("Antigravity rejected unrestricted permissions in review mode");
+    const reviewYoloSerialized = JSON.stringify(reviewYolo.content);
+    if (!reviewYoloSerialized.includes("--dangerously-skip-permissions")
+      || reviewYoloSerialized.includes("--sandbox")
+      || !reviewYoloSerialized.includes("plan")) {
+      throw new Error("Antigravity review YOLO mode did not use plan mode with unrestricted tool approval");
+    }
     console.log("Antigravity bridge call paths: explicit model forwarded; configured default preserved");
   } finally {
     await client.close();
