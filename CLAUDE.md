@@ -7,6 +7,7 @@ Prefer the installed collaboration skills as the user-facing interface. Announce
 - Use `/ask-agent` for one bounded handoff or review.
 - Use `/run-roundtable` for a persistent multi-agent collaboration.
 - Use `/show-collaboration` to inspect, monitor, or resume collaboration history.
+- Use `/replay-collaboration` to run a deterministic replay of collaboration incidents.
 - Use `/goal-loop` to build toward explicit completion criteria through bounded plan, implement, review, and verification cycles.
 - Use `/collaboration-doctor` for a read-only effective-policy audit of one workspace, provider roster, role, permission profile, fallback chain, and GitHub App boundary before delegation.
 - Use `/take-the-helm` when the user delegates operational ownership of a goal or work queue and wants the council to resolve routine decisions without human interruption.

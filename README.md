@@ -272,6 +272,7 @@ Ten canonical skills provide the same visible vocabulary in Codex, Claude, and A
 - `ask-agent`: announce and perform one named peer handoff.
 - `run-roundtable`: start and actively monitor a persistent collaboration.
 - `show-collaboration`: render status and turn history as a timeline.
+- `replay-collaboration`: replay incident records and identify next safe actions.
 - `goal-loop`: build toward verified completion through bounded, resumable council cycles.
 - `pair-program`: rotate implementation and review roles with preflight, worktrees, visible progress, recovery, CI, budgets, and review reconciliation.
 - `collaboration-doctor`: audit the effective workspace, provider, permission, fallback, skill, budget, and GitHub App policy without changing it.
@@ -346,6 +347,7 @@ These skills are supplied by this project and installed across Codex, Claude, an
 | `ask-agent` | Send one bounded task or review to a named peer with a visible handoff receipt. |
 | `run-roundtable` | Run and monitor a persistent Claude–Codex–Antigravity collaboration. |
 | `show-collaboration` | Display collaboration status, skipped providers, turns, and history. |
+| `replay-collaboration` | Replay incident records and identify next safe actions. |
 | `goal-loop` | Build toward explicit completion criteria through bounded plan, implement, review, fix, and verification cycles. |
 | `pair-program` | Rotate one writer and independent reviewers across tasks, worktrees, CI, and formal PR reviews. |
 | `collaboration-doctor` | Render a read-only effective-policy matrix with fail-closed findings and least-authority remediations before delegation. |

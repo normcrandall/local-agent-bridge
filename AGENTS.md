@@ -7,6 +7,7 @@ Prefer the installed collaboration skills as the user-facing interface. Announce
 - Use `$ask-agent` for one bounded handoff or review.
 - Use `$run-roundtable` for a persistent multi-agent collaboration.
 - Use `$show-collaboration` to inspect, monitor, or resume collaboration history.
+- Use `$replay-collaboration` to run a deterministic replay of collaboration incidents.
 - Use `$goal-loop` to build toward explicit completion criteria through bounded plan, implement, review, and verification cycles.
 - Use `$pair-program` for rotating Claude/Codex/Antigravity implementer and reviewer roles with preflight, worktree isolation, CI tracking, budgets, recovery, and formal PR reviews.
 - Use `$collaboration-doctor` for a read-only effective-policy audit of one workspace, provider roster, role, permission profile, fallback chain, and GitHub App boundary before delegation.
