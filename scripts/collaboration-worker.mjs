@@ -23,7 +23,7 @@ import {
   orderReviewProbes,
   recordReviewPublicationResult,
 } from "../src/review-publication.mjs";
-import { acquireProviderCapacity, loadProviderConcurrency } from "../src/provider-concurrency.mjs";
+import { acquireProviderCapacity, assertNoProviderPoolReentry, loadProviderConcurrency } from "../src/provider-concurrency.mjs";
 import { activeVerificationCommand, capacityWaitNarrative, verificationNarrative } from "../src/collaboration-narrative.mjs";
 import { enqueueCoordinatorWake } from "../src/coordinator-wake.mjs";
 import { createBoundBuilderClient } from "../src/github-builder-client.mjs";
@@ -287,6 +287,16 @@ try {
       let lastCapacityWaitSignature = null;
       let capacityLease;
       try {
+        // Issue #55: before acquiring capacity, reject a verification command that would
+        // re-enter this same live provider-capacity pool — it would deadlock on the slot
+        // this call is about to hold. Fail fast; register no waiter.
+        assertNoProviderPoolReentry({
+          provider: call.agent,
+          role: capacityRole,
+          collaborationId: id,
+          limit: capacityLimits?.[call.agent]?.[capacityRole],
+          verificationCommands: state.verificationCommands || [],
+        });
         capacityLease = await acquireProviderCapacity(workspaceRoot, {
           provider: call.agent,
           role: capacityRole,

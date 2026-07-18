@@ -4,12 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   acquireProviderCapacity,
+  assertNoProviderPoolReentry,
   DEFAULT_PROVIDER_CONCURRENCY,
   detectProviderSelfDeadlock,
   loadProviderConcurrency,
   normalizeProviderConcurrency,
   ProviderSelfDeadlockError,
   releaseProviderCapacityForCollaboration,
+  verificationCommandReentersProviderPool,
+  verificationCommandsReenteringPool,
 } from "../src/provider-concurrency.mjs";
 
 const root = await mkdtemp(join(tmpdir(), "agent-provider-capacity-"));
@@ -246,6 +249,56 @@ try {
   });
   assert.equal(afterCancel.slot, heldSlot);
   await afterCancel.release();
+
+  // Issue #55: a verification command that re-enters the same live provider-capacity pool
+  // must fail fast with provider_self_deadlock BEFORE any waiter/slot is registered.
+  assert.equal(verificationCommandReentersProviderPool("npm run test:provider-concurrency", "claude"), true);
+  assert.equal(verificationCommandReentersProviderPool("claude -p review", "claude"), true);
+  assert.equal(verificationCommandReentersProviderPool("/usr/local/bin/claude review", "claude"), true);
+  assert.equal(verificationCommandReentersProviderPool("npm run test:collaboration", "claude"), false);
+  assert.deepEqual(
+    verificationCommandsReenteringPool({
+      provider: "claude",
+      verificationCommands: ["npm test", "npm run test:provider-concurrency"],
+    }),
+    ["npm run test:provider-concurrency"],
+  );
+
+  // Mirror the worker's pre-dispatch ordering: guard first, then acquire. When the guard
+  // trips, capacity is never touched — no waiter or slot is created for the collaboration.
+  const reentryOwner = collaborationId("e");
+  const reentryDir = join(root, "capacity", "claude", "review");
+  const beforeNames = await readdir(reentryDir).catch(() => []);
+  const beforeWait = beforeNames.filter((name) => name.endsWith(".wait")).length;
+  const beforeSlot = beforeNames.filter((name) => name.endsWith(".slot")).length;
+  let reentryError = null;
+  try {
+    assertNoProviderPoolReentry({
+      provider: "claude",
+      role: "review",
+      collaborationId: reentryOwner,
+      limit: 2,
+      verificationCommands: ["npm run test:provider-concurrency"],
+    });
+    // Unreached in the worker: acquisition only runs when the guard passes.
+    const leaked = await acquireProviderCapacity(root, {
+      provider: "claude",
+      role: "review",
+      collaborationId: reentryOwner,
+      limits,
+      pollMs: 10,
+    });
+    await leaked.release();
+  } catch (error) {
+    reentryError = error;
+  }
+  assert.ok(reentryError instanceof ProviderSelfDeadlockError);
+  assert.equal(reentryError.code, "provider_self_deadlock");
+  assert.equal(reentryError.selfDeadlock, true);
+  assert.deepEqual(reentryError.commands, ["npm run test:provider-concurrency"]);
+  const afterNames = await readdir(reentryDir).catch(() => []);
+  assert.equal(afterNames.filter((name) => name.endsWith(".wait")).length, beforeWait);
+  assert.equal(afterNames.filter((name) => name.endsWith(".slot")).length, beforeSlot);
 } finally {
   delete process.env.AGENT_BRIDGE_PROVIDER_CONCURRENCY_CONFIG;
   delete process.env.BRIDGE_COLLABORATION_DIR;

@@ -5,10 +5,13 @@ import assert from "node:assert/strict";
 import {
   admitProviderCommand,
   admitProviderCommands,
+  assertProviderVerificationCapability,
   effectiveCommandAllowlist,
   isCommandAllowlisted,
   normalizeVerificationAllowlist,
+  ProviderCommandGrantUnsupportedError,
   ProviderCommandNotAllowlistedError,
+  providerEnforcesExactCommandGrants,
 } from "../src/verification-allowlist.mjs";
 
 // Normalization: trim, drop empties, de-duplicate, stable order.
@@ -65,5 +68,33 @@ assert.throws(
   () => admitProviderCommands({ mode: "work", verificationCommands: ["npm run smoke"], workCommands: ["git commit -am wip"], candidates: ["curl evil.example"] }),
   /provider verification allowlist|not on the coordinator/,
 );
+
+// Fail-closed provider capability boundary: only exact-grant enforcers may run a
+// command-running review; others are denied before dispatch but keep static review.
+assert.equal(providerEnforcesExactCommandGrants("claude"), true);
+assert.equal(providerEnforcesExactCommandGrants("codex"), false);
+assert.equal(providerEnforcesExactCommandGrants("antigravity"), false);
+
+// Command-running review on Claude is allowed; on Codex/Antigravity it is denied.
+assert.doesNotThrow(() => assertProviderVerificationCapability({ provider: "claude", mode: "review", verificationCommands: ["npm test"] }));
+for (const provider of ["codex", "antigravity"]) {
+  const denial = (() => {
+    try {
+      assertProviderVerificationCapability({ provider, mode: "review", verificationCommands: ["npm test"] });
+      return null;
+    } catch (error) {
+      return error;
+    }
+  })();
+  assert.ok(denial instanceof ProviderCommandGrantUnsupportedError, `${provider} must be denied`);
+  assert.equal(denial.code, "provider_command_grant_unsupported");
+  assert.equal(denial.provider, provider);
+}
+// Static review (no verification commands) is allowed for every provider.
+for (const provider of ["claude", "codex", "antigravity"]) {
+  assert.doesNotThrow(() => assertProviderVerificationCapability({ provider, mode: "review", verificationCommands: [] }));
+}
+// Work mode is not gated by this review-only boundary.
+assert.doesNotThrow(() => assertProviderVerificationCapability({ provider: "codex", mode: "work", verificationCommands: ["npm test"] }));
 
 console.log("Issue #55 allowlist admission tests passed.");

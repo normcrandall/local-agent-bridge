@@ -12,6 +12,39 @@ export class ProviderCommandNotAllowlistedError extends Error {
   }
 }
 
+// Fail-closed provider capability boundary. Only providers whose request path can
+// express an *enforceable exact command grant* (Claude: `--allowedTools Bash(cmd)` +
+// `--permission-mode dontAsk`) may run a bounded command-running review. Codex (sandbox
+// mode only) and Antigravity (no command grant at all) cannot restrict a reviewer to the
+// exact allowlist, so they are rejected before dispatch when verification commands are
+// present; they remain eligible for static review that carries no verification commands.
+export const PROVIDERS_ENFORCING_EXACT_COMMAND_GRANTS = Object.freeze(["claude"]);
+
+export function providerEnforcesExactCommandGrants(provider) {
+  return PROVIDERS_ENFORCING_EXACT_COMMAND_GRANTS.includes(provider);
+}
+
+export class ProviderCommandGrantUnsupportedError extends Error {
+  constructor(provider, commands) {
+    super(`Provider ${provider} cannot enforce an exact command grant, so it may not run a bounded command-running review (${commands.length} verification command${commands.length === 1 ? "" : "s"}). It remains eligible for static review with no verification commands.`);
+    this.name = "ProviderCommandGrantUnsupportedError";
+    this.code = "provider_command_grant_unsupported";
+    this.provider = provider;
+    this.commands = commands;
+  }
+}
+
+// Assert, before dispatch, that a provider is allowed to run this request's verification
+// commands. Throws for a command-running review on a provider that cannot enforce exact
+// grants. Static review (no verification commands) and work mode pass through.
+export function assertProviderVerificationCapability({ provider, mode, verificationCommands = [] } = {}) {
+  const commands = normalizeVerificationAllowlist(verificationCommands);
+  if (mode === "review" && commands.length && !providerEnforcesExactCommandGrants(provider)) {
+    throw new ProviderCommandGrantUnsupportedError(provider, commands);
+  }
+  return commands;
+}
+
 // Coordinator commands are single-line, trimmed, non-empty strings. Normalization is
 // deterministic (stable order, de-duplicated) so admission is order-independent.
 export function normalizeVerificationAllowlist(commands = []) {

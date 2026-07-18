@@ -19,8 +19,10 @@ export const PROVIDER_NAMES = ["claude", "codex", "antigravity"];
 // provider/role would wait forever on its own live slot. Fail fast instead of
 // registering a waiter that can never be satisfied.
 export class ProviderSelfDeadlockError extends Error {
-  constructor({ provider, role, collaborationId, limit, ownedSlots }) {
-    super(`Collaboration ${collaborationId} already owns ${ownedSlots}/${limit} live ${provider} ${role} capacity slot${limit === 1 ? "" : "s"}; waiting would deadlock on its own slot.`);
+  constructor({ provider, role, collaborationId, limit, ownedSlots, reason, commands }) {
+    super(reason
+      ? `Collaboration ${collaborationId} would deadlock on its own live ${provider} ${role} capacity slot: ${reason}.`
+      : `Collaboration ${collaborationId} already owns ${ownedSlots}/${limit} live ${provider} ${role} capacity slot${limit === 1 ? "" : "s"}; waiting would deadlock on its own slot.`);
     this.name = "ProviderSelfDeadlockError";
     this.code = "provider_self_deadlock";
     this.selfDeadlock = true;
@@ -29,11 +31,61 @@ export class ProviderSelfDeadlockError extends Error {
     this.collaborationId = collaborationId;
     this.limit = limit;
     this.ownedSlots = ownedSlots;
+    if (reason) this.reason = reason;
+    if (commands) this.commands = commands;
   }
 }
 
 export function detectProviderSelfDeadlock({ ownedSlots, limit } = {}) {
   return Number.isInteger(ownedSlots) && Number.isInteger(limit) && ownedSlots >= limit;
+}
+
+// A verification command "exercises the same live provider-capacity pool" when running
+// it would itself acquire capacity for the same provider — because it drives this
+// broker's provider dispatch (directly, via its capacity test, or the collaboration
+// worker) or re-invokes the same provider CLI by name. Dispatching such a review would
+// deadlock: the nested acquisition waits on the very slot this call holds. Conservative,
+// provider-neutral structural match.
+const PROVIDER_CAPACITY_POOL_MARKERS = [
+  "test:provider-concurrency",
+  "provider-concurrency",
+  "acquireProviderCapacity",
+  "collaboration-worker",
+  "start_collaboration",
+  "collaboration-bridge",
+];
+
+export function verificationCommandReentersProviderPool(command, provider) {
+  const text = String(command || "");
+  if (PROVIDER_CAPACITY_POOL_MARKERS.some((marker) => text.includes(marker))) return true;
+  if (provider) {
+    const token = text.trim().split(/\s+/)[0] || "";
+    if (token === provider || token.endsWith(`/${provider}`)) return true;
+  }
+  return false;
+}
+
+export function verificationCommandsReenteringPool({ provider, verificationCommands = [] } = {}) {
+  return verificationCommands
+    .map((command) => String(command || "").trim())
+    .filter((command) => command && verificationCommandReentersProviderPool(command, provider));
+}
+
+// Worker/dispatch guard: run BEFORE acquiring capacity. If any verification command
+// would re-enter the same live provider-capacity pool, fail fast with a typed
+// provider_self_deadlock and register no waiter.
+export function assertNoProviderPoolReentry({ provider, role, collaborationId, limit, verificationCommands = [] } = {}) {
+  const reentrant = verificationCommandsReenteringPool({ provider, verificationCommands });
+  if (reentrant.length) {
+    throw new ProviderSelfDeadlockError({
+      provider,
+      role,
+      collaborationId,
+      limit,
+      reason: `verification command re-enters the same live provider-capacity pool (${reentrant.join(", ")})`,
+      commands: reentrant,
+    });
+  }
 }
 export const DEFAULT_PROVIDER_CONCURRENCY_CONFIG = resolve(
   homedir(),

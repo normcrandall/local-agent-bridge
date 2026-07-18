@@ -8,6 +8,8 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 // Issue #55 dispatch/narrative fixtures: command allowlist admission and command-aware narrative.
 import "./issue-55-allowlist-test.mjs";
 import "./issue-55-narrative-test.mjs";
+// Issue #55 fail-closed provider capability boundary (integration via delegated pool.send).
+import "./issue-55-capability-boundary-test.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const stateDirectory = await mkdtemp(join(tmpdir(), "agent-collaboration-test-"));
