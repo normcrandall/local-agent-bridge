@@ -50,6 +50,11 @@ import {
   recordMergeValidation,
   refreshMergeTarget,
 } from "./merge-train.mjs";
+import {
+  plannedIssueClaimWorktree,
+  resolveClaimedWorktreeHead,
+  resolveIssueClaimRevisions,
+} from "./collaboration-start-preflight.mjs";
 
 const RUNTIME_ROOT = realpathSync(process.env.BRIDGE_RUNTIME_ROOT || process.env.BRIDGE_ROOT || process.cwd());
 const WORKSPACE_ROOT = realpathSync(process.env.BRIDGE_WORKSPACE_ROOT || process.env.BRIDGE_ROOT || process.cwd());
@@ -654,20 +659,14 @@ server.registerTool(
       const repository = input.issueClaim.repository;
       const expectedLogin = input.issueClaim.expectedLogin;
       const credential = await createInstallationToken({ role: "builder", repository });
-      let headSha = input.issueClaim.headSha;
-      if (!headSha) {
-        const rev = spawnSync("git", ["rev-parse", "HEAD"], { cwd: requestedWorkspace, encoding: "utf8" });
-        if (rev.status === 0) {
-          headSha = rev.stdout.trim();
-        } else {
-          throw new Error("Unable to retrieve HEAD SHA from workspace.");
-        }
-      }
+      const revisions = resolveIssueClaimRevisions({
+        workspace: requestedWorkspace,
+        headSha: input.issueClaim.headSha,
+        baseRef: input.worktree?.base || input.issueClaim.baseSha || input.issueClaim.headSha || "HEAD",
+      });
+      const headSha = revisions.headSha;
       claimHeadSha = headSha;
-      const baseRef = input.worktree?.base || input.issueClaim.baseSha || headSha;
-      const baseRevision = spawnSync("git", ["rev-parse", baseRef], { cwd: requestedWorkspace, encoding: "utf8" });
-      if (baseRevision.status !== 0) throw new Error(`Unable to resolve claim base revision ${baseRef}.`);
-      claimBaseSha = baseRevision.stdout.trim();
+      claimBaseSha = revisions.baseSha;
 
       claimClient = createBoundBuilderClient({
         apiUrl: input.issueClaim.apiUrl || process.env.GITHUB_BUILDER_API_URL || "https://api.github.com",
@@ -698,11 +697,10 @@ server.registerTool(
         } catch {}
       }
 
-      let plannedWorktreePath = null;
-      if (input.worktree) {
-        const root = resolve(input.worktree.root || join(requestedWorkspace, ".bridge/worktrees"));
-        plannedWorktreePath = resolve(root, input.worktree.taskId);
-      }
+      const plannedWorktreePath = plannedIssueClaimWorktree({
+        workspace: requestedWorkspace,
+        worktree: input.worktree,
+      });
 
       await acquireClaimLease({
         client: claimClient,
@@ -745,15 +743,14 @@ server.registerTool(
         throw new Error(`Workspace ownership is preserved by indeterminate collaboration ${ownershipConflict.id}; inspect and cancel it before starting replacement work.`);
       }
       if (input.issueClaim) {
-        const actualHead = spawnSync("git", ["rev-parse", "HEAD"], { cwd: workspace, encoding: "utf8" });
-        if (actualHead.status !== 0) throw new Error("Unable to resolve the claimed worktree HEAD.");
+        const actualHead = resolveClaimedWorktreeHead(workspace);
         resolvedIssueClaim = {
           ...input.issueClaim,
           writer: writer || input.writer || startAgent,
           branch: worktree?.branch || input.issueClaim.branch || null,
           worktree: workspace,
           baseSha: claimBaseSha,
-          headSha: actualHead.stdout.trim(),
+          headSha: actualHead,
         };
         const { refreshClaimLease } = await import("./github-issue-claims.mjs");
         await refreshClaimLease({
