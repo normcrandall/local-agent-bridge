@@ -50,7 +50,8 @@
     "test:coordinator-hook": "node scripts/coordinator-hook-test.mjs",
     "test:claude-wake-channel": "node scripts/claude-wake-channel-test.mjs",
     "test:coordinator-hook-config": "node scripts/coordinator-hook-config-test.mjs",
-    "test:secrets": "node scripts/secret-boundary-test.mjs"
+    "test:secrets": "node scripts/secret-boundary-test.mjs",
+    "test:replay": "node scripts/incident-replay-test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",

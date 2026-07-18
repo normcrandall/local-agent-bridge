@@ -28,6 +28,7 @@ import { resolveNativeChair } from "./native-chair.mjs";
 import { clearTerminalRuntime, legacyWorkerCommandMatches, reconciliationAction, workerCancellationMatches, workerCommandMatches } from "./collaboration-cleanup.mjs";
 import { acknowledgeCompletion } from "./handoff-protocol.mjs";
 import { readContextCapsule } from "./context-capsule.mjs";
+import { replayIncident, formatReplayHuman } from "./incident-replay.mjs";
 import { analyzePortfolio, buildExecutionWaves, normalizePortfolioItems } from "./portfolio-scheduler.mjs";
 import { createPortfolio, listPortfolios, readPortfolio, updatePortfolio } from "./portfolio-store.mjs";
 import {
@@ -1619,6 +1620,25 @@ server.registerTool(
       structuredContent: { collaborations },
     };
   },
+);
+
+server.registerTool(
+  "replay_incident",
+  {
+    title: "Replay collaboration incident",
+    description: "Reconstruct a chronological timeline, observed facts, inferred contributing factors, and remediation steps from active or archived collaboration records.",
+    inputSchema: { collaborationId },
+  },
+  async ({ collaborationId: id }) => {
+    const report = await replayIncident(WORKSPACE_ROOT, id);
+    return {
+      content: [{
+        type: "text",
+        text: formatReplayHuman(report),
+      }],
+      structuredContent: report,
+    };
+  }
 );
 
 await reconcileInterruptedCleanup();

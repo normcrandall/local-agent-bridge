@@ -20,6 +20,7 @@ import {
 } from "../src/operations.mjs";
 import { appendEvent, archiveCollaboration, pruneTerminalCollaborations, readCollaboration, updateCollaboration, queryControlPlane } from "../src/collaboration-store.mjs";
 import { clearTerminalRuntime, workerCancellationMatches } from "../src/collaboration-cleanup.mjs";
+import { replayIncident, formatReplayHuman } from "../src/incident-replay.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const stateRoot = process.env.BRIDGE_COLLABORATION_DIR || resolve(homedir(), ".local/share/agent-bridge/state");
@@ -222,6 +223,18 @@ print "Authenticate Claude Code, Codex, and Antigravity. Configure your reviewer
     json({ destination, archive, installer, manifest });
     break;
   }
+  case "replay": {
+    const id = args.find((arg) => arg.startsWith("bridge-"));
+    if (!id) throw new Error("replay requires a collaboration ID.");
+    const format = value("--format", "human");
+    const report = await replayIncident(root, id);
+    if (format === "json") {
+      json(report);
+    } else {
+      process.stdout.write(formatReplayHuman(report) + "\n");
+    }
+    break;
+  }
   default:
-    process.stdout.write("Usage: bridge <talk|start|watchdog|doctor|smoke|models|status|capabilities|roles|preflight|recover|archive|prune|worktree|ci|reconcile|usage|bundle> [options]\n");
+    process.stdout.write("Usage: bridge <talk|start|watchdog|doctor|smoke|models|status|capabilities|roles|preflight|recover|archive|prune|worktree|ci|reconcile|usage|bundle|replay> [options]\n");
 }

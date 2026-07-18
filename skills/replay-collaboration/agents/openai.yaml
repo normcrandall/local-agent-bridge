@@ -1,0 +1,9 @@
+interface:
+  display_name: "Replay Collaboration"
+  short_description: "Reconstruct incident timelines, facts, factors, and remediation steps from active or archived collaborations"
+  default_prompt: "Use $replay-collaboration to replay the incident history of my latest agent collaboration."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "collaboration"
+      description: "Persistent collaboration history service"
