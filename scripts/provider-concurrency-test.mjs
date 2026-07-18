@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -16,6 +16,24 @@ const root = await mkdtemp(join(tmpdir(), "agent-provider-capacity-"));
 process.env.BRIDGE_COLLABORATION_DIR = root;
 process.env.AGENT_BRIDGE_PROVIDER_CONCURRENCY_CONFIG = join(root, "missing-machine-policy.json");
 const collaborationId = (suffix) => `bridge-00000000-0000-4000-8000-${suffix.padStart(12, "0")}`;
+
+// Deterministic FIFO ordering barrier: wait until at least `count` waiter files are
+// registered in a capacity directory before starting the next queued acquisition, so
+// waiter sequence never depends on concurrent call scheduling.
+async function waitForWaiterCount(directory, count) {
+  for (let attempt = 0; attempt < 2_000; attempt += 1) {
+    let names = [];
+    try {
+      names = await readdir(directory);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    if (names.filter((name) => name.endsWith(".wait")).length >= count) return;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+  }
+  throw new Error(`Timed out waiting for ${count} capacity waiter(s) in ${directory}.`);
+}
+const claudeReviewCapacityDir = join(root, "capacity", "claude", "review");
 
 try {
   assert.deepEqual(normalizeProviderConcurrency({}), DEFAULT_PROVIDER_CONCURRENCY);
@@ -70,6 +88,9 @@ try {
     thirdAcquired = true;
     return lease;
   });
+  // Register the third waiter before starting the fourth so FIFO order is deterministic
+  // and never relies on concurrent call scheduling.
+  await waitForWaiterCount(claudeReviewCapacityDir, 1);
   const fourthPromise = acquireProviderCapacity(root, {
     provider: "claude",
     role: "review",
