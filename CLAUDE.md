@@ -10,7 +10,7 @@ Prefer the installed collaboration skills as the user-facing interface. Announce
 - Use `/replay-collaboration` to run a deterministic replay of collaboration incidents.
 - Use `/goal-loop` to build toward explicit completion criteria through bounded plan, implement, review, and verification cycles.
 - Use `/collaboration-doctor` for a read-only effective-policy audit of one workspace, provider roster, role, permission profile, fallback chain, and GitHub App boundary before delegation.
-- Use `/take-the-helm` when the user delegates operational ownership of a goal or work queue and wants the council to resolve routine decisions without human interruption.
+- Use `/take-the-helm` when the user delegates operational ownership of a goal or work queue and wants the council to resolve routine decisions without human interruption. It self-sequences new work (review follow-ups, `/council-wayfinder` output), decomposes oversized items via `/council-wayfinder`, applies a two-tier review circuit-breaker (5-round follow-up → extracted ticket, 12-round → council disposition), runs in wave/phase/end-to-end modes, and requires reviewers to include a proposed fix.
 - Use `/council-discovery` to inspect an existing app, systematically search the public web for competitors and substitutes, reconcile evidence-backed feature proposals from Claude, Codex, and Antigravity, and publish implementation-ready GitHub issues through Wayfinder.
 - Use `/council-grill-agents` when the user wants the chair to cross-examine Claude, Codex, and Antigravity for a defensible answer instead of interviewing the user.
 - Use `/council-ux-review` to challenge a rendered application's UI and end-to-end UX with independent browser passes, cross-verification, and prioritized GitHub issues.
