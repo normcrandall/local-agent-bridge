@@ -326,7 +326,7 @@ export async function replayIncident(root, id) {
   const issueDraft = {
     title: `[Incident Replay] Collaboration ${id} - ${classification.toUpperCase()}`,
     body: `Incident replay report for collaboration \`${id}\`.
-    
+
 - **Classification**: ${classification}
 - **Last Confirmed State**: ${lastConfirmedState}
 - **Unresolved Ownership**: ${unresolvedOwnership}
