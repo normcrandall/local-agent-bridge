@@ -797,6 +797,29 @@ await assert.rejects(
 );
 assert.equal(missingBaseFactory.state.issued, false);
 
+// A3b. createBranch rejects an exact base SHA that is not an ancestor of head
+// before issuing a credential. This ancestry gate makes scoped diff validation
+// safe: every blob outside baseSha..head must be inherited from that base.
+const unrelatedBaseFactory = tokenFactory();
+await assert.rejects(
+  createBoundBuilderClient({
+    apiUrl: "https://github.test",
+    fetchImpl: fakeGitHub({ branchShas: { main: divergedSha } }).fetchImpl,
+    workspace: localRepoPath,
+    repository: "owner/repo",
+    baseRef: "main",
+    baseSha: divergedSha,
+    headSha: successHeadSha,
+    headRef: "refs/heads/feature-unrelated-base",
+    allowedOperations: ["create_branch"],
+    getToken: unrelatedBaseFactory.getToken,
+    expectedLogin: "builder[bot]",
+    transportUrl,
+  }).createBranch({ ref: "refs/heads/feature-unrelated-base", sha: successHeadSha }),
+  /is not an ancestor of head/
+);
+assert.equal(unrelatedBaseFactory.state.issued, false);
+
 // A4. createBranch rejects a stale exact-base authorization before mutation.
 const staleBaseFactory = tokenFactory();
 const staleBasePushesBefore = mockServer.pushAttempts;
