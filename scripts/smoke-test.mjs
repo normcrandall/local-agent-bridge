@@ -1,15 +1,19 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { rm } from "node:fs/promises";
 
 const root = resolve(import.meta.dirname, "..");
-const cleanProcessEnv = Object.fromEntries(
-  Object.entries(process.env).filter(([name]) => (
-    !name.startsWith("BRIDGE_")
-    && !["CLAUDE_BRIDGE_ACTIVE", "CODEX_BRIDGE_ACTIVE", "ANTIGRAVITY_BRIDGE_ACTIVE"].includes(name)
-  )),
-);
+const cleanProcessEnv = {
+  ...Object.fromEntries(
+    Object.entries(process.env).filter(([name]) => (
+      !name.startsWith("BRIDGE_")
+      && !["CLAUDE_BRIDGE_ACTIVE", "CODEX_BRIDGE_ACTIVE", "ANTIGRAVITY_BRIDGE_ACTIVE"].includes(name)
+    )),
+  ),
+  AGENT_BRIDGE_MODEL_POLICY_CONFIG: resolve(tmpdir(), `bridge-smoke-model-policy-${process.pid}.json`),
+};
 
 async function listTools(label, command, args, env) {
   const client = new Client({ name: "bridge-smoke-test", version: "0.1.0" });

@@ -27,7 +27,7 @@
     "test:github-app-auth": "node scripts/github-app-auth-test.mjs",
     "test:github-command-fallback": "node scripts/github-command-fallback-test.mjs",
     "test:github-builder": "node scripts/github-builder-test.mjs",
-    "test:claims": "node scripts/github-claims-test.mjs",
+    "test:claims": "node scripts/collaboration-start-preflight-test.mjs && node scripts/github-claims-test.mjs",
     "test:native-github-builder": "node scripts/native-github-builder-test.mjs",
     "test:github-review": "node scripts/github-review-test.mjs",
     "test:github-enforcement": "node scripts/github-merge-enforcement-test.mjs",
