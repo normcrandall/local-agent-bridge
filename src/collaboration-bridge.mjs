@@ -71,6 +71,12 @@ function blockNestedCollaboration() {
   }
 }
 
+function assertAutonomousDeliveryBinding({ mode, workProfile, githubBuilder }) {
+  if (mode === "work" && workProfile === "deliver" && !githubBuilder) {
+    throw new Error("Autonomous delivery requires a bound githubBuilder; raw push, gh pull-request mutation, PAT, or ambient git credentials are not permitted in autonomous council/portfolio flows.");
+  }
+}
+
 function projectDirectory(requested) {
   const candidate = resolve(WORKSPACE_ROOT, requested || ".");
   if (!existsSync(candidate) || !statSync(candidate).isDirectory()) {
@@ -641,6 +647,11 @@ server.registerTool(
     const startAgent = delegatedAgents.includes(rotated?.writer) ? rotated.writer : native.startAgent;
     validateAgents(delegatedAgents, startAgent);
     const writer = effectiveMode === "work" ? (native.writer || startAgent) : null;
+    assertAutonomousDeliveryBinding({
+      mode: effectiveMode,
+      workProfile: input.workProfile || "exact",
+      githubBuilder: input.githubBuilder || null,
+    });
     if (input.githubReview && !input.handoffPath) throw new Error("githubReview requires handoffPath.");
     if (input.githubBuilder && effectiveMode !== "work") throw new Error("githubBuilder cannot be delegated when the native chair owns the work; the host must perform its own bound delivery phase.");
     if (input.githubReview && effectiveMode === "work" && delegatedAgents.every((agent) => agent === writer)) {
@@ -1372,6 +1383,11 @@ server.registerTool(
       throw new Error("githubReview requires handoffPath.");
     }
     if (githubBuilder && current.mode !== "work") throw new Error("githubBuilder is available only in work mode.");
+    assertAutonomousDeliveryBinding({
+      mode: current.mode,
+      workProfile: workProfile || current.workProfile || "exact",
+      githubBuilder: githubBuilder || current.githubBuilder || null,
+    });
     if ((permissionProfile || current.permissionProfile) === "yolo" && current.mode !== "work") {
       throw new Error("permissionProfile yolo is available only in work mode.");
     }

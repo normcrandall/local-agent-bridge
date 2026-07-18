@@ -42,6 +42,9 @@ if (!id) throw new Error("A collaboration ID is required.");
 let releaseWorker = null;
 let releaseWorkspace = null;
 let pool = null;
+let state = null;
+let claimClient = null;
+let workerHeadSha = null;
 
 function gitValue(workspace, args, label) {
   const result = spawnSync("git", args, { cwd: workspace, encoding: "utf8" });
@@ -138,14 +141,12 @@ async function scheduleProviderRecovery(error) {
 
 try {
   releaseWorker = await acquireWorkerLock(workspaceRoot, id);
-  let state = await readCollaboration(workspaceRoot, id);
+  state = await readCollaboration(workspaceRoot, id);
   if (state.cancelRequested) {
     await updateCollaboration(workspaceRoot, id, (current) => ({ ...current, status: "cancelled", workerPid: null }));
     process.exit(0);
   }
 
-  let claimClient = null;
-  let workerHeadSha = null;
   if (state.issueClaim) {
     const repository = state.issueClaim.repository;
     const expectedLogin = state.issueClaim.expectedLogin;
