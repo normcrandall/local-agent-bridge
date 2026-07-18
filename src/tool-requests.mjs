@@ -1,5 +1,6 @@
 import { isAbsolute, relative, resolve } from "node:path";
 import { homedir } from "node:os";
+import { normalizeVerificationAllowlist } from "./verification-allowlist.mjs";
 
 export function claudeToolRequest({
   prompt,
@@ -138,8 +139,11 @@ export function antigravityToolRequest({
   fallbackModels,
   timeoutSeconds = 7200,
   permissionProfile = "standard",
+  verificationCommands = [],
 }) {
+  const commands = normalizeVerificationAllowlist(verificationCommands);
   const arguments_ = { prompt, cwd, mode, timeoutSeconds, permissionProfile };
+  if (commands.length) arguments_.verificationCommands = commands;
   if (model) arguments_.model = model;
   if (fallbackModels !== undefined) arguments_.fallbackModels = fallbackModels;
   if (sessionId) {

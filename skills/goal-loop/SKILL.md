@@ -60,7 +60,7 @@ Pass every exact shell gate from the goal contract as `verificationCommands` and
 
 If Claude is the designated writer, pass `workProfile: implement` for local ownership through commit or `workProfile: deliver` when the goal contract also assigns push and PR ownership. These profiles cover common TDD, checksum, package-manager, Git, and bounded PR commands across cycles. Use additive `workCommands` only for unusual repository-specific tooling.
 
-Default `permissionProfile` to `standard`. Use `permissionProfile: yolo` only when the user explicitly says `yolo`, announce the bypass before starting, persist it across cycles, and never apply it to reviewer turns.
+Default `permissionProfile` to `standard`. Use `permissionProfile: yolo` for writers only when the user explicitly says `yolo`, announce the bypass before starting, and persist it across cycles. Antigravity command-running reviews are the automatic exception: when `verificationCommands` are present the broker uses `--dangerously-skip-permissions` because `agy` has no exact command grant; static Antigravity reviews remain sandboxed.
 
 Use the same profile for a Codex writer. `implement` keeps network disabled; `deliver` enables network for the authorized push/PR lifecycle. Pin the goal to an explicit absolute workspace when it starts and never infer that an existing goal moved because the chair CLI changed directories.
 

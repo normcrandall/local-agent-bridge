@@ -29,6 +29,7 @@ import { activeVerificationCommand, capacityWaitNarrative, verificationNarrative
 import { enqueueCoordinatorWake } from "../src/coordinator-wake.mjs";
 import { createBoundBuilderClient } from "../src/github-builder-client.mjs";
 import { createInstallationToken } from "../src/github-app-auth.mjs";
+import { providerPermissionDecisionForRequest } from "../src/verification-allowlist.mjs";
 
 const runtimeRoot = realpathSync(
   process.env.BRIDGE_RUNTIME_ROOT || process.env.BRIDGE_ROOT || fileURLToPath(new URL("..", import.meta.url)),
@@ -369,6 +370,14 @@ try {
       let summaryAt = null;
       let summarySource = "broker";
       let livenessMessage = null;
+      const permissionDecision = providerPermissionDecisionForRequest({
+        provider: call.agent,
+        mode: call.mode,
+        verificationCommands: state.verificationCommands || [],
+        permissionProfile: state.permissionProfile || "standard",
+      });
+      const activePermissionProfile = permissionDecision.permissionProfile;
+      const permissionReason = permissionDecision.permissionReason;
       const writeActiveCall = async (patch = {}) => {
         await updateCollaboration(workspaceRoot, id, (current) => ({
           ...current,
@@ -385,6 +394,8 @@ try {
               summaryAt,
               summarySource,
               livenessMessage,
+              permissionProfile: activePermissionProfile,
+              permissionReason,
               capacity: {
                 role: capacityRole,
                 limit: capacityLease.limit,
@@ -403,6 +414,8 @@ try {
           at: startedAt,
           agent: call.agent,
           mode: call.mode,
+          permissionProfile: activePermissionProfile,
+          permissionReason,
           summary: lastSummary,
           capacity: {
             role: capacityRole,

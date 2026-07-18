@@ -12,12 +12,12 @@ export class ProviderCommandNotAllowlistedError extends Error {
   }
 }
 
-// Fail-closed provider capability boundary. Only providers whose request path can
-// express an *enforceable exact command grant* (Claude: `--allowedTools Bash(cmd)` +
-// `--permission-mode dontAsk`) may run a bounded command-running review. Codex (sandbox
-// mode only) and Antigravity (no command grant at all) cannot restrict a reviewer to the
-// exact allowlist, so they are rejected before dispatch when verification commands are
-// present; they remain eligible for static review that carries no verification commands.
+// Fail-closed provider capability boundary. Claude can express an enforceable exact
+// command grant (`--allowedTools Bash(cmd)` + `--permission-mode dontAsk`). Codex has
+// only a sandbox and remains ineligible for command-running reviews. Antigravity has no
+// exact grant either, but the owner selected its only command-capable non-interactive
+// path as the machine default: command-running review requests automatically use
+// `--dangerously-skip-permissions`. That exception is deliberately provider-specific.
 export const PROVIDERS_ENFORCING_EXACT_COMMAND_GRANTS = Object.freeze(["claude"]);
 
 export function providerEnforcesExactCommandGrants(provider) {
@@ -39,10 +39,41 @@ export class ProviderCommandGrantUnsupportedError extends Error {
 // grants. Static review (no verification commands) and work mode pass through.
 export function assertProviderVerificationCapability({ provider, mode, verificationCommands = [] } = {}) {
   const commands = normalizeVerificationAllowlist(verificationCommands);
-  if (mode === "review" && commands.length && !providerEnforcesExactCommandGrants(provider)) {
+  if (mode === "review" && commands.length
+    && !providerEnforcesExactCommandGrants(provider)
+    && provider !== "antigravity") {
     throw new ProviderCommandGrantUnsupportedError(provider, commands);
   }
   return commands;
+}
+
+// Resolve the provider-facing permission profile at the dispatch boundary. Static
+// Antigravity reviews remain sandboxed. The unrestricted profile is selected only when
+// a review is explicitly carrying coordinator verification commands and would otherwise
+// be unusable. Work-mode behavior continues to honor the collaboration profile.
+export function providerPermissionDecisionForRequest({
+  provider,
+  mode,
+  verificationCommands = [],
+  permissionProfile = "standard",
+} = {}) {
+  const commands = normalizeVerificationAllowlist(verificationCommands);
+  const automaticUnrestrictedVerification = provider === "antigravity"
+    && mode === "review"
+    && commands.length > 0;
+  return {
+    verificationCommands: commands,
+    permissionProfile: automaticUnrestrictedVerification
+      ? "yolo"
+      : mode === "review" ? "standard" : permissionProfile,
+    permissionReason: automaticUnrestrictedVerification
+      ? "automatic_unrestricted_verification"
+      : "configured",
+  };
+}
+
+export function providerPermissionProfileForRequest(request = {}) {
+  return providerPermissionDecisionForRequest(request).permissionProfile;
 }
 
 // Coordinator commands are single-line, trimmed, non-empty strings. Normalization is

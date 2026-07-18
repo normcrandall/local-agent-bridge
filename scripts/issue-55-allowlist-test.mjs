@@ -12,6 +12,8 @@ import {
   ProviderCommandGrantUnsupportedError,
   ProviderCommandNotAllowlistedError,
   providerEnforcesExactCommandGrants,
+  providerPermissionDecisionForRequest,
+  providerPermissionProfileForRequest,
 } from "../src/verification-allowlist.mjs";
 
 // Normalization: trim, drop empties, de-duplicate, stable order.
@@ -75,21 +77,57 @@ assert.equal(providerEnforcesExactCommandGrants("claude"), true);
 assert.equal(providerEnforcesExactCommandGrants("codex"), false);
 assert.equal(providerEnforcesExactCommandGrants("antigravity"), false);
 
-// Command-running review on Claude is allowed; on Codex/Antigravity it is denied.
+// Command-running review on Claude is exactly bounded. Antigravity has no exact
+// grant mechanism, so the broker automatically selects its unrestricted profile
+// instead of removing it from the collaboration. Codex remains denied.
 assert.doesNotThrow(() => assertProviderVerificationCapability({ provider: "claude", mode: "review", verificationCommands: ["npm test"] }));
-for (const provider of ["codex", "antigravity"]) {
-  const denial = (() => {
-    try {
-      assertProviderVerificationCapability({ provider, mode: "review", verificationCommands: ["npm test"] });
-      return null;
-    } catch (error) {
-      return error;
-    }
-  })();
-  assert.ok(denial instanceof ProviderCommandGrantUnsupportedError, `${provider} must be denied`);
-  assert.equal(denial.code, "provider_command_grant_unsupported");
-  assert.equal(denial.provider, provider);
-}
+assert.doesNotThrow(() => assertProviderVerificationCapability({ provider: "antigravity", mode: "review", verificationCommands: ["npm test"] }));
+const denial = (() => {
+  try {
+    assertProviderVerificationCapability({ provider: "codex", mode: "review", verificationCommands: ["npm test"] });
+    return null;
+  } catch (error) {
+    return error;
+  }
+})();
+assert.ok(denial instanceof ProviderCommandGrantUnsupportedError, "codex must be denied");
+assert.equal(denial.code, "provider_command_grant_unsupported");
+assert.equal(denial.provider, "codex");
+assert.equal(providerPermissionProfileForRequest({
+  provider: "antigravity",
+  mode: "review",
+  verificationCommands: ["npm test"],
+}), "yolo");
+assert.equal(providerPermissionProfileForRequest({
+  provider: "antigravity",
+  mode: "review",
+  verificationCommands: [],
+}), "standard");
+assert.deepEqual(providerPermissionDecisionForRequest({
+  provider: "antigravity",
+  mode: "review",
+  verificationCommands: ["  npm test  ", "", "npm test"],
+}), {
+  verificationCommands: ["npm test"],
+  permissionProfile: "yolo",
+  permissionReason: "automatic_unrestricted_verification",
+});
+assert.deepEqual(providerPermissionDecisionForRequest({
+  provider: "antigravity",
+  mode: "review",
+  verificationCommands: ["   "],
+  permissionProfile: "yolo",
+}), {
+  verificationCommands: [],
+  permissionProfile: "standard",
+  permissionReason: "configured",
+});
+assert.equal(providerPermissionProfileForRequest({
+  provider: "antigravity",
+  mode: "work",
+  verificationCommands: ["npm test"],
+  permissionProfile: "standard",
+}), "standard");
 // Static review (no verification commands) is allowed for every provider.
 for (const provider of ["claude", "codex", "antigravity"]) {
   assert.doesNotThrow(() => assertProviderVerificationCapability({ provider, mode: "review", verificationCommands: [] }));

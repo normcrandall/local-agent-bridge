@@ -8,7 +8,11 @@ import { configuredReviewerLogin, createInstallationToken, inspectGitHubAppRoles
 import { createBoundBuilderClient } from "./github-builder-client.mjs";
 import { localReviewPrompt, republishValidatedReview, resolveReviewPublication } from "./review-publication.mjs";
 import { resolveContainedHandoffPath } from "./handoff-path.mjs";
-import { admitProviderCommands, assertProviderVerificationCapability } from "./verification-allowlist.mjs";
+import {
+  admitProviderCommands,
+  assertProviderVerificationCapability,
+  providerPermissionDecisionForRequest,
+} from "./verification-allowlist.mjs";
 import { resolve } from "node:path";
 
 function textFrom(result) {
@@ -244,7 +248,13 @@ export function createAgentPool({
       // the coordinator work commands. Any command outside the allowlist fails here.
       admitProviderCommands({ mode, verificationCommands, workCommands });
       const client = await clientFor(agent);
-      const effectivePermissionProfile = mode === "work" ? permissionProfile : "standard";
+      const permissionDecision = providerPermissionDecisionForRequest({
+        provider: agent,
+        mode,
+        verificationCommands,
+        permissionProfile,
+      });
+      const effectivePermissionProfile = permissionDecision.permissionProfile;
       // Autonomous work with a bound builder runs on an implement-equivalent
       // shell/network grant; the bound builder tools remain the delivery path.
       const effectiveWorkProfile = autonomousWorkProfile({ autonomous, githubBuilder, mode, workProfile });
@@ -264,7 +274,7 @@ export function createAgentPool({
           model: models.claude,
           fallbackModels: modelFallbacks.claude,
           allowFable: allowClaudeFable,
-          verificationCommands,
+          verificationCommands: permissionDecision.verificationCommands,
           workCommands,
           workProfile: effectiveWorkProfile,
           permissionProfile: effectivePermissionProfile,
@@ -284,7 +294,7 @@ export function createAgentPool({
           fallbackModels: modelFallbacks.codex,
           workProfile: effectiveWorkProfile,
           permissionProfile: effectivePermissionProfile,
-          verificationCommands,
+          verificationCommands: permissionDecision.verificationCommands,
           handoffPath,
           githubReview: effectiveGithubReview,
           githubReviewBridgePath: resolve(root, "src/github-review-bridge.mjs"),
@@ -310,6 +320,7 @@ export function createAgentPool({
           fallbackModels: modelFallbacks.antigravity,
           timeoutSeconds: turnTimeoutSeconds,
           permissionProfile: effectivePermissionProfile,
+          verificationCommands: permissionDecision.verificationCommands,
         });
       }
       request._meta = { progressToken: `${agent}-${Date.now()}` };
@@ -363,6 +374,8 @@ export function createAgentPool({
         metadata: {
           usage: structured.usage || structured.tokenUsage || null,
           durationMs: structured.durationMs || structured.duration_ms || null,
+          permissionProfile: effectivePermissionProfile,
+          permissionReason: permissionDecision.permissionReason,
           modelRouting: ["claude", "codex"].includes(agent) ? {
             requestedModel: structured.requestedModel ?? null,
             model: structured.model ?? null,

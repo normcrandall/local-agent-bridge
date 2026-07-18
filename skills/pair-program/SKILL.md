@@ -27,7 +27,7 @@ Call `collaboration.start_collaboration` with:
 - `agents`: Claude and Codex by default; add Antigravity when requested or valuable.
 - `taskNumber`: enables deterministic rotation.
 - `mode: work`, one `writer`, and `workProfile: implement|deliver`.
-- `permissionProfile: standard` unless the user explicitly says `yolo`. If explicit, warn before starting and set `permissionProfile: yolo`; reviewers remain read-only.
+- `permissionProfile: standard` unless the user explicitly says `yolo`. If explicit, warn before starting and set `permissionProfile: yolo` for the writer. Reviewers remain source-read-only, but an Antigravity review carrying `verificationCommands` automatically uses `--dangerously-skip-permissions` because `agy` exposes no exact command grant; static Antigravity reviews remain sandboxed.
 - exact `verificationCommands`, unusual `workCommands`, and repository handoff path.
 - `githubReview` when the PR is the source of truth.
 - `githubBuilder` when the writer owns bounded PR delivery, with an explicit `allowedOperations` list. Merge remains absent unless the user explicitly authorizes the exact-head merge.
