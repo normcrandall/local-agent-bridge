@@ -276,7 +276,7 @@ Ten canonical skills provide the same visible vocabulary in Codex, Claude, and A
 - `goal-loop`: build toward verified completion through bounded, resumable council cycles.
 - `pair-program`: rotate implementation and review roles with preflight, worktrees, visible progress, recovery, CI, budgets, and review reconciliation.
 - `collaboration-doctor`: audit the effective workspace, provider, permission, fallback, skill, budget, and GitHub App policy without changing it.
-- `take-the-helm`: give the council operational ownership of a goal or queue, schedule independent issues into parallel worktree lanes, and serialize integration through a bridge-owned merge train.
+- `take-the-helm`: give the council operational ownership of a goal or queue, schedule independent issues into parallel worktree lanes, and serialize integration through a bridge-owned merge train. Self-sequences new work (review follow-ups, `council-wayfinder` decomposition output), decomposes oversized items via `council-wayfinder`, applies a two-tier review circuit-breaker (5-round follow-up → extracted ticket, 12-round → council disposition), runs in wave/phase/end-to-end modes, and requires reviewers to include a proposed fix.
 - `council-discovery`: inspect an existing product and systematically scan competitors and substitutes across the web, reach evidence-backed feature consensus around retention, acquisition, maintainability, overhead, and ROI, then publish implementation-ready GitHub issues through Wayfinder.
 - `council-grill-agents`: make the chair cross-examine peer LLM answers through rotating answerer, challenger, and verifier roles without interviewing the user.
 - `council-ux-review`: challenge the rendered UI and end-to-end UX with three independent browser reviews, cross-verification, and prioritized GitHub issues.
@@ -351,7 +351,7 @@ These skills are supplied by this project and installed across Codex, Claude, an
 | `goal-loop` | Build toward explicit completion criteria through bounded plan, implement, review, fix, and verification cycles. |
 | `pair-program` | Rotate one writer and independent reviewers across tasks, worktrees, CI, and formal PR reviews. |
 | `collaboration-doctor` | Render a read-only effective-policy matrix with fail-closed findings and least-authority remediations before delegation. |
-| `take-the-helm` | Autonomously schedule safe parallel issue lanes, arbitrate conflicts, and integrate exact PR heads through a serialized merge train while preserving narrow escalation boundaries. |
+| `take-the-helm` | Autonomously schedule safe parallel issue lanes, arbitrate conflicts, and integrate exact PR heads through a serialized merge train while preserving narrow escalation boundaries. Self-sequences new work, decomposes oversized items via council-wayfinder, applies a two-tier review circuit-breaker, supports wave/phase/end-to-end run modes, and requires proposed-fix reviews. |
 | `council-discovery` | Scan the web-wide competitive landscape and publish Wayfinder-backed features grounded in product, market, retention, acquisition, maintainability, overhead, and ROI evidence. |
 | `council-grill-agents` | Cross-examine model answers one question at a time and return the strongest evidence-backed conclusion with dissent. |
 | `council-ux-review` | Inspect rendered journeys across desktop, mobile, and accessibility states, then publish verified UX issues. |

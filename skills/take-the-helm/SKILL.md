@@ -14,7 +14,8 @@ Read and apply the installed `goal-loop`, `pair-program`, `council-grill-agents`
 - `goal-loop` for explicit completion criteria, bounded recovery cycles, and verification;
 - `pair-program` for one-writer ownership, worktree isolation, CI, provider roles, and PR review;
 - `council-grill-agents` to resolve material questions among the models instead of interviewing the user;
-- `show-collaboration` for durable status, handoffs, and resumability.
+- `show-collaboration` for durable status, handoffs, and resumability;
+- `council-wayfinder` to decompose an oversized or ambiguous item into scheduled sub-issues instead of forcing it through a single lane.
 
 This skill sets the autonomy policy; it does not weaken their safety, permission, identity, verification, or single-writer rules.
 
@@ -38,6 +39,14 @@ Prefer work in this order:
 3. repository-labelled ready work in priority and dependency order;
 4. the smallest coherent work that advances the stated objective.
 
+Honor the requested run mode, inferring it from the request and defaulting to end-to-end. Treat `phase/stop-boundary` as one ordered per-item attribute:
+
+- **wave** — triage new work, compute the frontier, run one safe wave through to merge within the current `phase/stop-boundary` value, then report and stop;
+- **phase** — exhaust the current `phase/stop-boundary` value end-to-end, then halt for owner release before the next;
+- **end-to-end** (default) — loop the ready frontier, crossing ordinary `phase/stop-boundary` values automatically, until it is exhausted or a hard boundary is reached.
+
+A `Decide:`-class owner-gated fork and the 12-round item circuit-breaker interrupt any mode; the 5-round follow-up breaker applies within the active mode. No run mode releases an owner-gated `Decide:` fork or hard escalation boundary — those always require the existing release authority. Dependency edges order work within a `phase/stop-boundary` value; the value is a coarse partition and checkpoint. Consumers map the attribute to whatever field they use — for example a GitHub Project `Phase` field.
+
 If the request names a finite set, continue until every item is complete, blocked by a true escalation, or rendered obsolete with recorded evidence. For an open-ended backlog, work the current ready frontier until no eligible item remains. Respect explicit cost, token, time, or issue-count budgets; do not invent a smaller limit merely to return control early.
 
 Define done from repository evidence: implementation, exact gates, independent review, required documentation or handoff, PR status, issue state, and deployment or merge boundaries authorized by repository policy.
@@ -58,6 +67,14 @@ Distinguish:
 - a **resource reservation**, for migrations, generated artifacts, lockfiles, shared environments, provider call capacity, or another exclusive surface.
 
 Call `plan_portfolio` before mutation. Reject dependency cycles. Do not treat an open PR, passing branch CI, or a provider handoff as satisfying a hard dependency that requires merged behavior. Recompute the frontier whenever an issue, PR, target branch, provider, or lane manifest changes.
+
+When a candidate item is too large or ambiguous to deliver as one lane — or when the per-item circuit-breaker returns the `split` disposition — invoke `council-wayfinder` to decompose it. Before splitting an already-active item, the portfolio owner stops the original lane, removes its PR from the merge train, and releases its write authority. Its sub-issues flow through *Triage and sequence new work* and re-enter the frontier; the parent becomes a tracking issue, blocked-by its children, with no mergeable PR of its own.
+
+## Triage and sequence new work
+
+At the start of every scheduling cycle, before recomputing the frontier, triage any issue created since the last cycle — review follow-ups, `council-wayfinder` decomposition output, and council spin-offs. Normalize each into the scheduling manifest: inherit its `phase/stop-boundary` from its parent when one exists, otherwise derive it from explicit scheduling metadata or park the item with a recorded reason; assign a sibling order; and record its dependency, conflict, path, and resource edges as the tracker's native links (for example GitHub blocked-by/blocks) plus the consumer's ordering fields, so the next `plan_portfolio` observes them.
+
+The sole portfolio and merge-train writer performs all scheduling-manifest, tracker-link, field, and counter mutations under the required non-personal App identity; lanes report facts to that writer and never mutate shared orchestration state directly. Dependency closure makes an item dependency-ready — a genuinely independent item may legitimately have no dependency edges; phase, conflict, path, and resource constraints still govern scheduling. Use the consumer's stable sparse-ordering to insert a sibling without rewriting existing order values, otherwise append it — never renumber to force a position.
 
 ## Reconstruct intent from Git history
 
@@ -153,7 +170,7 @@ For each selected lane:
 3. **Implement with one writer** — select `workProfile: implement` for local delivery through commit or `workProfile: deliver` for authorized push and PR creation. No other lane or reviewer may write that worktree.
 4. **Expand reservations before scope** — if implementation must touch an undeclared path, contract, migration, generated artifact, or shared resource, update the manifest and recompute the portfolio before editing it. Pause the lower-priority lane on a new collision.
 5. **Verify and hand off** — run exact issue gates and require a structured `HANDOFF`. The chair verifies and acknowledges that sequence before recording the lane as ready for review.
-6. **Review independently** — assign providers that did not write the lane. When the PR is the source of truth, use the exact PR head and configured reviewer Apps. Accept either their resulting exact-head `agent-review` gate or an exact-head approval from a machine-locally configured trusted human. A PAT compatibility comment is not approval. Submit every review-ready lane to the broker immediately. It permits up to the configured live review limit per provider—two by default—while retaining one live work call by default.
+6. **Review independently** — assign providers that did not write the lane. When the PR is the source of truth, use the exact PR head and configured reviewer Apps. Accept either their resulting exact-head `agent-review` gate or an exact-head approval from a machine-locally configured trusted human. A PAT compatibility comment is not approval. Submit every review-ready lane to the broker immediately. It permits up to the configured live review limit per provider—two by default—while retaining one live work call by default. Every blocking finding must carry a concrete proposed fix when one is determinable — preferably the review surface's directly applicable suggested-change mechanism (for example GitHub's `suggestion` block), otherwise a precise code or diff snippet. A finding with no clear fix (a genuine design question) still states what is wrong, why, and the acceptance criteria.
 
    Start a review leg with an ordered roster containing the preferred reviewer and all eligible non-writer fallbacks in the same collaboration. Set `maxTurns` to the number of successful reviews required; a failed or disconnected provider does not consume a turn and the broker advances to the next candidate. Never make a single provider the only critical-review candidate unless the owner explicitly pins it. Reviewer-App publication is preflighted: publishable identities run first, unbound reviewers remain available for local handoff, and an all-unbound roster completes locally then waits for exact-head trusted-human approval instead of abandoning the portfolio.
 
@@ -162,6 +179,15 @@ For each selected lane:
 8. **Enqueue** — after current reviews and checks pass, call `enqueue_portfolio_merge` with the exact PR head. A queued PR is not yet complete and does not release its dependents.
 
 Continue healthy lanes when another becomes blocked, indeterminate, or enters arbitration. Never let two writers edit overlapping workspace state. Never have the chair impersonate a delegated reviewer or repost its review through a personal identity.
+
+## Circuit-breakers
+
+Reviews and repairs run unbounded by turns — iterate until genuinely green. Count one **review round** when an independent reviewer evaluates a new head after a repair attempt. Two count-based safety valves apply:
+
+- **Follow-up, 5 rounds.** A genuinely out-of-scope, non-blocking follow-up may be attempted inline. After 5 unresolved rounds on one specific follow-up, file and triage it separately (through *Triage and sequence new work*) and stop attempting it in this lane. **Never** defer or reclassify a finding that is caused by this change, required by acceptance criteria or a verification gate, or involves safety, security, identity, or a binding standard. The item merges only after independent re-review of the current head with every gate green.
+- **Item, 12 rounds.** If the whole item has not reached green after 12 review rounds, convene the council to decide disposition: `split` it (invoke `council-wayfinder`); re-spec it within already-ratified intent, or raise a `Decide:` fork for owner approval when intent or acceptance criteria would change; swap the writer only after stopping the current writer and transferring the lane claim and write authority so writers never overlap; surface a hidden owner-gated decision; or escalate. Twelve rounds convenes the council; it is not a silent kill.
+
+Track one item-round counter per lane and one counter keyed by each follow-up; the sole portfolio writer persists them with `update_portfolio_item` so they survive host restarts and are visible in status.
 
 ## Serialize integration through the bridge merge train
 
@@ -198,7 +224,7 @@ If every eligible provider is confirmed temporarily unavailable because of model
 
 A timeout or lost transport is indeterminate: preserve writer ownership, inspect state, and explicitly cancel before reassignment. Recover failed worktrees, stale branches, interrupted reviews, CI failures, and orphaned collaborations using the underlying skills. Reassign a writer only after confirming the previous writer cannot still mutate the workspace.
 
-If one item is truly blocked, record the blocker and continue every independent ready item. Stop the run only when the objective is complete, no ready work remains, every remaining item is at a hard escalation boundary, or an explicit budget is exhausted.
+If one item is truly blocked, record the blocker and continue every independent ready item. Stop the run only when the objective is complete, no ready work remains, the active run mode's boundary is reached (one wave for `wave`; the current `phase/stop-boundary` value for `phase`), every remaining item is at a hard escalation boundary, or an explicit budget is exhausted.
 
 ## Report without handing the helm back
 
