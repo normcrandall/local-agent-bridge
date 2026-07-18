@@ -251,6 +251,23 @@ try {
   assert.equal(reconciledTerminal.structuredContent.runtime.activeCall, null);
   assert.equal(reconciledTerminal.structuredContent.workerPid, null);
 
+  const unsafeAutonomousDelivery = await firstClient.callTool({
+    name: "start_collaboration",
+    arguments: {
+      task: "Reject delivery without a bound builder",
+      agents: ["claude"],
+      mode: "work",
+      writer: "claude",
+      workProfile: "deliver",
+      maxTurns: 1,
+    },
+  });
+  assert.equal(unsafeAutonomousDelivery.isError, true);
+  assert.match(
+    unsafeAutonomousDelivery.content?.[0]?.text || "",
+    /Autonomous delivery requires a bound githubBuilder/,
+  );
+
   const started = await firstClient.callTool({
     name: "start_collaboration",
     arguments: {
