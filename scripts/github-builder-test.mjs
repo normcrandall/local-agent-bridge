@@ -11,6 +11,7 @@ import {
   DELIVERY_OUTCOMES,
 } from "../src/builder-contract.mjs";
 import { loadBranchReconciliationState, summarizeDeliveryOutcomes } from "../src/builder-operation-store.mjs";
+import { claudeToolRequest, codexToolRequest } from "../src/tool-requests.mjs";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { z } from "zod";
@@ -1435,6 +1436,34 @@ assert.equal(deliverySummary.counts.indeterminate, undefined);
 assert.equal(summarizeDeliveryOutcomes(summaryLog, { headSha: "z".repeat(40) }), null);
 assert.equal(summarizeDeliveryOutcomes(null), null);
 
+// (2) Superseding regressions: a later reconciled must not stay indeterminate,
+// and a later succeeded must not stay rejected, because only the latest effective
+// state per stable operation identity aggregates.
+const supersedeReconLog = path.join(tmpDir, "summary", "indeterminate-to-reconciled.jsonl");
+fs.writeFileSync(supersedeReconLog, [
+  JSON.stringify({ operation: "create_branch", ref: "refs/heads/x", operationId: "b1", outcome: "indeterminate", deliveryOutcome: "indeterminate", requestedSha: headSha }),
+  JSON.stringify({ operation: "create_branch", ref: "refs/heads/x", operationId: "b1", outcome: "reconciled", deliveryOutcome: "reconciled", requestedSha: headSha }),
+  "",
+].join("\n"));
+const reconSummary = summarizeDeliveryOutcomes(supersedeReconLog, { headSha });
+assert.equal(reconSummary.outcome, "reconciled");
+assert.equal(reconSummary.counts.indeterminate, undefined);
+
+const supersedeSucceedLog = path.join(tmpDir, "summary", "failed-to-succeeded.jsonl");
+fs.writeFileSync(supersedeSucceedLog, [
+  JSON.stringify({ operationId: "m1", operation: "merge", headSha, outcome: "failed", deliveryOutcome: "rejected" }),
+  JSON.stringify({ operationId: "m1", operation: "merge", headSha, outcome: "succeeded", deliveryOutcome: "succeeded" }),
+  "",
+].join("\n"));
+const succeedSummary = summarizeDeliveryOutcomes(supersedeSucceedLog, { headSha });
+assert.equal(succeedSummary.outcome, "succeeded");
+assert.equal(succeedSummary.counts.rejected, undefined);
+
+// A dangling intent with no terminal remains genuinely indeterminate.
+const danglingLog = path.join(tmpDir, "summary", "dangling-intent.jsonl");
+fs.writeFileSync(danglingLog, `${JSON.stringify({ operationId: "i1", operation: "merge", headSha, outcome: "intent", deliveryOutcome: "indeterminate" })}\n`);
+assert.equal(summarizeDeliveryOutcomes(danglingLog, { headSha }).outcome, "indeterminate");
+
 // (5) Provider-equivalence fixtures. Claude and Codex reach the builder through
 // the MCP inputSchema; Antigravity reaches it through the free-text envelope.
 // Both boundaries derive from one canonical contract, so for every scenario they
@@ -1451,7 +1480,18 @@ const CANONICAL_METHOD = {
   mark_ready: "markReady",
   merge: "merge",
 };
-const equivalenceClient = createBoundBuilderClient({ ...base, fetchImpl: fakeGitHub().fetchImpl });
+// A recording stand-in for the shared bound client. The Antigravity envelope
+// dispatch performed by agent-pool.publishAntigravityBuilder destructures
+// `{ operation, ...input }` and calls client[method](input) — the same input the
+// Claude/Codex MCP tool handler forwards. We exercise that exact dispatch.
+const dispatched = [];
+const recordingClient = Object.fromEntries(
+  Object.values(CANONICAL_METHOD).map((method) => [method, async (input) => { dispatched.push({ method, input }); }]),
+);
+const dispatchEnvelopeOperation = async (operation) => {
+  const { operation: name, ...input } = operation;
+  await recordingClient[CANONICAL_METHOD[name]](input);
+};
 const EQUIVALENCE_FIXTURES = [
   { scenario: "create", op: { operation: "create_branch", ref: "refs/heads/feature", sha: "a".repeat(40) }, behavioralTest: "A/B create_branch" },
   { scenario: "fast_forward", op: { operation: "push_branch", ref: "refs/heads/feature", sha: "a".repeat(40), oldSha: "b".repeat(40) }, behavioralTest: "E push_branch" },
@@ -1467,14 +1507,27 @@ for (const { scenario, op } of EQUIVALENCE_FIXTURES) {
   // Antigravity adapter boundary: the envelope validates and publishes unchanged.
   const envelope = parseBuilderEnvelope(`x\n---BEGIN BOUND_GITHUB_BUILDER---\n${JSON.stringify({ operations: [op] })}\n---END BOUND_GITHUB_BUILDER---`);
   const { operation: envelopeName, ...envelopeInput } = envelope.operations[0];
-  // Both boundaries dispatch the same canonical operation to the same method.
   assert.equal(envelopeName, operation, `${scenario}: envelope operation must be canonical`);
-  assert.equal(typeof equivalenceClient[CANONICAL_METHOD[operation]], "function", `${scenario}: shared client method exists`);
-  // Both boundaries agree on every caller-supplied field (no divergence).
+
+  // Exercise the ACTUAL Antigravity envelope dispatch: it must call the same
+  // shared client method with the same caller fields the MCP boundary forwards.
+  dispatched.length = 0;
+  await dispatchEnvelopeOperation(envelope.operations[0]);
+  assert.equal(dispatched.length, 1, `${scenario}: exactly one dispatched operation`);
+  assert.equal(dispatched[0].method, CANONICAL_METHOD[operation], `${scenario}: dispatched to the canonical method`);
   for (const key of Object.keys(callerFields)) {
-    assert.deepEqual(envelopeInput[key], callerFields[key], `${scenario}: envelope field ${key} diverged`);
+    assert.deepEqual(dispatched[0].input[key], callerFields[key], `${scenario}: dispatched envelope field ${key} diverged`);
     assert.deepEqual(mcpInput[key], callerFields[key], `${scenario}: mcp field ${key} diverged`);
   }
+
+  // Exercise the ACTUAL generated Claude and Codex requests: the bound builder
+  // is wired with this operation in its allowlist (the Claude/Codex delivery
+  // boundary), not raw shell delivery.
+  const binding = { repository: "owner/repo", expectedLogin: "builder[bot]", headSha, headRef: "codex/feature", baseRef: "main", allowedOperations: [operation] };
+  const claudeRequest = claudeToolRequest({ prompt: "x", mode: "work", workProfile: "implement", githubBuilder: binding });
+  assert.ok(claudeRequest.arguments.githubBuilder.allowedOperations.includes(operation), `${scenario}: Claude request wires the builder operation`);
+  const codexRequest = codexToolRequest({ prompt: "x", cwd: localRepoPath, mode: "work", workProfile: "implement", githubBuilder: binding, githubBuilderBridgePath: path.join(tmpDir, "bridge.mjs") });
+  assert.match(codexRequest.arguments.config["mcp_servers.github_builder.env.GITHUB_BUILDER_ALLOWED_OPERATIONS"], new RegExp(operation), `${scenario}: Codex request wires the builder operation`);
 }
 
 cleanup();

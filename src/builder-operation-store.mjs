@@ -135,8 +135,11 @@ export function summarizeDeliveryOutcomes(receiptPath, { headSha = null } = {}) 
     if (error.code === "ENOENT") return null;
     throw new Error(`Failed to read durable builder receipts for delivery summary: ${error.message}`);
   }
-  const outcomes = [];
-  const counts = {};
+  // Replay the log to the LATEST effective state per stable operation identity,
+  // so a later reconciled supersedes an earlier indeterminate, and a later
+  // succeeded supersedes an earlier failed. Only these latest states aggregate;
+  // superseded history must not permanently worsen the summary.
+  const latest = new Map();
   const lines = raw.split("\n");
   for (let index = 0; index < lines.length; index += 1) {
     const trimmed = lines[index].trim();
@@ -149,14 +152,24 @@ export function summarizeDeliveryOutcomes(receiptPath, { headSha = null } = {}) 
       if (isTornTail) continue;
       throw new Error(`Durable builder receipt log has a corrupt record at line ${index + 1}; refusing to summarize delivery fail-closed: ${error.message}`);
     }
-    if (!receipt || typeof receipt.outcome !== "string" || receipt.outcome === "intent") continue;
+    if (!receipt || typeof receipt.outcome !== "string") continue;
     if (headSha && receipt.headSha !== headSha && receipt.requestedSha !== headSha) continue;
-    const delivery = typeof receipt.deliveryOutcome === "string" && DELIVERY_OUTCOME_VALUES.has(receipt.deliveryOutcome)
-      ? receipt.deliveryOutcome
-      : classifyDeliveryOutcome(receipt);
-    outcomes.push(delivery);
-    counts[delivery] = (counts[delivery] || 0) + 1;
+    // Stable identity: the content-addressed operationId (present on every branch
+    // and non-branch receipt), falling back to operation+ref for older records.
+    const identity = typeof receipt.operationId === "string" && receipt.operationId
+      ? receipt.operationId
+      : `${receipt.operation || "?"}:${receipt.ref || ""}`;
+    // A transient intent that is the latest record for its identity means the
+    // outcome is still unproven (indeterminate); any terminal record supersedes it.
+    const effective = receipt.outcome === "intent"
+      ? "indeterminate"
+      : (typeof receipt.deliveryOutcome === "string" && DELIVERY_OUTCOME_VALUES.has(receipt.deliveryOutcome)
+          ? receipt.deliveryOutcome
+          : classifyDeliveryOutcome(receipt));
+    latest.set(identity, effective);
   }
-  if (!outcomes.length) return null;
-  return { outcome: aggregateDeliveryOutcome(outcomes), counts };
+  if (!latest.size) return null;
+  const counts = {};
+  for (const value of latest.values()) counts[value] = (counts[value] || 0) + 1;
+  return { outcome: aggregateDeliveryOutcome([...latest.values()]), counts };
 }

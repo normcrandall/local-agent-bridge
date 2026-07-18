@@ -26,6 +26,20 @@ function sessionFrom(agent, result) {
   return structured.conversationId || null;
 }
 
+// In an autonomous work turn with a bound builder, downgrade the delegated
+// shell/network grant to implement-equivalent so no provider (Claude git
+// push/gh pr, Codex network) receives a raw-delivery capability. The bound
+// builder tools/envelope remain the only delivery path. Non-autonomous callers
+// keep their explicitly selected profile (legacy deliver lane).
+export function autonomousWorkProfile({ autonomous, githubBuilder, mode, workProfile }) {
+  if (autonomous && githubBuilder && mode === "work") return "implement";
+  return workProfile;
+}
+
+// A raw-delivery shell command that must never be granted to an autonomous
+// provider; delivery must flow through the bound builder canonical operations.
+const RAW_DELIVERY_COMMAND = /(^|\s|&|;|\|)(git\s+push|gh\s+pr\s+(create|edit|merge|ready|close|reopen|review|comment)|gh\s+api)\b/;
+
 export function createAgentPool({
   root,
   workspace = root,
@@ -48,14 +62,17 @@ export function createAgentPool({
   // must not fall back to raw push, gh pull-request mutation, gh api, PAT, or
   // ambient git credentials. An explicitly user-selected legacy lane is only the
   // non-autonomous caller (autonomous === false).
-  if (autonomous && !githubBuilder) {
-    if (workProfile === "deliver") {
-      throw new Error("Autonomous delivery requires a bound githubBuilder; raw push, gh pull-request mutation, PAT, or ambient git credentials are not permitted in autonomous council/portfolio flows.");
-    }
-    const rawDelivery = /(^|\s|&|;|\|)(git\s+push|gh\s+pr\s+(create|edit|merge|ready|close|reopen|review|comment)|gh\s+api)\b/;
-    const smuggled = (workCommands || []).find((command) => rawDelivery.test(command));
+  if (autonomous) {
+    // Reject raw-delivery commands in EVERY autonomous mode, including when a
+    // bound builder exists: the builder's canonical operations are the only
+    // permitted delivery path, never a raw shell command.
+    const smuggled = (workCommands || []).find((command) => RAW_DELIVERY_COMMAND.test(command));
     if (smuggled) {
-      throw new Error(`Autonomous delivery must use a bound githubBuilder; a raw delivery command is not permitted without one: ${smuggled}`);
+      throw new Error(`Autonomous delivery must use the bound githubBuilder canonical operations; a raw delivery command is not permitted: ${smuggled}`);
+    }
+    // Without a bound builder there is no canonical delivery path at all.
+    if (workProfile === "deliver" && !githubBuilder) {
+      throw new Error("Autonomous delivery requires a bound githubBuilder; raw push, gh pull-request mutation, PAT, or ambient git credentials are not permitted in autonomous council/portfolio flows.");
     }
   }
 
@@ -228,6 +245,9 @@ export function createAgentPool({
       admitProviderCommands({ mode, verificationCommands, workCommands });
       const client = await clientFor(agent);
       const effectivePermissionProfile = mode === "work" ? permissionProfile : "standard";
+      // Autonomous work with a bound builder runs on an implement-equivalent
+      // shell/network grant; the bound builder tools remain the delivery path.
+      const effectiveWorkProfile = autonomousWorkProfile({ autonomous, githubBuilder, mode, workProfile });
       const publication = mode === "review" ? await reviewPublicationFor(agent) : { available: true, binding: null, reason: null };
       const effectiveGithubReview = publication.available ? publication.binding : null;
       const effectivePrompt = mode === "review" && githubReview && !publication.available
@@ -246,7 +266,7 @@ export function createAgentPool({
           allowFable: allowClaudeFable,
           verificationCommands,
           workCommands,
-          workProfile,
+          workProfile: effectiveWorkProfile,
           permissionProfile: effectivePermissionProfile,
           handoffPath,
           githubReview: effectiveGithubReview,
@@ -262,7 +282,7 @@ export function createAgentPool({
           browser,
           model: models.codex,
           fallbackModels: modelFallbacks.codex,
-          workProfile,
+          workProfile: effectiveWorkProfile,
           permissionProfile: effectivePermissionProfile,
           verificationCommands,
           handoffPath,

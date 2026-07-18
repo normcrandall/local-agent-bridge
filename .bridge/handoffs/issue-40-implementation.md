@@ -1,9 +1,35 @@
 # Handoff: Issue #40 — Provider-neutral canonical builder delivery contract
 
 Base commit: `9e722d4bc92cba572249f6b6e88665fc3aeb4b52`
-Prior commit on branch: `423944b335fd4aeeb5643b3b1428779abd8813f6` (rejected by audit)
+Prior commits on branch: `423944b` (rejected), `6035132` (rejected by chair audit).
 Branch: `codex/helm-40-canonical-delivery`
 Writer: Claude Code (Opus 4.8, `claude-opus-4-8[1m]`). No delegation; no Fable.
+
+## Chair-audit repair (on top of 6035132)
+
+1. **Bound-builder autonomy no longer exposes raw delivery.** `createAgentPool`
+   now downgrades an autonomous work turn with a bound builder to an
+   implement-equivalent shell/network profile via `autonomousWorkProfile()` — so
+   Claude receives no `git push`/`gh pr` grant and Codex no network — while the
+   bound builder tools/envelope remain the sole delivery path. Raw-delivery
+   `workCommands` are rejected in EVERY autonomous mode, including with a builder
+   present. Tests inspect the actual generated Claude/Codex requests (profile
+   `implement`, Codex `network_access=false`, builder wired, no raw-delivery
+   prose) and contrast the closed leak. Non-autonomous legacy deliver preserved.
+2. **`summarizeDeliveryOutcomes` replays latest effective state per stable
+   operation identity** (content-addressed operationId; operation+ref fallback),
+   so `indeterminate→reconciled` and `failed→succeeded` supersede instead of
+   worsening permanently. Direct regressions added for both, plus a dangling
+   intent staying indeterminate.
+3. **Coordinator-wake tests added**: direct `classifyCoordinatorWake` coverage for
+   succeeded/reconciled/rejected/indeterminate and real `enqueueCoordinatorWake`
+   enqueue/dedup behavior (deduped on a stable delivery state, re-enqueued on a
+   delivery-state change).
+
+Provider-equivalence fixtures strengthened to exercise the actual Antigravity
+envelope dispatch (`{operation, ...input}` → shared client method) and the real
+generated Claude/Codex request wiring (builder operation in the allowlist),
+rather than schema parsing plus method existence.
 
 ## Scope
 
