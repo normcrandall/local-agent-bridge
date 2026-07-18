@@ -988,12 +988,16 @@ export function createBoundBuilderClient({
 
   async function pushBranch({ ref, sha, oldSha }) {
     authorize("push_branch");
-    const branchName = assertBranchOperationInput({ ref, sha, oldSha });
+    const authorizedOldSha = oldSha ?? baseSha ?? undefined;
+    const branchName = assertBranchOperationInput({ ref, sha, oldSha: authorizedOldSha });
     const encodedBranch = branchName.split("/").map(encodeURIComponent).join("/");
 
-    // 1. Local validation (including ancestry when oldSha is given) before token issuance.
+    // 1. Local validation (including ancestry when an operation or binding pins
+    // the base) before token issuance. A bound baseSha is the provider-omission
+    // fallback so unchanged inherited blobs never expand the payload to the
+    // full tree.
     const gitPath = resolveGitBinary();
-    await validateLocalGitState({ gitPath, workspace, repository, ref, sha, oldSha });
+    await validateLocalGitState({ gitPath, workspace, repository, ref, sha, oldSha: authorizedOldSha });
 
     // 2. Token issuance and identity verification after validation.
     const credential = await ensureToken();
@@ -1008,17 +1012,17 @@ export function createBoundBuilderClient({
     if (reconciledReceipt) return reconciledReceipt;
     const remoteSha = currentRef?.object?.sha;
     if (!remoteSha) {
-      throw new Error(oldSha !== undefined
+      throw new Error(authorizedOldSha !== undefined
         ? `Remote branch refs/heads/${branchName} does not exist, but oldSha was provided.`
         : `Remote branch refs/heads/${branchName} does not exist.`);
     }
-    if (oldSha !== undefined && remoteSha !== oldSha) {
-      throw new Error(`Remote branch ref changed: expected ${oldSha}, current ${remoteSha}.`);
-    }
     if (remoteSha === sha) {
-      return branchReceipt({ operation: "push_branch", ref, requestedSha: sha, expectedOldSha: oldSha ?? null, observedRemoteSha: sha, outcome: "idempotent", idempotent: true, verifiedLogin: credential.verifiedLogin });
+      return branchReceipt({ operation: "push_branch", ref, requestedSha: sha, expectedOldSha: authorizedOldSha ?? null, observedRemoteSha: sha, outcome: "idempotent", idempotent: true, verifiedLogin: credential.verifiedLogin });
     }
-    if (oldSha === undefined) {
+    if (authorizedOldSha !== undefined && remoteSha !== authorizedOldSha) {
+      throw new Error(`Remote branch ref changed: expected ${authorizedOldSha}, current ${remoteSha}.`);
+    }
+    if (authorizedOldSha === undefined) {
       // The caller did not pin a base; the observed remote SHA becomes the CAS
       // base and must be a local ancestor of the head, fail-closed.
       await assertLocalAncestry({ gitPath, workspace, ancestor: remoteSha, descendant: sha });
