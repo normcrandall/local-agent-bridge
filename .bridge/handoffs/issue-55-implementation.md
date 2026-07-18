@@ -2,6 +2,7 @@
 
 Branch: `codex/helm-55-reviewer-deadlock` (base `6d067aef1c390c1b1725b31f97f84b6405e0693f`)
 Implementation commit: `7396950a5cf38404f156396f2679805d04d0468d`
+Test-ordering repair commit: `1a61821b78925dfc6261d1a64e730da656dc44a8`
 Writer: Claude Opus 4.8 (1M context) — sole implementation agent.
 
 ## What changed and why
@@ -68,6 +69,7 @@ Run inside this provider call:
 - `npm run test:collaboration` — PASS (incl. allowlist admission, command-aware
   narrative, and the live waiting_capacity / activeCall.capacity integration path).
 - `npm run test:secrets` — PASS.
+- `npm run test:provider-concurrency` — PASS (twice, deterministic; see repair below).
 - `npm run smoke` — FAILS only at the Playwright MCP server listing: `@playwright/mcp`
   is not installed in this worktree (`ERR_PACKAGE_PATH_NOT_EXPORTED`). All four bridge
   servers this change touches (Claude, Codex, Antigravity, Persistent collaboration)
@@ -75,14 +77,19 @@ Run inside this provider call:
   pre-existing environment gap unrelated to issue #55 and aborts smoke before it
   reaches any changed code path.
 
-## Delegated chair gate
-- `npm run test:provider-concurrency` was intentionally **not** run here (it would run
-  inside the occupied provider pool). Codex must run it outside this pool to validate
-  the added same-owner fast-rejection, deterministic lease-release, and immediate
+## Provider-concurrency gate (now run and green)
+- `npm run test:provider-concurrency` — PASS (run twice, deterministic). Validates the
+  added same-owner fast-rejection, deterministic lease-release, and immediate
   slot-reacquisition fixtures.
-- Recommended chair verification: re-run the four safe gates, then
-  `npm run test:provider-concurrency`, and (optionally) `npm run smoke` in an
-  environment where `@playwright/mcp` is installed.
+- Chair-found pre-existing defect repaired: the third/fourth queued-waiter block in
+  `scripts/provider-concurrency-test.mjs` started both acquisitions concurrently and
+  assumed #3 registered before #5. Under real scheduling #5 could register first, take
+  the freed slot, and hang the suite at `await thirdPromise`. Fixed with a minimal
+  deterministic ordering barrier (`waitForWaiterCount`) that waits for #3's `.wait`
+  file before starting #5 — no reliance on concurrent call scheduling, no production
+  change.
+- Recommended remaining chair verification: re-run the four safe gates, and
+  (optionally) `npm run smoke` in an environment where `@playwright/mcp` is installed.
 
 ## Risks / notes
 - `reapProcessTree`'s default `ps` uses `/bin/ps -A -o pid= -o ppid=` (portable across
