@@ -27,5 +27,10 @@ export function parseBuilderEnvelope(text) {
   let parsed;
   try { parsed = JSON.parse(text.slice(start + START.length, end).trim()); }
   catch (error) { throw new Error(`Antigravity returned invalid builder-envelope JSON: ${error.message}`); }
-  return envelope.parse(parsed);
+  // Validate strictly (throws on any invalid operation) but publish the original
+  // operation content UNCHANGED. Zod's defaults (draft, body, method) would
+  // mutate the promised-unchanged envelope, so they are intentionally discarded
+  // here and applied only inside the bound executor.
+  envelope.parse(parsed);
+  return { operations: parsed.operations };
 }

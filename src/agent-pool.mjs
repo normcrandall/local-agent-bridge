@@ -41,7 +41,24 @@ export function createAgentPool({
   githubBuilder = null,
   requestTimeoutMs = 4 * 60 * 60 * 1000 + 5 * 60 * 1000,
   turnTimeoutSeconds = 600,
+  autonomous = false,
 }) {
+  // Fail-closed autonomy: an autonomous council/portfolio/take-the-helm lane may
+  // only deliver GitHub mutations through a bound githubBuilder. Without one it
+  // must not fall back to raw push, gh pull-request mutation, gh api, PAT, or
+  // ambient git credentials. An explicitly user-selected legacy lane is only the
+  // non-autonomous caller (autonomous === false).
+  if (autonomous && !githubBuilder) {
+    if (workProfile === "deliver") {
+      throw new Error("Autonomous delivery requires a bound githubBuilder; raw push, gh pull-request mutation, PAT, or ambient git credentials are not permitted in autonomous council/portfolio flows.");
+    }
+    const rawDelivery = /(^|\s|&|;|\|)(git\s+push|gh\s+pr\s+(create|edit|merge|ready|close|reopen|review|comment)|gh\s+api)\b/;
+    const smuggled = (workCommands || []).find((command) => rawDelivery.test(command));
+    if (smuggled) {
+      throw new Error(`Autonomous delivery must use a bound githubBuilder; a raw delivery command is not permitted without one: ${smuggled}`);
+    }
+  }
+
   const clients = {};
   const reviewPublication = new Map();
 

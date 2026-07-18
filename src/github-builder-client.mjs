@@ -13,7 +13,7 @@ import {
   inspectGitHubMergeCapabilities,
   resolveGitHubMergeEnforcement,
 } from "./github-merge-enforcement.mjs";
-import { loadBranchReconciliationState } from "./builder-operation-store.mjs";
+import { loadBranchReconciliationState, loadNonBranchIntents } from "./builder-operation-store.mjs";
 import { classifyDeliveryOutcome } from "./builder-contract.mjs";
 
 const LFS_POINTER_REGEX = /^version https:\/\/git-lfs\.github\.com\/spec\/v1\r?\noid sha256:[0-9a-f]{64}\r?\nsize [0-9]+\r?\n$/;
@@ -334,22 +334,22 @@ export function createBoundBuilderClient({
       ...context,
       path: `/repos/${repository}/pulls?state=open&head=${encodeURIComponent(`${owner}:${headRef}`)}&per_page=100`,
     });
-    let pull = existing.find((candidate) => candidate.head?.sha === headSha && candidate.base?.ref === baseRef);
-    if (pull) {
-      pull = await request({
-        ...context,
-        path: `/repos/${repository}/pulls/${pull.number}`,
-        method: "PATCH",
-        body: { title, body, base: baseRef },
-      });
-    } else {
-      pull = await request({
-        ...context,
-        path: `/repos/${repository}/pulls`,
-        method: "POST",
-        body: { title, body, head: headRef, base: baseRef, draft },
-      });
-    }
+    const existingPull = existing.find((candidate) => candidate.head?.sha === headSha && candidate.base?.ref === baseRef);
+    const pull = await withNonBranchMutation("ensure_pull_request", { headRef, baseRef }, async () => (
+      existingPull
+        ? request({
+            ...context,
+            path: `/repos/${repository}/pulls/${existingPull.number}`,
+            method: "PATCH",
+            body: { title, body, base: baseRef },
+          })
+        : request({
+            ...context,
+            path: `/repos/${repository}/pulls`,
+            method: "POST",
+            body: { title, body, head: headRef, base: baseRef, draft },
+          })
+    ));
     if (pull?.head?.sha !== headSha) throw new Error("GitHub returned a pull request at an unexpected head SHA.");
     prNumber = pull.number;
     context.prNumber = pull.number;
@@ -407,20 +407,26 @@ export function createBoundBuilderClient({
       && normalizeBotLogin(comment.author?.login) === normalizeBotLogin(expectedLogin)
       && comment.body?.includes(receiptMarker)
     ));
-    if (existing) return { operation: "reply_review_thread", threadId, url: existing.url, idempotent: true, login: expectedLogin, headSha };
-    const query = `mutation($threadId:ID!,$body:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$threadId,body:$body}){comment{id url author{login __typename}}}}`;
-    const result = await request({
-      ...context,
-      path: "/graphql",
-      method: "POST",
-      body: { query, variables: { threadId, body: `${body.trim()}\n\n${receiptMarker}` } },
-    });
-    if (result?.errors?.length) throw new Error(`GitHub review-thread reply failed: ${result.errors[0].message}`);
-    const comment = result?.data?.addPullRequestReviewThreadReply?.comment;
-    if (comment?.author?.__typename !== "Bot" || normalizeBotLogin(comment?.author?.login) !== normalizeBotLogin(expectedLogin)) {
-      throw new Error("GitHub posted the thread reply with an unexpected identity.");
+    const replyKey = { threadId, marker: receiptMarker };
+    if (existing) {
+      recordNonBranchSettled("reply_review_thread", replyKey);
+      return { operation: "reply_review_thread", threadId, url: existing.url, idempotent: true, login: expectedLogin, headSha };
     }
-    return { operation: "reply_review_thread", threadId, url: comment.url, idempotent: false, login: expectedLogin, headSha };
+    const query = `mutation($threadId:ID!,$body:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$threadId,body:$body}){comment{id url author{login __typename}}}}`;
+    return withNonBranchMutation("reply_review_thread", replyKey, async () => {
+      const result = await request({
+        ...context,
+        path: "/graphql",
+        method: "POST",
+        body: { query, variables: { threadId, body: `${body.trim()}\n\n${receiptMarker}` } },
+      });
+      if (result?.errors?.length) throw new Error(`GitHub review-thread reply failed: ${result.errors[0].message}`);
+      const comment = result?.data?.addPullRequestReviewThreadReply?.comment;
+      if (comment?.author?.__typename !== "Bot" || normalizeBotLogin(comment?.author?.login) !== normalizeBotLogin(expectedLogin)) {
+        throw new Error("GitHub posted the thread reply with an unexpected identity.");
+      }
+      return { operation: "reply_review_thread", threadId, url: comment.url, idempotent: false, login: expectedLogin, headSha };
+    });
   }
 
   async function resolveReviewThread({ threadId }) {
@@ -428,25 +434,35 @@ export function createBoundBuilderClient({
     const threads = await loadReviewThreads();
     const thread = threads.find((candidate) => candidate.id === threadId);
     if (!thread) throw new Error("Review thread is not part of the bound pull request.");
-    if (thread.isResolved) return { operation: "resolve_review_thread", threadId, idempotent: true, login: expectedLogin, headSha };
+    if (thread.isResolved) {
+      recordNonBranchSettled("resolve_review_thread", { threadId });
+      return { operation: "resolve_review_thread", threadId, idempotent: true, login: expectedLogin, headSha };
+    }
     const query = `mutation($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{id isResolved}}}`;
-    const result = await request({ ...context, path: "/graphql", method: "POST", body: { query, variables: { threadId } } });
-    if (result?.errors?.length) throw new Error(`GitHub review-thread resolution failed: ${result.errors[0].message}`);
-    if (!result?.data?.resolveReviewThread?.thread?.isResolved) throw new Error("GitHub did not resolve the review thread.");
-    return { operation: "resolve_review_thread", threadId, idempotent: false, login: expectedLogin, headSha };
+    return withNonBranchMutation("resolve_review_thread", { threadId }, async () => {
+      const result = await request({ ...context, path: "/graphql", method: "POST", body: { query, variables: { threadId } } });
+      if (result?.errors?.length) throw new Error(`GitHub review-thread resolution failed: ${result.errors[0].message}`);
+      if (!result?.data?.resolveReviewThread?.thread?.isResolved) throw new Error("GitHub did not resolve the review thread.");
+      return { operation: "resolve_review_thread", threadId, idempotent: false, login: expectedLogin, headSha };
+    });
   }
 
   async function markReady() {
     authorize("mark_ready");
     await identity();
     const pull = await boundPullRequest(context);
-    if (!pull.draft) return { operation: "mark_ready", prNumber, url: pull.html_url, idempotent: true, login: expectedLogin, headSha };
+    if (!pull.draft) {
+      recordNonBranchSettled("mark_ready", {});
+      return { operation: "mark_ready", prNumber, url: pull.html_url, idempotent: true, login: expectedLogin, headSha };
+    }
     const query = `mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{number url isDraft headRefOid}}}`;
-    const result = await request({ ...context, path: "/graphql", method: "POST", body: { query, variables: { id: pull.node_id } } });
-    if (result?.errors?.length) throw new Error(`GitHub mark-ready failed: ${result.errors[0].message}`);
-    const ready = result?.data?.markPullRequestReadyForReview?.pullRequest;
-    if (ready?.headRefOid !== headSha || ready?.isDraft) throw new Error("GitHub returned an invalid mark-ready receipt.");
-    return { operation: "mark_ready", prNumber, url: ready.url, idempotent: false, login: expectedLogin, headSha };
+    return withNonBranchMutation("mark_ready", {}, async () => {
+      const result = await request({ ...context, path: "/graphql", method: "POST", body: { query, variables: { id: pull.node_id } } });
+      if (result?.errors?.length) throw new Error(`GitHub mark-ready failed: ${result.errors[0].message}`);
+      const ready = result?.data?.markPullRequestReadyForReview?.pullRequest;
+      if (ready?.headRefOid !== headSha || ready?.isDraft) throw new Error("GitHub returned an invalid mark-ready receipt.");
+      return { operation: "mark_ready", prNumber, url: ready.url, idempotent: false, login: expectedLogin, headSha };
+    });
   }
 
   async function merge({ method = "squash" }) {
@@ -454,7 +470,10 @@ export function createBoundBuilderClient({
     if (!prNumber) throw new Error("Merge requires a builder session bound to a pull request.");
     await identity();
     const pull = await boundPullRequest(context);
-    if (pull.merged) return { operation: "merge", prNumber, url: pull.html_url, idempotent: true, login: expectedLogin, headSha };
+    if (pull.merged) {
+      recordNonBranchSettled("merge", { method });
+      return { operation: "merge", prNumber, url: pull.html_url, idempotent: true, login: expectedLogin, headSha };
+    }
     if (!trustedReviewLogins.length && !trustedHumanReviewLogins.length) {
       throw new Error("No trusted reviewer App or human reviewer identities are configured for merge authorization.");
     }
@@ -585,13 +604,16 @@ export function createBoundBuilderClient({
         throw new Error(`${enforcement.reason}${evidence}`);
       }
     }
-    const merged = await request({
-      ...context,
-      path: `/repos/${repository}/pulls/${prNumber}/merge`,
-      method: "PUT",
-      body: { sha: headSha, merge_method: method },
+    const merged = await withNonBranchMutation("merge", { method }, async () => {
+      const response = await request({
+        ...context,
+        path: `/repos/${repository}/pulls/${prNumber}/merge`,
+        method: "PUT",
+        body: { sha: headSha, merge_method: method },
+      });
+      if (!response?.merged) throw new Error(`GitHub did not merge the bound pull request: ${response?.message || "unknown error"}`);
+      return response;
     });
-    if (!merged?.merged) throw new Error(`GitHub did not merge the bound pull request: ${merged?.message || "unknown error"}`);
     return {
       operation: "merge", prNumber, sha: merged.sha, idempotent: false, login: expectedLogin, headSha,
       reviewGate, mergeEnforcement: enforcement,
@@ -711,6 +733,73 @@ export function createBoundBuilderClient({
     });
   }
 
+  // Durable receipts for the non-branch operations (PR create/update, review
+  // reply/resolve, mark-ready, merge). Each mutating call records a persisted
+  // intent immediately before its network mutation and a terminal receipt after,
+  // keyed by a content-addressed operationId so a restart can inspect the
+  // outcome and distinguish a fresh idempotent no-op from a prior process's
+  // intent that has since landed (reconciled). Return values are unchanged.
+  const danglingNonBranchIntents = loadNonBranchIntents(receiptPath);
+
+  function nonBranchOperationId(operation, key) {
+    return createHash("sha256")
+      .update(JSON.stringify({ operation, repository, headSha, ...key }))
+      .digest("hex");
+  }
+
+  function persistNonBranchReceipt({ operation, key, outcome, idempotent = false, detail = null }) {
+    return persistReceipt({
+      operationId: nonBranchOperationId(operation, key),
+      operation,
+      repository,
+      headSha,
+      prNumber: prNumber ?? null,
+      issueNumber: issueNumber ?? null,
+      request: { operation, ...key },
+      outcome,
+      deliveryOutcome: outcome === "intent" ? "indeterminate" : classifyDeliveryOutcome({ outcome }),
+      idempotent: Boolean(idempotent),
+      ...(detail ? { detail } : {}),
+      appIdentity: appIdentity(cachedVerifiedLogin),
+      login: expectedLogin,
+      verifiedLogin: cachedVerifiedLogin || expectedLogin,
+      transport: "github-api-app-token",
+      remoteVerified: outcome !== "indeterminate" && outcome !== "intent",
+      recordedAt: new Date().toISOString(),
+    });
+  }
+
+  // Record a terminal receipt for an already-satisfied (idempotent) pre-check.
+  // If a prior process left a dangling intent for the same operationId, the
+  // observed landed state is a reconciliation rather than a fresh no-op.
+  function recordNonBranchSettled(operation, key) {
+    const wasPending = danglingNonBranchIntents.has(nonBranchOperationId(operation, key));
+    danglingNonBranchIntents.delete(nonBranchOperationId(operation, key));
+    persistNonBranchReceipt({ operation, key, outcome: wasPending ? "reconciled" : "idempotent", idempotent: true });
+  }
+
+  // Wrap the actual network mutation: intent before, terminal after. A thrown
+  // error is recorded as a determinate failure (HTTP status) or a fail-closed
+  // indeterminate outcome (transport error, outcome unprovable) before rethrow.
+  async function withNonBranchMutation(operation, key, mutate) {
+    persistNonBranchReceipt({ operation, key, outcome: "intent" });
+    let result;
+    try {
+      result = await mutate();
+    } catch (error) {
+      const determinate = typeof error?.status === "number";
+      persistNonBranchReceipt({
+        operation, key,
+        outcome: determinate ? "failed" : "indeterminate",
+        detail: String(error?.message || error).slice(0, 500),
+      });
+      throw error;
+    }
+    danglingNonBranchIntents.delete(nonBranchOperationId(operation, key));
+    persistNonBranchReceipt({ operation, key, outcome: "succeeded" });
+    return result;
+  }
+
   // Read the remote ref while honoring a pending indeterminate marker: the
   // read must succeed before any further mutation is considered, and a read
   // proving the requested SHA resolves the marker as reconciled.
@@ -725,18 +814,47 @@ export function createBoundBuilderClient({
       }
       throw error;
     }
-    if (pending) {
-      indeterminateRefs.delete(ref);
-      if (currentRef?.object?.sha === sha) {
+    if (!pending) return { currentRef, reconciledReceipt: null };
+
+    // Resolve the pending marker strictly on its OWN requestedSha via read-back.
+    // A retry that targets a different SHA must never silently erase an
+    // unresolved attempt: the prior marker is reconciled or failed on its own
+    // terms first, then the current operation proceeds.
+    const observedSha = currentRef?.object?.sha ?? null;
+    const priorLanded = observedSha !== null && observedSha === pending.requestedSha;
+    indeterminateRefs.delete(ref);
+
+    if (pending.requestedSha === sha) {
+      if (priorLanded) {
         return {
           currentRef,
           reconciledReceipt: branchReceipt({
             operation, ref, requestedSha: sha, expectedOldSha: pending.expectedOldSha,
-            observedRemoteSha: sha, outcome: "reconciled", idempotent: false, reconciled: true,
+            observedRemoteSha: observedSha, outcome: "reconciled", idempotent: false, reconciled: true,
             verifiedLogin: receiptLogin,
           }),
         };
       }
+      // The prior attempt provably did not land; fall through to a normal
+      // evaluation of the current operation against the observed remote state.
+      return { currentRef, reconciledReceipt: null };
+    }
+
+    // Different-SHA retry: durably record the prior marker's real fate before
+    // continuing, so no indeterminate state is discarded without a read-back.
+    if (priorLanded) {
+      branchReceipt({
+        operation: pending.operation, ref, requestedSha: pending.requestedSha,
+        expectedOldSha: pending.expectedOldSha, observedRemoteSha: observedSha,
+        outcome: "reconciled", idempotent: false, reconciled: true, verifiedLogin: receiptLogin,
+      });
+    } else {
+      recordFailureReceipt({
+        operation: pending.operation, ref, requestedSha: pending.requestedSha,
+        expectedOldSha: pending.expectedOldSha, outcome: "failed",
+        detail: `prior indeterminate attempt for ${pending.requestedSha} did not land; remote observed at ${observedSha || "none"}`,
+        verifiedLogin: receiptLogin,
+      });
     }
     return { currentRef, reconciledReceipt: null };
   }

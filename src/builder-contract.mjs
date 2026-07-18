@@ -130,13 +130,51 @@ const BRANCH_OUTCOME_TO_DELIVERY = Object.freeze({
 // lifecycle delivery outcome. A non-branch success receipt has no `outcome`
 // field but is a proven mutation, so it maps to succeeded; a rejection carries
 // an explicit failed/indeterminate outcome or an error marker.
+export const DELIVERY_OUTCOME_VALUES = new Set(Object.values(DELIVERY_OUTCOMES));
+
+// Surfacing severity: an unproven (indeterminate) delivery is the most urgent to
+// distinguish, then an outright rejection, then a recovered (reconciled) state,
+// then a clean success. An aggregate reports the most severe present.
+const DELIVERY_OUTCOME_SEVERITY = [
+  DELIVERY_OUTCOMES.INDETERMINATE,
+  DELIVERY_OUTCOMES.REJECTED,
+  DELIVERY_OUTCOMES.RECONCILED,
+  DELIVERY_OUTCOMES.SUCCEEDED,
+];
+
+// Collapse many receipts/outcomes into a single lifecycle delivery outcome so
+// lifecycle status and coordinator wakes can distinguish succeeded, rejected,
+// indeterminate, and reconciled remote verification. Returns null when empty.
+export function aggregateDeliveryOutcome(outcomes) {
+  const present = new Set();
+  for (const entry of outcomes || []) {
+    if (entry === undefined || entry === null) continue;
+    const value = typeof entry === "string" && DELIVERY_OUTCOME_VALUES.has(entry)
+      ? entry
+      : classifyDeliveryOutcome(typeof entry === "object" ? entry : { outcome: entry });
+    present.add(value);
+  }
+  for (const severity of DELIVERY_OUTCOME_SEVERITY) {
+    if (present.has(severity)) return severity;
+  }
+  return null;
+}
+
 export function classifyDeliveryOutcome(receipt) {
   let outcome = receipt;
   if (receipt && typeof receipt === "object") {
-    if (typeof receipt.deliveryOutcome === "string") return receipt.deliveryOutcome;
-    if (receipt.error) return DELIVERY_OUTCOMES.REJECTED;
-    outcome = receipt.outcome;
+    if (receipt.deliveryOutcome !== undefined) outcome = receipt.deliveryOutcome;
+    else if (receipt.error) return DELIVERY_OUTCOMES.REJECTED;
+    else outcome = receipt.outcome;
   }
+  // A non-branch success receipt carries no outcome field; that is a proven,
+  // known success. Any other value must be a recognized outcome or fail closed
+  // rather than silently reporting success.
   if (outcome === undefined || outcome === null) return DELIVERY_OUTCOMES.SUCCEEDED;
-  return BRANCH_OUTCOME_TO_DELIVERY[outcome] ?? DELIVERY_OUTCOMES.SUCCEEDED;
+  if (DELIVERY_OUTCOME_VALUES.has(outcome)) return outcome;
+  if (Object.hasOwn(BRANCH_OUTCOME_TO_DELIVERY, outcome)) return BRANCH_OUTCOME_TO_DELIVERY[outcome];
+  throw new BuilderError(
+    BUILDER_ERROR_CODES.REJECTED,
+    `Unrecognized builder delivery outcome ${JSON.stringify(outcome)}; refusing to report success fail-closed.`,
+  );
 }

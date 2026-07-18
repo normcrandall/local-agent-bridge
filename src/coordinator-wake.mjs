@@ -36,36 +36,59 @@ export function coordinatorWakeSummary(state) {
   return `Collaboration ${state.id} entered ${state.status}.`;
 }
 
+// The provider-neutral delivery outcome recorded for the bound head SHA, if any.
+// This distinguishes succeeded / rejected / indeterminate / reconciled remote
+// verification independently of the coarse collaboration status.
+export function coordinatorDeliveryOutcome(state) {
+  const outcome = state.completion?.delivery?.outcome ?? null;
+  return outcome || null;
+}
+
+// A delivery whose remote verification is unproven (indeterminate) or was
+// rejected must not be silently treated as a clean phase completion.
+const DELIVERY_NEEDS_ATTENTION = new Set(["indeterminate", "rejected"]);
+
 export function classifyCoordinatorWake(state) {
   if (!coordinatorProvider(state)) return null;
+  const deliveryOutcome = coordinatorDeliveryOutcome(state);
+  const withDelivery = (classification) => (
+    deliveryOutcome ? { ...classification, deliveryOutcome } : classification
+  );
   if (state.status === "needs_user" || state.completion?.nextAction === "needs_user") {
-    return {
+    return withDelivery({
       kind: "needs_user",
       actionable: false,
       nextAction: "needs_user",
       summary: coordinatorWakeSummary(state),
-    };
+    });
   }
   if (state.completion?.acknowledged === false) {
-    return {
+    return withDelivery({
       kind: "handoff_ready",
-      actionable: ACTIONABLE_NEXT_ACTIONS.has(state.completion.nextAction),
-      nextAction: state.completion.nextAction,
+      // A delivery needing attention makes the handoff actionable even when the
+      // handoff's own nextAction would not, so the coordinator inspects it.
+      actionable: ACTIONABLE_NEXT_ACTIONS.has(state.completion.nextAction)
+        || DELIVERY_NEEDS_ATTENTION.has(deliveryOutcome),
+      nextAction: DELIVERY_NEEDS_ATTENTION.has(deliveryOutcome)
+        ? "writer_fix"
+        : state.completion.nextAction,
       summary: coordinatorWakeSummary(state),
-    };
+    });
   }
   if (TERMINAL_STATUSES.has(state.status)) {
-    const nextAction = state.status === "agreed"
-      ? "chair_verify"
-      : state.status === "turn_limit"
-        ? "continue"
-        : "inspect";
-    return {
+    const nextAction = DELIVERY_NEEDS_ATTENTION.has(deliveryOutcome)
+      ? "inspect"
+      : state.status === "agreed"
+        ? "chair_verify"
+        : state.status === "turn_limit"
+          ? "continue"
+          : "inspect";
+    return withDelivery({
       kind: state.status === "agreed" ? "phase_complete" : "phase_stopped",
       actionable: state.status !== "cancelled",
       nextAction,
       summary: coordinatorWakeSummary(state),
-    };
+    });
   }
   return null;
 }
@@ -79,6 +102,7 @@ function wakeKey(state, classification) {
     state.status,
     classification.kind,
     classification.nextAction,
+    classification.deliveryOutcome || "none",
   ].join(":");
 }
 
@@ -102,6 +126,7 @@ export async function enqueueCoordinatorWake(root, id, { force = false } = {}) {
         kind: classification.kind,
         actionable: classification.actionable,
         nextAction: classification.nextAction,
+        deliveryOutcome: classification.deliveryOutcome || null,
         summary: classification.summary,
         status: "pending",
         sourceStatus: current.status,
