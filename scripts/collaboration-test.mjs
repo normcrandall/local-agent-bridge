@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -651,6 +651,46 @@ try {
   assert.equal(activeCancellation.structuredContent.status, "cancelled");
   assert.equal(activeCancellation.structuredContent.workerPid, null);
   assert.equal(activeCancellation.structuredContent.runtime.activeCall, null);
+
+  // Issue #55: integration through the real start/worker path. A review whose only
+  // verification gate re-enters the same live provider-capacity pool must terminate with
+  // a typed provider_self_deadlock event BEFORE any provider work call, registering no
+  // waiter or slot. Uses the offline fake-claude harness; no real provider is invoked.
+  const selfDeadlockStarted = await secondClient.callTool({
+    name: "start_collaboration",
+    arguments: {
+      task: "Review with a self-referential provider-capacity gate",
+      agents: ["claude"],
+      startAgent: "claude",
+      mode: "review",
+      maxTurns: 2,
+      verificationCommands: ["npm run test:provider-concurrency"],
+      handoffPath: ".bridge/test-handoffs/self-deadlock-review.md",
+    },
+  });
+  const selfDeadlockId = selfDeadlockStarted.structuredContent.id;
+  const selfDeadlockRun = await waitForStop(secondClient, selfDeadlockId);
+  assert.equal(selfDeadlockRun.status, "failed", selfDeadlockRun.error || "expected self-deadlock failure");
+  assert.equal(selfDeadlockRun.turns.length, 0, "no provider turn may occur before the guard");
+  const selfDeadlockEvents = (await readFile(join(stateDirectory, `${selfDeadlockId}.jsonl`), "utf8"))
+    .split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  const deadlockEvent = selfDeadlockEvents.find((event) => event.type === "provider_self_deadlock");
+  assert.ok(deadlockEvent, "a typed provider_self_deadlock event must be recorded");
+  assert.equal(deadlockEvent.code, "provider_self_deadlock");
+  assert.equal(deadlockEvent.agent, "claude");
+  assert.ok(
+    !selfDeadlockEvents.some((event) => event.type === "agent_started"),
+    "no provider client/work call may launch before the self-deadlock guard",
+  );
+  const selfDeadlockCapacityDir = join(stateDirectory, "capacity", "claude", "review");
+  let selfDeadlockCapacityNames = [];
+  try { selfDeadlockCapacityNames = await readdir(selfDeadlockCapacityDir); } catch { selfDeadlockCapacityNames = []; }
+  for (const name of selfDeadlockCapacityNames) {
+    if (!name.endsWith(".wait") && !name.endsWith(".slot")) continue;
+    const entry = JSON.parse(await readFile(join(selfDeadlockCapacityDir, name), "utf8"));
+    assert.notEqual(entry.collaborationId, selfDeadlockId, "no waiter/slot may reference the self-deadlocked collaboration");
+  }
+  console.log("Issue #55 worker self-deadlock integration test passed.");
 
   const cpTestResult = spawnSync(process.execPath, [resolve(root, "scripts/collaboration-control-plane-test.mjs")], { stdio: "inherit" });
   assert.equal(cpTestResult.status, 0, "Control plane unit tests failed");

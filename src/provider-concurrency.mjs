@@ -41,27 +41,61 @@ export function detectProviderSelfDeadlock({ ownedSlots, limit } = {}) {
 }
 
 // A verification command "exercises the same live provider-capacity pool" when running
-// it would itself acquire capacity for the same provider — because it drives this
-// broker's provider dispatch (directly, via its capacity test, or the collaboration
-// worker) or re-invokes the same provider CLI by name. Dispatching such a review would
-// deadlock: the nested acquisition waits on the very slot this call holds. Conservative,
-// provider-neutral structural match.
-const PROVIDER_CAPACITY_POOL_MARKERS = [
-  "test:provider-concurrency",
-  "provider-concurrency",
-  "acquireProviderCapacity",
-  "collaboration-worker",
-  "start_collaboration",
-  "collaboration-bridge",
-];
+// it would itself consume the same provider's live capacity — because it drives this
+// broker's provider dispatch/capacity acquisition, or directly invokes the same provider
+// CLI. Dispatching such a review would deadlock on the very slot this call holds.
+//
+// The match is STRUCTURAL, not substring-based: a name that merely appears in a file
+// path or argument (e.g. `cat src/collaboration-bridge.mjs`, `grep provider-concurrency`)
+// is never a match. Only a directly executed entrypoint counts.
+const POOL_ENTRY_PACKAGE_SCRIPTS = new Set(["test:provider-concurrency"]);
+const POOL_ENTRY_EXECUTABLES = new Set([
+  "collaboration-worker.mjs",
+  "collaboration-bridge.mjs",
+  "bridge",
+]);
+const SCRIPT_RUNNERS = new Set(["npm", "pnpm", "yarn"]);
+const NODE_RUNNERS = new Set(["node", "node.exe"]);
+
+function commandBasename(token) {
+  const cleaned = String(token || "").replace(/^['"]|['"]$/g, "");
+  const segments = cleaned.split(/[\\/]/);
+  return segments[segments.length - 1] || cleaned;
+}
 
 export function verificationCommandReentersProviderPool(command, provider) {
-  const text = String(command || "");
-  if (PROVIDER_CAPACITY_POOL_MARKERS.some((marker) => text.includes(marker))) return true;
-  if (provider) {
-    const token = text.trim().split(/\s+/)[0] || "";
-    if (token === provider || token.endsWith(`/${provider}`)) return true;
+  const tokens = String(command || "").trim().split(/\s+/).filter(Boolean);
+  if (!tokens.length) return false;
+  // Skip a leading `env` and any leading VAR=value environment assignments.
+  let index = 0;
+  if (commandBasename(tokens[index]) === "env") index += 1;
+  while (index < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[index])) index += 1;
+  const head = tokens[index];
+  if (!head) return false;
+  const headName = commandBasename(head);
+  const rest = tokens.slice(index + 1);
+  const firstOperand = rest.find((token) => !token.startsWith("-"));
+
+  // (a) Direct same-provider CLI invocation: `claude ...`, `/usr/local/bin/claude ...`.
+  if (provider && headName === provider) return true;
+
+  // (b) A known broker pool-entry executable, run directly or via node.
+  if (POOL_ENTRY_EXECUTABLES.has(headName)) return true;
+  if (NODE_RUNNERS.has(headName) && firstOperand && POOL_ENTRY_EXECUTABLES.has(commandBasename(firstOperand))) {
+    return true;
   }
+
+  // (c) A local package-script alias resolving to a known pool-entry gate.
+  if (SCRIPT_RUNNERS.has(headName)) {
+    const runIndex = rest.findIndex((token) => token === "run" || token === "run-script");
+    const script = runIndex >= 0
+      ? rest[runIndex + 1]
+      : headName === "yarn"
+        ? firstOperand
+        : null;
+    if (script && POOL_ENTRY_PACKAGE_SCRIPTS.has(script)) return true;
+  }
+
   return false;
 }
 

@@ -252,14 +252,31 @@ try {
 
   // Issue #55: a verification command that re-enters the same live provider-capacity pool
   // must fail fast with provider_self_deadlock BEFORE any waiter/slot is registered.
+  // Positive: local package-script alias to the pool gate, direct provider CLI, node/
+  // direct execution of a broker pool-entry script, the ./bridge CLI, wrapper forms.
   assert.equal(verificationCommandReentersProviderPool("npm run test:provider-concurrency", "claude"), true);
+  assert.equal(verificationCommandReentersProviderPool("yarn test:provider-concurrency", "claude"), true);
+  assert.equal(verificationCommandReentersProviderPool("pnpm run test:provider-concurrency --silent", "claude"), true);
   assert.equal(verificationCommandReentersProviderPool("claude -p review", "claude"), true);
   assert.equal(verificationCommandReentersProviderPool("/usr/local/bin/claude review", "claude"), true);
+  assert.equal(verificationCommandReentersProviderPool("env NODE_ENV=test claude -p review", "claude"), true);
+  assert.equal(verificationCommandReentersProviderPool("node scripts/collaboration-worker.mjs bridge-1", "claude"), true);
+  assert.equal(verificationCommandReentersProviderPool("./bridge talk hello", "claude"), true);
+  assert.equal(verificationCommandReentersProviderPool("codex exec review", "codex"), true);
+
+  // Negative: same substrings appearing only as file-path/argument data, unrelated
+  // gates, and a cross-provider CLI that cannot deadlock on this provider's slot.
   assert.equal(verificationCommandReentersProviderPool("npm run test:collaboration", "claude"), false);
+  assert.equal(verificationCommandReentersProviderPool("grep -rn provider-concurrency src", "claude"), false);
+  assert.equal(verificationCommandReentersProviderPool("cat src/collaboration-bridge.mjs", "claude"), false);
+  assert.equal(verificationCommandReentersProviderPool("eslint src/provider-concurrency.mjs", "claude"), false);
+  assert.equal(verificationCommandReentersProviderPool("node scripts/lint.mjs --rule provider-concurrency", "claude"), false);
+  assert.equal(verificationCommandReentersProviderPool("echo start_collaboration && cat notes/claude.md", "claude"), false);
+  assert.equal(verificationCommandReentersProviderPool("codex exec review", "claude"), false);
   assert.deepEqual(
     verificationCommandsReenteringPool({
       provider: "claude",
-      verificationCommands: ["npm test", "npm run test:provider-concurrency"],
+      verificationCommands: ["npm test", "npm run test:provider-concurrency", "cat src/collaboration-bridge.mjs"],
     }),
     ["npm run test:provider-concurrency"],
   );
