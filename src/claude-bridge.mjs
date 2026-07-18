@@ -3,7 +3,6 @@
 import { spawn } from "node:child_process";
 import {
   existsSync,
-  mkdirSync,
   mkdtempSync,
   realpathSync,
   rmSync,
@@ -11,7 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -20,6 +19,7 @@ import { loadConfiguredClaudeModel, resolveClaudeModelPolicy } from "./claude-mo
 import { loadConfiguredFallbackModels, normalizeFallbackModels } from "./model-fallbacks.mjs";
 import { resolveModelRoute } from "./model-policy.mjs";
 import { negotiateProviderCapabilities } from "./provider-cli-capabilities.mjs";
+import { ensureContainedHandoffPath } from "./handoff-path.mjs";
 
 const RUNTIME_ROOT = realpathSync(process.env.BRIDGE_RUNTIME_ROOT || process.env.BRIDGE_ROOT || process.cwd());
 const WORKSPACE_ROOT = realpathSync(process.env.BRIDGE_WORKSPACE_ROOT || process.env.BRIDGE_ROOT || process.cwd());
@@ -62,30 +62,7 @@ function projectDirectory(requested) {
 }
 
 function projectFile(cwd, requested) {
-  if (!requested) return null;
-  if (isAbsolute(requested)) throw new Error("handoffPath must be relative to the delegated working directory.");
-  const candidate = resolve(cwd, requested);
-  const fromWorkspace = relative(cwd, candidate);
-  if (fromWorkspace === ".." || fromWorkspace.startsWith(`..${sep}`) || isAbsolute(fromWorkspace)) {
-    throw new Error("handoffPath must stay inside the delegated working directory.");
-  }
-
-  let existing = existsSync(candidate) ? candidate : dirname(candidate);
-  while (!existsSync(existing) && dirname(existing) !== existing) existing = dirname(existing);
-  const actual = realpathSync(existing);
-  const actualFromWorkspace = relative(cwd, actual);
-  if (
-    actualFromWorkspace === ".."
-    || actualFromWorkspace.startsWith(`..${sep}`)
-    || isAbsolute(actualFromWorkspace)
-  ) {
-    throw new Error("handoffPath resolves outside the delegated working directory.");
-  }
-  if (existsSync(candidate) && statSync(candidate).isDirectory()) {
-    throw new Error("handoffPath must name a file, not a directory.");
-  }
-  mkdirSync(dirname(candidate), { recursive: true, mode: 0o700 });
-  return candidate;
+  return ensureContainedHandoffPath(cwd, requested);
 }
 
 function timeoutMs(requestedSeconds) {

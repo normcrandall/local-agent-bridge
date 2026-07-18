@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import {
   assertReviewWorkspaceHead,
+  isRecoverablePublicationError,
   localReviewPrompt,
   orderReviewProbes,
   recordReviewPublicationResult,
+  republishValidatedReview,
   resolveReviewPublication,
 } from "../src/review-publication.mjs";
 
@@ -104,6 +106,50 @@ const ordinary = orderReviewProbes({
 assert.deepEqual(ordinary.agents, ["claude", "codex"]);
 assert.equal(ordinary.startAgent, "codex");
 assert.equal(ordinary.publication, null);
+
+// Recoverable-vs-terminal classification for publication retries.
+assert.equal(isRecoverablePublicationError(new Error("ENOENT: no such file or directory, open '/w/x.md'")), true);
+assert.equal(isRecoverablePublicationError(new Error("transport closed")), true);
+assert.equal(isRecoverablePublicationError(new Error("reviewer identity mismatch")), false);
+assert.equal(isRecoverablePublicationError(new Error("PAT fallback cannot APPROVE")), false);
+assert.equal(isRecoverablePublicationError(new Error("head changed since authorization")), false);
+
+// A validated Antigravity envelope is published without re-running the provider;
+// a recoverable failure retries only the publication path against the same
+// envelope, and the envelope is never re-parsed.
+const validatedEnvelope = { handoff: "# Review\n\nVerified.", event: "APPROVE", body: "Looks good.", comments: [] };
+let publishAttempts = 0;
+const publishedReceipt = await republishValidatedReview({
+  envelope: validatedEnvelope,
+  publish: async (envelope, attempt) => {
+    publishAttempts += 1;
+    assert.equal(envelope, validatedEnvelope, "publish always receives the already-validated envelope");
+    if (attempt === 1) throw new Error("ENOENT: no such file or directory, open '.bridge/handoffs/issue-58.md'");
+    return { login: "antigravity-reviewer[bot]", url: "https://github.test/review/7" };
+  },
+});
+assert.equal(publishAttempts, 2, "publication retried once without re-running the provider");
+assert.equal(publishedReceipt.login, "antigravity-reviewer[bot]");
+
+// A terminal (policy) failure is not retried.
+let terminalAttempts = 0;
+await assert.rejects(
+  republishValidatedReview({
+    envelope: validatedEnvelope,
+    publish: async () => {
+      terminalAttempts += 1;
+      throw new Error("reviewer identity mismatch: refusing to publish");
+    },
+  }),
+  /identity mismatch/,
+);
+assert.equal(terminalAttempts, 1, "terminal publication failure is surfaced immediately, not retried");
+
+// A missing validated envelope is a programmer error, not a silent no-op.
+await assert.rejects(
+  republishValidatedReview({ envelope: null, publish: async () => ({}) }),
+  /already-validated review envelope/,
+);
 
 const prompt = localReviewPrompt("Review this diff.", "reviewer App unavailable");
 assert.match(prompt, /Complete the independent review and durable handoff/);
