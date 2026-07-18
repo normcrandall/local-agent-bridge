@@ -1,17 +1,8 @@
-import { z } from "zod";
+import { builderEnvelopeSchema } from "./builder-contract.mjs";
 
-const operation = z.discriminatedUnion("operation", [
-  z.object({ operation: z.literal("ensure_pull_request"), title: z.string().min(1).max(256), body: z.string().max(60_000), draft: z.boolean().default(false) }).strict(),
-  z.object({ operation: z.literal("reply_review_thread"), threadId: z.string().min(1), body: z.string().min(1).max(60_000) }).strict(),
-  z.object({ operation: z.literal("resolve_review_thread"), threadId: z.string().min(1) }).strict(),
-  z.object({ operation: z.literal("mark_ready") }).strict(),
-  z.object({ operation: z.literal("merge"), method: z.enum(["merge", "squash", "rebase"]).default("squash") }).strict(),
-  z.object({ operation: z.literal("create_branch"), ref: z.string().min(1).max(220), sha: z.string().regex(/^[0-9a-f]{40}$/i) }).strict(),
-  z.object({ operation: z.literal("push_branch"), ref: z.string().min(1).max(220), sha: z.string().regex(/^[0-9a-f]{40}$/i), oldSha: z.string().regex(/^[0-9a-f]{40}$/i).optional() }).strict(),
-  z.object({ operation: z.literal("replace_branch"), ref: z.string().min(1).max(220), sha: z.string().regex(/^[0-9a-f]{40}$/i), oldSha: z.string().regex(/^[0-9a-f]{40}$/i) }).strict(),
-]);
-
-const envelope = z.object({ operations: z.array(operation).min(1).max(20) }).strict();
+// The Antigravity envelope schema is derived from the single canonical builder
+// contract so it can never drift from the Claude/Codex MCP tool schemas.
+const envelope = builderEnvelopeSchema();
 const START = "---BEGIN BOUND_GITHUB_BUILDER---";
 const END = "---END BOUND_GITHUB_BUILDER---";
 
@@ -36,5 +27,10 @@ export function parseBuilderEnvelope(text) {
   let parsed;
   try { parsed = JSON.parse(text.slice(start + START.length, end).trim()); }
   catch (error) { throw new Error(`Antigravity returned invalid builder-envelope JSON: ${error.message}`); }
-  return envelope.parse(parsed);
+  // Validate strictly (throws on any invalid operation) but publish the original
+  // operation content UNCHANGED. Zod's defaults (draft, body, method) would
+  // mutate the promised-unchanged envelope, so they are intentionally discarded
+  // here and applied only inside the bound executor.
+  envelope.parse(parsed);
+  return { operations: parsed.operations };
 }

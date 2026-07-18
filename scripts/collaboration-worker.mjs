@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import process from "node:process";
 import { createAgentPool } from "../src/agent-pool.mjs";
+import { summarizeDeliveryOutcomes } from "../src/builder-operation-store.mjs";
 import {
   acquireWorkerLock,
   acquireWorkspaceLock,
@@ -219,6 +220,9 @@ try {
     githubBuilder: state.githubBuilder || null,
     turnTimeoutSeconds: state.turnTimeoutSeconds || 600,
     requestTimeoutMs: (state.turnTimeoutSeconds || 600) * 1000 + 5_000,
+    // The collaboration worker is the autonomous council/portfolio/take-the-helm
+    // execution path: delivery must be fail-closed to a bound githubBuilder.
+    autonomous: true,
   });
   const probes = await Promise.all(state.agents.map((agent) => pool.probe(agent)));
   const reviewOrder = orderReviewProbes({
@@ -530,6 +534,15 @@ try {
             turn: turn.number,
           });
           handoffs = [...handoffs, completion.lastHandoff];
+          // Carry the durable, provider-neutral delivery outcome structurally
+          // into completion so coordinator wakes distinguish succeeded / rejected
+          // / indeterminate / reconciled remote verification (not free text).
+          if (current.githubBuilder) {
+            const receiptPath = current.githubBuilder.receiptPath
+              || resolve(current.workspace, ".bridge", "github-builder-receipts.jsonl");
+            const delivery = summarizeDeliveryOutcomes(receiptPath, { headSha: current.githubBuilder.headSha });
+            if (delivery) completion = { ...completion, delivery: { ...delivery, at: new Date().toISOString() } };
+          }
         }
         const reviewPublication = turn.metadata?.reviewPublication?.available
           ? recordReviewPublicationResult(current.reviewPublication, { agent: turn.agent, published: true })

@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 // Issue #55 dispatch/narrative fixtures: command allowlist admission and command-aware narrative.
+import "./issue-40-autonomy-test.mjs";
 import "./issue-55-allowlist-test.mjs";
 import "./issue-55-narrative-test.mjs";
 // Issue #55 fail-closed provider capability boundary (integration via delegated pool.send).

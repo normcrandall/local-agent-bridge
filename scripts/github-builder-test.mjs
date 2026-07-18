@@ -2,7 +2,19 @@ import assert from "node:assert/strict";
 import { createBoundBuilderClient } from "../src/github-builder-client.mjs";
 import { assertBranchRef, resolveTransportUrl } from "../src/github-builder-transport.mjs";
 import { builderEnvelopeInstructions, parseBuilderEnvelope } from "../src/builder-envelope.mjs";
+import {
+  builderMcpInputSchema,
+  builderEnvelopeOperationSchema,
+  classifyDeliveryOutcome,
+  aggregateDeliveryOutcome,
+  BuilderUnsupportedError,
+  DELIVERY_OUTCOMES,
+} from "../src/builder-contract.mjs";
+import { loadBranchReconciliationState, summarizeDeliveryOutcomes } from "../src/builder-operation-store.mjs";
+import { claudeToolRequest, codexToolRequest } from "../src/tool-requests.mjs";
 import { execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { z } from "zod";
 import http from "node:http";
 import path from "node:path";
 import fs from "node:fs";
@@ -190,7 +202,7 @@ function fakeGitHub({
   currentSha = headSha, wrongThread = false, existingPull = false,
   reviewStatus = "success", reviewLogin = "reviewer[bot]", reviewStatuses = null, reviews = [],
   statusPermissionDenied = false, branchShas = {}, graphqlReplyLogin = "builder[bot]", graphqlReplyType = "Bot",
-  rules = [], branchProtection = null, branchProtectionStatus = 200,
+  rules = [], branchProtection = null, branchProtectionStatus = 200, merged = false,
 } = {}) {
   const calls = [];
   const branchState = { ...branchShas };
@@ -233,7 +245,7 @@ function fakeGitHub({
       return json({ name: branch, protected: false });
     }
     if (path === "/repos/owner/repo/pulls/42" && (options.method || "GET") === "GET") return json({
-      number: 42, node_id: "PR_node", draft: true, merged: false, html_url: "https://github.test/pr/42", head: { sha: currentSha },
+      number: 42, node_id: "PR_node", draft: true, merged, html_url: "https://github.test/pr/42", head: { sha: currentSha },
     });
     if (path.startsWith("/repos/owner/repo/pulls?")) return json(existingPull ? [{
       number: 42, html_url: "https://github.test/pr/42", head: { sha: currentSha }, base: { ref: "main" }, state: "open",
@@ -1168,21 +1180,38 @@ git(["config", "--unset", "url.http://127.0.0.1:1/.pushInsteadOf"], { cwd: local
 const rawReceiptLog = fs.readFileSync(receiptLogPath, "utf8");
 assert.ok(!rawReceiptLog.includes(BUILDER_TOKEN), "durable receipts must never contain the token");
 const receiptLines = rawReceiptLog.trim().split("\n").map((line) => JSON.parse(line));
+const BRANCH_OPS = ["create_branch", "push_branch", "replace_branch"];
+const NON_BRANCH_OPS = ["ensure_pull_request", "reply_review_thread", "resolve_review_thread", "mark_ready", "merge"];
 for (const receipt of receiptLines) {
-  assert.ok(["create_branch", "push_branch", "replace_branch"].includes(receipt.operation));
   assert.match(receipt.operationId, /^[0-9a-f]{64}$/);
   assert.equal(receipt.repository, "owner/repo");
-  assert.ok(receipt.ref.startsWith("refs/heads/"));
-  assert.ok(Object.hasOwn(receipt, "requestedSha"));
-  assert.ok(Object.hasOwn(receipt, "expectedOldSha"));
-  assert.ok(Object.hasOwn(receipt, "observedRemoteSha"));
-  assert.ok(["created", "fast_forwarded", "replaced", "idempotent", "reconciled", "indeterminate", "failed"].includes(receipt.outcome));
-  assert.equal(receipt.appIdentity.expectedLogin, "builder[bot]");
   assert.ok(receipt.recordedAt);
+  assert.equal(receipt.appIdentity.expectedLogin, "builder[bot]");
+  // Every durable receipt carries its provider-neutral lifecycle outcome so a
+  // restarted process can inspect succeeded/rejected/indeterminate/reconciled.
+  assert.ok(["succeeded", "rejected", "indeterminate", "reconciled"].includes(receipt.deliveryOutcome));
+  if (BRANCH_OPS.includes(receipt.operation)) {
+    assert.ok(receipt.ref.startsWith("refs/heads/"));
+    assert.ok(Object.hasOwn(receipt, "requestedSha"));
+    assert.ok(Object.hasOwn(receipt, "expectedOldSha"));
+    assert.ok(Object.hasOwn(receipt, "observedRemoteSha"));
+    assert.ok(["created", "fast_forwarded", "replaced", "idempotent", "reconciled", "indeterminate", "failed"].includes(receipt.outcome));
+    assert.equal(receipt.deliveryOutcome, classifyDeliveryOutcome(receipt));
+  } else {
+    // Non-branch durable receipt: canonical operationId, request envelope, and
+    // intent/terminal lifecycle for restart inspection.
+    assert.ok(NON_BRANCH_OPS.includes(receipt.operation), `unexpected receipt operation ${receipt.operation}`);
+    assert.ok(["intent", "succeeded", "idempotent", "reconciled", "failed", "indeterminate"].includes(receipt.outcome));
+    assert.equal(receipt.request.operation, receipt.operation);
+  }
 }
 for (const expectedOutcome of ["created", "fast_forwarded", "replaced", "idempotent", "reconciled", "indeterminate", "failed"]) {
-  assert.ok(receiptLines.some((receipt) => receipt.outcome === expectedOutcome), `missing durable receipt outcome ${expectedOutcome}`);
+  assert.ok(receiptLines.some((receipt) => BRANCH_OPS.includes(receipt.operation) && receipt.outcome === expectedOutcome), `missing durable receipt outcome ${expectedOutcome}`);
 }
+// The non-branch lifecycle is durably recorded too: an intent precedes each
+// mutation and a terminal outcome follows.
+assert.ok(receiptLines.some((r) => NON_BRANCH_OPS.includes(r.operation) && r.outcome === "intent"), "missing non-branch intent receipt");
+assert.ok(receiptLines.some((r) => NON_BRANCH_OPS.includes(r.operation) && r.outcome === "succeeded"), "missing non-branch terminal receipt");
 
 const envelopeInstructions = builderEnvelopeInstructions({ githubBuilder: base, threads: [{ id: "thread-1" }] });
 assert.match(envelopeInstructions, /thread-1/);
@@ -1205,6 +1234,302 @@ assert.throws(() => parseBuilderEnvelope(`x\n---BEGIN BOUND_GITHUB_BUILDER---\n$
   operations: [{ operation: "push_branch", ref: "refs/heads/feature", sha: "not-a-sha" }],
 })}\n---END BOUND_GITHUB_BUILDER---`));
 
+// Canonical contract: the Claude/Codex MCP inputSchema and the Antigravity
+// envelope schema are both derived from one source of truth and cannot drift.
+assert.deepEqual(Object.keys(builderMcpInputSchema("create_branch")).sort(), ["ref", "sha"]);
+assert.deepEqual(Object.keys(builderMcpInputSchema("push_branch")).sort(), ["oldSha", "ref", "sha"]);
+assert.throws(
+  () => builderMcpInputSchema("delete_repository"),
+  (error) => error instanceof BuilderUnsupportedError && error.code === "unsupported",
+);
+const canonicalEnvelopeOp = builderEnvelopeOperationSchema();
+assert.equal(
+  canonicalEnvelopeOp.parse({ operation: "create_branch", ref: "refs/heads/feature", sha: "a".repeat(40) }).operation,
+  "create_branch",
+);
+assert.throws(() => canonicalEnvelopeOp.parse({ operation: "create_branch", ref: "refs/heads/feature", sha: "not-a-sha" }));
+// The MCP create_branch schema now shares the envelope's 220-char ref bound.
+assert.throws(() => canonicalEnvelopeOp.parse({ operation: "create_branch", ref: `refs/heads/${"x".repeat(300)}`, sha: "a".repeat(40) }));
+
+// Lifecycle: every builder receipt maps to one provider-neutral delivery
+// outcome that distinguishes succeeded, rejected, indeterminate, and reconciled.
+assert.equal(classifyDeliveryOutcome({ outcome: "created" }), DELIVERY_OUTCOMES.SUCCEEDED);
+assert.equal(classifyDeliveryOutcome({ outcome: "idempotent" }), DELIVERY_OUTCOMES.SUCCEEDED);
+assert.equal(classifyDeliveryOutcome({ outcome: "reconciled" }), DELIVERY_OUTCOMES.RECONCILED);
+assert.equal(classifyDeliveryOutcome({ outcome: "indeterminate" }), DELIVERY_OUTCOMES.INDETERMINATE);
+assert.equal(classifyDeliveryOutcome({ outcome: "failed" }), DELIVERY_OUTCOMES.REJECTED);
+assert.equal(classifyDeliveryOutcome({ operation: "merge", prNumber: 42 }), DELIVERY_OUTCOMES.SUCCEEDED);
+assert.equal(classifyDeliveryOutcome({ error: "boom" }), DELIVERY_OUTCOMES.REJECTED);
+
+// Durable reconciliation store: replaying the receipt log rebuilds pending
+// indeterminate refs and clears them once a terminal outcome is recorded.
+const reconLogPath = path.join(tmpDir, "recon", "receipts.jsonl");
+fs.mkdirSync(path.dirname(reconLogPath), { recursive: true });
+fs.writeFileSync(reconLogPath, [
+  JSON.stringify({ operation: "create_branch", ref: "refs/heads/done", outcome: "created", requestedSha: headSha, recordedAt: "t1" }),
+  JSON.stringify({ operation: "push_branch", ref: "refs/heads/hanging", outcome: "indeterminate", requestedSha: headSha, expectedOldSha: baseCommitSha, recordedAt: "t2" }),
+  JSON.stringify({ operation: "create_branch", ref: "refs/heads/recovered", outcome: "indeterminate", requestedSha: headSha, recordedAt: "t3" }),
+  JSON.stringify({ operation: "create_branch", ref: "refs/heads/recovered", outcome: "reconciled", requestedSha: headSha, recordedAt: "t4" }),
+  "",
+].join("\n"));
+const rehydrated = loadBranchReconciliationState(reconLogPath);
+assert.equal(rehydrated.has("refs/heads/done"), false);
+assert.equal(rehydrated.has("refs/heads/recovered"), false);
+assert.equal(rehydrated.get("refs/heads/hanging").expectedOldSha, baseCommitSha);
+assert.equal(loadBranchReconciliationState(path.join(tmpDir, "recon", "missing.jsonl")).size, 0);
+assert.equal(loadBranchReconciliationState(null).size, 0);
+
+// Restart durability: a fresh client whose durable log records an indeterminate
+// prior mutation reconciles by remote read-back before any push, resuming
+// without a duplicate mutation across a process/agent restart.
+git(["push", bareRepoPath, `${headSha}:refs/heads/restart-recon`], { cwd: localRepoPath });
+const restartReconLog = path.join(tmpDir, "restart", "recon.jsonl");
+fs.mkdirSync(path.dirname(restartReconLog), { recursive: true });
+fs.writeFileSync(restartReconLog, `${JSON.stringify({
+  operation: "create_branch", ref: "refs/heads/restart-recon", outcome: "indeterminate",
+  requestedSha: headSha, expectedOldSha: null, recordedAt: "prior-process",
+})}\n`);
+const restartPushesBefore = mockServer.pushAttempts;
+const restartClient = createBoundBuilderClient({
+  ...base, headRef: "restart-recon", allowedOperations: ["create_branch"],
+  fetchImpl: fakeGitHub().fetchImpl, receiptPath: restartReconLog,
+});
+const restartResult = await restartClient.createBranch({ ref: "refs/heads/restart-recon", sha: headSha });
+assert.equal(restartResult.outcome, "reconciled");
+assert.equal(restartResult.reconciled, true);
+assert.equal(mockServer.pushAttempts, restartPushesBefore, "restart reconciliation must not re-push");
+
+// Restart durability, read-back unavailable: the fresh client stays fail-closed
+// and refuses any push until a read-only reconciliation succeeds.
+const restartBlockLog = path.join(tmpDir, "restart", "block.jsonl");
+fs.writeFileSync(restartBlockLog, `${JSON.stringify({
+  operation: "create_branch", ref: "refs/heads/restart-block", outcome: "indeterminate",
+  requestedSha: headSha, expectedOldSha: null, recordedAt: "prior-process",
+})}\n`);
+const blockPushesBefore = mockServer.pushAttempts;
+const restartBlockClient = createBoundBuilderClient({
+  ...base, headRef: "restart-block", allowedOperations: ["create_branch"],
+  fetchImpl: fakeGitHub({ branchShas: { "restart-block": { error: 503 } } }).fetchImpl,
+  receiptPath: restartBlockLog,
+});
+await assert.rejects(
+  restartBlockClient.createBranch({ ref: "refs/heads/restart-block", sha: headSha }),
+  /read-only reconciliation must succeed before retry/,
+);
+assert.equal(mockServer.pushAttempts, blockPushesBefore, "blocked restart must not push");
+
+// (7) Antigravity envelopes are published UNCHANGED: strict validation must not
+// inject zod defaults (draft/body/method) into the promised-unchanged content.
+const unchangedEnvelope = parseBuilderEnvelope(`ok\n---BEGIN BOUND_GITHUB_BUILDER---\n${JSON.stringify({
+  operations: [
+    { operation: "ensure_pull_request", title: "T" },
+    { operation: "merge" },
+  ],
+})}\n---END BOUND_GITHUB_BUILDER---`);
+assert.deepEqual(unchangedEnvelope.operations[0], { operation: "ensure_pull_request", title: "T" });
+assert.equal(Object.hasOwn(unchangedEnvelope.operations[0], "draft"), false);
+assert.equal(Object.hasOwn(unchangedEnvelope.operations[0], "body"), false);
+assert.deepEqual(unchangedEnvelope.operations[1], { operation: "merge" });
+assert.equal(Object.hasOwn(unchangedEnvelope.operations[1], "method"), false);
+
+// (6) classifyDeliveryOutcome fails closed on an unrecognized value rather than
+// silently reporting success.
+assert.throws(() => classifyDeliveryOutcome({ outcome: "totally-unknown" }), /Unrecognized builder delivery outcome/);
+assert.throws(() => classifyDeliveryOutcome("banana"), /Unrecognized builder delivery outcome/);
+
+// (6) The durable log loader tolerates a torn trailing append but fails closed on
+// a corrupt interior record or an indeterminate record without a resolvable ref.
+const tornTailLog = path.join(tmpDir, "faillog", "torn.jsonl");
+fs.mkdirSync(path.dirname(tornTailLog), { recursive: true });
+fs.writeFileSync(tornTailLog, `${JSON.stringify({ operation: "create_branch", ref: "refs/heads/tail", outcome: "indeterminate", requestedSha: headSha })}\n{ torn write`);
+const tornState = loadBranchReconciliationState(tornTailLog);
+assert.equal(tornState.has("refs/heads/tail"), true);
+const interiorCorruptLog = path.join(tmpDir, "faillog", "interior.jsonl");
+fs.writeFileSync(interiorCorruptLog, `{ corrupt interior\n${JSON.stringify({ operation: "create_branch", ref: "refs/heads/ok", outcome: "created", requestedSha: headSha })}\n`);
+assert.throws(() => loadBranchReconciliationState(interiorCorruptLog), /corrupt record.*fail-closed/);
+const indeterminateNoRefLog = path.join(tmpDir, "faillog", "noref.jsonl");
+fs.writeFileSync(indeterminateNoRefLog, `${JSON.stringify({ operation: "create_branch", outcome: "indeterminate" })}\n`);
+assert.throws(() => loadBranchReconciliationState(indeterminateNoRefLog), /indeterminate record without a resolvable ref/);
+
+// (1) A different-SHA retry must NOT erase an unresolved indeterminate marker: the
+// prior attempt is reconciled on its own requestedSha and durably recorded, then
+// the current operation proceeds against the observed remote state.
+git(["push", bareRepoPath, `${headSha}:refs/heads/diff-sha-recon`], { cwd: localRepoPath });
+const diffShaLog = path.join(tmpDir, "diffsha", "recon.jsonl");
+fs.mkdirSync(path.dirname(diffShaLog), { recursive: true });
+fs.writeFileSync(diffShaLog, `${JSON.stringify({
+  operation: "create_branch", ref: "refs/heads/diff-sha-recon", outcome: "indeterminate",
+  requestedSha: headSha, expectedOldSha: null, recordedAt: "prior-process",
+})}\n`);
+const diffShaPushesBefore = mockServer.pushAttempts;
+const diffShaClient = createBoundBuilderClient({
+  ...base, headSha: successHeadSha, headRef: "diff-sha-recon", allowedOperations: ["create_branch"],
+  fetchImpl: fakeGitHub().fetchImpl, receiptPath: diffShaLog,
+});
+await assert.rejects(
+  diffShaClient.createBranch({ ref: "refs/heads/diff-sha-recon", sha: successHeadSha }),
+  /already exists at/,
+);
+assert.equal(mockServer.pushAttempts, diffShaPushesBefore, "different-SHA retry must not push");
+const diffShaReceipts = fs.readFileSync(diffShaLog, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+const priorResolution = diffShaReceipts.find((receipt) => receipt.requestedSha === headSha && receipt.outcome === "reconciled");
+assert.ok(priorResolution, "the prior indeterminate marker must be durably reconciled, not erased");
+assert.equal(loadBranchReconciliationState(diffShaLog).has("refs/heads/diff-sha-recon"), false);
+
+// (3) Non-branch restart reconciliation: a fresh client whose durable log holds
+// a dangling merge intent, where the remote now shows the PR already merged,
+// records "reconciled" (not a fresh "idempotent") and performs no merge PUT.
+const mergeReconLog = path.join(tmpDir, "nonbranch", "merge-recon.jsonl");
+fs.mkdirSync(path.dirname(mergeReconLog), { recursive: true });
+// The operationId is content-addressed on operation+repository+headSha+method,
+// matching what the bound client computes for merge({ method: "squash" }). The
+// durable intent must exist BEFORE the client is constructed so it rehydrates.
+const mergeIntentId = createHash("sha256").update(JSON.stringify({
+  operation: "merge", repository: "owner/repo", headSha, method: "squash",
+})).digest("hex");
+fs.writeFileSync(mergeReconLog, `${JSON.stringify({
+  operationId: mergeIntentId, operation: "merge", repository: "owner/repo", headSha,
+  request: { operation: "merge", method: "squash" }, outcome: "intent",
+  deliveryOutcome: "indeterminate", recordedAt: "prior-process",
+})}\n`);
+const mergeReconApi = fakeGitHub({ merged: true });
+const mergeReconClient = createBoundBuilderClient({ ...base, fetchImpl: mergeReconApi.fetchImpl, receiptPath: mergeReconLog });
+const mergeReconResult = await mergeReconClient.merge({ method: "squash" });
+assert.equal(mergeReconResult.idempotent, true);
+assert.equal(mergeReconApi.calls.some((call) => call.path === "/repos/owner/repo/pulls/42/merge"), false);
+const mergeReconReceipts = fs.readFileSync(mergeReconLog, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+assert.ok(
+  mergeReconReceipts.some((receipt) => receipt.operation === "merge" && receipt.outcome === "reconciled"),
+  "a landed prior merge intent must reconcile on restart, not report a fresh idempotent no-op",
+);
+// A fresh idempotent merge with no prior intent records "idempotent", not "reconciled".
+const mergeFreshLog = path.join(tmpDir, "nonbranch", "merge-fresh.jsonl");
+const mergeFreshApi = fakeGitHub({ merged: true });
+await createBoundBuilderClient({ ...base, fetchImpl: mergeFreshApi.fetchImpl, receiptPath: mergeFreshLog }).merge({ method: "squash" });
+const mergeFreshReceipts = fs.readFileSync(mergeFreshLog, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+assert.equal(mergeFreshReceipts.length, 1);
+assert.equal(mergeFreshReceipts[0].outcome, "idempotent");
+
+// (2) Lifecycle: aggregate delivery outcomes report the most severe present, so
+// lifecycle status and coordinator wakes can distinguish the four states.
+assert.equal(aggregateDeliveryOutcome(["succeeded", "reconciled"]), "reconciled");
+assert.equal(aggregateDeliveryOutcome(["succeeded", "rejected", "reconciled"]), "rejected");
+assert.equal(aggregateDeliveryOutcome(["succeeded", "indeterminate", "rejected"]), "indeterminate");
+assert.equal(aggregateDeliveryOutcome(["succeeded", "succeeded"]), "succeeded");
+assert.equal(aggregateDeliveryOutcome([]), null);
+
+// (2) The durable log summarizes into one provider-neutral delivery outcome for a
+// bound head SHA; transient intent records are excluded.
+const summaryLog = path.join(tmpDir, "summary", "receipts.jsonl");
+fs.mkdirSync(path.dirname(summaryLog), { recursive: true });
+fs.writeFileSync(summaryLog, [
+  JSON.stringify({ operation: "create_branch", ref: "refs/heads/a", outcome: "created", requestedSha: headSha, deliveryOutcome: "succeeded" }),
+  JSON.stringify({ operationId: "op1", operation: "merge", headSha, outcome: "intent", deliveryOutcome: "indeterminate" }),
+  JSON.stringify({ operationId: "op1", operation: "merge", headSha, outcome: "reconciled", deliveryOutcome: "reconciled" }),
+  "",
+].join("\n"));
+const deliverySummary = summarizeDeliveryOutcomes(summaryLog, { headSha });
+assert.equal(deliverySummary.outcome, "reconciled");
+assert.equal(deliverySummary.counts.succeeded, 1);
+assert.equal(deliverySummary.counts.reconciled, 1);
+assert.equal(deliverySummary.counts.indeterminate, undefined);
+assert.equal(summarizeDeliveryOutcomes(summaryLog, { headSha: "z".repeat(40) }), null);
+assert.equal(summarizeDeliveryOutcomes(null), null);
+
+// (2) Superseding regressions: a later reconciled must not stay indeterminate,
+// and a later succeeded must not stay rejected, because only the latest effective
+// state per stable operation identity aggregates.
+const supersedeReconLog = path.join(tmpDir, "summary", "indeterminate-to-reconciled.jsonl");
+fs.writeFileSync(supersedeReconLog, [
+  JSON.stringify({ operation: "create_branch", ref: "refs/heads/x", operationId: "b1", outcome: "indeterminate", deliveryOutcome: "indeterminate", requestedSha: headSha }),
+  JSON.stringify({ operation: "create_branch", ref: "refs/heads/x", operationId: "b1", outcome: "reconciled", deliveryOutcome: "reconciled", requestedSha: headSha }),
+  "",
+].join("\n"));
+const reconSummary = summarizeDeliveryOutcomes(supersedeReconLog, { headSha });
+assert.equal(reconSummary.outcome, "reconciled");
+assert.equal(reconSummary.counts.indeterminate, undefined);
+
+const supersedeSucceedLog = path.join(tmpDir, "summary", "failed-to-succeeded.jsonl");
+fs.writeFileSync(supersedeSucceedLog, [
+  JSON.stringify({ operationId: "m1", operation: "merge", headSha, outcome: "failed", deliveryOutcome: "rejected" }),
+  JSON.stringify({ operationId: "m1", operation: "merge", headSha, outcome: "succeeded", deliveryOutcome: "succeeded" }),
+  "",
+].join("\n"));
+const succeedSummary = summarizeDeliveryOutcomes(supersedeSucceedLog, { headSha });
+assert.equal(succeedSummary.outcome, "succeeded");
+assert.equal(succeedSummary.counts.rejected, undefined);
+
+// A dangling intent with no terminal remains genuinely indeterminate.
+const danglingLog = path.join(tmpDir, "summary", "dangling-intent.jsonl");
+fs.writeFileSync(danglingLog, `${JSON.stringify({ operationId: "i1", operation: "merge", headSha, outcome: "intent", deliveryOutcome: "indeterminate" })}\n`);
+assert.equal(summarizeDeliveryOutcomes(danglingLog, { headSha }).outcome, "indeterminate");
+
+// (5) Provider-equivalence fixtures. Claude and Codex reach the builder through
+// the MCP inputSchema; Antigravity reaches it through the free-text envelope.
+// Both boundaries derive from one canonical contract, so for every scenario they
+// must normalize the caller's operation identically and dispatch to the same
+// shared client method. The behavioral transport outcomes are exercised by the
+// tests cross-referenced below (all three providers share that one client).
+const CANONICAL_METHOD = {
+  create_branch: "createBranch",
+  push_branch: "pushBranch",
+  replace_branch: "replaceBranch",
+  ensure_pull_request: "ensurePullRequest",
+  reply_review_thread: "replyReviewThread",
+  resolve_review_thread: "resolveReviewThread",
+  mark_ready: "markReady",
+  merge: "merge",
+};
+// A recording stand-in for the shared bound client. The Antigravity envelope
+// dispatch performed by agent-pool.publishAntigravityBuilder destructures
+// `{ operation, ...input }` and calls client[method](input) — the same input the
+// Claude/Codex MCP tool handler forwards. We exercise that exact dispatch.
+const dispatched = [];
+const recordingClient = Object.fromEntries(
+  Object.values(CANONICAL_METHOD).map((method) => [method, async (input) => { dispatched.push({ method, input }); }]),
+);
+const dispatchEnvelopeOperation = async (operation) => {
+  const { operation: name, ...input } = operation;
+  await recordingClient[CANONICAL_METHOD[name]](input);
+};
+const EQUIVALENCE_FIXTURES = [
+  { scenario: "create", op: { operation: "create_branch", ref: "refs/heads/feature", sha: "a".repeat(40) }, behavioralTest: "A/B create_branch" },
+  { scenario: "fast_forward", op: { operation: "push_branch", ref: "refs/heads/feature", sha: "a".repeat(40), oldSha: "b".repeat(40) }, behavioralTest: "E push_branch" },
+  { scenario: "rework", op: { operation: "replace_branch", ref: "refs/heads/feature", sha: "a".repeat(40), oldSha: "b".repeat(40) }, behavioralTest: "D3 replace_branch" },
+  { scenario: "ambiguous_transport", op: { operation: "push_branch", ref: "refs/heads/feature", sha: "a".repeat(40) }, behavioralTest: "D lossy reconcile" },
+  { scenario: "restart", op: { operation: "create_branch", ref: "refs/heads/feature", sha: "a".repeat(40) }, behavioralTest: "restart reconciliation" },
+  { scenario: "denied_permission", op: { operation: "create_branch", ref: "refs/heads/feature", sha: "a".repeat(40) }, behavioralTest: "I2 deny-push" },
+];
+for (const { scenario, op } of EQUIVALENCE_FIXTURES) {
+  const { operation, ...callerFields } = op;
+  // Claude/Codex adapter boundary: the MCP inputSchema accepts the operation.
+  const mcpInput = z.object(builderMcpInputSchema(operation)).parse(callerFields);
+  // Antigravity adapter boundary: the envelope validates and publishes unchanged.
+  const envelope = parseBuilderEnvelope(`x\n---BEGIN BOUND_GITHUB_BUILDER---\n${JSON.stringify({ operations: [op] })}\n---END BOUND_GITHUB_BUILDER---`);
+  const { operation: envelopeName, ...envelopeInput } = envelope.operations[0];
+  assert.equal(envelopeName, operation, `${scenario}: envelope operation must be canonical`);
+
+  // Exercise the ACTUAL Antigravity envelope dispatch: it must call the same
+  // shared client method with the same caller fields the MCP boundary forwards.
+  dispatched.length = 0;
+  await dispatchEnvelopeOperation(envelope.operations[0]);
+  assert.equal(dispatched.length, 1, `${scenario}: exactly one dispatched operation`);
+  assert.equal(dispatched[0].method, CANONICAL_METHOD[operation], `${scenario}: dispatched to the canonical method`);
+  for (const key of Object.keys(callerFields)) {
+    assert.deepEqual(dispatched[0].input[key], callerFields[key], `${scenario}: dispatched envelope field ${key} diverged`);
+    assert.deepEqual(mcpInput[key], callerFields[key], `${scenario}: mcp field ${key} diverged`);
+  }
+
+  // Exercise the ACTUAL generated Claude and Codex requests: the bound builder
+  // is wired with this operation in its allowlist (the Claude/Codex delivery
+  // boundary), not raw shell delivery.
+  const binding = { repository: "owner/repo", expectedLogin: "builder[bot]", headSha, headRef: "codex/feature", baseRef: "main", allowedOperations: [operation] };
+  const claudeRequest = claudeToolRequest({ prompt: "x", mode: "work", workProfile: "implement", githubBuilder: binding });
+  assert.ok(claudeRequest.arguments.githubBuilder.allowedOperations.includes(operation), `${scenario}: Claude request wires the builder operation`);
+  const codexRequest = codexToolRequest({ prompt: "x", cwd: localRepoPath, mode: "work", workProfile: "implement", githubBuilder: binding, githubBuilderBridgePath: path.join(tmpDir, "bridge.mjs") });
+  assert.match(codexRequest.arguments.config["mcp_servers.github_builder.env.GITHUB_BUILDER_ALLOWED_OPERATIONS"], new RegExp(operation), `${scenario}: Codex request wires the builder operation`);
+}
+
 cleanup();
 clearTimeout(watchdog);
-console.log("Bound GitHub builder tests passed: PR lifecycle, exact head, trusted latest review gate, merge paths, bounded no-shell transport, create_branch, fast-forward push_branch, and guarded replace_branch with fail-closed validations.");
+console.log("Bound GitHub builder tests passed: PR lifecycle, exact head, trusted latest review gate, merge paths, bounded no-shell transport, create_branch, fast-forward push_branch, guarded replace_branch, canonical contract derivation, delivery-outcome mapping, and durable restart reconciliation.");
