@@ -4,7 +4,30 @@ Branch: `codex/helm-55-reviewer-deadlock` (base `6d067aef1c390c1b1725b31f97f84b6
 Implementation commit: `7396950a5cf38404f156396f2679805d04d0468d`
 Test-ordering repair commit: `1a61821b78925dfc6261d1a64e730da656dc44a8`
 Capability-boundary repair commit: `d20c1a981da34f13ae066b4e636d588cf25d55c4`
+Integration + matcher-tightening repair commit: `6a48ec38e3a0135672142886dff573d5914ce424`
 (branch HEAD is the immediately following handoff-update commit, which Codex pushes)
+
+## Chair acceptance-blocker follow-up (worker-path integration + precise matcher)
+- **Real start/worker self-deadlock integration fixture.** Added to
+  `scripts/collaboration-test.mjs` (offline fake-claude harness, no real provider). It
+  starts a review whose only verification gate re-enters the same live provider-capacity
+  pool (`npm run test:provider-concurrency`) and proves: terminal status `failed`, a
+  typed `provider_self_deadlock` event in the transcript, **no `agent_started`/provider
+  work call**, zero turns, and **no waiter or slot referencing the collaboration**. This
+  exercises `scripts/collaboration-worker.mjs` end-to-end, not a mirror.
+- **Tightened `verificationCommandReentersProviderPool` (structural, not substring).**
+  Replaced raw substring markers (which false-matched any path containing
+  `collaboration-bridge`/`provider-concurrency`) with a tokenizer that recognizes only:
+  (a) a direct same-provider CLI invocation (`claude …`, `/usr/local/bin/claude …`, incl.
+  leading `env`/VAR=val), (b) a known broker pool-entry executable run directly or via
+  `node` (`collaboration-worker.mjs`, `collaboration-bridge.mjs`, `bridge`), and (c) a
+  local package-script alias resolving to a known pool-entry gate
+  (`npm|pnpm|yarn run test:provider-concurrency`). A name appearing only as a file-path
+  or argument (`cat src/collaboration-bridge.mjs`, `grep provider-concurrency`,
+  `eslint src/provider-concurrency.mjs`, `node scripts/lint.mjs --rule provider-concurrency`)
+  no longer matches; a cross-provider CLI (`codex …` during a claude review) is not a
+  claude self-deadlock. Positive/negative unit tests added in
+  `scripts/provider-concurrency-test.mjs`.
 Writer: Claude Opus 4.8 (1M context) — sole implementation agent.
 
 ## Chair-rejection repair (capability boundary + pool reentry)
@@ -106,16 +129,17 @@ Run inside this provider call:
   green). Note: an earlier run failed only because `@playwright/mcp` was not installed
   in the worktree — a pre-existing environment gap, never a code defect.
 
-All six gates named for this repair pass:
-test:collaboration, test:cleanup, test:secrets, test:provider-concurrency,
-test:provider-capabilities, smoke.
+All six gates pass (observed after the integration + matcher repair):
+test:provider-concurrency PASS, test:collaboration PASS (incl. the real start/worker
+self-deadlock integration fixture), test:provider-capabilities PASS, test:cleanup PASS,
+test:secrets PASS, smoke PASS (full Playwright browser runtime green).
 
 ## Push status
 Work profile `implement` authorizes local work through commit only; pushing and PR
 mutation are not authorized here, and no builder push operation is available in this
 call. **Stopped after commit for Codex to push the current branch HEAD of
-`codex/helm-55-reviewer-deadlock` (code repair `d20c1a98` plus this handoff-update
-commit) to the existing branch/PR.**
+`codex/helm-55-reviewer-deadlock` (latest code repair `6a48ec38` plus this
+handoff-update commit) to the existing branch/PR.**
 
 ## Provider-concurrency gate (now run and green)
 - `npm run test:provider-concurrency` — PASS (run twice, deterministic). Validates the
