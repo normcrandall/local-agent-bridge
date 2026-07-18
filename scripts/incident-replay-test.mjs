@@ -224,6 +224,21 @@ try {
     { type: "run_finished", at: "2026-07-17T11:05:00.000Z", reason: "completed" }
   ]);
 
+  // 14. A later operator cancellation must not erase the original worker disappearance.
+  const id14 = "bridge-00000000-0000-4000-8000-000000000014";
+  await writeFixture(id14, {
+    id: id14,
+    status: "cancelled",
+    updatedAt: "2026-07-17T12:10:00.000Z",
+    cleanup: { workerLeaseReleased: true, workspaceLeaseReleased: true }
+  }, [
+    { type: "collaboration_started", at: "2026-07-17T11:00:00.000Z" },
+    { type: "run_started", at: "2026-07-17T11:01:00.000Z", pid: 1234 },
+    { type: "worker_exit", at: "2026-07-17T11:05:00.000Z", pid: 1234, signal: "SIGKILL", terminalReceipt: false },
+    { type: "cleanup_reconciled", at: "2026-07-17T11:06:00.000Z", action: "mark-indeterminate" },
+    { type: "cancelled", at: "2026-07-17T12:10:00.000Z", terminatedWorkerPid: 1234 }
+  ]);
+
   // Run replay tests on fixtures
   const r1 = await replayIncident(stateDir, id1);
   assert.equal(r1.classification, "clean_completion");
@@ -292,6 +307,12 @@ try {
   assert.notEqual(r13.classification, "permission_denial");
   assert.equal(r13.classification, "clean_completion");
   console.log("Fixture 13 (Bare token permission false-positive): passed");
+
+  const r14 = await replayIncident(stateDir, id14);
+  assert.equal(r14.classification, "worker_disappeared");
+  assert.equal(r14.remediation.nextSafeAction, "inspect_recovery");
+  assert.ok(r14.observed.facts.some((fact) => fact.source === "transcript.jsonl:3"));
+  console.log("Fixture 14 (Cancellation preserves worker disappearance): passed");
 
   console.log("All incident replay test assertions passed successfully!");
 } finally {

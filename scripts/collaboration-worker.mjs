@@ -172,7 +172,9 @@ try {
     status: "running",
     workerPid: process.pid,
     workerOwner: {
+      ...(current.workerOwner || {}),
       id, pid: process.pid, token: process.env.BRIDGE_WORKER_TOKEN || null,
+      supervisorId: process.env.BRIDGE_SUPERVISOR_ID || null,
       startedAt: new Date().toISOString(), command: "collaboration-worker.mjs",
     },
     error: null,
