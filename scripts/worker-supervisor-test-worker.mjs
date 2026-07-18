@@ -7,6 +7,8 @@ const id = process.argv[2];
 if (process.env.BRIDGE_SUPERVISOR_TEST_OUTPUT) {
   await writeFile(join(process.env.BRIDGE_SUPERVISOR_TEST_OUTPUT, `${id}.environment.json`), `${JSON.stringify({
     firstHostOnlySecret: process.env.FIRST_HOST_ONLY_SECRET || null,
+    bridgeRequiredSetting: process.env.AGENT_BRIDGE_TEST_REQUIRED || null,
+    pathPresent: Boolean(process.env.PATH),
   })}\n`);
 }
 

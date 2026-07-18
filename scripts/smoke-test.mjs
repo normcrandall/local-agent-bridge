@@ -1,8 +1,9 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 
 const root = resolve(import.meta.dirname, "..");
 const cleanProcessEnv = {
@@ -307,14 +308,18 @@ async function callBridgeWithoutModel() {
 }
 
 async function callAntigravityWithoutModel() {
+  const workspace = await mkdtemp(resolve(tmpdir(), `bridge-smoke-workspace-${process.pid}-`));
+  execFileSync("git", ["init", "--quiet"], { cwd: workspace });
   const client = new Client({ name: "antigravity-call-test", version: "0.1.0" });
   const transport = new StdioClientTransport({
     command: "/bin/zsh",
     args: [resolve(root, "scripts/antigravity-bridge-mcp.sh")],
-    cwd: root,
+    cwd: workspace,
     env: {
       ...cleanProcessEnv,
       AGY_BIN: resolve(root, "scripts/fake-antigravity.mjs"),
+      BRIDGE_RUNTIME_ROOT: root,
+      BRIDGE_WORKSPACE_ROOT: workspace,
       FAKE_ANTIGRAVITY_OVERLOAD_MODELS: "overloaded-antigravity-model",
     },
   });
@@ -377,6 +382,7 @@ async function callAntigravityWithoutModel() {
     console.log("Antigravity bridge call paths: explicit model forwarded; configured default preserved");
   } finally {
     await client.close();
+    await rm(workspace, { recursive: true, force: true });
   }
 }
 

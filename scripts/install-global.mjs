@@ -11,6 +11,8 @@ import {
   resolveCodexHookPath,
 } from "../src/coordinator-hook-config.mjs";
 import { exportSkills } from "./skill-portability.mjs";
+import { deployRuntime } from "../src/runtime-deployment.mjs";
+import { refreshSupervisor } from "../src/worker-supervisor-client.mjs";
 
 const sourceRoot = resolve(import.meta.dirname, "..");
 const installRoot = resolve(homedir(), ".local/share/agent-bridge");
@@ -26,16 +28,17 @@ const claudeDialogueSkillSource = resolve(sourceRoot, "assets/skills/claude/agen
 
 await mkdir(installRoot, { recursive: true, mode: 0o700 });
 await mkdir(stateRoot, { recursive: true, mode: 0o700 });
-await rm(runtimeRoot, { recursive: true, force: true });
-await mkdir(runtimeRoot, { recursive: true, mode: 0o700 });
-
-for (const name of ["src", "scripts", "skills", "package.json", "package-lock.json"]) {
-  await cp(resolve(sourceRoot, name), resolve(runtimeRoot, name), { recursive: true });
-}
-
-execFileSync("npm", ["ci", "--omit=dev", "--ignore-scripts"], {
-  cwd: runtimeRoot,
-  stdio: "inherit",
+await deployRuntime({
+  sourceRoot,
+  installRoot,
+  runtimeRoot,
+  entries: ["src", "scripts", "skills", "package.json", "package-lock.json"],
+  installDependencies: async (stagedRuntime) => {
+    execFileSync("npm", ["ci", "--omit=dev", "--ignore-scripts"], {
+      cwd: stagedRuntime,
+      stdio: "inherit",
+    });
+  },
 });
 
 await mkdir(binRoot, { recursive: true, mode: 0o700 });
@@ -150,6 +153,9 @@ elif [[ "$COMMAND" == "skills" ]]; then
 elif [[ "$COMMAND" == "models" ]]; then
   shift
   exec "$NODE_BIN" "$RUNTIME/scripts/model-policy-cli.mjs" "$@"
+elif [[ "$COMMAND" == "supervisor" ]]; then
+  shift
+  exec "$NODE_BIN" "$RUNTIME/scripts/supervisor-control.mjs" "$@"
 else
   [[ "$COMMAND" == "help" ]] || shift
   exec "$NODE_BIN" "$RUNTIME/scripts/bridge-ops.mjs" "$COMMAND" "$@"
@@ -280,4 +286,16 @@ for (const [target, skills] of Object.entries(portableSkills.exports)) {
   for (const [name, result] of Object.entries(skills)) {
     if (!result.supported) console.log(`UNSUPPORTED: ${target}/${name}: ${result.unsupported.join("; ")}`);
   }
+}
+
+const supervisorRefresh = await refreshSupervisor({
+  runtimeRoot,
+  workspaceRoot: sourceRoot,
+  stateDirectory: stateRoot,
+  startIfMissing: false,
+});
+if (supervisorRefresh.running) {
+  console.log(`Refreshed supervisor: ${supervisorRefresh.previous.supervisorId} -> ${supervisorRefresh.current.supervisorId}; ${supervisorRefresh.current.monitoredWorkers} worker(s) adopted`);
+} else {
+  console.log("Supervisor refresh: no running supervisor");
 }

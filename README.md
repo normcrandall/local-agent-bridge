@@ -27,6 +27,8 @@ Restart Codex App, Claude App, and Antigravity App after setup. All three are re
 
 Global launchers are installed under `~/.local/bin/agent-{claude,codex,antigravity,collaboration,playwright}-mcp`, with runtime code under `~/.local/share/agent-bridge/runtime` and persistent collaboration state under `~/.local/share/agent-bridge/state`. CLI hosts use their current directory as the allowed workspace. GUI hosts set `AGENT_BRIDGE_WORKSPACE` explicitly because they do not have a reliable project working directory.
 
+Global upgrades are staged and dependency-validated before the active runtime directory is replaced. If the machine supervisor is running, the installer refreshes only that supervisor process and waits for the replacement to adopt its live workers; it never terminates the workers. Active app MCP processes still require the documented app/CLI restart to load other updated server modules.
+
 Claude CLI registers `codex`, `antigravity`, `collaboration`, and `playwright` at user scope in `~/.claude.json`. Verify that they remain available outside a project with `(cd /tmp && claude mcp list)`. Project `.mcp.json` entries may coexist as team-shareable project defaults; Claude's scope precedence selects the applicable definition.
 
 Codex App and CLI register `claude_code`, `antigravity`, `collaboration`, and `playwright` globally in `~/.codex/config.toml`, pointing at the stable `~/.local/bin/agent-*-mcp` launchers. Verify the user scope outside any project with `(cd /tmp && codex mcp list)`. The global bridge workspace root is the user's home directory so the same servers can operate across projects; narrower trusted-project entries may override it.
@@ -255,6 +257,8 @@ Each registration should point to the corresponding destination launcher under `
 ```sh
 npm run doctor
 npm run smoke
+npm run test:installed-runtime
+npm run test:runtime-deployment
 npm run test:skills
 npm run test:collaboration
 ```
@@ -479,7 +483,16 @@ The common tools are:
 
 State and JSONL transcripts live under `~/.local/share/agent-bridge/state`. A collaboration records provider session IDs, next speaker, agreement streak, selected agents, models, workspace, cumulative turn count, and an `activeCall` record. While a provider works, `activeCall` contains the provider, phase, automatic liveness heartbeat, elapsed time, and latest provider-authored or adapter-observed summary.
 
-All Codex, Claude, and Antigravity MCP clients on the machine submit durable runs to one local collaboration-worker supervisor. The supervisor is double-forked before the initiating MCP call returns, so closing or restarting one host app cannot reap its workers or workers started by another host. It preserves the existing per-workspace leases and per-provider concurrency limits, adopts command-and-start-time-matched workers after its own restart, and records every observed worker exit in the collaboration transcript. Each launch receives only the initiating MCP client's ephemeral environment plus fixed bridge routing values; the supervisor's first-host environment is never used as a fallback or written to state. A process that disappears before writing a terminal outcome becomes `indeterminate` with `Worker exited without a terminal receipt`; a later cancellation does not erase that original incident from `replay_incident`.
+All Codex, Claude, and Antigravity MCP clients on the machine submit durable runs to one local collaboration-worker supervisor. The supervisor is double-forked before the initiating MCP call returns, so closing or restarting one host app cannot reap its workers or workers started by another host. It preserves the existing per-workspace leases and per-provider concurrency limits, adopts command-and-start-time-matched workers after its own restart, retries transient OS identity-probe failures, and records every observed worker exit in the collaboration transcript. Repeated unavailable probes and confirmed mismatches remain fail-closed and never authorize a replacement worker.
+
+The supervisor state directory is forced to owner-only `0700`; on Unix the endpoint is created under a restrictive umask and fixed to `0600`. Worker launches do not forward the caller's full environment. The client and supervisor independently retain only basic runtime keys plus the documented bridge/provider/tool families: `AGENT_BRIDGE_*`, `BRIDGE_*`, `CLAUDE_*`, `ANTHROPIC_*`, `CODEX_*`, `OPENAI_*`, `AGY_*`, `ANTIGRAVITY_*`, `GEMINI_*`, `GOOGLE_*`, `GH_*`, `GITHUB_*`, `GIT_*`, `MCP_*`, Node/package-manager configuration, locale, proxy/CA settings, and executable/home/temp discovery. Arbitrary project secrets are dropped before IPC and are never written to supervisor state. A process that disappears before writing a terminal outcome becomes `indeterminate` with `Worker exited without a terminal receipt`; a later cancellation does not erase that original incident from `replay_incident`.
+
+Inspect or safely replace the supervisor without touching its workers:
+
+```sh
+bridge supervisor status
+bridge supervisor refresh
+```
 
 ### Parallel portfolios and bridge-owned merge trains
 
