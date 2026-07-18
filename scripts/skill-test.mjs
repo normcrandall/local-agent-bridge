@@ -526,7 +526,7 @@ for (const term of [
   "Run parallel issue lanes",
   "configured live review limit per provider",
   "wakes the oldest queued call automatically",
-  "work: 1, review: 2",
+  "work: 5, review: 10",
   "enqueue_portfolio_merge",
   "begin_portfolio_merge_validation",
   "authorize_portfolio_merge",

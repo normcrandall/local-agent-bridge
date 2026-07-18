@@ -64,7 +64,7 @@ chmod 600 ~/.config/ghtoken
 
 Do not commit tokens, GitHub App private keys, or the populated machine-local App config to the bridge repository.
 
-Provider call concurrency is machine-local. The built-in default permits one live work call and two concurrent read-only review calls per provider. To customize it:
+Provider call concurrency is machine-local. The built-in default permits five live work calls and ten concurrent read-only review calls per provider. To customize it:
 
 ```sh
 mkdir -p ~/.config/local-agent-bridge
@@ -72,7 +72,7 @@ cp config/provider-concurrency.example.json ~/.config/local-agent-bridge/provide
 chmod 600 ~/.config/local-agent-bridge/provider-concurrency.json
 ```
 
-Keep `work` at `1` unless you deliberately want the same provider operating multiple independent writer sessions. Increasing `review` is safer because review sessions remain read-only and use exact-head GitHub authorization.
+Use isolated worktrees and non-conflicting issue claims when multiple writer sessions run concurrently. Review sessions remain read-only and use exact-head GitHub authorization, so the larger review pool can drain review-ready work without blocking writers.
 
 On another computer, generate a new private key for the same App when possible, install the App on the required accounts, rerun the installation discovery command, and recreate the machine-local config. A securely transferred existing key also works, but it must remain outside the repository with mode `600`.
 
@@ -496,9 +496,9 @@ bridge supervisor refresh
 
 ### Parallel portfolios and bridge-owned merge trains
 
-`take-the-helm` uses a durable portfolio ledger under `~/.local/share/agent-bridge/state/portfolios`. Each issue declares hard blockers, temporary conflict edges, expected path ownership, exclusive resources, priority, and verification commands. `plan_portfolio` rejects dependency cycles and greedily selects the highest-priority non-conflicting frontier up to `maxParallel`, which defaults to two. A selected issue receives one writer and one isolated worktree. Provider execution uses role-specific semaphores: the machine default is one live work call and two concurrent read-only review calls per provider. Excess calls remain queued in FIFO order with `runtime.activeCall.phase: waiting_capacity` and start automatically when a compatible slot is released.
+`take-the-helm` uses a durable portfolio ledger under `~/.local/share/agent-bridge/state/portfolios`. Each issue declares hard blockers, temporary conflict edges, expected path ownership, exclusive resources, priority, and verification commands. `plan_portfolio` rejects dependency cycles and greedily selects the highest-priority non-conflicting frontier up to `maxParallel`, which defaults to two. A selected issue receives one writer and one isolated worktree. Provider execution uses role-specific semaphores: the machine default is five live work calls and ten concurrent read-only review calls per provider. Excess calls remain queued in FIFO order with `runtime.activeCall.phase: waiting_capacity` and start automatically when a compatible slot is released.
 
-The machine policy lives at `~/.config/local-agent-bridge/provider-concurrency.json` and is a hard ceiling. `start_collaboration.providerConcurrency` may lower it for one collaboration but cannot raise it; `continue_collaboration` preserves the resolved limits unless supplied a lower replacement. Implementation lanes should normally retain `work: 1`; review-ready PRs should be submitted immediately instead of being held by the chair.
+The machine policy lives at `~/.config/local-agent-bridge/provider-concurrency.json` and is a hard ceiling. `start_collaboration.providerConcurrency` may lower it for one collaboration but cannot raise it; `continue_collaboration` preserves the resolved limits unless supplied a lower replacement. Lower work concurrency when the safe frontier, worktree isolation, or exclusive resources cannot support five writers; submit review-ready PRs immediately instead of holding them in the chair.
 
 Passing branch CI or opening a PR does not satisfy a hard dependency that requires merged behavior. Verified PR heads enter the bridge-owned merge train. They stop consuming writer capacity but continue reserving overlapping paths and exclusive resources until merged or repaired. Only one candidate may hold the integration slot. The chair combines the exact PR head with the current target SHA in a disposable worktree, runs the lane and repository integration gates, and records either a current validation or an arbitration dossier. `authorize_portfolio_merge` fails if the target or head changed and does not itself grant merge authority; the configured builder App still requires standing repository authority or explicit authorization for that exact head.
 

@@ -38,7 +38,7 @@ For every autonomous review leg, pass an ordered roster containing the preferred
 - `ciTracking.prNumber` when a PR exists.
 - optional `budget.maxCostUsd`, `budget.maxTokens`, and `budget.maxMinutes`.
 - optional `modelFallbacks.claude`, filtered through the Claude model policy above, and `modelFallbacks.codex`, preserving ordered overload-only downgrade chains; omit them to use machine-local policies.
-- optional `providerConcurrency`; omit it to use the machine policy, defaulting each provider to one live work call and two concurrent read-only review calls. A collaboration may lower but never raise that machine ceiling. Excess calls remain visibly queued and start automatically when the oldest compatible slot opens.
+- optional `providerConcurrency`; omit it to use the machine policy, defaulting each provider to five live work calls and ten concurrent read-only review calls. A collaboration may lower but never raise that machine ceiling. Excess calls remain visibly queued and start automatically when the oldest compatible slot opens.
 
 A recognized provider model overload advances inside the active turn without rotating or reassigning the writer. Claude Code owns its native fallback; the Codex bridge records attempted and selected models. Show any downgrade narrative. Treat authentication, quota, permission, configuration, and transport errors through their existing failure or indeterminate paths instead of model fallback.
 

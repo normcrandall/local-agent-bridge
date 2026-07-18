@@ -39,9 +39,14 @@ async function waitForWaiterCount(directory, count) {
 const claudeReviewCapacityDir = join(root, "capacity", "claude", "review");
 
 try {
+  assert.deepEqual(DEFAULT_PROVIDER_CONCURRENCY, {
+    claude: { work: 5, review: 10 },
+    codex: { work: 5, review: 10 },
+    antigravity: { work: 5, review: 10 },
+  });
   assert.deepEqual(normalizeProviderConcurrency({}), DEFAULT_PROVIDER_CONCURRENCY);
   assert.deepEqual(normalizeProviderConcurrency({ claude: { review: 3 } }).claude, {
-    work: 1,
+    work: 5,
     review: 3,
   });
   assert.throws(() => normalizeProviderConcurrency({ claude: { review: 0 } }), /integer from 1 to 20/);
