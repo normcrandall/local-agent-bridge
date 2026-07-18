@@ -135,6 +135,9 @@ try {
   const first = startFromIndependentClient(ids[0], { set: {
     FIRST_HOST_ONLY_SECRET: "must-not-transit-supervisor-ipc",
     AGENT_BRIDGE_TEST_REQUIRED: "preserved",
+    AWS_ACCESS_KEY_ID: "bedrock-access-key",
+    AWS_BEARER_TOKEN_BEDROCK: "bedrock-bearer-token",
+    CLOUD_ML_REGION: "us-central1",
   } });
   assert.equal(first.reused, false);
   assert.equal(alive(first.workerPid), true, "worker must survive the MCP client process exiting");
@@ -154,6 +157,9 @@ try {
   const firstEnvironment = JSON.parse(await readFile(join(temporary, `${ids[0]}.environment.json`), "utf8"));
   assert.equal(firstEnvironment.firstHostOnlySecret, null, "arbitrary caller secrets must not transit supervisor IPC");
   assert.equal(firstEnvironment.bridgeRequiredSetting, "preserved", "bridge configuration must reach the worker");
+  assert.equal(firstEnvironment.awsAccessKeyId, "bedrock-access-key", "Bedrock AWS credentials must reach the worker");
+  assert.equal(firstEnvironment.awsBearerTokenBedrock, "bedrock-bearer-token", "Bedrock bearer credentials must reach the worker");
+  assert.equal(firstEnvironment.cloudMlRegion, "us-central1", "Vertex region configuration must reach the worker");
   assert.equal(firstEnvironment.pathPresent, true, "workers must retain executable discovery");
 
   await writeFile(processProbeFailureFile, "fail once\n");
@@ -210,6 +216,28 @@ try {
   for (const workerPid of [first.workerPid, second.workerPid, concurrent[0].workerPid]) {
     assert.equal(alive(workerPid), true, "supervisor refresh must never kill an owned worker");
   }
+
+  await writeFile(processProbeFailureFile, `${JSON.stringify({ pid: concurrent[0].workerPid, remaining: 12 })}\n`);
+  await waitFor(async () => {
+    try {
+      await readFile(processProbeFailureFile, "utf8");
+      return false;
+    } catch (error) {
+      return error.code === "ENOENT";
+    }
+  }, "monitor did not exercise two consecutive unavailable probe intervals", 5_000);
+  const toleratedProbeFailure = JSON.parse(await readFile(join(stateDirectory, `${ids[2]}.json`), "utf8"));
+  assert.notEqual(toleratedProbeFailure.status, "indeterminate",
+    "two consecutive unavailable probe intervals must not invalidate a live worker");
+  assert.equal(alive(concurrent[0].workerPid), true, "transient cross-interval probe failures must preserve the worker");
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 1_200));
+
+  await writeFile(processProbeFailureFile, `${JSON.stringify({ pid: concurrent[0].workerPid, remaining: 18 })}\n`);
+  await waitFor(async () => {
+    const state = JSON.parse(await readFile(join(stateDirectory, `${ids[2]}.json`), "utf8"));
+    return state.status === "indeterminate" && state.lastWorkerExit?.signal === "IDENTITY_UNAVAILABLE";
+  }, "three consecutive unavailable probe intervals were not receipted", 6_000);
+  assert.equal(alive(concurrent[0].workerPid), true, "identity-unavailable fencing must record, not kill, the worker");
 
   process.kill(-first.workerPid, "SIGTERM");
   await waitFor(async () => {

@@ -17,6 +17,7 @@ export async function deployRuntime({
   runtimeRoot,
   entries,
   installDependencies,
+  setMode = chmod,
 }) {
   await mkdir(installRoot, { recursive: true, mode: 0o700 });
   await chmod(installRoot, 0o700);
@@ -33,6 +34,7 @@ export async function deployRuntime({
       await cp(resolve(sourceRoot, name), resolve(stagedRuntime, name), { recursive: true });
     }
     await installDependencies(stagedRuntime);
+    await setMode(stagedRuntime, 0o700);
 
     if (await exists(runtimeRoot)) {
       await rename(runtimeRoot, previousRuntime);
@@ -40,7 +42,6 @@ export async function deployRuntime({
     }
     await rename(stagedRuntime, runtimeRoot);
     activated = true;
-    await chmod(runtimeRoot, 0o700);
     succeeded = true;
     return { runtimeRoot, replaced: previousMoved };
   } catch (error) {

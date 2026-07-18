@@ -8,6 +8,9 @@ if (process.env.BRIDGE_SUPERVISOR_TEST_OUTPUT) {
   await writeFile(join(process.env.BRIDGE_SUPERVISOR_TEST_OUTPUT, `${id}.environment.json`), `${JSON.stringify({
     firstHostOnlySecret: process.env.FIRST_HOST_ONLY_SECRET || null,
     bridgeRequiredSetting: process.env.AGENT_BRIDGE_TEST_REQUIRED || null,
+    awsAccessKeyId: process.env.AWS_ACCESS_KEY_ID || null,
+    awsBearerTokenBedrock: process.env.AWS_BEARER_TOKEN_BEDROCK || null,
+    cloudMlRegion: process.env.CLOUD_ML_REGION || null,
     pathPresent: Boolean(process.env.PATH),
   })}\n`);
 }

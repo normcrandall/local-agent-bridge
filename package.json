@@ -21,7 +21,7 @@
     "test:launcher": "node scripts/workflow-launcher-test.mjs",
     "test:watchdog": "node scripts/codex-turn-watchdog-test.mjs",
     "test:cleanup": "node scripts/collaboration-cleanup-test.mjs",
-    "test:supervisor": "node scripts/worker-supervisor-test.mjs",
+    "test:supervisor": "node scripts/worker-supervisor-test.mjs && node scripts/legacy-supervisor-test.mjs",
     "test:installed-runtime": "node scripts/installed-runtime-test.mjs",
     "test:runtime-deployment": "node scripts/runtime-deployment-test.mjs",
     "test:claude-capabilities": "node scripts/claude-capability-guard-test.mjs",

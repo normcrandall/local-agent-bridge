@@ -7,11 +7,12 @@ const WORKER_ENVIRONMENT_KEYS = new Set([
   "HOME", "HTTP_PROXY", "HTTPS_PROXY", "LANG", "LANGUAGE", "LOGNAME",
   "NO_COLOR", "NO_PROXY", "PATH", "SHELL", "SSH_AUTH_SOCK", "TEMP", "TERM",
   "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "TMP", "TMPDIR", "USER", "VISUAL",
+  "CLOUD_ML_REGION",
   "all_proxy", "http_proxy", "https_proxy", "no_proxy",
 ]);
 
 const WORKER_ENVIRONMENT_PREFIXES = [
-  "AGENT_BRIDGE_", "AGY_", "ANTHROPIC_", "ANTIGRAVITY_", "ASDF_", "BRIDGE_",
+  "AGENT_BRIDGE_", "AGY_", "ANTHROPIC_", "ANTIGRAVITY_", "ASDF_", "AWS_", "BRIDGE_",
   "CLAUDE_", "CLOUDSDK_", "CODEX_", "CURL_CA_", "GEMINI_", "GH_", "GITHUB_",
   "GIT_", "GOOGLE_", "LC_", "MCP_", "NODE_", "NPM_", "NVM_", "OPENAI_",
   "PNPM_", "SSL_CERT_", "VERTEX_", "XDG_", "npm_",
