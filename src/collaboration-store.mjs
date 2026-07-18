@@ -188,14 +188,62 @@ export async function acquireWorkerLock(root, id) {
   return acquireFileLock(target.workerLock, { attempts: 200, intervalMs: 50 });
 }
 
+export function workspaceLockPath(root, workspace) {
+  const digest = createHash("sha256").update(workspace).digest("hex").slice(0, 24);
+  return resolve(collaborationDirectory(root), `workspace-${digest}.lock`);
+}
+
 export async function acquireWorkspaceLock(root, workspace) {
   const directory = collaborationDirectory(root);
   await mkdir(directory, { recursive: true, mode: 0o700 });
-  const digest = createHash("sha256").update(workspace).digest("hex").slice(0, 24);
-  return acquireFileLock(resolve(directory, `workspace-${digest}.lock`), {
+  return acquireFileLock(workspaceLockPath(root, workspace), {
     attempts: 100,
     intervalMs: 50,
   });
+}
+
+// Issue #55: on cancel, deterministically release the worker/update/workspace locks
+// owned by the (already reaped) worker. Ownership is preserved: a lock file is removed
+// only when its recorded owner PID equals the cancelled worker's PID or that owner is
+// no longer alive. A lock held by a different *live* process is never touched.
+export async function releaseOwnedCollaborationLocks(root, {
+  id,
+  workspace,
+  ownerPid,
+  isAlive = (pid) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return error?.code === "EPERM";
+    }
+  },
+} = {}) {
+  const target = paths(root, id);
+  const lockPaths = [target.workerLock, target.updateLock];
+  if (workspace) lockPaths.push(workspaceLockPath(root, workspace));
+  const released = [];
+  const preserved = [];
+  for (const path of lockPaths) {
+    let owner = null;
+    try {
+      owner = Number.parseInt(await readFile(path, "utf8"), 10);
+    } catch (error) {
+      if (error.code === "ENOENT") continue;
+      throw error;
+    }
+    const ownedByTarget = Number.isInteger(ownerPid) && owner === ownerPid;
+    const ownerLive = Number.isInteger(owner) && owner > 1 && isAlive(owner);
+    if (ownedByTarget || !ownerLive) {
+      await unlink(path).catch((error) => {
+        if (error.code !== "ENOENT") throw error;
+      });
+      released.push(path);
+    } else {
+      preserved.push(path);
+    }
+  }
+  return { released, preserved };
 }
 
 export async function waitForCollaborationChange(root, id, afterUpdatedAt, timeoutMs) {

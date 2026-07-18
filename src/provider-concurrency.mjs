@@ -14,6 +14,27 @@ import { resolve } from "node:path";
 import { collaborationDirectory } from "./collaboration-store.mjs";
 
 export const PROVIDER_NAMES = ["claude", "codex", "antigravity"];
+
+// Issue #55: a collaboration that already holds every capacity slot for a
+// provider/role would wait forever on its own live slot. Fail fast instead of
+// registering a waiter that can never be satisfied.
+export class ProviderSelfDeadlockError extends Error {
+  constructor({ provider, role, collaborationId, limit, ownedSlots }) {
+    super(`Collaboration ${collaborationId} already owns ${ownedSlots}/${limit} live ${provider} ${role} capacity slot${limit === 1 ? "" : "s"}; waiting would deadlock on its own slot.`);
+    this.name = "ProviderSelfDeadlockError";
+    this.code = "provider_self_deadlock";
+    this.selfDeadlock = true;
+    this.provider = provider;
+    this.role = role;
+    this.collaborationId = collaborationId;
+    this.limit = limit;
+    this.ownedSlots = ownedSlots;
+  }
+}
+
+export function detectProviderSelfDeadlock({ ownedSlots, limit } = {}) {
+  return Number.isInteger(ownedSlots) && Number.isInteger(limit) && ownedSlots >= limit;
+}
 export const DEFAULT_PROVIDER_CONCURRENCY_CONFIG = resolve(
   homedir(),
   ".config/local-agent-bridge/provider-concurrency.json",
@@ -192,6 +213,19 @@ async function liveEntries(root, directory, suffix) {
   return live;
 }
 
+async function countOwnedSlots(root, directory, collaborationId) {
+  let owned = 0;
+  for (const entry of await liveEntries(root, directory, ".slot")) {
+    try {
+      const parsed = JSON.parse(await readFile(entry.path, "utf8"));
+      if (parsed.collaborationId === collaborationId) owned += 1;
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
+  return owned;
+}
+
 export async function releaseProviderCapacityForCollaboration(root, collaborationId) {
   if (!/^bridge-[0-9a-f-]{36}$/.test(collaborationId || "")) {
     throw new Error("A valid collaborationId is required for provider capacity cleanup.");
@@ -243,6 +277,10 @@ export async function acquireProviderCapacity(root, {
   const limit = normalized[provider][role];
   const directory = resolve(collaborationDirectory(root), "capacity", provider, role);
   await mkdir(directory, { recursive: true, mode: 0o700 });
+  const ownedSlots = await countOwnedSlots(root, directory, collaborationId);
+  if (detectProviderSelfDeadlock({ ownedSlots, limit })) {
+    throw new ProviderSelfDeadlockError({ provider, role, collaborationId, limit, ownedSlots });
+  }
   const queuedAt = Date.now();
   const { waiterName, waiterPath } = await registerWaiter(directory, {
     collaborationId,

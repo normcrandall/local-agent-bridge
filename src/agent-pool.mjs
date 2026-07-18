@@ -8,6 +8,7 @@ import { configuredReviewerLogin, createInstallationToken, inspectGitHubAppRoles
 import { createBoundBuilderClient } from "./github-builder-client.mjs";
 import { localReviewPrompt, republishValidatedReview, resolveReviewPublication } from "./review-publication.mjs";
 import { resolveContainedHandoffPath } from "./handoff-path.mjs";
+import { admitProviderCommands } from "./verification-allowlist.mjs";
 import { resolve } from "node:path";
 
 function textFrom(result) {
@@ -198,6 +199,11 @@ export function createAgentPool({
       }
     },
     async send({ agent, prompt, sessionId, mode, browser }, onProgress = () => {}) {
+      // Issue #55: enforce the coordinator command allowlist on every provider request
+      // path before dispatch. Review calls may run only the verification gates; work
+      // calls additionally cover the coordinator work commands. Any command outside the
+      // coordinator allowlist fails deterministically here, before the provider spawns.
+      admitProviderCommands({ mode, verificationCommands, workCommands });
       const client = await clientFor(agent);
       const effectivePermissionProfile = mode === "work" ? permissionProfile : "standard";
       const publication = mode === "review" ? await reviewPublicationFor(agent) : { available: true, binding: null, reason: null };

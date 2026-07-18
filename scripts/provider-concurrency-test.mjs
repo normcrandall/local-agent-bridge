@@ -5,8 +5,10 @@ import { join } from "node:path";
 import {
   acquireProviderCapacity,
   DEFAULT_PROVIDER_CONCURRENCY,
+  detectProviderSelfDeadlock,
   loadProviderConcurrency,
   normalizeProviderConcurrency,
+  ProviderSelfDeadlockError,
   releaseProviderCapacityForCollaboration,
 } from "../src/provider-concurrency.mjs";
 
@@ -155,6 +157,74 @@ try {
   await ceilingFirst.release();
   const ceilingSecond = await ceilingSecondPromise;
   await ceilingSecond.release();
+
+  // Issue #55: same-owner fast rejection. A collaboration that already holds every
+  // slot for a provider/role must fail fast with a typed self-deadlock error rather
+  // than register a waiter that can never be satisfied.
+  assert.equal(detectProviderSelfDeadlock({ ownedSlots: 1, limit: 1 }), true);
+  assert.equal(detectProviderSelfDeadlock({ ownedSlots: 0, limit: 1 }), false);
+  assert.equal(detectProviderSelfDeadlock({ ownedSlots: 2, limit: 2 }), true);
+
+  const selfOwner = collaborationId("a");
+  const selfLimits = normalizeProviderConcurrency({ antigravity: { work: 1, review: 2 } });
+  const held = await acquireProviderCapacity(root, {
+    provider: "antigravity",
+    role: "work",
+    collaborationId: selfOwner,
+    limits: selfLimits,
+    pollMs: 10,
+  });
+  const beforeReject = Date.now();
+  await assert.rejects(
+    acquireProviderCapacity(root, {
+      provider: "antigravity",
+      role: "work",
+      collaborationId: selfOwner,
+      limits: selfLimits,
+      pollMs: 10,
+    }),
+    (error) => error instanceof ProviderSelfDeadlockError
+      && error.code === "provider_self_deadlock"
+      && error.selfDeadlock === true,
+  );
+  // Fast rejection: it must not have polled/waited on a registered waiter.
+  assert.ok(Date.now() - beforeReject < 200);
+
+  // Issue #55: deterministic lease release and immediate slot reacquisition. Releasing
+  // frees the exact slot, which the next owner reacquires immediately.
+  const heldSlot = held.slot;
+  await held.release();
+  const reacquired = await acquireProviderCapacity(root, {
+    provider: "antigravity",
+    role: "work",
+    collaborationId: collaborationId("b"),
+    limits: selfLimits,
+    pollMs: 10,
+  });
+  assert.equal(reacquired.slot, heldSlot);
+  await reacquired.release();
+
+  // The same holds for a cancel-style release: releasing a lease frees the slot for the
+  // next owner without any residual waiter.
+  const cancelOwner = collaborationId("c");
+  const cancelLease = await acquireProviderCapacity(root, {
+    provider: "antigravity",
+    role: "work",
+    collaborationId: cancelOwner,
+    limits: selfLimits,
+    pollMs: 10,
+  });
+  assert.equal(await releaseProviderCapacityForCollaboration(root, cancelOwner), 0);
+  await cancelLease.release();
+  const afterCancel = await acquireProviderCapacity(root, {
+    provider: "antigravity",
+    role: "work",
+    collaborationId: collaborationId("d"),
+    limits: selfLimits,
+    pollMs: 10,
+  });
+  assert.equal(afterCancel.slot, heldSlot);
+  await afterCancel.release();
 } finally {
   delete process.env.AGENT_BRIDGE_PROVIDER_CONCURRENCY_CONFIG;
   delete process.env.BRIDGE_COLLABORATION_DIR;
