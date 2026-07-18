@@ -92,6 +92,7 @@ git(["push", bareRepoPath, `${headSha}:refs/heads/idempotent-branch`], { cwd: lo
 git(["push", bareRepoPath, `${baseCommitSha}:refs/heads/exists-elsewhere`], { cwd: localRepoPath });
 git(["push", bareRepoPath, `${baseCommitSha}:refs/heads/ff-branch`], { cwd: localRepoPath });
 git(["push", bareRepoPath, `${baseCommitSha}:refs/heads/ff2-branch`], { cwd: localRepoPath });
+git(["push", bareRepoPath, `${inheritedBinaryBaseSha}:refs/heads/inherited-binary-push`], { cwd: localRepoPath });
 git(["push", bareRepoPath, `${divergedSha}:refs/heads/cas-branch`], { cwd: localRepoPath });
 git(["push", bareRepoPath, `${divergedSha}:refs/heads/diverged-branch`], { cwd: localRepoPath });
 git(["push", bareRepoPath, `${divergedSha}:refs/heads/replacement-branch`], { cwd: localRepoPath });
@@ -1018,6 +1019,20 @@ const ff2Pushed = await createBoundBuilderClient({ ...base, headRef: "ff2-branch
   .pushBranch({ ref: "refs/heads/ff2-branch", sha: headSha });
 assert.equal(gitOut(["rev-parse", "refs/heads/ff2-branch"], { cwd: bareRepoPath }), headSha);
 assert.equal(ff2Pushed.readBackSha, headSha);
+
+// A bound baseSha must also scope push_branch validation when the provider
+// omits oldSha. Otherwise an inherited binary in the unchanged base is
+// incorrectly treated as part of the outgoing payload.
+const inheritedBinaryPush = await createBoundBuilderClient({
+  ...base,
+  baseSha: inheritedBinaryBaseSha,
+  headSha: inheritedBinaryHeadSha,
+  headRef: "inherited-binary-push",
+  fetchImpl: fakeGitHub({ branchShas: { "inherited-binary-push": [inheritedBinaryBaseSha, inheritedBinaryHeadSha] } }).fetchImpl,
+}).pushBranch({ ref: "refs/heads/inherited-binary-push", sha: inheritedBinaryHeadSha });
+assert.equal(inheritedBinaryPush.expectedOldSha, inheritedBinaryBaseSha);
+assert.equal(inheritedBinaryPush.outcome, "fast_forwarded");
+assert.equal(gitOut(["rev-parse", "refs/heads/inherited-binary-push"], { cwd: bareRepoPath }), inheritedBinaryHeadSha);
 
 // F. Missing remote branch and stale oldSha are rejected before any push.
 await assert.rejects(
