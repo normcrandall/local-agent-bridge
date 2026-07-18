@@ -1,4 +1,3 @@
-import { isAbsolute, relative, resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { antigravityToolRequest, claudeToolRequest, codexToolRequest } from "./tool-requests.mjs";
@@ -7,7 +6,9 @@ import { loadConfiguredFallbackModels } from "./model-fallbacks.mjs";
 import { builderEnvelopeInstructions, parseBuilderEnvelope } from "./builder-envelope.mjs";
 import { configuredReviewerLogin, createInstallationToken, inspectGitHubAppRoles } from "./github-app-auth.mjs";
 import { createBoundBuilderClient } from "./github-builder-client.mjs";
-import { localReviewPrompt, resolveReviewPublication } from "./review-publication.mjs";
+import { localReviewPrompt, republishValidatedReview, resolveReviewPublication } from "./review-publication.mjs";
+import { resolveContainedHandoffPath } from "./handoff-path.mjs";
+import { resolve } from "node:path";
 
 function textFrom(result) {
   const structured = result.structuredContent || {};
@@ -55,13 +56,12 @@ export function createAgentPool({
     return result;
   }
 
-  async function publishAntigravityReview(message, reviewBinding) {
-    const envelope = parseReviewEnvelope(message);
-    const absoluteHandoffPath = resolve(workspace, handoffPath);
-    const fromWorkspace = relative(workspace, absoluteHandoffPath);
-    if (fromWorkspace === ".." || fromWorkspace.startsWith("../") || isAbsolute(fromWorkspace)) {
-      throw new Error("Antigravity handoffPath must stay inside the delegated workspace.");
-    }
+  async function publishValidatedAntigravityEnvelope(envelope, reviewBinding) {
+    // Containment is validated before any parent directory is created; the bound
+    // publisher process recursively creates the authorized parent directory.
+    const absoluteHandoffPath = resolveContainedHandoffPath(workspace, handoffPath, {
+      label: "Antigravity handoffPath",
+    });
     const publisher = new Client({ name: "agent-bridge-antigravity-review-publisher", version: "0.2.0" });
     const transport = new StdioClientTransport({
       command: process.execPath,
@@ -94,6 +94,16 @@ export function createAgentPool({
     } finally {
       await publisher.close().catch(() => {});
     }
+  }
+
+  async function publishAntigravityReview(message, reviewBinding, providedEnvelope = null) {
+    // Validate the envelope exactly once. If a validated envelope already exists,
+    // publication is retried without re-running the Antigravity provider.
+    const envelope = providedEnvelope || parseReviewEnvelope(message);
+    return republishValidatedReview({
+      envelope,
+      publish: (validated) => publishValidatedAntigravityEnvelope(validated, reviewBinding),
+    });
   }
 
   async function boundBuilderClient() {

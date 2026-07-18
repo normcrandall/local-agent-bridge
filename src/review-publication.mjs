@@ -111,6 +111,38 @@ export function recordReviewPublicationResult(publication, {
   };
 }
 
+// A publication failure is recoverable when it reflects a transient filesystem
+// or transport condition rather than a policy, identity, or authorization
+// rejection. Recoverable failures may be retried against the already-validated
+// envelope; policy rejections must surface immediately.
+export function isRecoverablePublicationError(error) {
+  const message = error?.message || String(error);
+  if (/identity|mismatch|permission|not authorized|forbidden|denied|PAT fallback|head changed|not in the pull request/i.test(message)) {
+    return false;
+  }
+  return /ENOENT|no such file|not a directory|EEXIST|transport closed|connection closed|socket hang up|ECONNRESET|ETIMEDOUT|timed out|network/i.test(message);
+}
+
+// Publish an already-validated Antigravity review envelope, retrying the
+// publication path on recoverable errors WITHOUT re-running the provider. The
+// envelope is parsed and validated once by the caller; only `publish` (mkdir +
+// write_handoff + submit_pr_review) is re-attempted.
+export async function republishValidatedReview({ envelope, publish, attempts = 2 }) {
+  if (!envelope) throw new Error("republishValidatedReview requires an already-validated review envelope.");
+  if (typeof publish !== "function") throw new Error("republishValidatedReview requires a publish function.");
+  const maxAttempts = Math.max(1, attempts);
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await publish(envelope, attempt);
+    } catch (error) {
+      lastError = error;
+      if (attempt >= maxAttempts || !isRecoverablePublicationError(error)) throw error;
+    }
+  }
+  throw lastError;
+}
+
 export function localReviewPrompt(prompt, reason) {
   return `${prompt}\n\nREVIEW PUBLICATION DEGRADED: ${reason} Complete the independent review and durable handoff, but do not claim that a formal GitHub review or agent-review status was published. A configured trusted human must approve the exact head before merge. Continue the review instead of stopping solely because the reviewer App is unavailable.`;
 }

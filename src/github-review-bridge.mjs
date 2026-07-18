@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
-import { appendFile, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -68,6 +68,10 @@ server.registerTool(
     },
   },
   async ({ content }) => {
+    // The handoff path is pre-bound and containment-validated outside the model
+    // context; create its parent directories recursively so a nested authorized
+    // path (e.g. .bridge/handoffs/issue-58-implementation.md) does not ENOENT.
+    await mkdir(dirname(handoffPath), { recursive: true, mode: 0o700 });
     await writeFile(handoffPath, `${content.trimEnd()}\n`, { mode: 0o600 });
     return {
       content: [{ type: "text", text: `Wrote the bound review handoff: ${handoffPath}` }],

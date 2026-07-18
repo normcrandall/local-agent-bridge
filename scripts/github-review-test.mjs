@@ -6,8 +6,10 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { existsSync, realpathSync, symlinkSync } from "node:fs";
 import { reviewGateState, reviewMarker, submitBoundReview } from "../src/github-review-client.mjs";
 import { parseReviewEnvelope, reviewEnvelopeInstructions } from "../src/review-envelope.mjs";
+import { ensureContainedHandoffPath, resolveContainedHandoffPath } from "../src/handoff-path.mjs";
 
 const base = {
   apiUrl: "https://github.test",
@@ -36,6 +38,38 @@ const envelope = parseReviewEnvelope(`Independent review complete.\n---BEGIN BOU
 assert.equal(envelope.event, "APPROVE");
 assert.match(envelope.handoff, /Antigravity review/);
 await assert.rejects(async () => parseReviewEnvelope("no envelope"), /required bound GitHub review envelope/);
+
+// Shared handoff-path containment + recursive parent creation (used by Claude,
+// Codex, and Antigravity handoff writes). Parent directories are created only
+// after project-relative workspace containment is validated.
+const containmentRoot = await mkdtemp(join(tmpdir(), "handoff-path-test-"));
+const canonicalRoot = realpathSync(containmentRoot);
+try {
+  const nested = ensureContainedHandoffPath(containmentRoot, "deeply/nested/handoffs/issue-58.md");
+  assert.equal(nested, join(canonicalRoot, "deeply/nested/handoffs/issue-58.md"));
+  assert.equal(existsSync(join(canonicalRoot, "deeply/nested/handoffs")), true, "nested parent directories are created recursively");
+  assert.equal(existsSync(nested), false, "only the parent is created, not the handoff file itself");
+  // Validation without side effects still resolves the contained path.
+  assert.equal(
+    resolveContainedHandoffPath(containmentRoot, "a/b.md"),
+    join(canonicalRoot, "a/b.md"),
+  );
+  assert.equal(existsSync(join(canonicalRoot, "a")), false, "resolve does not create directories");
+  // Escapes are rejected before any directory is created.
+  assert.throws(() => ensureContainedHandoffPath(containmentRoot, "../escape.md"), /stay inside the delegated/);
+  assert.throws(() => ensureContainedHandoffPath(containmentRoot, "/etc/passwd"), /must be relative/);
+  assert.equal(existsSync(join(containmentRoot, "..", "escape.md")), false);
+  // A symlinked ancestor that points outside the workspace is rejected.
+  symlinkSync(tmpdir(), join(containmentRoot, "linked-out"));
+  assert.throws(
+    () => ensureContainedHandoffPath(containmentRoot, "linked-out/evil.md"),
+    /resolves outside the delegated/,
+  );
+  // A path naming an existing directory is rejected.
+  assert.throws(() => ensureContainedHandoffPath(containmentRoot, "deeply/nested"), /must name a file/);
+} finally {
+  await rm(containmentRoot, { recursive: true, force: true });
+}
 
 function json(value, status = 200) {
   return new Response(JSON.stringify(value), {
@@ -145,9 +179,11 @@ assert.equal(idempotentApi.calls.find((call) => call.options.method === "POST").
 
 const temporary = await mkdtemp(join(tmpdir(), "github-review-mcp-test-"));
 const tokenFile = join(temporary, "token");
-const handoffFile = join(temporary, "handoff.md");
+// Regression: the handoff lives under a nested parent directory that does not
+// exist yet, so write_handoff must create it recursively before writing.
+const handoffFile = join(temporary, "nested", "handoffs", "handoff.md");
 await writeFile(tokenFile, "test-token\n", { mode: 0o600 });
-await writeFile(handoffFile, "", { mode: 0o600 });
+assert.equal(existsSync(join(temporary, "nested")), false, "nested handoff parent is absent before write_handoff");
 let reviewPayload = null;
 let statusPayload = null;
 let reviewPostCount = 0;
@@ -213,6 +249,7 @@ try {
   });
   assert.notEqual(handoffResult.isError, true);
   assert.equal(handoffResult.structuredContent.handoffPath, handoffFile);
+  assert.equal(existsSync(join(temporary, "nested", "handoffs")), true, "write_handoff created the missing nested parent directory");
   assert.match(await readFile(handoffFile, "utf8"), /Verified independently/);
   const rejectedApproval = await mcpClient.callTool({
     name: "submit_pr_review",
