@@ -1,5 +1,6 @@
 import { isAbsolute, relative, resolve } from "node:path";
 import { homedir } from "node:os";
+import { normalizeVerificationAllowlist } from "./verification-allowlist.mjs";
 
 export function claudeToolRequest({
   prompt,
@@ -140,10 +141,9 @@ export function antigravityToolRequest({
   permissionProfile = "standard",
   verificationCommands = [],
 }) {
-  const verificationContract = mode === "review" && verificationCommands.length
-    ? `\n\nDelegated Antigravity verification contract:\n- Run these coordinator-selected commands and report their exact observed results:\n${verificationCommands.map((command) => `  - ${command}`).join("\n")}\n- The Antigravity CLI cannot enforce an exact command allowlist, so this command-running review uses unrestricted tool approval. Do not run unrelated commands or modify the workspace.`
-    : "";
-  const arguments_ = { prompt: `${prompt}${verificationContract}`, cwd, mode, timeoutSeconds, permissionProfile };
+  const commands = normalizeVerificationAllowlist(verificationCommands);
+  const arguments_ = { prompt, cwd, mode, timeoutSeconds, permissionProfile };
+  if (commands.length) arguments_.verificationCommands = commands;
   if (model) arguments_.model = model;
   if (fallbackModels !== undefined) arguments_.fallbackModels = fallbackModels;
   if (sessionId) {

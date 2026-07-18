@@ -51,16 +51,29 @@ export function assertProviderVerificationCapability({ provider, mode, verificat
 // Antigravity reviews remain sandboxed. The unrestricted profile is selected only when
 // a review is explicitly carrying coordinator verification commands and would otherwise
 // be unusable. Work-mode behavior continues to honor the collaboration profile.
-export function providerPermissionProfileForRequest({
+export function providerPermissionDecisionForRequest({
   provider,
   mode,
   verificationCommands = [],
   permissionProfile = "standard",
 } = {}) {
   const commands = normalizeVerificationAllowlist(verificationCommands);
-  if (provider === "antigravity" && mode === "review" && commands.length) return "yolo";
-  if (mode === "review") return "standard";
-  return permissionProfile;
+  const automaticUnrestrictedVerification = provider === "antigravity"
+    && mode === "review"
+    && commands.length > 0;
+  return {
+    verificationCommands: commands,
+    permissionProfile: automaticUnrestrictedVerification
+      ? "yolo"
+      : mode === "review" ? "standard" : permissionProfile,
+    permissionReason: automaticUnrestrictedVerification
+      ? "automatic_unrestricted_verification"
+      : "configured",
+  };
+}
+
+export function providerPermissionProfileForRequest(request = {}) {
+  return providerPermissionDecisionForRequest(request).permissionProfile;
 }
 
 // Coordinator commands are single-line, trimmed, non-empty strings. Normalization is

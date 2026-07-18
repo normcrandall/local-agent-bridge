@@ -29,7 +29,7 @@ import { activeVerificationCommand, capacityWaitNarrative, verificationNarrative
 import { enqueueCoordinatorWake } from "../src/coordinator-wake.mjs";
 import { createBoundBuilderClient } from "../src/github-builder-client.mjs";
 import { createInstallationToken } from "../src/github-app-auth.mjs";
-import { providerPermissionProfileForRequest } from "../src/verification-allowlist.mjs";
+import { providerPermissionDecisionForRequest } from "../src/verification-allowlist.mjs";
 
 const runtimeRoot = realpathSync(
   process.env.BRIDGE_RUNTIME_ROOT || process.env.BRIDGE_ROOT || fileURLToPath(new URL("..", import.meta.url)),
@@ -370,17 +370,14 @@ try {
       let summaryAt = null;
       let summarySource = "broker";
       let livenessMessage = null;
-      const activePermissionProfile = providerPermissionProfileForRequest({
+      const permissionDecision = providerPermissionDecisionForRequest({
         provider: call.agent,
         mode: call.mode,
         verificationCommands: state.verificationCommands || [],
         permissionProfile: state.permissionProfile || "standard",
       });
-      const permissionReason = call.agent === "antigravity"
-        && call.mode === "review"
-        && (state.verificationCommands || []).length
-        ? "automatic_unrestricted_verification"
-        : "configured";
+      const activePermissionProfile = permissionDecision.permissionProfile;
+      const permissionReason = permissionDecision.permissionReason;
       const writeActiveCall = async (patch = {}) => {
         await updateCollaboration(workspaceRoot, id, (current) => ({
           ...current,

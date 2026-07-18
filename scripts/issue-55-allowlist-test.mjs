@@ -12,6 +12,7 @@ import {
   ProviderCommandGrantUnsupportedError,
   ProviderCommandNotAllowlistedError,
   providerEnforcesExactCommandGrants,
+  providerPermissionDecisionForRequest,
   providerPermissionProfileForRequest,
 } from "../src/verification-allowlist.mjs";
 
@@ -102,6 +103,25 @@ assert.equal(providerPermissionProfileForRequest({
   mode: "review",
   verificationCommands: [],
 }), "standard");
+assert.deepEqual(providerPermissionDecisionForRequest({
+  provider: "antigravity",
+  mode: "review",
+  verificationCommands: ["  npm test  ", "", "npm test"],
+}), {
+  verificationCommands: ["npm test"],
+  permissionProfile: "yolo",
+  permissionReason: "automatic_unrestricted_verification",
+});
+assert.deepEqual(providerPermissionDecisionForRequest({
+  provider: "antigravity",
+  mode: "review",
+  verificationCommands: ["   "],
+  permissionProfile: "yolo",
+}), {
+  verificationCommands: [],
+  permissionProfile: "standard",
+  permissionReason: "configured",
+});
 assert.equal(providerPermissionProfileForRequest({
   provider: "antigravity",
   mode: "work",

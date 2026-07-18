@@ -101,9 +101,8 @@ const antigravityCommandReview = antigravityToolRequest({
   verificationCommands: ["npm test", "git diff --check"],
 });
 assert.equal(antigravityCommandReview.arguments.permissionProfile, "yolo");
-assert.match(antigravityCommandReview.arguments.prompt, /npm test/);
-assert.match(antigravityCommandReview.arguments.prompt, /git diff --check/);
-assert.match(antigravityCommandReview.arguments.prompt, /unrestricted tool approval/);
+assert.deepEqual(antigravityCommandReview.arguments.verificationCommands, ["npm test", "git diff --check"]);
+assert.equal(antigravityCommandReview.arguments.prompt, "review");
 
 const codexDefault = codexToolRequest({ prompt: "test", cwd: "/workspace" });
 assert.equal(codexDefault.name, "codex");

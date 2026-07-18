@@ -374,9 +374,21 @@ async function callAntigravityWithoutModel() {
     if (!yoloSerialized.includes("--dangerously-skip-permissions") || yoloSerialized.includes("--sandbox")) {
       throw new Error("Antigravity YOLO mode did not replace the terminal sandbox with auto-approval");
     }
+    const staticReviewYolo = await client.callTool({
+      name: "ask_antigravity",
+      arguments: { prompt: "static review", mode: "review", permissionProfile: "yolo" },
+    });
+    if (!staticReviewYolo.isError) {
+      throw new Error("Antigravity accepted manually configured YOLO permissions for a static review");
+    }
     const reviewYolo = await client.callTool({
       name: "ask_antigravity",
-      arguments: { prompt: "command-running review", mode: "review", permissionProfile: "yolo" },
+      arguments: {
+        prompt: "command-running review",
+        mode: "review",
+        permissionProfile: "standard",
+        verificationCommands: ["npm test"],
+      },
     });
     if (reviewYolo.isError) throw new Error("Antigravity rejected unrestricted permissions in review mode");
     const reviewYoloSerialized = JSON.stringify(reviewYolo.content);
@@ -509,7 +521,7 @@ for (const property of [
   if (!(property in claudeSchema)) throw new Error(`Claude bridge schema is missing: ${property}`);
 }
 const antigravitySchema = antigravityTools.find((tool) => tool.name === "ask_antigravity")?.inputSchema?.properties || {};
-for (const property of ["prompt", "mode", "model", "fallbackModels"]) {
+for (const property of ["prompt", "mode", "model", "fallbackModels", "verificationCommands"]) {
   if (!(property in antigravitySchema)) throw new Error(`Antigravity bridge schema is missing: ${property}`);
 }
 const collaborationSchema = collaborationTools.find((tool) => tool.name === "start_collaboration")?.inputSchema?.properties || {};

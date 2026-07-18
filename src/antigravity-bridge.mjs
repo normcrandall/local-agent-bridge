@@ -11,6 +11,7 @@ import { negotiateProviderCapabilities } from "./provider-cli-capabilities.mjs";
 import { loadConfiguredFallbackModels, normalizeFallbackModels } from "./model-fallbacks.mjs";
 import { resolveModelRoute } from "./model-policy.mjs";
 import { loadConfiguredAntigravityModel } from "./provider-model-settings.mjs";
+import { normalizeVerificationAllowlist } from "./verification-allowlist.mjs";
 
 const WORKSPACE_ROOT = realpathSync(process.env.BRIDGE_WORKSPACE_ROOT || process.env.BRIDGE_ROOT || process.cwd());
 const DEFAULT_TIMEOUT_MS = 2 * 60 * 60 * 1000;
@@ -92,7 +93,7 @@ function isModelOverload(error) {
     .test(error?.message || String(error));
 }
 
-function runAntigravityAttempt({ prompt, cwd, mode, model, timeoutSeconds, permissionProfile = "standard", conversationId, onProgress = () => {} }) {
+function runAntigravityAttempt({ prompt, cwd, mode, model, timeoutSeconds, permissionProfile = "standard", verificationCommands = [], conversationId, onProgress = () => {} }) {
   if (process.env.ANTIGRAVITY_BRIDGE_ACTIVE === "1") {
     throw new Error("Nested Antigravity bridge invocation blocked to prevent an agent loop.");
   }
@@ -108,9 +109,17 @@ function runAntigravityAttempt({ prompt, cwd, mode, model, timeoutSeconds, permi
   if (!AGY_CAPABILITIES.addDir) {
     throw new Error(`Installed Antigravity ${AGY_CAPABILITIES.version} lacks required --add-dir support for delegated workspace binding.`);
   }
+  const commands = normalizeVerificationAllowlist(verificationCommands);
+  if (mode === "review" && permissionProfile === "yolo" && commands.length === 0) {
+    throw new Error("Antigravity review mode may use unrestricted permissions only when verificationCommands are present; static reviews remain sandboxed.");
+  }
+  const commandRunningReview = mode === "review" && commands.length > 0;
+  const verificationContract = commandRunningReview
+    ? `\n\nDelegated Antigravity verification contract:\n- Run these coordinator-selected commands and report their exact observed results:\n${commands.map((command) => `  - ${command}`).join("\n")}\n- The Antigravity CLI cannot enforce an exact command allowlist, so this command-running review uses unrestricted tool approval. Do not run unrelated commands or modify the workspace.`
+    : "";
   const args = [
     "--print",
-    prompt,
+    `${prompt}${verificationContract}`,
     "--print-timeout",
     `${Math.ceil(duration / 1000)}s`,
     "--mode",
@@ -122,7 +131,7 @@ function runAntigravityAttempt({ prompt, cwd, mode, model, timeoutSeconds, permi
   for (const directory of [actualCwd, ...gitMetadataDirectories(actualCwd)]) {
     args.push("--add-dir", directory);
   }
-  if (permissionProfile === "yolo") {
+  if (permissionProfile === "yolo" || commandRunningReview) {
     if (!AGY_CAPABILITIES.yolo) throw new Error(`Installed Antigravity ${AGY_CAPABILITIES.version} cannot enable YOLO mode.`);
     args.push("--dangerously-skip-permissions");
   } else if (AGY_CAPABILITIES.sandbox) args.push("--sandbox");
@@ -262,8 +271,11 @@ const sharedInput = {
     "Ordered Antigravity models to try only after a recognized overload. Omit to use the machine-local fallback policy; pass [] to disable it.",
   ),
   timeoutSeconds: z.number().int().min(10).max(14400).optional(),
+  verificationCommands: z.array(z.string()).max(50).default([]).describe(
+    "Coordinator-selected commands for a command-running review. Their presence automatically enables unrestricted tool approval because agy has no exact non-interactive command grant.",
+  ),
   permissionProfile: z.enum(["standard", "yolo"]).default("standard").describe(
-    "Permission policy. yolo auto-approves tools and disables the terminal sandbox. The collaboration broker selects it automatically for Antigravity command-running reviews because agy exposes no narrower non-interactive command grant.",
+    "Work-mode permission policy. In review mode, verificationCommands automatically enable unrestricted approval; manually selecting yolo without commands is rejected so static reviews stay sandboxed.",
   ),
 };
 
