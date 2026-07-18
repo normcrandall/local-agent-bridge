@@ -73,6 +73,19 @@ git(["commit", "-m", "Diverged commit"], { cwd: localRepoPath });
 const divergedSha = gitOut(["rev-parse", "HEAD"], { cwd: localRepoPath });
 git(["checkout", "main"], { cwd: localRepoPath });
 
+// A feature branch whose base already contains a binary exercises the create
+// contract against the intended base-to-head payload instead of the full tree.
+git(["checkout", "-b", "inherited-binary", baseCommitSha], { cwd: localRepoPath });
+fs.writeFileSync(path.join(localRepoPath, "inherited-binary.dat"), Buffer.from([0, 1, 2, 3]));
+git(["add", "inherited-binary.dat"], { cwd: localRepoPath });
+git(["commit", "-m", "Add binary on base"], { cwd: localRepoPath });
+const inheritedBinaryBaseSha = gitOut(["rev-parse", "HEAD"], { cwd: localRepoPath });
+fs.writeFileSync(path.join(localRepoPath, "inherited-feature.txt"), "feature payload");
+git(["add", "inherited-feature.txt"], { cwd: localRepoPath });
+git(["commit", "-m", "Add feature above binary base"], { cwd: localRepoPath });
+const inheritedBinaryHeadSha = gitOut(["rev-parse", "HEAD"], { cwd: localRepoPath });
+git(["checkout", "main"], { cwd: localRepoPath });
+
 // Seed remote state through direct file-path pushes: no network, no auth, no
 // URL rewriting. The HTTP transport under test is never used for seeding.
 git(["push", bareRepoPath, `${headSha}:refs/heads/idempotent-branch`], { cwd: localRepoPath });
@@ -182,6 +195,7 @@ const base = {
   repository: "owner/repo",
   expectedLogin: "builder[bot]",
   verifiedLogin: "builder[bot]",
+  baseSha: baseCommitSha,
   headSha,
   prNumber: 42,
   headRef: "codex/feature",
@@ -205,7 +219,7 @@ function fakeGitHub({
   rules = [], branchProtection = null, branchProtectionStatus = 200, merged = false,
 } = {}) {
   const calls = [];
-  const branchState = { ...branchShas };
+  const branchState = { main: baseCommitSha, ...branchShas };
   const fetchImpl = async (url, options = {}) => {
     const path = new URL(url).pathname + new URL(url).search;
     const body = options.body ? JSON.parse(options.body) : null;
@@ -702,13 +716,15 @@ git(["checkout", "main"], { cwd: localRepoPath });
 assert.throws(() => git(["cat-file", "-e", `${successHeadSha}^{commit}`], { cwd: bareRepoPath }));
 assert.throws(() => git(["rev-parse", "--verify", "refs/heads/feature-success"], { cwd: bareRepoPath }));
 
-const successApi = fakeGitHub();
+const successApi = fakeGitHub({ branchShas: { main: headSha } });
 const successFactory = tokenFactory();
 const integrationSuccessClient = createBoundBuilderClient({
   apiUrl: "https://github.test",
   fetchImpl: successApi.fetchImpl,
   workspace: localRepoPath,
   repository: "owner/repo",
+  baseRef: "main",
+  baseSha: headSha,
   headSha: successHeadSha,
   headRef: "refs/heads/feature-success",
   allowedOperations: ["create_branch", "push_branch"],
@@ -736,6 +752,73 @@ git(["cat-file", "-e", `${successHeadSha}^{commit}`], { cwd: bareRepoPath });
 // The credential channel produced the exact Basic header, never argv.
 assert.ok(authAttempts.length > authAttemptsBefore);
 assert.ok(authAttempts.slice(authAttemptsBefore).every((value) => value === expectedAuth));
+
+// A2. createBranch accepts an unchanged binary inherited from its exact base.
+const inheritedBinaryFactory = tokenFactory();
+const inheritedBinaryClient = createBoundBuilderClient({
+  apiUrl: "https://github.test",
+  fetchImpl: fakeGitHub({ branchShas: { main: inheritedBinaryBaseSha } }).fetchImpl,
+  workspace: localRepoPath,
+  repository: "owner/repo",
+  baseRef: "main",
+  baseSha: inheritedBinaryBaseSha,
+  headSha: inheritedBinaryHeadSha,
+  headRef: "refs/heads/feature-inherited-binary",
+  allowedOperations: ["create_branch"],
+  getToken: inheritedBinaryFactory.getToken,
+  expectedLogin: "builder[bot]",
+  transportUrl,
+  receiptPath: receiptLogPath,
+});
+const inheritedBinaryResult = await inheritedBinaryClient.createBranch({
+  ref: "refs/heads/feature-inherited-binary",
+  sha: inheritedBinaryHeadSha,
+});
+assert.equal(inheritedBinaryResult.outcome, "created");
+assert.equal(inheritedBinaryResult.observedRemoteSha, inheritedBinaryHeadSha);
+assert.equal(inheritedBinaryFactory.state.issued, true);
+
+// A3. createBranch fails closed when its authorization omits an exact base SHA.
+const missingBaseFactory = tokenFactory();
+await assert.rejects(
+  createBoundBuilderClient({
+    apiUrl: "https://github.test",
+    fetchImpl: fakeGitHub().fetchImpl,
+    workspace: localRepoPath,
+    repository: "owner/repo",
+    headSha: successHeadSha,
+    headRef: "refs/heads/feature-missing-base",
+    allowedOperations: ["create_branch"],
+    getToken: missingBaseFactory.getToken,
+    expectedLogin: "builder[bot]",
+    transportUrl,
+  }).createBranch({ ref: "refs/heads/feature-missing-base", sha: successHeadSha }),
+  /create_branch requires an exact baseSha authorization/
+);
+assert.equal(missingBaseFactory.state.issued, false);
+
+// A4. createBranch rejects a stale exact-base authorization before mutation.
+const staleBaseFactory = tokenFactory();
+const staleBasePushesBefore = mockServer.pushAttempts;
+await assert.rejects(
+  createBoundBuilderClient({
+    apiUrl: "https://github.test",
+    fetchImpl: fakeGitHub({ branchShas: { main: headSha } }).fetchImpl,
+    workspace: localRepoPath,
+    repository: "owner/repo",
+    baseRef: "main",
+    baseSha: baseCommitSha,
+    headSha: successHeadSha,
+    headRef: "refs/heads/feature-stale-base",
+    allowedOperations: ["create_branch"],
+    getToken: staleBaseFactory.getToken,
+    expectedLogin: "builder[bot]",
+    transportUrl,
+  }).createBranch({ ref: "refs/heads/feature-stale-base", sha: successHeadSha }),
+  /Base ref main changed: authorized .* current/
+);
+assert.equal(staleBaseFactory.state.issued, true);
+assert.equal(mockServer.pushAttempts, staleBasePushesBefore);
 
 // B. createBranch is idempotent when the remote ref already sits at the SHA.
 const idempotentClient = createBoundBuilderClient({
@@ -960,6 +1043,8 @@ const authFailureClient = createBoundBuilderClient({
   fetchImpl: fakeGitHub().fetchImpl,
   workspace: localRepoPath,
   repository: "owner/repo",
+  baseRef: "main",
+  baseSha: baseCommitSha,
   headSha,
   headRef: "refs/heads/auth-branch",
   allowedOperations: ["create_branch"],
@@ -1003,6 +1088,8 @@ await assert.rejects(
     fetchImpl: fakeGitHub().fetchImpl,
     workspace: localRepoPath,
     repository: "owner/repo",
+    baseRef: "main",
+    baseSha: baseCommitSha,
     headSha,
     headRef: "refs/heads/feature-extra-header",
     allowedOperations: ["create_branch"],
@@ -1027,6 +1114,8 @@ await assert.rejects(
     fetchImpl: fakeGitHub().fetchImpl,
     workspace: localRepoPath,
     repository: "owner/repo",
+    baseRef: "main",
+    baseSha: headSha,
     headSha: oversizedSha,
     headRef: "refs/heads/feature-oversized",
     allowedOperations: ["create_branch"],
@@ -1051,6 +1140,8 @@ await assert.rejects(
     fetchImpl: fakeGitHub().fetchImpl,
     workspace: localRepoPath,
     repository: "owner/repo",
+    baseRef: "main",
+    baseSha: headSha,
     headSha: binarySha,
     headRef: "refs/heads/feature-binary",
     allowedOperations: ["create_branch"],
@@ -1075,6 +1166,8 @@ await assert.rejects(
     fetchImpl: fakeGitHub().fetchImpl,
     workspace: localRepoPath,
     repository: "owner/repo",
+    baseRef: "main",
+    baseSha: headSha,
     headSha: invalidLfsSha,
     headRef: "refs/heads/feature-invalid-lfs",
     allowedOperations: ["create_branch"],
@@ -1103,6 +1196,8 @@ await assert.rejects(
     fetchImpl: fakeGitHub().fetchImpl,
     workspace: localRepoPath,
     repository: "owner/repo",
+    baseRef: "main",
+    baseSha: headSha,
     headSha: validLfsSha,
     headRef: "refs/heads/feature-valid-lfs",
     allowedOperations: ["create_branch"],
@@ -1123,6 +1218,8 @@ await assert.rejects(
     fetchImpl: fakeGitHub().fetchImpl,
     workspace: localRepoPath,
     repository: "wrong/repo",
+    baseRef: "main",
+    baseSha: baseCommitSha,
     headSha,
     headRef: "refs/heads/feature-wrong-remote",
     allowedOperations: ["create_branch"],
@@ -1144,6 +1241,8 @@ await assert.rejects(
     fetchImpl: fakeGitHub().fetchImpl,
     workspace: localRepoPath,
     repository: "owner/repo",
+    baseRef: "main",
+    baseSha: baseCommitSha,
     headSha,
     headRef: "refs/heads/feature-rewrite",
     allowedOperations: ["create_branch"],
@@ -1162,6 +1261,8 @@ await assert.rejects(
     fetchImpl: fakeGitHub().fetchImpl,
     workspace: localRepoPath,
     repository: "owner/repo",
+    baseRef: "main",
+    baseSha: baseCommitSha,
     headSha,
     headRef: "refs/heads/feature-rewrite",
     allowedOperations: ["create_branch"],
@@ -1292,7 +1393,7 @@ fs.writeFileSync(restartReconLog, `${JSON.stringify({
 const restartPushesBefore = mockServer.pushAttempts;
 const restartClient = createBoundBuilderClient({
   ...base, headRef: "restart-recon", allowedOperations: ["create_branch"],
-  fetchImpl: fakeGitHub().fetchImpl, receiptPath: restartReconLog,
+  fetchImpl: fakeGitHub({ branchShas: { main: headSha } }).fetchImpl, receiptPath: restartReconLog,
 });
 const restartResult = await restartClient.createBranch({ ref: "refs/heads/restart-recon", sha: headSha });
 assert.equal(restartResult.outcome, "reconciled");
@@ -1363,8 +1464,8 @@ fs.writeFileSync(diffShaLog, `${JSON.stringify({
 })}\n`);
 const diffShaPushesBefore = mockServer.pushAttempts;
 const diffShaClient = createBoundBuilderClient({
-  ...base, headSha: successHeadSha, headRef: "diff-sha-recon", allowedOperations: ["create_branch"],
-  fetchImpl: fakeGitHub().fetchImpl, receiptPath: diffShaLog,
+  ...base, baseSha: headSha, headSha: successHeadSha, headRef: "diff-sha-recon", allowedOperations: ["create_branch"],
+  fetchImpl: fakeGitHub({ branchShas: { main: headSha } }).fetchImpl, receiptPath: diffShaLog,
 });
 await assert.rejects(
   diffShaClient.createBranch({ ref: "refs/heads/diff-sha-recon", sha: successHeadSha }),
@@ -1523,11 +1624,13 @@ for (const { scenario, op } of EQUIVALENCE_FIXTURES) {
   // Exercise the ACTUAL generated Claude and Codex requests: the bound builder
   // is wired with this operation in its allowlist (the Claude/Codex delivery
   // boundary), not raw shell delivery.
-  const binding = { repository: "owner/repo", expectedLogin: "builder[bot]", headSha, headRef: "codex/feature", baseRef: "main", allowedOperations: [operation] };
+  const binding = { repository: "owner/repo", expectedLogin: "builder[bot]", baseSha: baseCommitSha, headSha, headRef: "codex/feature", baseRef: "main", allowedOperations: [operation] };
   const claudeRequest = claudeToolRequest({ prompt: "x", mode: "work", workProfile: "implement", githubBuilder: binding });
   assert.ok(claudeRequest.arguments.githubBuilder.allowedOperations.includes(operation), `${scenario}: Claude request wires the builder operation`);
+  assert.equal(claudeRequest.arguments.githubBuilder.baseSha, baseCommitSha, `${scenario}: Claude request preserves the exact base authorization`);
   const codexRequest = codexToolRequest({ prompt: "x", cwd: localRepoPath, mode: "work", workProfile: "implement", githubBuilder: binding, githubBuilderBridgePath: path.join(tmpDir, "bridge.mjs") });
   assert.match(codexRequest.arguments.config["mcp_servers.github_builder.env.GITHUB_BUILDER_ALLOWED_OPERATIONS"], new RegExp(operation), `${scenario}: Codex request wires the builder operation`);
+  assert.equal(codexRequest.arguments.config["mcp_servers.github_builder.env.GITHUB_BUILDER_BASE_SHA"], baseCommitSha, `${scenario}: Codex request wires the exact base authorization`);
 }
 
 cleanup();
