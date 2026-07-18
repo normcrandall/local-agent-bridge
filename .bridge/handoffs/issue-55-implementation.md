@@ -5,7 +5,18 @@ Implementation commit: `7396950a5cf38404f156396f2679805d04d0468d`
 Test-ordering repair commit: `1a61821b78925dfc6261d1a64e730da656dc44a8`
 Capability-boundary repair commit: `d20c1a981da34f13ae066b4e636d588cf25d55c4`
 Integration + matcher-tightening repair commit: `6a48ec38e3a0135672142886dff573d5914ce424`
+pnpm/yarn shorthand pool-gate repair commit: `066fcbac75ece5d2a2a11ddf44733cf9c24477cc`
 (branch HEAD is the immediately following handoff-update commit, which Codex pushes)
+
+## PR #65 review follow-up (pnpm shorthand)
+Antigravity published a valid exact-head REQUEST_CHANGES review: the matcher's
+no-`run` shorthand fallback recognized only `yarn <script>`, so the supported direct
+form `pnpm test:provider-concurrency` returned false (missed pool-entry gate). Smallest
+fix in `src/provider-concurrency.mjs`: extend the shorthand fallback to `pnpm` as well
+(`yarn`/`pnpm` support `<runner> <script>`; npm still requires `run`, matching its real
+CLI). Added a positive regression test for `pnpm test:provider-concurrency` and negatives
+locking that `npm test:provider-concurrency` (no npm shorthand) and `pnpm install` do not
+match. All six gates re-run green.
 
 ## Chair acceptance-blocker follow-up (worker-path integration + precise matcher)
 - **Real start/worker self-deadlock integration fixture.** Added to
@@ -138,8 +149,8 @@ test:secrets PASS, smoke PASS (full Playwright browser runtime green).
 Work profile `implement` authorizes local work through commit only; pushing and PR
 mutation are not authorized here, and no builder push operation is available in this
 call. **Stopped after commit for Codex to push the current branch HEAD of
-`codex/helm-55-reviewer-deadlock` (latest code repair `6a48ec38` plus this
-handoff-update commit) to the existing branch/PR.**
+`codex/helm-55-reviewer-deadlock` (latest code repair `066fcbac` plus this
+handoff-update commit) to the existing branch/PR #65.**
 
 ## Provider-concurrency gate (now run and green)
 - `npm run test:provider-concurrency` — PASS (run twice, deterministic). Validates the
