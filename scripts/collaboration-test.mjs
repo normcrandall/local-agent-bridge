@@ -25,6 +25,7 @@ const cleanProcessEnv = Object.fromEntries(
 );
 const env = {
   ...cleanProcessEnv,
+  AGENT_BRIDGE_TEST_MODE: "1",
   BRIDGE_COLLABORATION_DIR: stateDirectory,
   CLAUDE_BIN: resolve(root, "scripts/fake-claude.mjs"),
   AGY_BIN: "/bin/echo",

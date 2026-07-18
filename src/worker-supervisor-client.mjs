@@ -1,11 +1,11 @@
 import { spawnSync } from "node:child_process";
 import { createConnection } from "node:net";
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
 import process from "node:process";
 import { collaborationDirectory } from "./collaboration-store.mjs";
-import { supervisorEndpoint } from "./worker-supervisor-protocol.mjs";
+import { sanitizeWorkerEnvironment, supervisorEndpoint } from "./worker-supervisor-protocol.mjs";
 
 const PROTOCOL_VERSION = 1;
 
@@ -56,6 +56,7 @@ async function request(endpoint, payload, timeoutMs = 1_000) {
 async function acquireStartupLock(directory) {
   const lock = join(directory, "supervisor-start.lock");
   await mkdir(directory, { recursive: true, mode: 0o700 });
+  await chmod(directory, 0o700);
   for (let attempt = 0; attempt < 100; attempt += 1) {
     try {
       await mkdir(lock, { mode: 0o700 });
@@ -121,6 +122,40 @@ async function ensureSupervisor({ runtimeRoot, workspaceRoot, stateDirectory, en
   }
 }
 
+async function stopLegacySupervisor({ previous, runtimeRoot, stateDirectory }) {
+  const metadata = JSON.parse(await readFile(join(stateDirectory, "supervisor.json"), "utf8"));
+  const processProbeBinary = process.env.BRIDGE_SUPERVISOR_PS_BIN || "/bin/ps";
+  const processProbe = (field) => {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const result = spawnSync(processProbeBinary, ["-p", String(previous.supervisorPid), "-o", `${field}=`], {
+        encoding: "utf8",
+        timeout: 2_000,
+      });
+      const value = result.status === 0 ? result.stdout?.trim() : "";
+      if (value) return value;
+    }
+    return null;
+  };
+  const command = processProbe("command");
+  const observedStart = processProbe("lstart");
+  const expectedStartedAt = metadata.startedAt || previous.startedAt;
+  const observedStartedAtMs = Date.parse(observedStart || "");
+  const expectedStartedAtMs = Date.parse(expectedStartedAt || "");
+  const startIdentityMatches = Number.isFinite(observedStartedAtMs)
+    && Number.isFinite(expectedStartedAtMs)
+    && Math.abs(observedStartedAtMs - expectedStartedAtMs) <= 5_000;
+  if (metadata.supervisorId !== previous.supervisorId
+    || metadata.pid !== previous.supervisorPid
+    || resolve(metadata.runtimeRoot || "") !== resolve(runtimeRoot)
+    || resolve(metadata.stateDirectory || "") !== resolve(stateDirectory)
+    || !command?.includes("collaboration-supervisor.mjs")
+    || !startIdentityMatches) {
+    throw new Error("Legacy supervisor identity could not be verified; refresh was refused.");
+  }
+  process.kill(previous.supervisorPid, "SIGTERM");
+  return { ...previous, accepted: true, legacySignal: true };
+}
+
 export async function startSupervisedWorker({
   collaborationId,
   runtimeRoot = resolve(fileURLToPath(new URL("..", import.meta.url))),
@@ -137,7 +172,7 @@ export async function startSupervisedWorker({
     collaborationId,
     runtimeRoot,
     workspaceRoot,
-    workerEnvironment: process.env,
+    workerEnvironment: sanitizeWorkerEnvironment(process.env),
   }, 5_000);
 }
 
@@ -145,5 +180,53 @@ export async function getSupervisorStatus({
   workspaceRoot = resolve(process.env.BRIDGE_WORKSPACE_ROOT || fileURLToPath(new URL("..", import.meta.url))),
   stateDirectory = resolve(process.env.BRIDGE_COLLABORATION_DIR || collaborationDirectory(workspaceRoot)),
 } = {}) {
-  return request(supervisorEndpoint(stateDirectory), { type: "ping" });
+  const endpoint = supervisorEndpoint(stateDirectory);
+  try {
+    return await request(endpoint, { type: "status" });
+  } catch (error) {
+    try {
+      return { ...await request(endpoint, { type: "ping" }), legacy: true };
+    } catch {
+      throw error;
+    }
+  }
+}
+
+export async function refreshSupervisor({
+  runtimeRoot = resolve(fileURLToPath(new URL("..", import.meta.url))),
+  workspaceRoot = resolve(process.env.BRIDGE_WORKSPACE_ROOT || runtimeRoot),
+  stateDirectory = resolve(process.env.BRIDGE_COLLABORATION_DIR || collaborationDirectory(workspaceRoot)),
+  startIfMissing = true,
+} = {}) {
+  const endpoint = supervisorEndpoint(stateDirectory);
+  let previous;
+  let legacy = false;
+  try {
+    previous = await request(endpoint, { type: "status" });
+  } catch (error) {
+    try {
+      previous = await request(endpoint, { type: "ping" });
+      legacy = true;
+    } catch {
+      if (!startIfMissing) return { running: false, previous: null, current: null };
+      const current = await ensureSupervisor({ runtimeRoot, workspaceRoot, stateDirectory, endpoint });
+      return { running: true, previous: null, current, started: true };
+    }
+  }
+
+  const accepted = legacy
+    ? await stopLegacySupervisor({ previous, runtimeRoot, stateDirectory })
+    : await request(endpoint, { type: "refresh" }, 2_000);
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline && processAlive(previous.supervisorPid)) {
+    await pause(50);
+  }
+  if (processAlive(previous.supervisorPid)) {
+    throw new Error("Collaboration supervisor did not stop after accepting refresh.");
+  }
+  const current = await ensureSupervisor({ runtimeRoot, workspaceRoot, stateDirectory, endpoint });
+  if (current.supervisorId === previous.supervisorId) {
+    throw new Error("Collaboration supervisor refresh did not replace the running supervisor.");
+  }
+  return { running: true, previous, accepted, current, started: false };
 }

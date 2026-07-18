@@ -2,14 +2,16 @@
 
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { supervisorEndpoint } from "../src/worker-supervisor-protocol.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const temporary = await mkdtemp(join(tmpdir(), "agent-bridge-supervisor-"));
 const stateDirectory = join(temporary, "state");
 const workspace = join(temporary, "workspace");
+const processProbeFailureFile = join(temporary, "fail-next-process-probe");
 await mkdir(stateDirectory, { recursive: true });
 await mkdir(workspace, { recursive: true });
 
@@ -63,6 +65,8 @@ function startFromIndependentClient(id, { set = {}, unset = [] } = {}) {
     BRIDGE_WORKSPACE_ROOT: workspace,
     BRIDGE_COLLABORATION_DIR: stateDirectory,
     BRIDGE_SUPERVISOR_WORKER_PATH: join(root, "scripts/worker-supervisor-test-worker.mjs"),
+    BRIDGE_SUPERVISOR_PS_BIN: join(root, "scripts/fixtures/fake-transient-ps.mjs"),
+    BRIDGE_SUPERVISOR_TEST_PS_FAILURE_FILE: processProbeFailureFile,
     BRIDGE_SUPERVISOR_TEST_OUTPUT: temporary,
     ...set,
   };
@@ -85,6 +89,8 @@ function startFromIndependentClientAsync(id) {
     BRIDGE_WORKSPACE_ROOT: workspace,
     BRIDGE_COLLABORATION_DIR: stateDirectory,
     BRIDGE_SUPERVISOR_WORKER_PATH: join(root, "scripts/worker-supervisor-test-worker.mjs"),
+    BRIDGE_SUPERVISOR_PS_BIN: join(root, "scripts/fixtures/fake-transient-ps.mjs"),
+    BRIDGE_SUPERVISOR_TEST_PS_FAILURE_FILE: processProbeFailureFile,
     BRIDGE_SUPERVISOR_TEST_OUTPUT: temporary,
   };
   return new Promise((resolvePromise, rejectPromise) => {
@@ -101,13 +107,76 @@ function startFromIndependentClientAsync(id) {
   });
 }
 
+function controlFromIndependentClient(action) {
+  const source = [
+    `import { getSupervisorStatus, refreshSupervisor } from ${JSON.stringify(join(root, "src/worker-supervisor-client.mjs"))};`,
+    `const options = ${JSON.stringify({ runtimeRoot: root, workspaceRoot: workspace, stateDirectory })};`,
+    "const result = process.argv[1] === 'refresh' ? await refreshSupervisor(options) : await getSupervisorStatus(options);",
+    "process.stdout.write(JSON.stringify(result));",
+  ].join("\n");
+  return JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", source, action], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      BRIDGE_RUNTIME_ROOT: root,
+      BRIDGE_WORKSPACE_ROOT: workspace,
+      BRIDGE_COLLABORATION_DIR: stateDirectory,
+      BRIDGE_SUPERVISOR_WORKER_PATH: join(root, "scripts/worker-supervisor-test-worker.mjs"),
+      BRIDGE_SUPERVISOR_PS_BIN: join(root, "scripts/fixtures/fake-transient-ps.mjs"),
+      BRIDGE_SUPERVISOR_TEST_PS_FAILURE_FILE: processProbeFailureFile,
+      BRIDGE_SUPERVISOR_TEST_OUTPUT: temporary,
+    },
+  }));
+}
+
 try {
   await Promise.all(ids.map(seed));
 
-  const first = startFromIndependentClient(ids[0], { set: { FIRST_HOST_ONLY_SECRET: "must-not-bleed" } });
+  const first = startFromIndependentClient(ids[0], { set: {
+    FIRST_HOST_ONLY_SECRET: "must-not-transit-supervisor-ipc",
+    AGENT_BRIDGE_TEST_REQUIRED: "preserved",
+    AWS_ACCESS_KEY_ID: "bedrock-access-key",
+    AWS_BEARER_TOKEN_BEDROCK: "bedrock-bearer-token",
+    CLOUD_ML_REGION: "us-central1",
+  } });
   assert.equal(first.reused, false);
   assert.equal(alive(first.workerPid), true, "worker must survive the MCP client process exiting");
   assert.equal(alive(first.supervisorPid), true, "machine supervisor must survive its first client exiting");
+  assert.equal((await stat(stateDirectory)).mode & 0o777, 0o700, "supervisor state directory must be private");
+  if (process.platform !== "win32") {
+    assert.equal((await stat(supervisorEndpoint(stateDirectory))).mode & 0o777, 0o600, "supervisor socket must be owner-only");
+  }
+  await waitFor(async () => {
+    try {
+      await readFile(join(temporary, `${ids[0]}.environment.json`), "utf8");
+      return true;
+    } catch {
+      return false;
+    }
+  }, "first worker did not record its environment fixture");
+  const firstEnvironment = JSON.parse(await readFile(join(temporary, `${ids[0]}.environment.json`), "utf8"));
+  assert.equal(firstEnvironment.firstHostOnlySecret, null, "arbitrary caller secrets must not transit supervisor IPC");
+  assert.equal(firstEnvironment.bridgeRequiredSetting, "preserved", "bridge configuration must reach the worker");
+  assert.equal(firstEnvironment.awsAccessKeyId, "bedrock-access-key", "Bedrock AWS credentials must reach the worker");
+  assert.equal(firstEnvironment.awsBearerTokenBedrock, "bedrock-bearer-token", "Bedrock bearer credentials must reach the worker");
+  assert.equal(firstEnvironment.cloudMlRegion, "us-central1", "Vertex region configuration must reach the worker");
+  assert.equal(firstEnvironment.pathPresent, true, "workers must retain executable discovery");
+
+  await writeFile(processProbeFailureFile, "fail once\n");
+  const transientReuse = startFromIndependentClient(ids[0]);
+  assert.equal(transientReuse.reused, true, "a transient process probe must retry and reuse the verified worker");
+  assert.equal(transientReuse.workerPid, first.workerPid);
+  await waitFor(async () => {
+    try {
+      await readFile(processProbeFailureFile, "utf8");
+      return false;
+    } catch (error) {
+      return error.code === "ENOENT";
+    }
+  }, "supervisor did not exercise the configured transient process probe");
+  const afterTransientProbe = JSON.parse(await readFile(join(stateDirectory, `${ids[0]}.json`), "utf8"));
+  assert.notEqual(afterTransientProbe.status, "indeterminate", "one transient process probe must not invalidate a live worker");
+  assert.equal(alive(first.workerPid), true, "transient process probe recovery must preserve the worker");
 
   const second = startFromIndependentClient(ids[1], { unset: ["FIRST_HOST_ONLY_SECRET"] });
   assert.equal(second.supervisorId, first.supervisorId, "independent clients must share one machine supervisor");
@@ -134,11 +203,47 @@ try {
   assert.equal(concurrentTranscript.split("\n").filter((line) => line.includes('"type":"worker_supervised_started"')).length, 1,
     "same-ID concurrent starts must emit one supervised-worker start");
 
+  const statusBeforeRefresh = controlFromIndependentClient("status");
+  assert.equal(statusBeforeRefresh.supervisorId, first.supervisorId);
+  assert.equal(statusBeforeRefresh.runtimeRoot, root);
+  assert.equal(statusBeforeRefresh.stateDirectory, stateDirectory);
+  assert.equal(statusBeforeRefresh.monitoredWorkers, 3);
+
+  const refreshed = controlFromIndependentClient("refresh");
+  assert.equal(refreshed.previous.supervisorId, first.supervisorId);
+  assert.notEqual(refreshed.current.supervisorId, first.supervisorId, "refresh must replace the supervisor process");
+  assert.equal(refreshed.current.monitoredWorkers, 3, "replacement supervisor must adopt every live worker before reporting ready");
+  for (const workerPid of [first.workerPid, second.workerPid, concurrent[0].workerPid]) {
+    assert.equal(alive(workerPid), true, "supervisor refresh must never kill an owned worker");
+  }
+
+  await writeFile(processProbeFailureFile, `${JSON.stringify({ pid: concurrent[0].workerPid, remaining: 12 })}\n`);
+  await waitFor(async () => {
+    try {
+      await readFile(processProbeFailureFile, "utf8");
+      return false;
+    } catch (error) {
+      return error.code === "ENOENT";
+    }
+  }, "monitor did not exercise two consecutive unavailable probe intervals", 5_000);
+  const toleratedProbeFailure = JSON.parse(await readFile(join(stateDirectory, `${ids[2]}.json`), "utf8"));
+  assert.notEqual(toleratedProbeFailure.status, "indeterminate",
+    "two consecutive unavailable probe intervals must not invalidate a live worker");
+  assert.equal(alive(concurrent[0].workerPid), true, "transient cross-interval probe failures must preserve the worker");
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 1_200));
+
+  await writeFile(processProbeFailureFile, `${JSON.stringify({ pid: concurrent[0].workerPid, remaining: 18 })}\n`);
+  await waitFor(async () => {
+    const state = JSON.parse(await readFile(join(stateDirectory, `${ids[2]}.json`), "utf8"));
+    return state.status === "indeterminate" && state.lastWorkerExit?.signal === "IDENTITY_UNAVAILABLE";
+  }, "three consecutive unavailable probe intervals were not receipted", 6_000);
+  assert.equal(alive(concurrent[0].workerPid), true, "identity-unavailable fencing must record, not kill, the worker");
+
   process.kill(-first.workerPid, "SIGTERM");
   await waitFor(async () => {
     const transcript = await readFile(join(stateDirectory, `${ids[0]}.jsonl`), "utf8");
-    return transcript.includes('"type":"worker_exit"') && transcript.includes('"signal":"SIGTERM"');
-  }, "supervisor did not persist the worker signal-exit receipt");
+    return transcript.includes('"type":"worker_exit"');
+  }, "replacement supervisor did not persist the adopted worker exit receipt");
   const exited = JSON.parse(await readFile(join(stateDirectory, `${ids[0]}.json`), "utf8"));
   assert.equal(exited.status, "indeterminate");
   assert.match(exited.error, /without a terminal receipt/i);
@@ -147,12 +252,12 @@ try {
     set: { BRIDGE_SUPERVISOR_TEST_CHANGE_TITLE_MS: "4000" },
   });
 
-  process.kill(first.supervisorPid, "SIGTERM");
-  await waitFor(() => !alive(first.supervisorPid), "supervisor did not stop");
+  process.kill(refreshed.current.supervisorPid, "SIGTERM");
+  await waitFor(() => !alive(refreshed.current.supervisorPid), "supervisor did not stop");
   assert.equal(alive(second.workerPid), true, "worker must survive supervisor replacement");
 
   const recovered = startFromIndependentClient(ids[1]);
-  assert.notEqual(recovered.supervisorId, first.supervisorId, "a new supervisor instance must fence the old instance");
+  assert.notEqual(recovered.supervisorId, refreshed.current.supervisorId, "a new supervisor instance must fence the old instance");
   assert.equal(recovered.reused, true, "restart must adopt the live recorded worker instead of duplicating it");
   assert.equal(recovered.workerPid, second.workerPid);
 
@@ -195,7 +300,10 @@ try {
   }
   try {
     const metadata = JSON.parse(await readFile(join(stateDirectory, "supervisor.json"), "utf8"));
-    if (alive(metadata.pid)) process.kill(metadata.pid, "SIGTERM");
+    if (alive(metadata.pid)) {
+      process.kill(metadata.pid, "SIGTERM");
+      await waitFor(() => !alive(metadata.pid), "supervisor did not stop during test cleanup");
+    }
   } catch {}
   await rm(temporary, { recursive: true, force: true });
 }
