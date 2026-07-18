@@ -3,7 +3,38 @@
 Branch: `codex/helm-55-reviewer-deadlock` (base `6d067aef1c390c1b1725b31f97f84b6405e0693f`)
 Implementation commit: `7396950a5cf38404f156396f2679805d04d0468d`
 Test-ordering repair commit: `1a61821b78925dfc6261d1a64e730da656dc44a8`
+Capability-boundary repair commit: `d20c1a981da34f13ae066b4e636d588cf25d55c4`
+(branch HEAD is the immediately following handoff-update commit, which Codex pushes)
 Writer: Claude Opus 4.8 (1M context) — sole implementation agent.
+
+## Chair-rejection repair (capability boundary + pool reentry)
+Two blocking gaps from the chair's Antigravity-approval rejection are now fixed:
+
+1. **Fail-closed provider capability boundary.** The prior allowlist was toothless
+   for providers that cannot express an enforceable exact command grant: Codex
+   (sandbox mode only) and Antigravity (no command grant at all) received no
+   enforceable constraint, and Antigravity ran unlisted `node scripts/issue-55-*.mjs`
+   and the doctor script during a bounded review. New provider-neutral capability
+   (`PROVIDERS_ENFORCING_EXACT_COMMAND_GRANTS = ["claude"]`,
+   `assertProviderVerificationCapability`, typed
+   `ProviderCommandGrantUnsupportedError` / `provider_command_grant_unsupported`)
+   in `src/verification-allowlist.mjs`, enforced at the provider-agnostic
+   `agent-pool.send()` choke point **before `clientFor`/spawn**. A bounded
+   command-running review (review mode + verification commands) is dispatched only
+   to a provider that enforces exact grants (Claude); Codex/Antigravity are denied
+   before dispatch and remain eligible for static review with no verification
+   commands. No provider CLI config is weakened.
+   - Integration fixture `scripts/issue-55-capability-boundary-test.mjs` drives the
+     unlisted package-script review through the real delegated `pool.send` path and
+     proves prompt typed denial before dispatch.
+2. **Pre-acquire pool-reentry self-deadlock.** The own-slot check alone missed a
+   verification command that re-enters the same live capacity pool under a *different*
+   collaborationId. New `assertNoProviderPoolReentry` +
+   `verificationCommandReentersProviderPool` in `src/provider-concurrency.mjs`,
+   called in the worker **before** `acquireProviderCapacity`: such a command fails
+   fast with `provider_self_deadlock` and registers no waiter. Fixture in
+   `scripts/provider-concurrency-test.mjs` mirrors the worker guard-then-acquire
+   order and asserts no waiter/slot is created.
 
 ## What changed and why
 
@@ -69,13 +100,22 @@ Run inside this provider call:
 - `npm run test:collaboration` — PASS (incl. allowlist admission, command-aware
   narrative, and the live waiting_capacity / activeCall.capacity integration path).
 - `npm run test:secrets` — PASS.
-- `npm run test:provider-concurrency` — PASS (twice, deterministic; see repair below).
-- `npm run smoke` — FAILS only at the Playwright MCP server listing: `@playwright/mcp`
-  is not installed in this worktree (`ERR_PACKAGE_PATH_NOT_EXPORTED`). All four bridge
-  servers this change touches (Claude, Codex, Antigravity, Persistent collaboration)
-  list successfully and the broker schema-compatibility check passes; the crash is a
-  pre-existing environment gap unrelated to issue #55 and aborts smoke before it
-  reaches any changed code path.
+- `npm run test:provider-concurrency` — PASS (incl. Gap-2 reentry guard + FIFO repair).
+- `npm run test:provider-capabilities` — PASS (no regression).
+- `npm run smoke` — PASS in this run (Playwright MCP available; full browser runtime
+  green). Note: an earlier run failed only because `@playwright/mcp` was not installed
+  in the worktree — a pre-existing environment gap, never a code defect.
+
+All six gates named for this repair pass:
+test:collaboration, test:cleanup, test:secrets, test:provider-concurrency,
+test:provider-capabilities, smoke.
+
+## Push status
+Work profile `implement` authorizes local work through commit only; pushing and PR
+mutation are not authorized here, and no builder push operation is available in this
+call. **Stopped after commit for Codex to push the current branch HEAD of
+`codex/helm-55-reviewer-deadlock` (code repair `d20c1a98` plus this handoff-update
+commit) to the existing branch/PR.**
 
 ## Provider-concurrency gate (now run and green)
 - `npm run test:provider-concurrency` — PASS (run twice, deterministic). Validates the
