@@ -2,7 +2,7 @@
 
 import { randomUUID } from "node:crypto";
 import { existsSync, realpathSync, statSync } from "node:fs";
-import { delimiter, isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, delimiter, isAbsolute, relative, resolve, sep } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -24,6 +24,7 @@ import {
 import { reapProcessTree } from "./process-reaper.mjs";
 import { KNOWN_AGENTS, validateAgents } from "./talk-protocol.mjs";
 import { createWorktree, isSafeWorkerPid, preflight, selectRoles } from "./operations.mjs";
+import { cleanupWriterCheckout, isLinkedGitCheckout, prepareWriterCheckout, recoverWriterCheckout } from "./writer-checkout.mjs";
 import { createDecisionReceipt, DECISION_CATEGORIES } from "./decision-policy.mjs";
 import { resolveNativeChair } from "./native-chair.mjs";
 import { clearTerminalRuntime, legacyWorkerCommandMatches, reconciliationAction, workerCancellationMatches, workerCommandMatches } from "./collaboration-cleanup.mjs";
@@ -523,7 +524,7 @@ const worktreeSchema = z.object({
   branch: z.string().regex(/^[A-Za-z0-9._/-]+$/),
   base: z.string().min(1).default("HEAD"),
   root: z.string().optional(),
-}).strict().optional().describe("Explicitly create and pin this work collaboration to an isolated Git worktree.");
+}).strict().optional().describe("Create and pin an isolated collaboration workspace. Work mode receives a self-contained writer checkout; review mode receives a linked read-only worktree.");
 const decisionPolicySchema = z.object({
   additionalEscalations: z.array(z.enum(DECISION_CATEGORIES)).max(6).default([]),
   maxDialogueTurns: z.number().int().min(1).max(12).default(4),
@@ -717,6 +718,7 @@ server.registerTool(
       const plannedWorktreePath = plannedIssueClaimWorktree({
         workspace: requestedWorkspace,
         worktree: input.worktree,
+        mode: effectiveMode,
       });
 
       await acquireClaimLease({
@@ -737,13 +739,21 @@ server.registerTool(
 
     try {
       const worktree = input.worktree
-        ? createWorktree({
-          workspace: requestedWorkspace,
-          taskId: input.worktree.taskId,
-          branch: input.worktree.branch,
-          base: input.worktree.base,
-          worktreeRoot: input.worktree.root,
-        })
+        ? effectiveMode === "work"
+          ? prepareWriterCheckout({
+            workspace: requestedWorkspace,
+            taskId: input.worktree.taskId,
+            branch: input.worktree.branch,
+            base: input.worktree.base,
+            checkoutRoot: input.worktree.root,
+          })
+          : createWorktree({
+            workspace: requestedWorkspace,
+            taskId: input.worktree.taskId,
+            branch: input.worktree.branch,
+            base: input.worktree.base,
+            worktreeRoot: input.worktree.root,
+          })
         : null;
       const workspace = worktree?.path || requestedWorkspace;
       if (input.chair?.workspace && projectDirectory(input.chair.workspace) !== realpathSync(workspace)) {
@@ -884,6 +894,274 @@ server.registerTool(
     }
     const view = await collaborationView(WORKSPACE_ROOT, id, includeTurns, afterTurn);
     return toolResponse(detail === "full" ? view : compactStatusView(view));
+  },
+);
+
+server.registerTool(
+  "recover_writer_checkout",
+  {
+    title: "Recover a stranded writer checkout",
+    description: "After explicit inspection, migrate one stopped linked-worktree writer into private Git custody. The exact current workspace and HEAD are required; active or indeterminate execution is never relocated.",
+    inputSchema: {
+      collaborationId,
+      expectedWorkspace: z.string().min(1),
+      expectedHeadSha: z.string().regex(/^[0-9a-f]{40}$/i),
+    },
+  },
+  async ({ collaborationId: id, expectedWorkspace, expectedHeadSha }) => {
+    blockNestedCollaboration();
+    const current = await readCollaboration(WORKSPACE_ROOT, id);
+    if (current.mode !== "work" || !current.worktree) {
+      throw new Error("Writer checkout recovery requires a work-mode collaboration with a recorded worktree.");
+    }
+    if (!["failed", "needs_user", "turn_limit"].includes(current.status)) {
+      throw new Error(`Writer checkout recovery requires a stopped inspectable collaboration; current status is ${current.status}.`);
+    }
+    if (current.status === "indeterminate" || current.runtime?.activeCall
+      || (isSafeWorkerPid(current.workerPid) && processAlive(current.workerPid))) {
+      throw new Error("Writer checkout recovery refuses active or indeterminate execution ownership.");
+    }
+    const actualWorkspace = realpathSync(current.workspace);
+    if (realpathSync(expectedWorkspace) !== actualWorkspace) {
+      throw new Error("Writer checkout recovery workspace changed after inspection.");
+    }
+    const observedHead = resolveClaimedWorktreeHead(actualWorkspace);
+    if (observedHead !== expectedHeadSha) {
+      throw new Error(`Writer checkout recovery HEAD changed after inspection: expected ${expectedHeadSha}, observed ${observedHead}.`);
+    }
+    if (current.worktree.strategy === "self-contained" || !isLinkedGitCheckout(actualWorkspace)) {
+      throw new Error("Writer checkout recovery source is already self-contained.");
+    }
+    const operationId = `writer-recovery-${randomUUID()}`;
+    const recoveredAt = new Date().toISOString();
+    const previousStatus = current.status;
+    const reserved = await updateCollaboration(WORKSPACE_ROOT, id, (latest) => {
+      if (!["failed", "needs_user", "turn_limit"].includes(latest.status)
+        || latest.workspaceOperation || latest.runtime?.activeCall
+        || (isSafeWorkerPid(latest.workerPid) && processAlive(latest.workerPid))) {
+        throw new Error("Writer checkout recovery lost stopped execution ownership before reservation.");
+      }
+      if (realpathSync(latest.workspace) !== actualWorkspace
+        || resolveClaimedWorktreeHead(actualWorkspace) !== expectedHeadSha) {
+        throw new Error("Writer checkout recovery workspace or HEAD changed before reservation.");
+      }
+      return {
+        ...latest,
+        status: "indeterminate",
+        workspaceOperation: {
+          id: operationId,
+          type: "recover_writer_checkout",
+          status: "reserved",
+          workspace: actualWorkspace,
+          expectedHeadSha,
+          previousStatus,
+          reservedAt: recoveredAt,
+        },
+      };
+    });
+    let recovered;
+    let state;
+    try {
+      recovered = recoverWriterCheckout({
+        workspace: actualWorkspace,
+        taskId: `${basename(reserved.worktree.path || actualWorkspace)}-${id}`,
+        branch: reserved.worktree.branch || reserved.issueClaim?.branch || null,
+        base: reserved.issueClaim?.baseSha || reserved.worktree.base || expectedHeadSha,
+      });
+      state = await updateCollaboration(WORKSPACE_ROOT, id, (latest) => {
+        if (latest.status !== "indeterminate" || latest.workspaceOperation?.id !== operationId
+          || realpathSync(latest.workspace) !== actualWorkspace) {
+          throw new Error("Writer checkout recovery lost its reserved workspace operation before commit.");
+        }
+        return {
+          ...latest,
+          status: previousStatus,
+          workspace: recovered.path,
+          worktree: recovered,
+          workspaceOperation: null,
+          issueClaim: latest.issueClaim
+            ? { ...latest.issueClaim, branch: recovered.branch, worktree: recovered.path, headSha: recovered.base }
+            : latest.issueClaim,
+          workspaceRecovery: {
+            recoveredAt,
+            from: actualWorkspace,
+            to: recovered.path,
+            inspectedHeadSha: expectedHeadSha,
+            recordedBaseSha: recovered.recovery.recordedBaseSha,
+            sourceHeadSha: recovered.recovery.sourceHeadSha,
+            strategy: "self-contained",
+          },
+        };
+      });
+    } catch (error) {
+      if (recovered?.path && existsSync(recovered.path)) {
+        cleanupWriterCheckout({ workspace: recovered.path, expectedPath: recovered.path, discardChanges: true });
+      }
+      await updateCollaboration(WORKSPACE_ROOT, id, (latest) => latest.workspaceOperation?.id === operationId
+        ? {
+          ...latest,
+          status: previousStatus,
+          workspaceOperation: null,
+          workspaceOperationFailure: { operationId, failedAt: new Date().toISOString(), error: error.message },
+        }
+        : latest);
+      throw error;
+    }
+
+    let claimRefresh = null;
+    if (state.issueClaim) {
+      try {
+        const { getBuilderClientForWorkspace, refreshClaimLease } = await import("./github-issue-claims.mjs");
+        const client = await getBuilderClientForWorkspace(state.workspace, state.issueClaim.issueNumber);
+        if (!client) throw new Error(`No builder App client is configured for claimed issue #${state.issueClaim.issueNumber}.`);
+        await refreshClaimLease({
+          client,
+          issueNumber: state.issueClaim.issueNumber,
+          collaborationId: id,
+          phase: "recovered",
+          summary: "Coordinator inspected and migrated the stranded writer into private Git custody.",
+          headSha: recovered.base,
+          branch: recovered.branch,
+          worktree: recovered.path,
+        });
+        claimRefresh = { ok: true };
+      } catch (error) {
+        claimRefresh = { ok: false, error: error.message };
+      }
+    }
+    await appendEvent(WORKSPACE_ROOT, id, {
+      type: "writer_checkout_recovered",
+      at: recoveredAt,
+      from: actualWorkspace,
+      to: recovered.path,
+      branch: recovered.branch,
+      baseSha: recovered.base,
+      trackedPatch: recovered.recovery.trackedPatch,
+      untrackedPathCount: recovered.recovery.untrackedPaths.length,
+      claimRefresh,
+    });
+    return toolResponse({
+      ...await collaborationView(WORKSPACE_ROOT, id, 0),
+      recoveryReceipt: state.workspaceRecovery,
+      claimRefresh,
+      nextAction: "continue_collaboration",
+    });
+  },
+);
+
+server.registerTool(
+  "cleanup_writer_checkout",
+  {
+    title: "Clean up a private writer checkout",
+    description: "Remove one stopped self-contained writer checkout after exact workspace and HEAD inspection. Dirty changes are preserved unless discardChanges is explicitly true.",
+    inputSchema: {
+      collaborationId,
+      expectedWorkspace: z.string().min(1),
+      expectedHeadSha: z.string().regex(/^[0-9a-f]{40}$/i),
+      discardChanges: z.boolean().default(false),
+    },
+  },
+  async ({ collaborationId: id, expectedWorkspace, expectedHeadSha, discardChanges }) => {
+    blockNestedCollaboration();
+    const current = await readCollaboration(WORKSPACE_ROOT, id);
+    if (current.mode !== "work" || current.worktree?.strategy !== "self-contained") {
+      throw new Error("Writer checkout cleanup requires a work-mode collaboration with private Git custody.");
+    }
+    if (!["completed", "failed", "cancelled", "needs_user", "turn_limit"].includes(current.status)) {
+      throw new Error(`Writer checkout cleanup requires a stopped inspectable collaboration; current status is ${current.status}.`);
+    }
+    if (current.status === "indeterminate" || current.runtime?.activeCall
+      || (isSafeWorkerPid(current.workerPid) && processAlive(current.workerPid))) {
+      throw new Error("Writer checkout cleanup refuses active or indeterminate execution ownership.");
+    }
+    const actualWorkspace = realpathSync(current.workspace);
+    if (realpathSync(expectedWorkspace) !== actualWorkspace) {
+      throw new Error("Writer checkout cleanup workspace changed after inspection.");
+    }
+    const cleanupDescriptor = current.worktree.cleanup;
+    if (cleanupDescriptor?.strategy !== "remove-directory"
+      || realpathSync(cleanupDescriptor.path) !== actualWorkspace) {
+      throw new Error("Writer checkout cleanup descriptor does not match the recorded workspace.");
+    }
+    const observedHead = resolveClaimedWorktreeHead(actualWorkspace);
+    if (observedHead !== expectedHeadSha) {
+      throw new Error(`Writer checkout cleanup HEAD changed after inspection: expected ${expectedHeadSha}, observed ${observedHead}.`);
+    }
+    const operationId = `writer-cleanup-${randomUUID()}`;
+    const previousStatus = current.status;
+    const reservedAt = new Date().toISOString();
+    await updateCollaboration(WORKSPACE_ROOT, id, (latest) => {
+      if (!["completed", "failed", "cancelled", "needs_user", "turn_limit"].includes(latest.status)
+        || latest.workspaceOperation || latest.runtime?.activeCall
+        || (isSafeWorkerPid(latest.workerPid) && processAlive(latest.workerPid))) {
+        throw new Error("Writer checkout cleanup lost stopped execution ownership before reservation.");
+      }
+      if (realpathSync(latest.workspace) !== actualWorkspace
+        || resolveClaimedWorktreeHead(actualWorkspace) !== expectedHeadSha) {
+        throw new Error("Writer checkout cleanup workspace or HEAD changed before reservation.");
+      }
+      return {
+        ...latest,
+        status: "indeterminate",
+        workspaceOperation: {
+          id: operationId,
+          type: "cleanup_writer_checkout",
+          status: "reserved",
+          workspace: actualWorkspace,
+          expectedHeadSha,
+          discardChanges,
+          previousStatus,
+          reservedAt,
+        },
+      };
+    });
+    let receipt;
+    let state;
+    try {
+      receipt = cleanupWriterCheckout({
+        workspace: actualWorkspace,
+        expectedPath: expectedWorkspace,
+        discardChanges,
+      });
+      state = await updateCollaboration(WORKSPACE_ROOT, id, (latest) => {
+        if (latest.status !== "indeterminate" || latest.workspaceOperation?.id !== operationId) {
+          throw new Error("Writer checkout cleanup lost its reserved workspace operation before commit.");
+        }
+        return {
+          ...latest,
+          status: previousStatus,
+          worktree: { ...latest.worktree, cleanup: null, cleanedAt: receipt.cleanedAt },
+          workspaceOperation: null,
+          workspaceCleanup: receipt,
+        };
+      });
+    } catch (error) {
+      await updateCollaboration(WORKSPACE_ROOT, id, (latest) => latest.workspaceOperation?.id === operationId
+        ? {
+          ...latest,
+          status: existsSync(actualWorkspace) ? previousStatus : "indeterminate",
+          workspaceOperation: existsSync(actualWorkspace) ? null : {
+            ...latest.workspaceOperation,
+            status: "reconciliation_required",
+            failedAt: new Date().toISOString(),
+            error: error.message,
+          },
+          workspaceOperationFailure: { operationId, failedAt: new Date().toISOString(), error: error.message },
+        }
+        : latest);
+      throw error;
+    }
+    await appendEvent(WORKSPACE_ROOT, id, {
+      type: "writer_checkout_cleaned",
+      at: receipt.cleanedAt,
+      path: receipt.path,
+      discardedChanges: receipt.discardedChanges,
+    });
+    return toolResponse({
+      collaborationId: state.id,
+      status: state.status,
+      cleanupReceipt: receipt,
+    });
   },
 );
 
@@ -1366,6 +1644,9 @@ server.registerTool(
     if (["queued", "running", "recovering", "cancelling", "indeterminate"].includes(current.status)) {
       throw new Error(`Collaboration ${id} is ${current.status}; wait for it to stop before continuing.`);
     }
+    if (current.workspaceOperation) {
+      throw new Error(`Collaboration ${id} has a reserved ${current.workspaceOperation.type} operation; inspect or reconcile it before continuing.`);
+    }
     if (current.completion?.acknowledged === false) {
       throw new Error(`Collaboration ${id} has unacknowledged HANDOFF sequence ${current.completion.sequence}; call acknowledge_handoff before continuing.`);
     }
@@ -1424,54 +1705,61 @@ server.registerTool(
         worktree: resolvedContinuationIssueClaim.worktree || current.workspace,
       });
     }
-    const state = await updateCollaboration(WORKSPACE_ROOT, id, (previous) => ({
-      ...previous,
-      status: "queued",
-      cancelRequested: false,
-      error: null,
-      cleanup: null,
-      models: models ? { ...previous.models, ...models } : previous.models,
-      modelFallbacks: modelFallbacks
-        ? { ...(previous.modelFallbacks || {}), ...modelFallbacks }
-        : previous.modelFallbacks || {},
-      allowClaudeFable: allowClaudeFable === true,
-      providerConcurrency: resolvedProviderConcurrency,
-      verificationCommands: verificationCommands || previous.verificationCommands || [],
-      workCommands: workCommands || previous.workCommands || [],
-      workProfile: workProfile || previous.workProfile || "exact",
-      permissionProfile: permissionProfile || previous.permissionProfile || "standard",
-      handoffPath: handoffPath || previous.handoffPath || null,
-      githubReview: githubReview || previous.githubReview || null,
-      githubBuilder: githubBuilder || previous.githubBuilder || null,
-      issueClaim: resolvedContinuationIssueClaim,
-      budget: budget || previous.budget || {},
-      providerRecovery: providerRecovery || previous.providerRecovery || { enabled: true, maxAttempts: 3, backoffSeconds: [15, 60, 180] },
-      providerRecoveryState: { attempts: 0, status: "idle" },
-      ciTracking: ciTracking || previous.ciTracking || null,
-      turnTimeoutSeconds: turnTimeoutSeconds || previous.turnTimeoutSeconds || 600,
-      decisionPolicy: decisionPolicy || previous.decisionPolicy || { additionalEscalations: [], maxDialogueTurns: 4 },
-      decisionPolicyEnabled: decisionPolicy ? true : previous.decisionPolicyEnabled || false,
-      budgetExceeded: false,
-      decisionEscalation: null,
-      runSequence: (previous.runSequence || 1) + 1,
-      coordinatorWake: previous.coordinatorWake?.status === "acknowledged"
-        ? previous.coordinatorWake
-        : null,
-      run: { maxTurns: (decisionPolicy || previous.decisionPolicyEnabled)
-        ? Math.min(additionalTurns, (decisionPolicy || previous.decisionPolicy).maxDialogueTurns)
-        : additionalTurns },
-      runtime: {
-        ...previous.runtime,
-        previousMessage: message,
-        previousAgent: null,
-        agreementStreak: 0,
-        availableAgents: previous.agents,
-        unavailableAgents: {},
-      },
-      completion: previous.completion
-        ? { ...previous.completion, phase: "continuing", nextAction: "provider_work" }
-        : null,
-    }));
+    const state = await updateCollaboration(WORKSPACE_ROOT, id, (previous) => {
+      if (["queued", "running", "recovering", "cancelling", "indeterminate"].includes(previous.status)
+        || previous.workspaceOperation || previous.runtime?.activeCall
+        || (isSafeWorkerPid(previous.workerPid) && processAlive(previous.workerPid))) {
+        throw new Error(`Collaboration ${id} execution ownership changed before continuation could be reserved.`);
+      }
+      return {
+        ...previous,
+        status: "queued",
+        cancelRequested: false,
+        error: null,
+        cleanup: null,
+        models: models ? { ...previous.models, ...models } : previous.models,
+        modelFallbacks: modelFallbacks
+          ? { ...(previous.modelFallbacks || {}), ...modelFallbacks }
+          : previous.modelFallbacks || {},
+        allowClaudeFable: allowClaudeFable === true,
+        providerConcurrency: resolvedProviderConcurrency,
+        verificationCommands: verificationCommands || previous.verificationCommands || [],
+        workCommands: workCommands || previous.workCommands || [],
+        workProfile: workProfile || previous.workProfile || "exact",
+        permissionProfile: permissionProfile || previous.permissionProfile || "standard",
+        handoffPath: handoffPath || previous.handoffPath || null,
+        githubReview: githubReview || previous.githubReview || null,
+        githubBuilder: githubBuilder || previous.githubBuilder || null,
+        issueClaim: resolvedContinuationIssueClaim,
+        budget: budget || previous.budget || {},
+        providerRecovery: providerRecovery || previous.providerRecovery || { enabled: true, maxAttempts: 3, backoffSeconds: [15, 60, 180] },
+        providerRecoveryState: { attempts: 0, status: "idle" },
+        ciTracking: ciTracking || previous.ciTracking || null,
+        turnTimeoutSeconds: turnTimeoutSeconds || previous.turnTimeoutSeconds || 600,
+        decisionPolicy: decisionPolicy || previous.decisionPolicy || { additionalEscalations: [], maxDialogueTurns: 4 },
+        decisionPolicyEnabled: decisionPolicy ? true : previous.decisionPolicyEnabled || false,
+        budgetExceeded: false,
+        decisionEscalation: null,
+        runSequence: (previous.runSequence || 1) + 1,
+        coordinatorWake: previous.coordinatorWake?.status === "acknowledged"
+          ? previous.coordinatorWake
+          : null,
+        run: { maxTurns: (decisionPolicy || previous.decisionPolicyEnabled)
+          ? Math.min(additionalTurns, (decisionPolicy || previous.decisionPolicy).maxDialogueTurns)
+          : additionalTurns },
+        runtime: {
+          ...previous.runtime,
+          previousMessage: message,
+          previousAgent: null,
+          agreementStreak: 0,
+          availableAgents: previous.agents,
+          unavailableAgents: {},
+        },
+        completion: previous.completion
+          ? { ...previous.completion, phase: "continuing", nextAction: "provider_work" }
+          : null,
+      };
+    });
     await appendEvent(WORKSPACE_ROOT, id, { type: "user_continued", at: new Date().toISOString(), message });
     await startWorker(id);
     return toolResponse(await collaborationView(WORKSPACE_ROOT, state.id, 1));
@@ -1529,15 +1817,23 @@ server.registerTool(
   },
   async ({ collaborationId: id }) => {
     const before = await readCollaboration(WORKSPACE_ROOT, id);
+    if (before.workspaceOperation) {
+      throw new Error(`Refusing to cancel: ${before.workspaceOperation.type} owns the collaboration workspace; reconcile that operation first.`);
+    }
     const workerIsLive = isSafeWorkerPid(before.workerPid) && processAlive(before.workerPid);
     if (workerIsLive && !workerCancellationMatches(before)) {
       throw new Error("Refusing to cancel: the live PID does not match this collaboration's owned worker metadata. Inspect with bridge recover; no process was terminated.");
     }
-    await updateCollaboration(WORKSPACE_ROOT, id, (previous) => ({
-      ...previous,
-      status: "cancelling",
-      cancelRequested: true,
-    }));
+    await updateCollaboration(WORKSPACE_ROOT, id, (previous) => {
+      if (previous.workspaceOperation) {
+        throw new Error(`Refusing to cancel: ${previous.workspaceOperation.type} reserved the collaboration workspace after inspection.`);
+      }
+      return {
+        ...previous,
+        status: "cancelling",
+        cancelRequested: true,
+      };
+    });
     let reaped = null;
     if (workerIsLive) {
       // Issue #55: reap the whole worker tree (process group + ps-discovered

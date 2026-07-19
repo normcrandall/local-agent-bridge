@@ -12,6 +12,7 @@ import { loadConfiguredFallbackModels, normalizeFallbackModels } from "./model-f
 import { resolveModelRoute } from "./model-policy.mjs";
 import { loadConfiguredAntigravityModel } from "./provider-model-settings.mjs";
 import { normalizeVerificationAllowlist } from "./verification-allowlist.mjs";
+import { resolveContainedWritableRoots } from "./writable-roots.mjs";
 
 const WORKSPACE_ROOT = realpathSync(process.env.BRIDGE_WORKSPACE_ROOT || process.env.BRIDGE_ROOT || process.cwd());
 const DEFAULT_TIMEOUT_MS = 2 * 60 * 60 * 1000;
@@ -93,11 +94,14 @@ function isModelOverload(error) {
     .test(error?.message || String(error));
 }
 
-function runAntigravityAttempt({ prompt, cwd, mode, model, timeoutSeconds, permissionProfile = "standard", verificationCommands = [], conversationId, onProgress = () => {} }) {
+function runAntigravityAttempt({ prompt, cwd, mode, model, timeoutSeconds, permissionProfile = "standard", verificationCommands = [], writableRoots = [], conversationId, onProgress = () => {} }) {
   if (process.env.ANTIGRAVITY_BRIDGE_ACTIVE === "1") {
     throw new Error("Nested Antigravity bridge invocation blocked to prevent an agent loop.");
   }
   const actualCwd = projectDirectory(cwd);
+  const containedWritableRoots = mode === "work"
+    ? resolveContainedWritableRoots(actualCwd, writableRoots, { label: "Antigravity writable root" })
+    : [];
   const duration = timeoutMs(timeoutSeconds);
   const temporaryDirectory = AGY_CAPABILITIES.logFile ? mkdtempSync(join(tmpdir(), "antigravity-agent-bridge-")) : null;
   const logFile = temporaryDirectory ? join(temporaryDirectory, "session.log") : null;
@@ -128,7 +132,7 @@ function runAntigravityAttempt({ prompt, cwd, mode, model, timeoutSeconds, permi
   if (logFile) args.push("--log-file", logFile);
   // Headless sandbox sessions otherwise open in Antigravity's scratch project
   // instead of granting the delegated worktree to terminal tools.
-  for (const directory of [actualCwd, ...gitMetadataDirectories(actualCwd)]) {
+  for (const directory of [...new Set([actualCwd, ...gitMetadataDirectories(actualCwd), ...containedWritableRoots])]) {
     args.push("--add-dir", directory);
   }
   if (permissionProfile === "yolo" || commandRunningReview) {
@@ -276,6 +280,9 @@ const sharedInput = {
   ),
   permissionProfile: z.enum(["standard", "yolo"]).default("standard").describe(
     "Work-mode permission policy. In review mode, verificationCommands automatically enable unrestricted approval; manually selecting yolo without commands is rejected so static reviews stay sandboxed.",
+  ),
+  writableRoots: z.array(z.string().min(1)).max(10).default([]).describe(
+    "Additional work-mode writable directories contained inside the delegated workspace. The broker uses this only for a private writer checkout's Git metadata.",
   ),
 };
 

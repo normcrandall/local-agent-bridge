@@ -31,8 +31,12 @@ try {
   );
   assert.equal(resolveClaimedWorktreeHead(directory), expectedHead);
   assert.equal(
-    plannedIssueClaimWorktree({ workspace: directory, worktree: { taskId: "issue-61" } }),
+    plannedIssueClaimWorktree({ workspace: directory, worktree: { taskId: "issue-61" }, mode: "review" }),
     resolve(directory, ".bridge/worktrees/issue-61"),
+  );
+  assert.equal(
+    plannedIssueClaimWorktree({ workspace: directory, worktree: { taskId: "issue-61" }, mode: "work" }),
+    resolve(directory, ".bridge/writer-checkouts/issue-61"),
   );
   assert.equal(
     plannedIssueClaimWorktree({

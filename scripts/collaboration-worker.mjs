@@ -227,6 +227,9 @@ try {
     // The collaboration worker is the autonomous council/portfolio/take-the-helm
     // execution path: delivery must be fail-closed to a bound githubBuilder.
     autonomous: true,
+    writableRoots: state.mode === "work" && state.worktree?.strategy === "self-contained"
+      ? [state.worktree.gitMetadataRoot]
+      : [],
   });
   const probes = await Promise.all(state.agents.map((agent) => pool.probe(agent)));
   const reviewOrder = orderReviewProbes({
