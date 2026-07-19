@@ -21,6 +21,7 @@ import { resolveModelRoute } from "./model-policy.mjs";
 import { admitProviderCommands } from "./verification-allowlist.mjs";
 import { negotiateProviderCapabilities } from "./provider-cli-capabilities.mjs";
 import { ensureContainedHandoffPath } from "./handoff-path.mjs";
+import { resolveContainedWritableRoots } from "./writable-roots.mjs";
 
 const RUNTIME_ROOT = realpathSync(process.env.BRIDGE_RUNTIME_ROOT || process.env.BRIDGE_ROOT || process.cwd());
 const WORKSPACE_ROOT = realpathSync(process.env.BRIDGE_WORKSPACE_ROOT || process.env.BRIDGE_ROOT || process.cwd());
@@ -129,6 +130,7 @@ function runClaude({
   handoffPath,
   githubReview,
   githubBuilder,
+  writableRoots = [],
   onProgress = () => {},
 }) {
   if (process.env.CLAUDE_BRIDGE_ACTIVE === "1") {
@@ -142,6 +144,9 @@ function runClaude({
   }
 
   const actualCwd = projectDirectory(cwd);
+  const containedWritableRoots = mode === "work"
+    ? resolveContainedWritableRoots(actualCwd, writableRoots, { label: "Claude writable root" })
+    : [];
   let resolvedFallbackModels;
   if (fallbackModels === undefined) {
     try {
@@ -205,6 +210,9 @@ function runClaude({
   if (mode === "work" && permissionProfile === "standard" && (!CLAUDE_CAPABILITIES.allowedTools || !CLAUDE_CAPABILITIES.permissionMode)) {
     throw new Error(`Installed Claude ${CLAUDE_CAPABILITIES.version} lacks required bounded work permission flags.`);
   }
+  if (containedWritableRoots.length && !CLAUDE_CAPABILITIES.addDir) {
+    throw new Error(`Installed Claude ${CLAUDE_CAPABILITIES.version} lacks required --add-dir support for private writer Git metadata.`);
+  }
   if (mode === "work" && permissionProfile === "yolo" && !CLAUDE_CAPABILITIES.yolo) {
     throw new Error(`Installed Claude ${CLAUDE_CAPABILITIES.version} cannot enable YOLO mode.`);
   }
@@ -260,6 +268,7 @@ function runClaude({
   if (CLAUDE_CAPABILITIES.verbose) args.push("--verbose");
   if (resolvedModel) args.push("--model", resolvedModel);
   if (resolvedFallbackModels.length) args.push("--fallback-model", resolvedFallbackModels.join(","));
+  if (containedWritableRoots.length) args.push("--add-dir", ...containedWritableRoots);
   if (mode === "review") {
     const allowedTools = [
       "Read",
@@ -465,6 +474,9 @@ const sharedInput = {
   ),
   permissionProfile: z.enum(["standard", "yolo"]).default("standard").describe(
     "Explicit work-mode permission policy. yolo bypasses Claude Code permission checks and must never be inferred.",
+  ),
+  writableRoots: z.array(z.string().min(1)).max(10).default([]).describe(
+    "Additional work-mode writable directories contained inside the delegated workspace. The broker uses this only for a private writer checkout's Git metadata.",
   ),
   handoffPath: z.string().trim().min(1).optional().describe(
     "Optional project-relative file Claude may create or edit in review mode. No other file writes are allowed.",

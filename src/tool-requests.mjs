@@ -1,6 +1,13 @@
 import { isAbsolute, relative, resolve } from "node:path";
 import { homedir } from "node:os";
 import { normalizeVerificationAllowlist } from "./verification-allowlist.mjs";
+import { resolveContainedWritableRoots } from "./writable-roots.mjs";
+
+function workWritableRoots(provider, cwd, mode, writableRoots) {
+  return mode === "work" && writableRoots.length
+    ? resolveContainedWritableRoots(cwd, writableRoots, { label: `${provider} writable root` })
+    : [];
+}
 
 export function claudeToolRequest({
   prompt,
@@ -19,6 +26,7 @@ export function claudeToolRequest({
   handoffPath = null,
   githubReview = null,
   githubBuilder = null,
+  writableRoots = [],
 }) {
   const arguments_ = { prompt, cwd, mode, browser, timeoutSeconds, permissionProfile };
   if (verificationCommands.length) arguments_.verificationCommands = verificationCommands;
@@ -27,6 +35,8 @@ export function claudeToolRequest({
   if (handoffPath) arguments_.handoffPath = handoffPath;
   if (githubReview) arguments_.githubReview = githubReview;
   if (githubBuilder) arguments_.githubBuilder = githubBuilder;
+  const containedWritableRoots = workWritableRoots("Claude", cwd, mode, writableRoots);
+  if (containedWritableRoots.length) arguments_.writableRoots = containedWritableRoots;
   if (model) arguments_.model = model;
   if (fallbackModels !== undefined) arguments_.fallbackModels = fallbackModels;
   if (allowFable) arguments_.allowFable = true;
@@ -54,6 +64,7 @@ export function codexToolRequest({
   githubBuilder = null,
   githubBuilderBridgePath = null,
   playwrightBridgePath = null,
+  writableRoots = [],
 }) {
   if (githubReview && mode !== "review") throw new Error("githubReview is available only in Codex review mode.");
   if (githubReview && (!handoffPath || !githubReviewBridgePath)) {
@@ -74,6 +85,7 @@ export function codexToolRequest({
       ? `\n\nDelegated Codex review contract:\n- Treat workspace source and Git state as read-only.\n- Run only the requested verification commands when permitted by the sandbox.\n- Write the durable review only through github_review.write_handoff, which is bound to ${absoluteHandoffPath}.\n- Then submit exactly one formal review through github_review.submit_pr_review to ${githubReview.repository} PR #${githubReview.prNumber} at ${githubReview.headSha} as ${githubReview.expectedLogin}; ${githubReview.publishStatusGate ? "the reviewer App also publishes the exact-head agent-review status" : "the formal App review is the configured review gate"}.\n- Do not use general GitHub, shell mutation, commit, push, or another agent.`
       : "";
   const yolo = mode === "work" && permissionProfile === "yolo";
+  const containedWritableRoots = workWritableRoots("Codex", cwd, mode, writableRoots);
   const arguments_ = {
     prompt: `${prompt}${workContract}`,
     cwd,
@@ -85,6 +97,9 @@ export function codexToolRequest({
   arguments_.config = {};
   if (mode === "work" && !yolo) {
     arguments_.config["sandbox_workspace_write.network_access"] = workProfile === "deliver";
+    if (containedWritableRoots.length) {
+      arguments_.config["sandbox_workspace_write.writable_roots"] = containedWritableRoots;
+    }
   }
   if (githubReview) {
     arguments_.config["mcp_servers.github_review.enabled"] = true;
@@ -140,10 +155,13 @@ export function antigravityToolRequest({
   timeoutSeconds = 7200,
   permissionProfile = "standard",
   verificationCommands = [],
+  writableRoots = [],
 }) {
   const commands = normalizeVerificationAllowlist(verificationCommands);
   const arguments_ = { prompt, cwd, mode, timeoutSeconds, permissionProfile };
   if (commands.length) arguments_.verificationCommands = commands;
+  const containedWritableRoots = workWritableRoots("Antigravity", cwd, mode, writableRoots);
+  if (containedWritableRoots.length) arguments_.writableRoots = containedWritableRoots;
   if (model) arguments_.model = model;
   if (fallbackModels !== undefined) arguments_.fallbackModels = fallbackModels;
   if (sessionId) {

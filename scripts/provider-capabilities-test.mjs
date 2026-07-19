@@ -12,10 +12,11 @@ assert.equal(oldCodex.newSession.skipGitRepoCheck, false);
 assert.equal(oldCodex.resume.model, false);
 
 const modernClaude = parseProviderHelp("claude", {
-  mainHelp: "-p, --print --output-format --model --fallback-model --resume --strict-mcp-config --mcp-config --verbose --allowedTools --permission-mode --dangerously-skip-permissions",
+  mainHelp: "-p, --print --output-format --model --fallback-model --resume --strict-mcp-config --mcp-config --verbose --allowedTools --permission-mode --dangerously-skip-permissions --add-dir",
 });
 assert.equal(modernClaude.fallbackModel, true);
 assert.equal(modernClaude.permissionMode, true);
+assert.equal(modernClaude.addDir, true);
 const oldClaude = parseProviderHelp("claude", { mainHelp: "-p, --print --output-format --model --resume --mcp-config" });
 assert.equal(oldClaude.fallbackModel, false);
 assert.equal(oldClaude.strictMcpConfig, false);

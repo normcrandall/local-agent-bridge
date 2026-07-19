@@ -24,9 +24,10 @@ export function resolveIssueClaimRevisions({ workspace, headSha, baseRef }) {
   return { headSha: resolvedHeadSha, baseSha };
 }
 
-export function plannedIssueClaimWorktree({ workspace, worktree }) {
+export function plannedIssueClaimWorktree({ workspace, worktree, mode = "review" }) {
   if (!worktree) return null;
-  const root = resolve(worktree.root || join(workspace, ".bridge/worktrees"));
+  const defaultDirectory = mode === "work" ? ".bridge/writer-checkouts" : ".bridge/worktrees";
+  const root = resolve(worktree.root || join(workspace, defaultDirectory));
   return resolve(root, worktree.taskId);
 }
 

@@ -9,7 +9,7 @@ if (args.includes("--version")) {
 }
 if (args.includes("--help")) {
   const strict = process.env.FAKE_CLAUDE_NO_STRICT === "1" ? "" : " --strict-mcp-config";
-  process.stdout.write(`-p, --print --output-format --model --fallback-model --resume${strict} --mcp-config --verbose --allowedTools --permission-mode --dangerously-skip-permissions\n`);
+  process.stdout.write(`-p, --print --output-format --model --fallback-model --resume${strict} --mcp-config --verbose --allowedTools --permission-mode --dangerously-skip-permissions --add-dir\n`);
   process.exit(0);
 }
 const configIndex = args.indexOf("--mcp-config");

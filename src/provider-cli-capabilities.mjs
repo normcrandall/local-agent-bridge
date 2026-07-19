@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { basename, dirname, resolve } from "node:path";
 
 const DEFAULT_CACHE = resolve(homedir(), ".cache/local-agent-bridge/provider-capabilities.json");
-const CAPABILITY_SCHEMA_VERSION = 4;
+const CAPABILITY_SCHEMA_VERSION = 5;
 
 function flags(help) {
   return new Set([...String(help || "").matchAll(/(?:^|\s)(--[a-z0-9][a-z0-9-]*)/gi)].map((match) => match[1]));
@@ -31,6 +31,7 @@ export function parseProviderHelp(provider, { version = "unknown", mainHelp = ""
     resume: main.has("--resume"), strictMcpConfig: main.has("--strict-mcp-config"), mcpConfig: main.has("--mcp-config"),
     verbose: main.has("--verbose"), allowedTools: main.has("--allowedTools") || main.has("--allowed-tools"),
     permissionMode: main.has("--permission-mode"), yolo: main.has("--dangerously-skip-permissions"),
+    addDir: main.has("--add-dir"),
   };
   return {
     provider, version,

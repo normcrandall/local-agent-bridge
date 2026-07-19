@@ -60,6 +60,7 @@ export function createAgentPool({
   requestTimeoutMs = 4 * 60 * 60 * 1000 + 5 * 60 * 1000,
   turnTimeoutSeconds = 600,
   autonomous = false,
+  writableRoots = [],
 }) {
   // Fail-closed autonomy: an autonomous council/portfolio/take-the-helm lane may
   // only deliver GitHub mutations through a bound githubBuilder. Without one it
@@ -282,6 +283,7 @@ export function createAgentPool({
           githubReview: effectiveGithubReview,
           githubBuilder: mode === "work" ? githubBuilder : null,
           timeoutSeconds: turnTimeoutSeconds,
+          writableRoots,
         });
       } else if (agent === "codex") {
         request = codexToolRequest({
@@ -301,6 +303,7 @@ export function createAgentPool({
           githubBuilder: mode === "work" ? githubBuilder : null,
           githubBuilderBridgePath: resolve(root, "src/github-builder-bridge.mjs"),
           playwrightBridgePath: resolve(root, "scripts/playwright-mcp.sh"),
+          writableRoots,
         });
       } else {
         let antigravityPrompt = effectiveGithubReview
@@ -321,6 +324,7 @@ export function createAgentPool({
           timeoutSeconds: turnTimeoutSeconds,
           permissionProfile: effectivePermissionProfile,
           verificationCommands: permissionDecision.verificationCommands,
+          writableRoots,
         });
       }
       request._meta = { progressToken: `${agent}-${Date.now()}` };
