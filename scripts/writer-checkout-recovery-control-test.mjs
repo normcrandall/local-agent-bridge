@@ -18,6 +18,12 @@ const stateDirectory = join(temporary, "state");
 await mkdir(repository);
 await mkdir(stateDirectory);
 const collaborationId = "bridge-00000000-0000-4000-8000-000000000082";
+const cleanProcessEnv = Object.fromEntries(
+  Object.entries(process.env).filter(([name]) => (
+    !name.startsWith("BRIDGE_")
+    && !["CLAUDE_BRIDGE_ACTIVE", "CODEX_BRIDGE_ACTIVE", "ANTIGRAVITY_BRIDGE_ACTIVE"].includes(name)
+  )),
+);
 
 let client;
 try {
@@ -61,7 +67,7 @@ try {
     args: [join(runtimeRoot, "scripts/collaboration-bridge-mcp.sh")],
     cwd: runtimeRoot,
     env: {
-      ...process.env,
+      ...cleanProcessEnv,
       BRIDGE_RUNTIME_ROOT: runtimeRoot,
       BRIDGE_WORKSPACE_ROOT: repository,
       BRIDGE_COLLABORATION_DIR: stateDirectory,
