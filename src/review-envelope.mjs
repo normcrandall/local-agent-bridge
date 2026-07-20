@@ -19,13 +19,14 @@ const reviewEnvelope = z.object({
 const START = "---BEGIN BOUND_GITHUB_REVIEW---";
 const END = "---END BOUND_GITHUB_REVIEW---";
 
-export function reviewEnvelopeInstructions({ githubReview, handoffPath }) {
+export function reviewEnvelopeInstructions({ githubReview, handoffPath, provider = "Antigravity" }) {
   return `
 
-Bound Antigravity review contract:
+Bound ${provider} review contract:
 - Treat workspace source, configuration, and Git state as read-only.
 - Independently review and verify the requested change.
 - Author the durable handoff and formal PR review, but do not call GitHub or write files directly.
+- ${provider === "Ollama" ? "This local-model evaluation may request changes. An APPROVE verdict is published as a non-authorizing COMMENT until local review authority is explicitly promoted by future policy." : "Your validated verdict is eligible for the configured provider review policy."}
 - End your response with exactly one JSON envelope between these markers:
 ${START}
 {"handoff":"complete markdown for ${handoffPath}","event":"COMMENT|APPROVE|REQUEST_CHANGES","body":"general formal review body","comments":[{"path":"changed/file","line":1,"side":"RIGHT","body":"actionable inline finding"}]}
@@ -40,7 +41,7 @@ export function parseReviewEnvelope(message) {
   const json = message.slice(start + START.length, end).trim();
   let parsed;
   try { parsed = JSON.parse(json); } catch (error) {
-    throw new Error(`Antigravity returned invalid review-envelope JSON: ${error.message}`);
+    throw new Error(`Provider returned invalid review-envelope JSON: ${error.message}`);
   }
   return reviewEnvelope.parse(parsed);
 }

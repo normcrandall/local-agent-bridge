@@ -43,6 +43,7 @@ try {
     claude: { work: 5, review: 10 },
     codex: { work: 5, review: 10 },
     antigravity: { work: 5, review: 10 },
+    ollama: { work: 1, review: 10 },
   });
   assert.deepEqual(normalizeProviderConcurrency({}), DEFAULT_PROVIDER_CONCURRENCY);
   assert.deepEqual(normalizeProviderConcurrency({ claude: { review: 3 } }).claude, {

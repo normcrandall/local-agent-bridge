@@ -24,6 +24,7 @@ assert.equal(isSafeWorkerPid(-1), false);
 assert.deepEqual(selectRoles({ taskNumber: 0, agents: ["claude", "codex"] }), { writer: "claude", reviewers: ["codex"] });
 assert.deepEqual(selectRoles({ taskNumber: 1, agents: ["claude", "codex"] }), { writer: "codex", reviewers: ["claude"] });
 assert.deepEqual(selectRoles({ taskNumber: 2, agents: ["claude", "codex"] }), { writer: "claude", reviewers: ["codex"] });
+assert.deepEqual(selectRoles({ taskNumber: 0, agents: ["ollama", "codex"] }), { writer: "codex", reviewers: ["ollama"] });
 
 const reconciled = reconcileReviews([
   { agent: "claude", findings: [{ path: "src/a.js", line: 1, title: "Validate", verdict: "accept" }] },

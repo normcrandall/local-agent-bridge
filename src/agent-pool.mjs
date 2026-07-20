@@ -1,6 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { antigravityToolRequest, claudeToolRequest, codexToolRequest } from "./tool-requests.mjs";
+import { antigravityToolRequest, claudeToolRequest, codexToolRequest, ollamaToolRequest } from "./tool-requests.mjs";
 import { parseReviewEnvelope, reviewEnvelopeInstructions } from "./review-envelope.mjs";
 import { loadConfiguredFallbackModels } from "./model-fallbacks.mjs";
 import { builderEnvelopeInstructions, parseBuilderEnvelope } from "./builder-envelope.mjs";
@@ -38,6 +38,15 @@ function sessionFrom(agent, result) {
 export function autonomousWorkProfile({ autonomous, githubBuilder, mode, workProfile }) {
   if (autonomous && githubBuilder && mode === "work") return "implement";
   return workProfile;
+}
+
+export function localReviewPublicationPolicy(agent, result) {
+  if (agent !== "ollama" || !result?.available || !result.binding) return result;
+  return {
+    ...result,
+    binding: { ...result.binding, publishStatusGate: false },
+    statusGateAvailable: false,
+  };
 }
 
 // A raw-delivery shell command that must never be granted to an autonomous
@@ -92,15 +101,16 @@ export function createAgentPool({
       configuredLogin: configuredReviewerLogin,
       createCredential: createInstallationToken,
     });
-    reviewPublication.set(agent, result);
-    return result;
+    const effective = localReviewPublicationPolicy(agent, result);
+    reviewPublication.set(agent, effective);
+    return effective;
   }
 
-  async function publishValidatedAntigravityEnvelope(envelope, reviewBinding) {
+  async function publishValidatedEnvelope(envelope, reviewBinding, agent) {
     // Containment is validated before any parent directory is created; the bound
     // publisher process recursively creates the authorized parent directory.
     const absoluteHandoffPath = resolveContainedHandoffPath(workspace, handoffPath, {
-      label: "Antigravity handoffPath",
+      label: `${agent} handoffPath`,
     });
     const publisher = new Client({ name: "agent-bridge-antigravity-review-publisher", version: "0.2.0" });
     const transport = new StdioClientTransport({
@@ -124,25 +134,32 @@ export function createAgentPool({
         name: "write_handoff",
         arguments: { content: envelope.handoff },
       });
-      if (handoff.isError) throw new Error(`Antigravity handoff publication failed: ${textFrom(handoff)}`);
+      if (handoff.isError) throw new Error(`${agent} handoff publication failed: ${textFrom(handoff)}`);
       const review = await publisher.callTool({
         name: "submit_pr_review",
         arguments: { event: envelope.event, body: envelope.body, comments: envelope.comments },
       });
-      if (review.isError) throw new Error(`Antigravity PR review publication failed: ${textFrom(review)}`);
+      if (review.isError) throw new Error(`${agent} PR review publication failed: ${textFrom(review)}`);
       return review.structuredContent;
     } finally {
       await publisher.close().catch(() => {});
     }
   }
 
-  async function publishAntigravityReview(message, reviewBinding, providedEnvelope = null) {
+  async function publishEnvelopeReview(agent, message, reviewBinding, providedEnvelope = null) {
     // Validate the envelope exactly once. If a validated envelope already exists,
     // publication is retried without re-running the Antigravity provider.
-    const envelope = providedEnvelope || parseReviewEnvelope(message);
+    const authoredEnvelope = providedEnvelope || parseReviewEnvelope(message);
+    const envelope = agent === "ollama" && authoredEnvelope.event === "APPROVE"
+      ? {
+        ...authoredEnvelope,
+        event: "COMMENT",
+        body: `Evaluation-only local approval (non-authorizing):\n\n${authoredEnvelope.body}`,
+      }
+      : authoredEnvelope;
     return republishValidatedReview({
       envelope,
-      publish: (validated) => publishValidatedAntigravityEnvelope(validated, reviewBinding),
+      publish: (validated) => publishValidatedEnvelope(validated, reviewBinding, agent),
     });
   }
 
@@ -197,6 +214,7 @@ export function createAgentPool({
       claude: "scripts/claude-bridge-mcp.sh",
       codex: "scripts/codex-mcp.sh",
       antigravity: "scripts/antigravity-bridge-mcp.sh",
+      ollama: "scripts/ollama-bridge-mcp.sh",
     };
     const client = new Client({ name: `agent-bridge-worker-${agent}`, version: "0.2.0" });
     const transport = new StdioClientTransport({
@@ -221,6 +239,13 @@ export function createAgentPool({
         const client = await clientFor(agent);
         const tools = await client.listTools({}, { timeout: 5_000 });
         if (!tools.tools?.length) throw new Error(`${agent} MCP server exposed no tools.`);
+        if (agent === "ollama") {
+          const health = await client.callTool({
+            name: "get_ollama_status",
+            arguments: models.ollama ? { model: models.ollama } : {},
+          }, undefined, { timeout: 7_000 });
+          if (health.isError) throw new Error(textFrom(health));
+        }
         const publication = await reviewPublicationFor(agent);
         return {
           agent,
@@ -305,7 +330,7 @@ export function createAgentPool({
           playwrightBridgePath: resolve(root, "scripts/playwright-mcp.sh"),
           writableRoots,
         });
-      } else {
+      } else if (agent === "antigravity") {
         let antigravityPrompt = effectiveGithubReview
           ? `${effectivePrompt}${reviewEnvelopeInstructions({ githubReview: effectiveGithubReview, handoffPath })}`
           : effectivePrompt;
@@ -326,10 +351,23 @@ export function createAgentPool({
           verificationCommands: permissionDecision.verificationCommands,
           writableRoots,
         });
+      } else {
+        const ollamaPrompt = effectiveGithubReview
+          ? `${effectivePrompt}${reviewEnvelopeInstructions({ githubReview: effectiveGithubReview, handoffPath, provider: "Ollama" })}`
+          : effectivePrompt;
+        request = ollamaToolRequest({
+          prompt: ollamaPrompt,
+          sessionId,
+          cwd: workspace,
+          mode,
+          model: models.ollama,
+          fallbackModels: modelFallbacks.ollama,
+          timeoutSeconds: turnTimeoutSeconds,
+        });
       }
       request._meta = { progressToken: `${agent}-${Date.now()}` };
       let fallbackSlots = 0;
-      if (["claude", "codex"].includes(agent)) {
+      if (["claude", "codex", "ollama"].includes(agent)) {
         if (Array.isArray(modelFallbacks[agent])) {
           fallbackSlots = modelFallbacks[agent].length;
         } else {
@@ -363,8 +401,8 @@ export function createAgentPool({
       }
       if (result.isError) throw new Error(`${agent} MCP call failed: ${textFrom(result)}`);
       let message = textFrom(result);
-      if (agent === "antigravity" && effectiveGithubReview) {
-        const receipt = await publishAntigravityReview(message, effectiveGithubReview);
+      if (["antigravity", "ollama"].includes(agent) && effectiveGithubReview) {
+        const receipt = await publishEnvelopeReview(agent, message, effectiveGithubReview);
         message = `${message}\n\nBound review published as ${receipt.login}: ${receipt.url}`;
       }
       if (agent === "antigravity" && githubBuilder && mode === "work") {
@@ -380,7 +418,7 @@ export function createAgentPool({
           durationMs: structured.durationMs || structured.duration_ms || null,
           permissionProfile: effectivePermissionProfile,
           permissionReason: permissionDecision.permissionReason,
-          modelRouting: ["claude", "codex"].includes(agent) ? {
+          modelRouting: ["claude", "codex", "ollama"].includes(agent) ? {
             requestedModel: structured.requestedModel ?? null,
             model: structured.model ?? null,
             fallbackUsed: structured.fallbackUsed ?? null,

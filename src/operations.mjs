@@ -5,10 +5,11 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { GITHUB_LOGIN_PATTERN } from "./github-app-auth.mjs";
 import { negotiateProviderCapabilities } from "./provider-cli-capabilities.mjs";
 
-export const PROVIDERS = ["claude", "codex", "antigravity"];
+export const PROVIDERS = ["claude", "codex", "antigravity", "ollama"];
+export const WRITER_PROVIDERS = ["claude", "codex", "antigravity"];
 
 export function isTransportLivenessSummary(value) {
-  return /^(Claude Code|Codex|Antigravity) (?:started the delegated turn|is still working \(\d+s heartbeat\))\.?$/i
+  return /^(Claude Code|Codex|Antigravity|Ollama|The local reviewer) (?:started the delegated turn|is still working(?: \(\d+s heartbeat\))?[^.]*)\.?$/i
     .test(String(value || "").trim());
 }
 
@@ -19,7 +20,9 @@ export function isSafeWorkerPid(value) {
 export function selectRoles({ taskNumber, agents = PROVIDERS, offset = 0 }) {
   if (!Number.isInteger(taskNumber) || taskNumber < 0) throw new Error("taskNumber must be a non-negative integer.");
   if (!agents.length || agents.some((agent) => !PROVIDERS.includes(agent))) throw new Error("agents contains an unsupported provider.");
-  const writer = agents[(taskNumber + offset) % agents.length];
+  const writerCandidates = agents.filter((agent) => WRITER_PROVIDERS.includes(agent));
+  if (!writerCandidates.length) throw new Error("Role rotation requires at least one write-capable provider.");
+  const writer = writerCandidates[(taskNumber + offset) % writerCandidates.length];
   return { writer, reviewers: agents.filter((agent) => agent !== writer) };
 }
 
@@ -71,11 +74,20 @@ export function providerCapabilities({ home = homedir() } = {}) {
     claude: negotiated("claude", "claude", process.env.CLAUDE_BIN),
     codex: negotiated("codex", "codex", process.env.CODEX_BRIDGE_CODEX_BIN),
     antigravity: negotiated("antigravity", "agy", process.env.AGY_BIN),
+    ollama: (() => {
+      const binary = process.env.OLLAMA_BIN || spawnSync("/usr/bin/env", ["which", "ollama"], { encoding: "utf8" }).stdout?.trim();
+      if (!binary || !existsSync(binary)) return { available: false, reason: "ollama was not found" };
+      const result = spawnSync(binary, ["--version"], { encoding: "utf8" });
+      return result.status === 0
+        ? { available: true, binary, negotiated: { version: (result.stdout || result.stderr).trim() } }
+        : { available: false, binary, reason: (result.stderr || result.stdout).trim() };
+    })(),
   };
   return {
     claude: { ...providers.claude, read: true, write: true, shell: "profiled", browser: "isolated", githubReview: reviewerConfigured("claude") || patReviewFallback, githubBuilder: builderBot },
     codex: { ...providers.codex, read: true, write: true, shell: "sandboxed", browser: "isolated", githubReview: reviewerConfigured("codex") || patReviewFallback, githubBuilder: builderBot },
     antigravity: { ...providers.antigravity, read: true, write: true, shell: "sandboxed", browser: false, githubReview: (reviewerConfigured("antigravity") || patReviewFallback) ? "broker-envelope" : false, githubBuilder: builderBot ? "broker-envelope" : false },
+    ollama: { ...providers.ollama, read: true, write: false, shell: false, browser: false, githubReview: (reviewerConfigured("ollama") || patReviewFallback) ? "broker-envelope" : false, githubBuilder: false },
   };
 }
 
@@ -193,7 +205,7 @@ export function exportPortableManifest({ destination, sourceRoot }) {
     source: resolve(sourceRoot),
     excludes: ["node_modules", ".git", ".bridge", "~/.config/ghtoken", "~/.config/local-agent-bridge/github-apps", "provider credentials", "collaboration state", "capsule files"],
     install: ["npm ci", "npm run install:global", "npm run doctor"],
-    launchers: ["claude", "codex", "antigravity", "collaboration", "playwright"],
+    launchers: ["claude", "codex", "antigravity", "ollama", "collaboration", "playwright"],
   };
   writeFileSync(resolve(destination), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
   return manifest;

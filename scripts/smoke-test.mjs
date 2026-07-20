@@ -448,6 +448,11 @@ const antigravityTools = await listTools(
   "/bin/zsh",
   [resolve(root, "scripts/antigravity-bridge-mcp.sh")],
 );
+const ollamaTools = await listTools(
+  "Ollama review bridge",
+  "/bin/zsh",
+  [resolve(root, "scripts/ollama-bridge-mcp.sh")],
+);
 const collaborationTools = await listTools(
   "Persistent collaboration",
   "/bin/zsh",
@@ -469,6 +474,9 @@ for (const required of ["codex", "codex-reply"]) {
 }
 for (const required of ["ask_antigravity", "continue_antigravity"]) {
   if (!names(antigravityTools).includes(required)) throw new Error(`Missing bridge tool: ${required}`);
+}
+for (const required of ["ask_ollama", "continue_ollama", "get_ollama_status"]) {
+  if (!names(ollamaTools).includes(required)) throw new Error(`Missing Ollama review tool: ${required}`);
 }
 for (const required of [
   "acknowledge_coordinator_wake",
@@ -523,6 +531,10 @@ for (const property of [
 const antigravitySchema = antigravityTools.find((tool) => tool.name === "ask_antigravity")?.inputSchema?.properties || {};
 for (const property of ["prompt", "mode", "model", "fallbackModels", "verificationCommands"]) {
   if (!(property in antigravitySchema)) throw new Error(`Antigravity bridge schema is missing: ${property}`);
+}
+const ollamaSchema = ollamaTools.find((tool) => tool.name === "ask_ollama")?.inputSchema?.properties || {};
+for (const property of ["prompt", "mode", "model", "fallbackModels", "timeoutSeconds"]) {
+  if (!(property in ollamaSchema)) throw new Error(`Ollama bridge schema is missing: ${property}`);
 }
 const collaborationSchema = collaborationTools.find((tool) => tool.name === "start_collaboration")?.inputSchema?.properties || {};
 for (const property of [

@@ -8,6 +8,7 @@ import {
   republishValidatedReview,
   resolveReviewPublication,
 } from "../src/review-publication.mjs";
+import { localReviewPublicationPolicy } from "../src/agent-pool.mjs";
 
 const githubReview = { repository: "owner/repo", prNumber: 1, headSha: "a".repeat(40) };
 assert.equal(assertReviewWorkspaceHead({ expectedHeadSha: "a".repeat(40), observedHeadSha: "A".repeat(40) }), true);
@@ -155,5 +156,15 @@ const prompt = localReviewPrompt("Review this diff.", "reviewer App unavailable"
 assert.match(prompt, /Complete the independent review and durable handoff/);
 assert.match(prompt, /trusted human must approve the exact head/i);
 assert.match(prompt, /do not claim.*formal GitHub review/i);
+
+const noTarget = { available: true, binding: null, reason: null };
+assert.equal(localReviewPublicationPolicy("ollama", noTarget), noTarget, "a local review without a PR target must preserve its null publication binding");
+const localTarget = localReviewPublicationPolicy("ollama", {
+  available: true,
+  binding: { repository: "owner/repo", publishStatusGate: true },
+  statusGateAvailable: true,
+});
+assert.equal(localTarget.binding.publishStatusGate, false);
+assert.equal(localTarget.statusGateAvailable, false);
 
 console.log("Review publication fallback tests passed: publishable-first ordering, local degradation, and trusted-human escalation.");

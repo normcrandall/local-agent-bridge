@@ -13,7 +13,7 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { collaborationDirectory } from "./collaboration-store.mjs";
 
-export const PROVIDER_NAMES = ["claude", "codex", "antigravity"];
+export const PROVIDER_NAMES = ["claude", "codex", "antigravity", "ollama"];
 
 // Issue #55: a collaboration that already holds every capacity slot for a
 // provider/role would wait forever on its own live slot. Fail fast instead of
@@ -130,6 +130,7 @@ export const DEFAULT_PROVIDER_CONCURRENCY = Object.freeze({
   claude: Object.freeze({ work: 5, review: 10 }),
   codex: Object.freeze({ work: 5, review: 10 }),
   antigravity: Object.freeze({ work: 5, review: 10 }),
+  ollama: Object.freeze({ work: 1, review: 10 }),
 });
 
 function capacity(value, label) {

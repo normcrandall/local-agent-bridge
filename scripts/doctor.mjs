@@ -62,7 +62,7 @@ check("Provider concurrency policy", () => {
   return info.isFile()
     && (info.mode & 0o077) === 0
     && config.version === 1
-    && ["claude", "codex", "antigravity"].every((provider) => {
+    && ["claude", "codex", "antigravity", "ollama"].every((provider) => {
       const selected = providers[provider] || {};
       return (selected.work === undefined || validCapacity(selected.work))
         && (selected.review === undefined || validCapacity(selected.review));
@@ -75,14 +75,22 @@ check("Antigravity CLI", () => {
   return result.status === 0;
 }, "install or repair Antigravity CLI, or set AGY_BIN");
 
+check("Ollama local reviewer", () => {
+  const ollama = process.env.OLLAMA_BIN || "/usr/local/bin/ollama";
+  const version = spawnSync(ollama, ["--version"], { encoding: "utf8" });
+  if (version.status !== 0) return false;
+  const models = spawnSync(ollama, ["list"], { encoding: "utf8", timeout: 10_000 });
+  return models.status === 0 && /(?:^|\n)gemma4(?::latest)?\s/m.test(models.stdout || "");
+}, "install Ollama and pull gemma4, or set OLLAMA_BIN");
+
 check("Bridge dependencies", () => existsSync(resolve(root, "node_modules/@modelcontextprotocol/sdk")), "run npm install");
 check("Playwright MCP", () => existsSync(resolve(root, "node_modules/@playwright/mcp/cli.js")), "run npm install");
 check("Codex project config", () => existsSync(resolve(root, ".codex/config.toml")));
 check("Claude project config", () => existsSync(resolve(root, ".mcp.json")));
 check("Antigravity global MCP config", () => {
   const config = JSON.parse(readFileSync(resolve(homedir(), ".gemini/config/mcp_config.json"), "utf8"));
-  return Boolean(config.mcpServers?.codex && config.mcpServers?.claude_code && config.mcpServers?.collaboration);
-}, "register codex, claude_code, and collaboration in ~/.gemini/config/mcp_config.json");
+  return Boolean(config.mcpServers?.codex && config.mcpServers?.claude_code && config.mcpServers?.ollama && config.mcpServers?.collaboration);
+}, "register codex, claude_code, ollama, and collaboration in ~/.gemini/config/mcp_config.json");
 check("Claude Desktop collaboration config", () => {
   const path = resolve(homedir(), "Library/Application Support/Claude/claude_desktop_config.json");
   const config = JSON.parse(readFileSync(path, "utf8"));
@@ -94,6 +102,7 @@ check("Claude CLI user-scope bridge config", () => {
   const expected = {
     codex: "agent-codex-mcp",
     antigravity: "agent-antigravity-mcp",
+    ollama: "agent-ollama-mcp",
     collaboration: "agent-collaboration-mcp",
     playwright: "agent-playwright-mcp",
   };
@@ -186,6 +195,7 @@ check("Codex user-scope bridge config", () => {
   const expected = {
     claude_code: "agent-claude-mcp",
     antigravity: "agent-antigravity-mcp",
+    ollama: "agent-ollama-mcp",
     collaboration: "agent-collaboration-mcp",
     playwright: "agent-playwright-mcp",
   };
@@ -213,7 +223,7 @@ check("Collaboration launcher executable", () => {
   return true;
 });
 check("Global collaboration launcher executable", () => {
-  for (const name of ["claude", "codex", "antigravity", "collaboration", "playwright"]) {
+  for (const name of ["claude", "codex", "antigravity", "ollama", "collaboration", "playwright"]) {
     accessSync(resolve(homedir(), `.local/bin/agent-${name}-mcp`), constants.X_OK);
   }
   return existsSync(resolve(homedir(), ".local/share/agent-bridge/runtime/src/collaboration-bridge.mjs"));

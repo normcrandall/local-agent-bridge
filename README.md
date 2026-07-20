@@ -1,11 +1,12 @@
-# Codex ↔ Claude Code ↔ Antigravity bridge
+# Codex ↔ Claude Code ↔ Antigravity ↔ Ollama bridge
 
-This project connects the two local coding agents through MCP without API keys or a hosted relay:
+This project connects cloud coding agents and an optional local reviewer through MCP without a hosted relay:
 
 - **Claude Code → Codex:** Claude loads `.mcp.json`, which starts Codex's native MCP server and exposes `codex` and `codex-reply`.
 - **Codex → Claude Code:** Codex loads `.codex/config.toml`, which starts the local adapter and exposes `ask_claude` and `continue_claude`.
 - **Codex or Claude Code → Antigravity:** both load the Antigravity adapter, which exposes `ask_antigravity` and `continue_antigravity`.
 - **Antigravity → Codex or Claude Code:** Antigravity's central MCP configuration can start the same Codex and Claude servers.
+- **Any host → local Ollama reviewer:** the review-only adapter exposes `ask_ollama` and `continue_ollama` with bounded repository-inspection tools. It cannot write, run shell commands, browse, commit, push, or become a writer.
 - **Browser work:** both clients load a project-scoped, isolated Playwright MCP server. This is a shared capability, not a shared browser session.
 
 The adapters shell out to the already-authenticated Claude Code and Antigravity CLIs. Exact Claude session IDs and Antigravity conversation IDs preserve continuity. Delegated prompts prohibit nested peer calls, preventing circular routing; working directories are constrained to this project. Calls from Codex require approval by default.
@@ -14,6 +15,7 @@ The adapters shell out to the already-authenticated Claude Code and Antigravity 
 
 ```sh
 npm install
+ollama pull gemma4
 npm run install:global
 npm run doctor
 npm run smoke
@@ -21,21 +23,36 @@ npm run smoke
 
 Then restart/reopen this project in Codex and Claude Code. Approve the project-scoped MCP server when Claude asks.
 
-Restart `agy` as well. Its shared MCP file at `~/.gemini/config/mcp_config.json` now exposes `codex`, `claude_code`, and `collaboration`; use `/mcp` inside Antigravity to inspect their status. This registration is global, while the service deliberately constrains delegated work to this bridge project.
+Restart `agy` as well. Its shared MCP file at `~/.gemini/config/mcp_config.json` now exposes `codex`, `claude_code`, `ollama`, and `collaboration`; use `/mcp` inside Antigravity to inspect their status. This registration is global, while the service deliberately constrains delegated work to the selected workspace.
 
 Restart Codex App, Claude App, and Antigravity App after setup. All three are registered with the persistent `collaboration` MCP server. Claude's ordinary Chat surface uses `~/Library/Application Support/Claude/claude_desktop_config.json`; its Code tab uses this project's `.mcp.json`.
 
-Global launchers are installed under `~/.local/bin/agent-{claude,codex,antigravity,collaboration,playwright}-mcp`, with runtime code under `~/.local/share/agent-bridge/runtime` and persistent collaboration state under `~/.local/share/agent-bridge/state`. CLI hosts use their current directory as the allowed workspace. GUI hosts set `AGENT_BRIDGE_WORKSPACE` explicitly because they do not have a reliable project working directory.
+Global launchers are installed under `~/.local/bin/agent-{claude,codex,antigravity,ollama,collaboration,playwright}-mcp`, with runtime code under `~/.local/share/agent-bridge/runtime` and persistent collaboration state under `~/.local/share/agent-bridge/state`. CLI hosts use their current directory as the allowed workspace. GUI hosts set `AGENT_BRIDGE_WORKSPACE` explicitly because they do not have a reliable project working directory.
 
 Global upgrades are staged and dependency-validated before the active runtime directory is replaced. If the machine supervisor is running, the installer refreshes only that supervisor process and waits for the replacement to adopt its live workers; it never terminates the workers. Active app MCP processes still require the documented app/CLI restart to load other updated server modules.
 
-Claude CLI registers `codex`, `antigravity`, `collaboration`, and `playwright` at user scope in `~/.claude.json`. Verify that they remain available outside a project with `(cd /tmp && claude mcp list)`. Project `.mcp.json` entries may coexist as team-shareable project defaults; Claude's scope precedence selects the applicable definition.
+Claude CLI registers `codex`, `antigravity`, `ollama`, `collaboration`, and `playwright` at user scope in `~/.claude.json`. Verify that they remain available outside a project with `(cd /tmp && claude mcp list)`. Project `.mcp.json` entries may coexist as team-shareable project defaults; Claude's scope precedence selects the applicable definition.
 
-Codex App and CLI register `claude_code`, `antigravity`, `collaboration`, and `playwright` globally in `~/.codex/config.toml`, pointing at the stable `~/.local/bin/agent-*-mcp` launchers. Verify the user scope outside any project with `(cd /tmp && codex mcp list)`. The global bridge workspace root is the user's home directory so the same servers can operate across projects; narrower trusted-project entries may override it.
+Codex App and CLI register `claude_code`, `antigravity`, `ollama`, `collaboration`, and `playwright` globally in `~/.codex/config.toml`, pointing at the stable `~/.local/bin/agent-*-mcp` launchers. Verify the user scope outside any project with `(cd /tmp && codex mcp list)`. The global bridge workspace root is the user's home directory so the same servers can operate across projects; narrower trusted-project entries may override it.
 
 Global setup also installs coordinator lifecycle hooks without replacing existing hook groups: Claude Code `Stop` and `SessionStart`, Codex `Stop` and `SessionStart`, and Antigravity/Gemini `AfterAgent` and `SessionStart`. The hooks inspect durable collaboration state, hold a native coordinator open while delegated work or an actionable completion remains, and restore an unprocessed wake after restart. They deliberately allow `needs_user` and `indeterminate` boundaries to stop.
 
 Claude Code additionally receives the `collaboration_wake` MCP Channel. During the Channels research preview, start Claude with `claude-collab` instead of `claude` to receive live collaboration completion events inside the current session. Ordinary Claude sessions still receive the Stop/SessionStart safety hooks. Restart active Codex, Claude, and Antigravity sessions after `npm run install:global`.
+
+### Local Ollama reviewer
+
+Ollama is opt-in and review-only. Configure its model and loopback endpoint by copying [`config/ollama.example.json`](config/ollama.example.json) to `~/.config/local-agent-bridge/ollama.json`; if the file is absent, the bridge uses `gemma4:latest` at `http://127.0.0.1:11434`. `OLLAMA_MODEL` and `OLLAMA_HOST` are explicit machine overrides. This release rejects non-loopback endpoints.
+
+```sh
+mkdir -p ~/.config/local-agent-bridge
+cp config/ollama.example.json ~/.config/local-agent-bridge/ollama.json
+chmod 600 ~/.config/local-agent-bridge/ollama.json
+ollama pull gemma4
+```
+
+Use `agents: ["ollama"]` for a bounded local review or include `ollama` alongside cloud participants. In work mode, choose Claude, Codex, or Antigravity as the writer; schema and runtime guards prevent Ollama from being selected or promoted as writer. The local model receives only bounded read-only repository tools. It receives no shell, browser, source-write, builder, commit, push, or merge capability, and `verificationCommands` remain unavailable.
+
+The adapter emits progress when the model inspects repository state, files, searches, or diffs. Configure ordered memory/capacity fallbacks under `providers.ollama.fallbackModels` in [`config/model-fallbacks.example.json`](config/model-fallbacks.example.json). During the initial evaluation period, an Ollama `APPROVE` verdict is published as a non-authorizing PR `COMMENT`, never as `agent-review=success`; `REQUEST_CHANGES` and inline findings remain visible. This allows real review history without letting an unevaluated local model independently unlock a merge.
 
 ## Move the bridge to another computer
 
@@ -477,7 +494,7 @@ The common tools are:
 
 - `start_collaboration`: starts a detached bounded run and returns immediately.
 - `get_collaboration`: reads status and recent turns; supports a 30-second long poll.
-- `continue_collaboration`: resumes the exact Claude, Codex, and Antigravity sessions.
+- `continue_collaboration`: resumes the exact Claude, Codex, Antigravity, and in-process Ollama sessions.
 - `cancel_collaboration`: terminates the detached worker process group, including the active provider adapter.
 - `list_collaborations`: finds recent portable IDs.
 - `record_native_chair_turn`: records work performed in the current host session without spawning the same provider again.
@@ -532,7 +549,7 @@ Provider capacity is acquired for every turn, not merely when the collaboration 
 
 Model fields are optional. Omitting them preserves each provider's configured model. Explicit values pass through unchanged except for the Claude Fable policy: the bridge runtime denies Fable unless the user's current request explicitly asks for Fable by name. Saved defaults, earlier requests, aliases, and fallback chains do not grant permission. Without that explicit request, the runtime preserves any configured non-Fable Claude model, substitutes `claude-opus-4-8[1m]` if the configured/default model resolves to Fable, and removes Fable from the Claude fallback chain.
 
-`modelFallbacks.claude`, `modelFallbacks.codex`, and `modelFallbacks.antigravity` are optional. Omitting them loads the machine-local overload policy; an explicit provider array replaces that policy for the collaboration. Overload retries happen inside one provider turn, so they do not consume another broker turn or trigger writer reassignment.
+`modelFallbacks.claude`, `modelFallbacks.codex`, `modelFallbacks.antigravity`, and `modelFallbacks.ollama` are optional. Omitting them loads the machine-local overload policy; an explicit provider array replaces that policy for the collaboration. Overload retries happen inside one provider turn, so they do not consume another broker turn or trigger writer reassignment.
 
 Autonomous work lanes should pass all eligible providers in one ordered roster and identify one preferred writer. If that writer is confirmed unavailable, the broker moves ownership to the next eligible provider without changing the private checkout. Existing collaborations retain their recorded workspace across restarts. To rescue an older stopped work collaboration from a linked worktree, inspect its exact workspace and HEAD, call `recover_writer_checkout` with both fences, and then continue the same collaboration. Recovery rebuilds the lane from its recorded base, migrates committed, staged, deleted, modified, and untracked changes into private Git custody, and retains the original linked worktree as evidence. `cleanup_writer_checkout` removes a stopped private checkout only after exact workspace and HEAD inspection; it refuses dirty state unless `discardChanges: true` is explicit. Both operations atomically reserve the collaboration as `indeterminate` before touching the filesystem, so a concurrent continuation cannot start a worker in a checkout being moved or removed; an interrupted operation leaves a durable reconciliation marker instead of guessing ownership. If the full roster is exhausted by transient model-capacity failures, the collaboration enters visible `recovering` state and retries according to `providerRecovery` (three attempts at 15, 60, and 180 seconds by default). Each recovery attempt begins with the provider's preferred configured model and then follows its downgrade chain, allowing automatic upgrade when capacity returns. Authentication, permission, quota, configuration, command, and indeterminate transport failures are not retried. `wait_for_portfolio_lane` races the desired head advancement against handoff, failure, cancellation, indeterminate ownership, and recovery so coordinators cannot park on a success-only signal.
 
@@ -645,19 +662,21 @@ The peer model override is passed directly through MCP after the collaboration s
 
 #### Provider overload fallback
 
-Claude Code, Codex, and Antigravity model-capacity failures can fall through an ordered chain inside the same delegated turn without breaking the collaboration or rotating its writer. The caller may pass `fallbackModels` on a provider's direct tools or use `modelFallbacks.claude`, `modelFallbacks.codex`, and `modelFallbacks.antigravity` on `start_collaboration` and `continue_collaboration`:
+Claude Code, Codex, Antigravity, and Ollama model-capacity failures can fall through an ordered chain inside the same delegated turn without breaking the collaboration or rotating its writer. The caller may pass `fallbackModels` on a provider's direct tools or use `modelFallbacks.claude`, `modelFallbacks.codex`, `modelFallbacks.antigravity`, and `modelFallbacks.ollama` on `start_collaboration` and `continue_collaboration`:
 
 ```json
 {
   "models": {
     "claude": "claude-opus-4-8",
     "codex": "gpt-5.6-sol",
-    "antigravity": "Gemini 3.1 Pro (High)"
+    "antigravity": "Gemini 3.1 Pro (High)",
+    "ollama": "gemma4:31b-coding-mtp-bf16"
   },
   "modelFallbacks": {
     "claude": ["claude-opus-4-6", "claude-sonnet-5"],
     "codex": ["gpt-5.6-terra"],
-    "antigravity": ["Gemini 3.1 Pro (Low)", "Gemini 3.5 Flash (High)"]
+    "antigravity": ["Gemini 3.1 Pro (Low)", "Gemini 3.5 Flash (High)"],
+    "ollama": ["gemma4:31b", "qwen3-coder:30b", "gemma4:latest"]
   }
 }
 ```
@@ -678,6 +697,7 @@ Disable a model once for every new delegated bridge turn instead of repeating th
 bridge models disable claude fable
 bridge models disable codex gpt-5.6-sol
 bridge models disable antigravity "Gemini 3.1 Pro (High)"
+bridge models disable ollama "gemma4:31b-coding-mtp-bf16"
 bridge models status
 ```
 
@@ -798,6 +818,7 @@ When repository policy says the PR is the source of truth, both directions produ
 - Codex primary → delegated Claude receives bound `github_review.write_handoff` and `github_review.submit_pr_review` tools.
 - Claude primary → delegated Codex receives the same two bound tools while its source sandbox remains read-only.
 - Claude or Codex primary → delegated Antigravity authors a strict handoff/review envelope; the broker validates it and publishes that exact payload through the same target-bound bot adapter because `agy` has no per-session MCP injection.
+- Any primary → delegated Ollama uses bounded local repository tools and authors the same envelope. Requests for changes publish normally; local approval is deliberately downgraded to a non-authorizing comment during evaluation.
 
 The caller passes an exact PR authorization object. Omit `expectedLogin` to select the active provider's configured reviewer App automatically:
 

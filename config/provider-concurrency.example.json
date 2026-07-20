@@ -12,6 +12,10 @@
     "antigravity": {
       "work": 5,
       "review": 10
+    },
+    "ollama": {
+      "work": 1,
+      "review": 10
     }
   }
 }

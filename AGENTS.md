@@ -1,10 +1,11 @@
 # Codex collaboration guidance
 
-Claude Code is available through the `claude_code` MCP server. Antigravity is available through the `antigravity` MCP server.
+Claude Code is available through the `claude_code` MCP server. Antigravity is available through the `antigravity` MCP server. Ollama is available through the `ollama` MCP server as a hard review-only local provider.
 
 Prefer the installed collaboration skills as the user-facing interface. Announce the skill and the exact peer or broker it will call before starting:
 
 - Use `$ask-agent` for one bounded handoff or review.
+- Use Ollama only for review. Never select it as a writer, give it verification commands, or treat its evaluation-period approval as a merge gate.
 - Use `$run-roundtable` for a persistent multi-agent collaboration.
 - Use `$show-collaboration` to inspect, monitor, or resume collaboration history.
 - Use `$replay-collaboration` to run a deterministic replay of collaboration incidents.
@@ -39,6 +40,7 @@ When a native-chair collaboration stops, treat `coordinatorWake` as the authorit
 
 - Use `ask_claude` for an independent second opinion, review, or bounded delegated task.
 - Use `ask_antigravity` for a bounded Gemini/Antigravity second opinion and `continue_antigravity` only with its returned `conversationId`.
+- Use `ask_ollama` for a bounded local review and `continue_ollama` only with its returned `conversationId`. Ollama has bounded read-only repository tools, no shell/browser/write/builder capability, and cannot use `mode: work`.
 - Default to `mode: review`. Use `mode: work` only when the user asked for implementation and concurrent edits will not conflict.
 - Set `browser: true` only when the delegated task needs browser interaction. This supplies an isolated Playwright browser, not the Codex app's built-in browser or a signed-in profile.
 - Give Claude a self-contained prompt with the relevant paths, constraints, and expected output.

@@ -51,6 +51,7 @@
     "test:merge-train": "node scripts/merge-train-test.mjs",
     "test:provider-capabilities": "node scripts/provider-capabilities-test.mjs && node scripts/collaboration-doctor-test.mjs",
     "test:provider-concurrency": "node scripts/provider-concurrency-test.mjs",
+    "test:ollama": "node scripts/ollama-review-test.mjs",
     "test:coordinator-wake": "node scripts/coordinator-wake-test.mjs",
     "test:coordinator-hook": "node scripts/coordinator-hook-test.mjs",
     "test:claude-wake-channel": "node scripts/claude-wake-channel-test.mjs",

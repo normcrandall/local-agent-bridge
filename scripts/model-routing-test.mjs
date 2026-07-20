@@ -107,7 +107,7 @@ assert.equal(antigravityCommandReview.arguments.prompt, "review");
 const codexDefault = codexToolRequest({ prompt: "test", cwd: "/workspace" });
 assert.equal(codexDefault.name, "codex");
 assert.equal(Object.hasOwn(codexDefault.arguments, "model"), false);
-for (const server of ["claude_code", "antigravity", "collaboration", "playwright", "node_repl", "computer-use", "github_review"]) {
+for (const server of ["claude_code", "antigravity", "ollama", "collaboration", "playwright", "node_repl", "computer-use", "github_review"]) {
   assert.equal(
     Object.hasOwn(codexDefault.arguments.config, `mcp_servers.${server}.enabled`),
     false,
