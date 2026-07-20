@@ -8,7 +8,7 @@ import {
   republishValidatedReview,
   resolveReviewPublication,
 } from "../src/review-publication.mjs";
-import { localReviewPublicationPolicy } from "../src/agent-pool.mjs";
+import { localReviewEnvelopePolicy, localReviewPublicationPolicy } from "../src/agent-pool.mjs";
 
 const githubReview = { repository: "owner/repo", prNumber: 1, headSha: "a".repeat(40) };
 assert.equal(assertReviewWorkspaceHead({ expectedHeadSha: "a".repeat(40), observedHeadSha: "A".repeat(40) }), true);
@@ -166,5 +166,39 @@ const localTarget = localReviewPublicationPolicy("ollama", {
 });
 assert.equal(localTarget.binding.publishStatusGate, false);
 assert.equal(localTarget.statusGateAvailable, false);
+assert.equal(localTarget.authorizing, false);
+
+const localAndCloud = orderReviewProbes({
+  requestedStartAgent: "ollama",
+  githubReview,
+  probes: [
+    { agent: "ollama", available: true, reviewPublication: { available: true, authorizing: false } },
+    { agent: "claude", available: true, reviewPublication: { available: true, authorizing: true } },
+  ],
+});
+assert.deepEqual(localAndCloud.agents, ["claude", "ollama"]);
+assert.equal(localAndCloud.startAgent, "claude");
+assert.deepEqual(localAndCloud.publication.authorizingAgents, ["claude"]);
+assert.deepEqual(localAndCloud.publication.nonAuthorizingAgents, ["ollama"]);
+assert.equal(localAndCloud.publication.humanApprovalRequired, false);
+
+const localOnlyPublication = orderReviewProbes({
+  requestedStartAgent: "ollama",
+  githubReview,
+  probes: [{ agent: "ollama", available: true, reviewPublication: { available: true, authorizing: false } }],
+});
+assert.equal(localOnlyPublication.publication.status, "available");
+assert.equal(localOnlyPublication.publication.humanApprovalRequired, true);
+const localPublished = recordReviewPublicationResult(localOnlyPublication.publication, { agent: "ollama", published: true });
+assert.equal(localPublished.humanApprovalRequired, true);
+
+const evaluationApproval = localReviewEnvelopePolicy("ollama", {
+  event: "APPROVE",
+  body: "No blockers found.",
+  handoff: "# Review",
+  comments: [],
+});
+assert.equal(evaluationApproval.event, "COMMENT");
+assert.match(evaluationApproval.body, /non-authorizing/);
 
 console.log("Review publication fallback tests passed: publishable-first ordering, local degradation, and trusted-human escalation.");

@@ -13,7 +13,7 @@ export async function resolveReviewPublication({
   configuredLogin,
   createCredential,
 }) {
-  if (!githubReview) return { available: true, binding: null, reason: null };
+  if (!githubReview) return { available: true, authorizing: true, binding: null, reason: null };
   try {
     const expectedLogin = githubReview.expectedLogins?.[agent]
       || githubReview.expectedLogin
@@ -28,6 +28,7 @@ export async function resolveReviewPublication({
     });
     return {
       available: true,
+      authorizing: true,
       binding: {
         ...binding,
         publishStatusGate: canPublishReviewStatus(credential.permissions),
@@ -36,7 +37,7 @@ export async function resolveReviewPublication({
       statusGateAvailable: canPublishReviewStatus(credential.permissions),
     };
   } catch (error) {
-    return { available: false, binding: null, reason: error?.message || String(error) };
+    return { available: false, authorizing: false, binding: null, reason: error?.message || String(error) };
   }
 }
 
@@ -52,12 +53,15 @@ export function orderReviewProbes({ probes, requestedStartAgent = null, githubRe
     };
   }
   const publishable = providerAvailable.filter((probe) => probe.reviewPublication?.available);
+  const authorizing = publishable.filter((probe) => probe.reviewPublication?.authorizing !== false);
+  const nonAuthorizing = publishable.filter((probe) => probe.reviewPublication?.authorizing === false);
   const localOnly = providerAvailable.filter((probe) => !probe.reviewPublication?.available);
-  const ordered = [...publishable, ...localOnly];
-  const preferredPublishable = publishable.some((probe) => probe.agent === requestedStartAgent)
+  const ordered = [...authorizing, ...nonAuthorizing, ...localOnly];
+  const preferredPublishable = authorizing.some((probe) => probe.agent === requestedStartAgent)
     ? requestedStartAgent
-    : publishable[0]?.agent;
+    : authorizing[0]?.agent;
   const startAgent = preferredPublishable
+    || (nonAuthorizing.some((probe) => probe.agent === requestedStartAgent) ? requestedStartAgent : nonAuthorizing[0]?.agent)
     || (localOnly.some((probe) => probe.agent === requestedStartAgent) ? requestedStartAgent : localOnly[0]?.agent)
     || null;
   return {
@@ -68,12 +72,15 @@ export function orderReviewProbes({ probes, requestedStartAgent = null, githubRe
         ? "available"
         : publishable.length ? "partial" : "degraded",
       publishableAgents: publishable.map((probe) => probe.agent),
+      authorizingAgents: authorizing.map((probe) => probe.agent),
+      nonAuthorizingAgents: nonAuthorizing.map((probe) => probe.agent),
       publishedAgents: [],
+      publishedAuthorizingAgents: [],
       localOnlyAgents: Object.fromEntries(localOnly.map((probe) => [
         probe.agent,
         probe.reviewPublication?.reason || "review publication is unavailable",
       ])),
-      humanApprovalRequired: publishable.length === 0,
+      humanApprovalRequired: authorizing.length === 0,
     },
   };
 }
@@ -91,11 +98,18 @@ export function recordReviewPublicationResult(publication, {
     ...(publication.publishedAgents || []),
     ...(published ? [agent] : []),
   ])];
+  const originalAuthorizingAgents = publication.authorizingAgents || publication.publishableAgents || [];
+  const authorizingAgents = originalAuthorizingAgents.filter((candidate) => candidate !== agent || !unavailableReason);
+  const publishedAuthorizingAgents = [...new Set([
+    ...(publication.publishedAuthorizingAgents || (publication.publishedAgents || []).filter((candidate) => originalAuthorizingAgents.includes(candidate))),
+    ...(published && originalAuthorizingAgents.includes(agent) ? [agent] : []),
+  ])];
   const unavailableAgents = { ...(publication.unavailableAgents || {}) };
   if (unavailableReason) unavailableAgents[agent] = unavailableReason;
   const localOnlyAgents = { ...(publication.localOnlyAgents || {}) };
   if (unavailableReason) delete localOnlyAgents[agent];
   const hasPublicationPath = publishedAgents.length > 0 || publishableAgents.length > 0;
+  const hasAuthorizationPath = publishedAuthorizingAgents.length > 0 || authorizingAgents.length > 0;
   return {
     ...publication,
     status: hasPublicationPath
@@ -104,10 +118,12 @@ export function recordReviewPublicationResult(publication, {
         : "available")
       : "degraded",
     publishableAgents,
+    authorizingAgents,
+    publishedAuthorizingAgents,
     publishedAgents,
     localOnlyAgents,
     unavailableAgents,
-    humanApprovalRequired: !hasPublicationPath,
+    humanApprovalRequired: !hasAuthorizationPath,
   };
 }
 

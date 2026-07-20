@@ -130,6 +130,8 @@ export const DEFAULT_PROVIDER_CONCURRENCY = Object.freeze({
   claude: Object.freeze({ work: 5, review: 10 }),
   codex: Object.freeze({ work: 5, review: 10 }),
   antigravity: Object.freeze({ work: 5, review: 10 }),
+  // The shared capacity schema requires a positive work value, but Ollama is
+  // rejected as a writer before capacity acquisition. This slot is unreachable.
   ollama: Object.freeze({ work: 1, review: 10 }),
 });
 

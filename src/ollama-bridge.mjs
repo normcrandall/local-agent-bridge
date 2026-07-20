@@ -6,6 +6,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { probeOllama, runOllamaReview } from "./ollama-review.mjs";
+import { loadOllamaSession, saveOllamaSession } from "./ollama-session-store.mjs";
 
 const WORKSPACE_ROOT = realpathSync(process.env.BRIDGE_WORKSPACE_ROOT || process.env.BRIDGE_ROOT || process.cwd());
 const sessions = new Map();
@@ -37,7 +38,9 @@ async function runWithProgress(input, extra, conversationId = null) {
   if (input.mode !== "review") {
     throw new Error("Ollama is configured as a review-only provider; mode work is not permitted.");
   }
-  const existing = conversationId ? sessions.get(conversationId) : null;
+  const existing = conversationId
+    ? sessions.get(conversationId) || await loadOllamaSession(WORKSPACE_ROOT, conversationId)
+    : null;
   const token = extra?._meta?.progressToken;
   let progress = 0;
   const notify = async (message) => {
@@ -65,7 +68,9 @@ async function runWithProgress(input, extra, conversationId = null) {
       onProgress: (summary) => notify(summary).catch(() => {}),
     });
     const id = conversationId || randomUUID();
-    sessions.set(id, { messages: result.messages, cwd: input.cwd || existing?.cwd || ".", model: result.model });
+    const session = { messages: result.messages, cwd: input.cwd || existing?.cwd || ".", model: result.model };
+    sessions.set(id, session);
+    await saveOllamaSession(WORKSPACE_ROOT, id, session);
     return toolResponse(result, id);
   } finally {
     clearInterval(heartbeat);

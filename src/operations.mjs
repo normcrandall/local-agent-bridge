@@ -9,8 +9,10 @@ export const PROVIDERS = ["claude", "codex", "antigravity", "ollama"];
 export const WRITER_PROVIDERS = ["claude", "codex", "antigravity"];
 
 export function isTransportLivenessSummary(value) {
-  return /^(Claude Code|Codex|Antigravity|Ollama|The local reviewer) (?:started the delegated turn|is still working(?: \(\d+s heartbeat\))?[^.]*)\.?$/i
-    .test(String(value || "").trim());
+  const summary = String(value || "").trim();
+  return /^(Claude Code|Codex|Antigravity|Ollama|The local reviewer) started the delegated turn\.?$/i.test(summary)
+    || /^(Claude Code|Codex|Antigravity|Ollama) is still working(?: \(\d+s heartbeat\))?\.?$/i.test(summary)
+    || /^The local reviewer is still working; its last repository action remains current\.?$/i.test(summary);
 }
 
 export function isSafeWorkerPid(value) {

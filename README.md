@@ -52,7 +52,7 @@ ollama pull gemma4
 
 Use `agents: ["ollama"]` for a bounded local review or include `ollama` alongside cloud participants. In work mode, choose Claude, Codex, or Antigravity as the writer; schema and runtime guards prevent Ollama from being selected or promoted as writer. The local model receives only bounded read-only repository tools. It receives no shell, browser, source-write, builder, commit, push, or merge capability, and `verificationCommands` remain unavailable.
 
-The adapter emits progress when the model inspects repository state, files, searches, or diffs. Configure ordered memory/capacity fallbacks under `providers.ollama.fallbackModels` in [`config/model-fallbacks.example.json`](config/model-fallbacks.example.json). During the initial evaluation period, an Ollama `APPROVE` verdict is published as a non-authorizing PR `COMMENT`, never as `agent-review=success`; `REQUEST_CHANGES` and inline findings remain visible. This allows real review history without letting an unevaluated local model independently unlock a merge.
+The adapter emits progress when the model inspects repository state, files, searches, or diffs. Conversation state is stored owner-only under `~/.local/state/local-agent-bridge/ollama-sessions`, keyed by the canonical workspace path, so `continue_ollama` preserves context when its MCP process restarts. Configure ordered memory/capacity fallbacks under `providers.ollama.fallbackModels` in [`config/model-fallbacks.example.json`](config/model-fallbacks.example.json). During the initial evaluation period, an Ollama `APPROVE` verdict is published as a non-authorizing PR `COMMENT`, never as `agent-review=success`; `REQUEST_CHANGES` and inline findings remain visible. This allows real review history without letting an unevaluated local model independently unlock a merge.
 
 ## Move the bridge to another computer
 
@@ -494,7 +494,7 @@ The common tools are:
 
 - `start_collaboration`: starts a detached bounded run and returns immediately.
 - `get_collaboration`: reads status and recent turns; supports a 30-second long poll.
-- `continue_collaboration`: resumes the exact Claude, Codex, Antigravity, and in-process Ollama sessions.
+- `continue_collaboration`: resumes the exact Claude, Codex, Antigravity, and persisted local Ollama sessions.
 - `cancel_collaboration`: terminates the detached worker process group, including the active provider adapter.
 - `list_collaborations`: finds recent portable IDs.
 - `record_native_chair_turn`: records work performed in the current host session without spawning the same provider again.

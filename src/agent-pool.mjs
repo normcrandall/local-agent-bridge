@@ -44,9 +44,20 @@ export function localReviewPublicationPolicy(agent, result) {
   if (agent !== "ollama" || !result?.available || !result.binding) return result;
   return {
     ...result,
+    authorizing: false,
     binding: { ...result.binding, publishStatusGate: false },
     statusGateAvailable: false,
   };
+}
+
+export function localReviewEnvelopePolicy(agent, authoredEnvelope) {
+  return agent === "ollama" && authoredEnvelope.event === "APPROVE"
+    ? {
+      ...authoredEnvelope,
+      event: "COMMENT",
+      body: `Evaluation-only local approval (non-authorizing):\n\n${authoredEnvelope.body}`,
+    }
+    : authoredEnvelope;
 }
 
 // A raw-delivery shell command that must never be granted to an autonomous
@@ -150,13 +161,7 @@ export function createAgentPool({
     // Validate the envelope exactly once. If a validated envelope already exists,
     // publication is retried without re-running the Antigravity provider.
     const authoredEnvelope = providedEnvelope || parseReviewEnvelope(message);
-    const envelope = agent === "ollama" && authoredEnvelope.event === "APPROVE"
-      ? {
-        ...authoredEnvelope,
-        event: "COMMENT",
-        body: `Evaluation-only local approval (non-authorizing):\n\n${authoredEnvelope.body}`,
-      }
-      : authoredEnvelope;
+    const envelope = localReviewEnvelopePolicy(agent, authoredEnvelope);
     return republishValidatedReview({
       envelope,
       publish: (validated) => publishValidatedEnvelope(validated, reviewBinding, agent),
@@ -253,6 +258,7 @@ export function createAgentPool({
           reviewPublication: githubReview
             ? {
               available: publication.available,
+              authorizing: publication.authorizing !== false,
               reason: publication.reason,
               statusGateAvailable: publication.statusGateAvailable ?? false,
             }
@@ -428,10 +434,11 @@ export function createAgentPool({
           } : null,
           reviewPublication: mode === "review" && githubReview ? {
             available: publication.available,
+            authorizing: publication.authorizing !== false,
             login: effectiveGithubReview?.expectedLogin || null,
             reason: publication.reason,
             statusGateAvailable: publication.statusGateAvailable ?? false,
-            humanApprovalRequired: !publication.available,
+            humanApprovalRequired: !publication.available || publication.authorizing === false,
           } : null,
         },
       };

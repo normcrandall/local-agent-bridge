@@ -2,9 +2,10 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { loadOllamaSession, saveOllamaSession } from "../src/ollama-session-store.mjs";
 import { executeOllamaReviewTool, runOllamaReview } from "../src/ollama-review.mjs";
 import { ollamaToolRequest } from "../src/tool-requests.mjs";
 import { runConversation } from "../src/talk-protocol.mjs";
@@ -33,6 +34,32 @@ try {
   assert.throws(
     () => executeOllamaReviewTool({ cwd: repository, name: "read_file", arguments: { path: "../outside" } }),
     /inside the delegated workspace/,
+  );
+  const outside = join(repository, "..", `${repository.split("/").at(-1)}-outside.txt`);
+  await writeFile(outside, "outside workspace");
+  await symlink(outside, join(repository, "escape-link"));
+  assert.throws(
+    () => executeOllamaReviewTool({ cwd: repository, name: "read_file", arguments: { path: "escape-link" } }),
+    /inside the delegated workspace/,
+  );
+  await writeFile(join(repository, "oversized.txt"), Buffer.alloc(2 * 1024 * 1024 + 1, 65));
+  assert.throws(
+    () => executeOllamaReviewTool({ cwd: repository, name: "read_file", arguments: { path: "oversized.txt" } }),
+    /read limit/,
+  );
+  assert.throws(
+    () => executeOllamaReviewTool({ cwd: repository, name: "git_diff", arguments: { base: "missing-review-base" } }),
+    /does not resolve to a commit/,
+  );
+
+  const stateRoot = join(repository, "session-state");
+  const conversationId = "123e4567-e89b-42d3-a456-426614174000";
+  await saveOllamaSession(repository, conversationId, { messages: [{ role: "assistant", content: "prior review" }], cwd: ".", model: "gemma4:latest" }, { stateRoot });
+  const restored = await loadOllamaSession(repository, conversationId, { stateRoot });
+  assert.equal(restored.messages[0].content, "prior review");
+  await assert.rejects(
+    loadOllamaSession(repository, "123e4567-e89b-42d3-a456-426614174001", { stateRoot }),
+    /Unknown Ollama conversation/,
   );
 
   const requests = [];
@@ -115,4 +142,5 @@ try {
   console.log("Ollama review-only provider tests passed.");
 } finally {
   await rm(repository, { recursive: true, force: true });
+  await rm(join(repository, "..", `${repository.split("/").at(-1)}-outside.txt`), { force: true });
 }

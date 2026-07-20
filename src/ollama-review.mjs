@@ -11,6 +11,7 @@ export const DEFAULT_OLLAMA_MODEL = "gemma4:latest";
 export const DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434";
 
 const MAX_FILE_LINES = 400;
+const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_TOOL_OUTPUT = 160_000;
 const MAX_TOOL_CALLS = 24;
 
@@ -74,16 +75,27 @@ function containedWorkspace(root, requested = ".") {
 }
 
 function containedFile(cwd, requested) {
-  const candidate = resolve(cwd, requested);
-  const fromRoot = relative(cwd, candidate);
-  if (!requested || fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)) {
+  const actualCwd = realpathSync(cwd);
+  const candidate = resolve(actualCwd, requested);
+  const lexicalFromRoot = relative(actualCwd, candidate);
+  if (!requested || lexicalFromRoot === ".." || lexicalFromRoot.startsWith(`..${sep}`) || isAbsolute(lexicalFromRoot)) {
+    throw new Error("Requested file must stay inside the delegated workspace.");
+  }
+  if (!existsSync(candidate)) throw new Error(`File does not exist: ${requested}`);
+  const actual = realpathSync(candidate);
+  const fromRoot = relative(actualCwd, actual);
+  if (fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)) {
     throw new Error("Requested file must stay inside the delegated workspace.");
   }
   if (fromRoot === ".git" || fromRoot.startsWith(`.git${sep}`)) {
     throw new Error("Git metadata is not exposed to the local reviewer.");
   }
-  if (!existsSync(candidate) || !statSync(candidate).isFile()) throw new Error(`File does not exist: ${requested}`);
-  return candidate;
+  const info = statSync(actual);
+  if (!info.isFile()) throw new Error(`File does not exist: ${requested}`);
+  if (info.size > MAX_FILE_BYTES) {
+    throw new Error(`File exceeds the local reviewer's ${MAX_FILE_BYTES}-byte read limit: ${requested}`);
+  }
+  return actual;
 }
 
 function clipped(value, limit = MAX_TOOL_OUTPUT) {
@@ -222,7 +234,9 @@ export function executeOllamaReviewTool({ cwd, name, arguments: rawArguments = {
     return { matches, truncated: matches.length === 500 };
   }
   if (name === "git_diff") {
-    const base = resolveDiffBase(cwd, args.base ? String(args.base) : null);
+    const requestedBase = args.base ? String(args.base) : null;
+    const base = resolveDiffBase(cwd, requestedBase);
+    if (requestedBase && !base) throw new Error(`Git diff base does not resolve to a commit: ${requestedBase}`);
     if (!base) return { base: null, diff: git(cwd, ["show", "--format=", "--no-ext-diff", "HEAD"]) };
     return { base, diff: git(cwd, ["diff", "--no-ext-diff", "--unified=50", `${base.sha}...HEAD`]) };
   }
