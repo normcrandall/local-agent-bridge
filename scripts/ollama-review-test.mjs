@@ -108,6 +108,18 @@ try {
   assert.match(requests[2].messages.at(-1).content, /final review now/);
   assert.equal(progress.some((message) => /inspecting app\.mjs/.test(message)), true);
 
+  const defaultModelResult = await runOllamaReview({
+    prompt: "Return a concise review.",
+    cwd: ".",
+    workspaceRoot: repository,
+    fallbackModels: [],
+    fetchImpl: async (_url, request) => {
+      assert.equal(JSON.parse(request.body).model, "gemma4:latest");
+      return { ok: true, json: async () => ({ model: "gemma4:latest", message: { role: "assistant", content: "No findings." } }) };
+    },
+  });
+  assert.equal(defaultModelResult.result, "No findings.");
+
   assert.throws(
     () => ollamaToolRequest({ prompt: "implement", cwd: repository, mode: "work" }),
     /review-only/,

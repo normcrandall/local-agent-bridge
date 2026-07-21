@@ -167,6 +167,14 @@ const localTarget = localReviewPublicationPolicy("ollama", {
 assert.equal(localTarget.binding.publishStatusGate, false);
 assert.equal(localTarget.statusGateAvailable, false);
 assert.equal(localTarget.authorizing, false);
+const dockerTarget = localReviewPublicationPolicy("docker", {
+  available: true,
+  binding: { repository: "owner/repo", publishStatusGate: true },
+  statusGateAvailable: true,
+});
+assert.equal(dockerTarget.binding.publishStatusGate, false);
+assert.equal(dockerTarget.statusGateAvailable, false);
+assert.equal(dockerTarget.authorizing, false);
 
 const localAndCloud = orderReviewProbes({
   requestedStartAgent: "ollama",
@@ -208,5 +216,13 @@ const evaluationRequestChanges = localReviewEnvelopePolicy("ollama", {
 });
 assert.equal(evaluationRequestChanges.event, "COMMENT");
 assert.match(evaluationRequestChanges.body, /request for changes \(non-authorizing\)/);
+const dockerApproval = localReviewEnvelopePolicy("docker", {
+  event: "APPROVE",
+  body: "No blockers found.",
+  handoff: "# Review",
+  comments: [],
+});
+assert.equal(dockerApproval.event, "COMMENT");
+assert.match(dockerApproval.body, /non-authorizing/);
 
 console.log("Review publication fallback tests passed: publishable-first ordering, local degradation, and trusted-human escalation.");

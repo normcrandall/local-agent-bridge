@@ -16,6 +16,10 @@
     "ollama": {
       "work": 1,
       "review": 10
+    },
+    "docker": {
+      "work": 1,
+      "review": 10
     }
   }
 }

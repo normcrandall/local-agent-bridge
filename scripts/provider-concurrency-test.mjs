@@ -44,6 +44,7 @@ try {
     codex: { work: 5, review: 10 },
     antigravity: { work: 5, review: 10 },
     ollama: { work: 1, review: 10 },
+    docker: { work: 1, review: 10 },
   });
   assert.deepEqual(normalizeProviderConcurrency({}), DEFAULT_PROVIDER_CONCURRENCY);
   assert.deepEqual(normalizeProviderConcurrency({ claude: { review: 3 } }).claude, {
@@ -56,6 +57,15 @@ try {
       provider: "ollama",
       role: "work",
       collaborationId: collaborationId("99"),
+      limits: DEFAULT_PROVIDER_CONCURRENCY,
+    }),
+    /review-only.*work capacity/,
+  );
+  await assert.rejects(
+    acquireProviderCapacity(root, {
+      provider: "docker",
+      role: "work",
+      collaborationId: collaborationId("98"),
       limits: DEFAULT_PROVIDER_CONCURRENCY,
     }),
     /review-only.*work capacity/,

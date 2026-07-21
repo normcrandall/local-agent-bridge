@@ -1,6 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { antigravityToolRequest, claudeToolRequest, codexToolRequest, ollamaToolRequest } from "./tool-requests.mjs";
+import { antigravityToolRequest, claudeToolRequest, codexToolRequest, dockerToolRequest, ollamaToolRequest } from "./tool-requests.mjs";
 import { parseReviewEnvelope, reviewEnvelopeInstructions } from "./review-envelope.mjs";
 import { loadConfiguredFallbackModels } from "./model-fallbacks.mjs";
 import { builderEnvelopeInstructions, parseBuilderEnvelope } from "./builder-envelope.mjs";
@@ -41,7 +41,7 @@ export function autonomousWorkProfile({ autonomous, githubBuilder, mode, workPro
 }
 
 export function localReviewPublicationPolicy(agent, result) {
-  if (agent !== "ollama" || !result?.available || !result.binding) return result;
+  if (!["ollama", "docker"].includes(agent) || !result?.available || !result.binding) return result;
   return {
     ...result,
     authorizing: false,
@@ -51,7 +51,7 @@ export function localReviewPublicationPolicy(agent, result) {
 }
 
 export function localReviewEnvelopePolicy(agent, authoredEnvelope) {
-  if (agent !== "ollama" || authoredEnvelope.event === "COMMENT") return authoredEnvelope;
+  if (!["ollama", "docker"].includes(agent) || authoredEnvelope.event === "COMMENT") return authoredEnvelope;
   const verdict = authoredEnvelope.event === "APPROVE" ? "approval" : "request for changes";
   return {
     ...authoredEnvelope,
@@ -220,6 +220,7 @@ export function createAgentPool({
       codex: "scripts/codex-mcp.sh",
       antigravity: "scripts/antigravity-bridge-mcp.sh",
       ollama: "scripts/ollama-bridge-mcp.sh",
+      docker: "scripts/docker-bridge-mcp.sh",
     };
     const client = new Client({ name: `agent-bridge-worker-${agent}`, version: "0.2.0" });
     const transport = new StdioClientTransport({
@@ -248,6 +249,13 @@ export function createAgentPool({
           const health = await client.callTool({
             name: "get_ollama_status",
             arguments: models.ollama ? { model: models.ollama } : {},
+          }, undefined, { timeout: 7_000 });
+          if (health.isError) throw new Error(textFrom(health));
+        }
+        if (agent === "docker") {
+          const health = await client.callTool({
+            name: "get_docker_status",
+            arguments: models.docker ? { model: models.docker } : {},
           }, undefined, { timeout: 7_000 });
           if (health.isError) throw new Error(textFrom(health));
         }
@@ -357,7 +365,7 @@ export function createAgentPool({
           verificationCommands: permissionDecision.verificationCommands,
           writableRoots,
         });
-      } else {
+      } else if (agent === "ollama") {
         const ollamaPrompt = effectiveGithubReview
           ? `${effectivePrompt}${reviewEnvelopeInstructions({ githubReview: effectiveGithubReview, handoffPath, provider: "Ollama" })}`
           : effectivePrompt;
@@ -370,10 +378,23 @@ export function createAgentPool({
           fallbackModels: modelFallbacks.ollama,
           timeoutSeconds: turnTimeoutSeconds,
         });
+      } else {
+        const dockerPrompt = effectiveGithubReview
+          ? `${effectivePrompt}${reviewEnvelopeInstructions({ githubReview: effectiveGithubReview, handoffPath, provider: "Docker Model Runner" })}`
+          : effectivePrompt;
+        request = dockerToolRequest({
+          prompt: dockerPrompt,
+          sessionId,
+          cwd: workspace,
+          mode,
+          model: models.docker,
+          fallbackModels: modelFallbacks.docker,
+          timeoutSeconds: turnTimeoutSeconds,
+        });
       }
       request._meta = { progressToken: `${agent}-${Date.now()}` };
       let fallbackSlots = 0;
-      if (["claude", "codex", "ollama"].includes(agent)) {
+      if (["claude", "codex", "ollama", "docker"].includes(agent)) {
         if (Array.isArray(modelFallbacks[agent])) {
           fallbackSlots = modelFallbacks[agent].length;
         } else {
@@ -407,7 +428,7 @@ export function createAgentPool({
       }
       if (result.isError) throw new Error(`${agent} MCP call failed: ${textFrom(result)}`);
       let message = textFrom(result);
-      if (["antigravity", "ollama"].includes(agent) && effectiveGithubReview) {
+      if (["antigravity", "ollama", "docker"].includes(agent) && effectiveGithubReview) {
         const receipt = await publishEnvelopeReview(agent, message, effectiveGithubReview);
         message = `${message}\n\nBound review published as ${receipt.login}: ${receipt.url}`;
       }
@@ -424,7 +445,7 @@ export function createAgentPool({
           durationMs: structured.durationMs || structured.duration_ms || null,
           permissionProfile: effectivePermissionProfile,
           permissionReason: permissionDecision.permissionReason,
-          modelRouting: ["claude", "codex", "ollama"].includes(agent) ? {
+          modelRouting: ["claude", "codex", "ollama", "docker"].includes(agent) ? {
             requestedModel: structured.requestedModel ?? null,
             model: structured.model ?? null,
             fallbackUsed: structured.fallbackUsed ?? null,

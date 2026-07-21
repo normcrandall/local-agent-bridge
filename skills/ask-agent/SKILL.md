@@ -1,6 +1,6 @@
 ---
 name: ask-agent
-description: Hand off one bounded task to Claude Code, Codex, Antigravity, or the local review-only Ollama provider with a visible receipt showing the exact peer, MCP tool, workspace, permissions, and model policy.
+description: Hand off one bounded task to Claude Code, Codex, Antigravity, or a local review-only Docker Model Runner or Ollama provider with a visible receipt showing the exact peer, MCP tool, workspace, permissions, and model policy.
 ---
 
 # Ask Agent
@@ -18,6 +18,7 @@ Map the requested peer to its provider adapter:
 | Claude Code | `ask_claude` | `continue_claude` |
 | Codex | `codex` | `codex-reply` |
 | Antigravity | `ask_antigravity` | `continue_antigravity` |
+| Docker Model Runner (preferred local review) | `ask_docker` | `continue_docker` |
 | Ollama (review-only) | `ask_ollama` | `continue_ollama` |
 
 If the required tool is unavailable, stop and identify the missing server. Never silently substitute a different peer.
@@ -28,7 +29,7 @@ Pass the current host as `chair` with its provider and absolute workspace. Do no
 
 Default to read-only review. Permit work mode only when the user requested edits. Omit `model` unless the user explicitly supplied an override. Use browser access only when required by the task.
 
-Ollama is a hard review-only provider. Never select it as `writer` or request `mode: work`; do not pass browser or `verificationCommands`. It may inspect repository state, files, literal searches, and Git diffs only through bounded adapter tools. Its `APPROVE` verdict is evaluation-only and publishes as a non-authorizing comment, while findings and `REQUEST_CHANGES` remain visible.
+Docker Model Runner and Ollama are hard review-only providers. Prefer Docker when the user asks for local review and does not name a backend; fall back to Ollama only when Docker is unavailable. Never select either as `writer` or request `mode: work`; do not pass browser or `verificationCommands`. They may inspect repository state, files, literal searches, and Git diffs only through bounded adapter tools. Their `APPROVE` and `REQUEST_CHANGES` verdicts are evaluation-only and publish as non-authorizing comments while findings remain visible.
 
 Claude model policy: Never select, inherit, or fall back to Fable unless the user's current request explicitly asks for Fable by name. Saved settings, earlier requests, session history, aliases, and caller-supplied fallback chains do not count. Preserve any configured non-Fable Claude model. If the configured or default Claude model resolves to Fable without that permission, override it with `claude-opus-4-8[1m]` and remove Fable from `modelFallbacks.claude`. Announce an explicitly authorized Fable use before starting. For that authorized phase only, pass `allowClaudeFable: true` to collaboration or `allowFable: true` to a direct Claude call. Never set either field otherwise; authorization resets on every collaboration continuation.
 

@@ -414,6 +414,7 @@ const modelsSchema = z.object({
   codex: z.string().min(1).optional(),
   antigravity: z.string().min(1).optional(),
   ollama: z.string().min(1).optional(),
+  docker: z.string().min(1).optional(),
 }).optional().describe(
   "Optional exact model overrides. Omit a provider to use that provider's configured model.",
 );
@@ -422,6 +423,7 @@ const modelFallbacksSchema = z.object({
   codex: z.array(z.string().trim().min(1)).max(5).optional(),
   antigravity: z.array(z.string().trim().min(1)).max(5).optional(),
   ollama: z.array(z.string().trim().min(1)).max(5).optional(),
+  docker: z.array(z.string().trim().min(1)).max(5).optional(),
 }).strict().optional().describe(
   "Ordered provider models to try after an overload response. Claude uses its native fallback flag; Codex and Antigravity retry through the bridge. A later provider-recovery attempt starts again from the preferred configured model. Omit to use the machine-local config; pass a provider's [] to disable it for this collaboration.",
 );
@@ -437,6 +439,7 @@ const providerConcurrencySchema = z.object({
   codex: providerConcurrencyRoleSchema.optional(),
   antigravity: providerConcurrencyRoleSchema.optional(),
   ollama: providerConcurrencyRoleSchema.optional(),
+  docker: providerConcurrencyRoleSchema.optional(),
 }).strict().optional().describe(
   "Optional lower per-provider live-call limits. The machine-local provider-concurrency policy is a hard ceiling; defaults are work 5 and review 10.",
 );
@@ -469,6 +472,7 @@ const githubReviewSchema = z.object({
     codex: z.string().regex(GITHUB_LOGIN_PATTERN).optional(),
     antigravity: z.string().regex(GITHUB_LOGIN_PATTERN).optional(),
     ollama: z.string().regex(GITHUB_LOGIN_PATTERN).optional(),
+    docker: z.string().regex(GITHUB_LOGIN_PATTERN).optional(),
   }).strict().optional(),
 }).strict().optional().describe(
   "Explicitly authorize reviewers to write their handoff and submit one formal review to this exact PR head. The active provider's configured reviewer App is selected by default. Requires handoffPath.",

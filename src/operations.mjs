@@ -5,14 +5,14 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { GITHUB_LOGIN_PATTERN } from "./github-app-auth.mjs";
 import { negotiateProviderCapabilities } from "./provider-cli-capabilities.mjs";
 
-export const PROVIDERS = ["claude", "codex", "antigravity", "ollama"];
+export const PROVIDERS = ["claude", "codex", "antigravity", "docker", "ollama"];
 export const WRITER_PROVIDERS = ["claude", "codex", "antigravity"];
 
 export function isTransportLivenessSummary(value) {
   const summary = String(value || "").trim();
-  return /^(Claude Code|Codex|Antigravity|Ollama|The local reviewer) started the delegated turn\.?$/i.test(summary)
-    || /^(Claude Code|Codex|Antigravity|Ollama) is still working \(\d+s heartbeat\)\.?$/i.test(summary)
-    || /^The local reviewer is still working; its last repository action remains current\.?$/i.test(summary);
+  return /^(Claude Code|Codex|Antigravity|Ollama|Docker Model Runner|The local reviewer) started the delegated turn\.?$/i.test(summary)
+    || /^(Claude Code|Codex|Antigravity|Ollama|Docker Model Runner) is still working \(\d+s heartbeat\)\.?$/i.test(summary)
+    || /^(The local reviewer|The Docker local reviewer) is still working; its last repository action remains current\.?$/i.test(summary);
 }
 
 export function isSafeWorkerPid(value) {
@@ -84,12 +84,21 @@ export function providerCapabilities({ home = homedir() } = {}) {
         ? { available: true, binary, negotiated: { version: (result.stdout || result.stderr).trim() } }
         : { available: false, binary, reason: (result.stderr || result.stdout).trim() };
     })(),
+    docker: (() => {
+      const binary = process.env.DOCKER_BIN || spawnSync("/usr/bin/env", ["which", "docker"], { encoding: "utf8" }).stdout?.trim();
+      if (!binary || !existsSync(binary)) return { available: false, reason: "docker was not found" };
+      const result = spawnSync(binary, ["model", "status"], { encoding: "utf8" });
+      return result.status === 0
+        ? { available: true, binary, negotiated: { version: (result.stdout || result.stderr).trim() } }
+        : { available: false, binary, reason: (result.stderr || result.stdout).trim() };
+    })(),
   };
   return {
     claude: { ...providers.claude, read: true, write: true, shell: "profiled", browser: "isolated", githubReview: reviewerConfigured("claude") || patReviewFallback, githubBuilder: builderBot },
     codex: { ...providers.codex, read: true, write: true, shell: "sandboxed", browser: "isolated", githubReview: reviewerConfigured("codex") || patReviewFallback, githubBuilder: builderBot },
     antigravity: { ...providers.antigravity, read: true, write: true, shell: "sandboxed", browser: false, githubReview: (reviewerConfigured("antigravity") || patReviewFallback) ? "broker-envelope" : false, githubBuilder: builderBot ? "broker-envelope" : false },
     ollama: { ...providers.ollama, read: true, write: false, shell: false, browser: false, githubReview: (reviewerConfigured("ollama") || patReviewFallback) ? "broker-envelope" : false, githubBuilder: false },
+    docker: { ...providers.docker, read: true, write: false, shell: false, browser: false, githubReview: (reviewerConfigured("docker") || patReviewFallback) ? "broker-envelope" : false, githubBuilder: false },
   };
 }
 
@@ -207,7 +216,7 @@ export function exportPortableManifest({ destination, sourceRoot }) {
     source: resolve(sourceRoot),
     excludes: ["node_modules", ".git", ".bridge", "~/.config/ghtoken", "~/.config/local-agent-bridge/github-apps", "provider credentials", "collaboration state", "capsule files"],
     install: ["npm ci", "npm run install:global", "npm run doctor"],
-    launchers: ["claude", "codex", "antigravity", "ollama", "collaboration", "playwright"],
+    launchers: ["claude", "codex", "antigravity", "docker", "ollama", "collaboration", "playwright"],
   };
   writeFileSync(resolve(destination), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
   return manifest;

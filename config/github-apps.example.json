@@ -59,6 +59,15 @@
           "your-personal-account": 99999999,
           "your-organization": 10101010
         }
+      },
+      "docker": {
+        "appId": "YOUR_DOCKER_REVIEWER_APP_ID",
+        "expectedLogin": "your-docker-reviewer[bot]",
+        "privateKeyPath": "~/.config/local-agent-bridge/github-apps/your-docker-reviewer.pem",
+        "installations": {
+          "your-personal-account": 11111111,
+          "your-organization": 12121212
+        }
       }
     }
   }

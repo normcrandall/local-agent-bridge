@@ -6,7 +6,7 @@ import { probeProviderCapabilities } from "./provider-cli-capabilities.mjs";
 import { resolveGitHubMergeEnforcement } from "./github-merge-enforcement.mjs";
 
 export const POLICY_REPORT_VERSION = 1;
-export const POLICY_PROVIDERS = ["claude", "codex", "antigravity", "ollama"];
+export const POLICY_PROVIDERS = ["claude", "codex", "antigravity", "docker", "ollama"];
 const BUILDER_OPERATIONS = [
   "ensure_pull_request",
   "read_review_threads",
@@ -223,16 +223,16 @@ function providerPermissions(provider, { mode, role, workProfile, permissionProf
       : provider === "claude" ? `${workProfile}-profiled` : `${workProfile}-sandboxed`;
   return {
     read: true,
-    write: provider !== "ollama" && !reviewer,
-    shell: provider === "ollama" ? false : shell,
-    browser: ["antigravity", "ollama"].includes(provider) ? false : "isolated",
+    write: !["ollama", "docker"].includes(provider) && !reviewer,
+    shell: ["ollama", "docker"].includes(provider) ? false : shell,
+    browser: ["antigravity", "ollama", "docker"].includes(provider) ? false : "isolated",
   };
 }
 
 function expectedPeerServers(host) {
-  if (host === "claude") return ["codex", "antigravity", "ollama", "collaboration"];
-  if (host === "antigravity") return ["codex", "claude_code", "ollama", "collaboration"];
-  return ["claude_code", "antigravity", "ollama", "collaboration"];
+  if (host === "claude") return ["codex", "antigravity", "docker", "ollama", "collaboration"];
+  if (host === "antigravity") return ["codex", "claude_code", "docker", "ollama", "collaboration"];
+  return ["claude_code", "antigravity", "docker", "ollama", "collaboration"];
 }
 
 export function collectPolicySnapshot({
@@ -295,7 +295,8 @@ export function collectPolicySnapshot({
     const explicit = provider === "claude" ? process.env.CLAUDE_BIN
       : provider === "codex" ? process.env.CODEX_BRIDGE_CODEX_BIN
         : provider === "antigravity" ? process.env.AGY_BIN
-          : process.env.OLLAMA_BIN;
+          : provider === "ollama" ? process.env.OLLAMA_BIN
+            : process.env.DOCKER_BIN;
     const requestedBinary = explicit || command;
     const binary = requestedBinary.includes("/") ? requestedBinary : which(requestedBinary);
     let availability;
@@ -303,9 +304,10 @@ export function collectPolicySnapshot({
     if (!binary) availability = observation("missing", `${command} was not found.`, source("/usr/bin/env", `which ${command}`));
     else {
       try {
-        if (provider === "ollama") {
-          const result = spawnSync(binary, ["--version"], { encoding: "utf8", timeout: 10_000 });
-          if (result.status !== 0) throw new Error((result.stderr || result.stdout || "Ollama probe failed.").trim());
+        if (["ollama", "docker"].includes(provider)) {
+          const args = provider === "ollama" ? ["--version"] : ["model", "status"];
+          const result = spawnSync(binary, args, { encoding: "utf8", timeout: 10_000 });
+          if (result.status !== 0) throw new Error((result.stderr || result.stdout || `${provider} probe failed.`).trim());
           cli = { provider, version: (result.stdout || result.stderr).trim(), reviewOnly: true };
         } else {
           cli = probeProviderCapabilities({ provider, binary });

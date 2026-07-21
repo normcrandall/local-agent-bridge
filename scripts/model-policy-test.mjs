@@ -29,6 +29,7 @@ try {
     codex: { disabledModels: [] },
     antigravity: { disabledModels: [] },
     ollama: { disabledModels: [] },
+    docker: { disabledModels: [] },
   });
   assert.deepEqual(empty.builtInGuards.claude, ["fable requires explicit per-request authorization"]);
 
@@ -56,7 +57,7 @@ try {
     env: environment,
   });
   assert.notEqual(invalid.status, 0);
-  assert.match(invalid.stderr, /provider must be one of claude, codex, antigravity, ollama/i);
+  assert.match(invalid.stderr, /provider must be one of claude, codex, antigravity, docker, ollama/i);
 
   updateModelPolicy("disable", "claude", "fable", { path: configPath });
   const claudeRoute = resolveModelRoute({
@@ -95,6 +96,14 @@ try {
     policyPath: configPath,
   });
   assert.equal(ollamaRoute.model, "gemma4:31b");
+  updateModelPolicy("disable", "docker", "ai/qwen2.5-coder", { path: configPath });
+  const dockerRoute = resolveModelRoute({
+    provider: "docker",
+    configuredModel: "ai/qwen2.5-coder",
+    fallbackModels: ["ai/qwen3-coder"],
+    policyPath: configPath,
+  });
+  assert.equal(dockerRoute.model, "ai/qwen3-coder");
 } finally {
   rmSync(temporary, { recursive: true, force: true });
 }

@@ -80,6 +80,16 @@ export BRIDGE_WORKSPACE_ROOT="\${AGENT_BRIDGE_WORKSPACE:-$PWD}"
 
 exec "$RUNTIME/scripts/ollama-bridge-mcp.sh"
 `,
+  "agent-docker-mcp": `#!/bin/zsh
+set -eu
+
+RUNTIME="$HOME/.local/share/agent-bridge/runtime"
+export NODE_BIN=${JSON.stringify(process.execPath)}
+export BRIDGE_RUNTIME_ROOT="$RUNTIME"
+export BRIDGE_WORKSPACE_ROOT="\${AGENT_BRIDGE_WORKSPACE:-$PWD}"
+
+exec "$RUNTIME/scripts/docker-bridge-mcp.sh"
+`,
   "agent-collaboration-mcp": `#!/bin/zsh
 set -eu
 
@@ -226,6 +236,10 @@ claudeUserConfig.mcpServers = {
     command: resolve(binRoot, "agent-ollama-mcp"),
     args: [],
   },
+  docker: {
+    command: resolve(binRoot, "agent-docker-mcp"),
+    args: [],
+  },
   collaboration_wake: {
     command: resolve(binRoot, "agent-bridge-claude-wake-channel"),
     args: [],
@@ -245,6 +259,10 @@ antigravityMcp.mcpServers = {
   ...(antigravityMcp.mcpServers || {}),
   ollama: {
     command: resolve(binRoot, "agent-ollama-mcp"),
+    args: [],
+  },
+  docker: {
+    command: resolve(binRoot, "agent-docker-mcp"),
     args: [],
   },
 };
@@ -286,6 +304,9 @@ await writeJson(codexHookPath, codexHooks);
 codexConfig = ensureCodexHookConfiguration(codexConfig);
 if (!/^\[mcp_servers\.ollama\]\s*$/m.test(codexConfig)) {
   codexConfig = `${codexConfig.trimEnd()}\n\n[mcp_servers.ollama]\ncommand = ${JSON.stringify(resolve(binRoot, "agent-ollama-mcp"))}\nargs = []\nstartup_timeout_sec = 20\ntool_timeout_sec = 1800\nenabled = true\nrequired = false\ndefault_tools_approval_mode = "prompt"\n`;
+}
+if (!/^\[mcp_servers\.docker\]\s*$/m.test(codexConfig)) {
+  codexConfig = `${codexConfig.trimEnd()}\n\n[mcp_servers.docker]\ncommand = ${JSON.stringify(resolve(binRoot, "agent-docker-mcp"))}\nargs = []\nstartup_timeout_sec = 20\ntool_timeout_sec = 1800\nenabled = true\nrequired = false\ndefault_tools_approval_mode = "prompt"\n`;
 }
 await writeTextAtomic(codexConfigPath, codexConfig);
 

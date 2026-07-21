@@ -41,7 +41,7 @@ async function githubJson(token, path) {
 
 const roles = [
   { label: "builder", role: "builder" },
-  ...["claude", "codex", "antigravity", "ollama"].map((reviewerProvider) => ({
+  ...["claude", "codex", "antigravity", "docker", "ollama"].map((reviewerProvider) => ({
     label: `reviewer:${reviewerProvider}`,
     role: "reviewer",
     reviewerProvider,

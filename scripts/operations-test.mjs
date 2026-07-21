@@ -17,6 +17,7 @@ import {
 
 assert.equal(isTransportLivenessSummary("Claude Code is still working (30s heartbeat)."), true);
 assert.equal(isTransportLivenessSummary("The local reviewer is still working; its last repository action remains current."), true);
+assert.equal(isTransportLivenessSummary("The Docker local reviewer is still working; its last repository action remains current."), true);
 assert.equal(isTransportLivenessSummary("Codex is still working around the auth guard."), false);
 assert.equal(isTransportLivenessSummary("Codex is still working."), false);
 assert.equal(isTransportLivenessSummary("Inspecting files; tests come next."), false);
@@ -28,6 +29,7 @@ assert.deepEqual(selectRoles({ taskNumber: 0, agents: ["claude", "codex"] }), { 
 assert.deepEqual(selectRoles({ taskNumber: 1, agents: ["claude", "codex"] }), { writer: "codex", reviewers: ["claude"] });
 assert.deepEqual(selectRoles({ taskNumber: 2, agents: ["claude", "codex"] }), { writer: "claude", reviewers: ["codex"] });
 assert.deepEqual(selectRoles({ taskNumber: 0, agents: ["ollama", "codex"] }), { writer: "codex", reviewers: ["ollama"] });
+assert.deepEqual(selectRoles({ taskNumber: 0, agents: ["docker", "codex"] }), { writer: "codex", reviewers: ["docker"] });
 
 const reconciled = reconcileReviews([
   { agent: "claude", findings: [{ path: "src/a.js", line: 1, title: "Validate", verdict: "accept" }] },
