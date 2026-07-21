@@ -11,6 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { resolve } from "node:path";
+import { CLAIMED_ISSUE_CONTEXT_MARKER } from "./claimed-issue-context.mjs";
 
 const LOCK_STALE_MS = 30_000;
 
@@ -171,7 +172,7 @@ export async function listCollaborations(root, { status, limit = 20 } = {}) {
     .slice(0, limit)
     .map((state) => ({
       id: state.id,
-      task: state.task,
+      task: String(state.task || "").split(CLAIMED_ISSUE_CONTEXT_MARKER)[0].trim().slice(0, 500),
       status: state.status,
       agents: state.agents,
       workspace: state.workspace,
@@ -596,4 +597,3 @@ export async function queryControlPlane(stateRoot, options = {}) {
     lanes: filteredLanes
   };
 }
-

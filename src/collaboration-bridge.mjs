@@ -58,6 +58,7 @@ import {
   resolveClaimedWorktreeHead,
   resolveIssueClaimRevisions,
 } from "./collaboration-start-preflight.mjs";
+import { hydrateClaimedIssueTask } from "./claimed-issue-context.mjs";
 import { startSupervisedWorker } from "./worker-supervisor-client.mjs";
 
 const RUNTIME_ROOT = realpathSync(process.env.BRIDGE_RUNTIME_ROOT || process.env.BRIDGE_ROOT || process.cwd());
@@ -680,6 +681,8 @@ server.registerTool(
     let claimHeadSha = null;
     let claimBaseSha = null;
     let resolvedIssueClaim = input.issueClaim ? { ...input.issueClaim } : null;
+    let resolvedTask = input.task;
+    let issueContext = null;
 
     if (input.issueClaim) {
       const { acquireClaimLease } = await import("./github-issue-claims.mjs");
@@ -709,6 +712,15 @@ server.registerTool(
         workspace: requestedWorkspace,
         fetchImpl: fetch,
       });
+
+      const hydrated = await hydrateClaimedIssueTask({
+        client: claimClient,
+        repository,
+        issueNumber: input.issueClaim.issueNumber,
+        task: input.task,
+      });
+      resolvedTask = hydrated.task;
+      issueContext = hydrated.metadata;
 
       let portfolioId = input.issueClaim.portfolioId || null;
       let itemId = input.issueClaim.itemId || null;
@@ -804,7 +816,7 @@ server.registerTool(
       }
       const state = await createCollaboration(WORKSPACE_ROOT, {
         id: collaborationId,
-        task: input.task,
+        task: resolvedTask,
         workspace,
         agents: delegatedAgents,
         participants: input.chair ? [input.chair.provider, ...delegatedAgents.filter((agent) => agent !== input.chair.provider)] : delegatedAgents,
@@ -828,6 +840,7 @@ server.registerTool(
         githubReview: input.githubReview || null,
         githubBuilder: input.githubBuilder || null,
         issueClaim: resolvedIssueClaim,
+        issueContext,
         rotation: rotated ? { taskNumber: input.taskNumber, offset: input.rotationOffset, ...rotated } : null,
         worktree,
         preflight: readiness,
