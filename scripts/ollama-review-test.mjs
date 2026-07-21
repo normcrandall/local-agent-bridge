@@ -182,6 +182,23 @@ try {
     const suppressed = await client.callTool({ name: "get_ollama_status", arguments: {} });
     assert.equal(suppressed.isError, true);
     assert.match(suppressed.content[0].text, /Ollama is disabled while Docker Model Runner is available/);
+    const suppressedAsk = await client.callTool({
+      name: "ask_ollama",
+      arguments: { prompt: "Review this change", cwd: ".", mode: "review" },
+    });
+    assert.equal(suppressedAsk.isError, true);
+    assert.match(suppressedAsk.content[0].text, /Ollama is disabled while Docker Model Runner is available/);
+    const suppressedContinue = await client.callTool({
+      name: "continue_ollama",
+      arguments: {
+        conversationId: "123e4567-e89b-42d3-a456-426614174099",
+        prompt: "Continue the review",
+        cwd: ".",
+        mode: "review",
+      },
+    });
+    assert.equal(suppressedContinue.isError, true);
+    assert.match(suppressedContinue.content[0].text, /Ollama is disabled while Docker Model Runner is available/);
     const rejected = await client.callTool({
       name: "ask_ollama",
       arguments: { prompt: "Implement this", cwd: ".", mode: "work" },

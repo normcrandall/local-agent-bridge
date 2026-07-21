@@ -39,9 +39,6 @@ async function runWithProgress(input, extra, conversationId = null) {
   if (input.mode !== "review") {
     throw new Error("Ollama is configured as a review-only provider; mode work is not permitted.");
   }
-  const existing = conversationId
-    ? sessions.get(conversationId) || await loadOllamaSession(WORKSPACE_ROOT, conversationId)
-    : null;
   const token = extra?._meta?.progressToken;
   let progress = 0;
   const notify = async (message) => {
@@ -54,6 +51,9 @@ async function runWithProgress(input, extra, conversationId = null) {
   };
   const priority = await assertOllamaFallbackAllowed();
   await notify(`Docker Model Runner is unavailable (${priority.dockerUnavailableReason}); using the Ollama fallback.`);
+  const existing = conversationId
+    ? sessions.get(conversationId) || await loadOllamaSession(WORKSPACE_ROOT, conversationId)
+    : null;
   await notify("Starting the local Ollama review.");
   const heartbeat = setInterval(() => {
     notify("The local reviewer is still working; its last repository action remains current.").catch(() => {});
