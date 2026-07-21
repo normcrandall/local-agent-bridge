@@ -110,6 +110,8 @@ chmod 600 ~/.config/local-agent-bridge/provider-concurrency.json
 
 Use self-contained writer checkouts and non-conflicting issue claims when multiple implementation sessions run concurrently. Each writer owns a private `.git`; review sessions remain read-only and may use lightweight linked worktrees with exact-head GitHub authorization, so the larger review pool can drain review-ready work without blocking writers.
 
+Claimed private-repository work is hydrated before provider launch. The broker reads the bound issue and non-lease comments through the builder App, excludes its own claim-status comment, and appends a bounded immutable snapshot to the writer task. The writer therefore does not need ambient GitHub credentials merely to discover its requirements. If the snapshot cannot be fetched, startup fails before a model receives the task or a claim is published.
+
 On another computer, generate a new private key for the same App when possible, install the App on the required accounts, rerun the installation discovery command, and recreate the machine-local config. A securely transferred existing key also works, but it must remain outside the repository with mode `600`.
 
 ### Optional: use your own GitHub Apps
