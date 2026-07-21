@@ -39,7 +39,6 @@ async function runWithProgress(input, extra, conversationId = null) {
   if (input.mode !== "review") {
     throw new Error("Ollama is configured as a review-only provider; mode work is not permitted.");
   }
-  await assertOllamaFallbackAllowed();
   const existing = conversationId
     ? sessions.get(conversationId) || await loadOllamaSession(WORKSPACE_ROOT, conversationId)
     : null;
@@ -53,6 +52,8 @@ async function runWithProgress(input, extra, conversationId = null) {
       params: { progressToken: token, progress, message },
     }).catch(() => {});
   };
+  const priority = await assertOllamaFallbackAllowed();
+  await notify(`Docker Model Runner is unavailable (${priority.dockerUnavailableReason}); using the Ollama fallback.`);
   await notify("Starting the local Ollama review.");
   const heartbeat = setInterval(() => {
     notify("The local reviewer is still working; its last repository action remains current.").catch(() => {});
@@ -94,9 +95,15 @@ server.registerTool(
     inputSchema: { model: z.string().trim().min(1).optional() },
   },
   async ({ model }) => {
-    await assertOllamaFallbackAllowed();
+    const priority = await assertOllamaFallbackAllowed();
     const result = await probeOllama({ model });
-    return { content: [{ type: "text", text: `Ollama ${result.model} is available.` }], structuredContent: result };
+    return {
+      content: [{
+        type: "text",
+        text: `Ollama ${result.model} is available as fallback because Docker Model Runner is unavailable: ${priority.dockerUnavailableReason}`,
+      }],
+      structuredContent: { ...result, dockerUnavailableReason: priority.dockerUnavailableReason },
+    };
   },
 );
 

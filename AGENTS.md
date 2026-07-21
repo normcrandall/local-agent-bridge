@@ -1,11 +1,11 @@
 # Codex collaboration guidance
 
-Claude Code is available through the `claude_code` MCP server. Antigravity is available through the `antigravity` MCP server. Docker Model Runner and Ollama are available through the `docker` and `ollama` MCP servers as hard review-only local providers. Docker has strict priority: Ollama may be used only when Docker preflight is unavailable.
+Claude Code is available through the `claude_code` MCP server. Antigravity is available through the `antigravity` MCP server. Docker Model Runner and Ollama are available through the `docker` and `ollama` MCP servers as hard review-only local providers. Docker has strict priority: Ollama may be used only when the selected Docker reviewer route is unavailable.
 
 Prefer the installed collaboration skills as the user-facing interface. Announce the skill and the exact peer or broker it will call before starting:
 
 - Use `$ask-agent` for one bounded handoff or review.
-- Use Docker Model Runner and Ollama only for review. Always use Docker when its configured reviewer is available; use Ollama only after Docker preflight fails. Explicitly naming Ollama does not override this machine policy. Never select either as a writer, give either verification commands, or treat an evaluation-period local approval as a merge gate.
+- Use Docker Model Runner and Ollama only for review. Always use Docker when its selected reviewer route is available; use Ollama only after Docker preflight fails. Explicitly naming Ollama does not override this machine policy. Never select either as a writer, give either verification commands, or treat an evaluation-period local approval as a merge gate.
 - Use `$run-roundtable` for a persistent multi-agent collaboration.
 - Use `$show-collaboration` to inspect, monitor, or resume collaboration history.
 - Use `$replay-collaboration` to run a deterministic replay of collaboration incidents.
