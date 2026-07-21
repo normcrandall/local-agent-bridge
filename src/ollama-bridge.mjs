@@ -5,6 +5,7 @@ import { realpathSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { assertOllamaFallbackAllowed } from "./local-review-priority.mjs";
 import { probeOllama, runOllamaReview } from "./ollama-review.mjs";
 import { loadOllamaSession, saveOllamaSession } from "./ollama-session-store.mjs";
 
@@ -38,6 +39,7 @@ async function runWithProgress(input, extra, conversationId = null) {
   if (input.mode !== "review") {
     throw new Error("Ollama is configured as a review-only provider; mode work is not permitted.");
   }
+  await assertOllamaFallbackAllowed();
   const existing = conversationId
     ? sessions.get(conversationId) || await loadOllamaSession(WORKSPACE_ROOT, conversationId)
     : null;
@@ -80,7 +82,7 @@ async function runWithProgress(input, extra, conversationId = null) {
 const server = new McpServer(
   { name: "local-ollama-review-bridge", version: "0.1.0" },
   {
-    instructions: "Use ask_ollama for bounded local code review and continue_ollama only with its returned conversationId. Ollama is hard-limited to read-only repository inspection and can never be a writer.",
+    instructions: "Use ask_ollama only as a bounded local-review fallback when Docker Model Runner is unavailable. Calls fail closed while Docker is healthy. Ollama is hard-limited to read-only repository inspection and can never be a writer.",
   },
 );
 
@@ -88,10 +90,11 @@ server.registerTool(
   "get_ollama_status",
   {
     title: "Check local Ollama reviewer",
-    description: "Verify that the loopback Ollama service is reachable and the selected review model is installed.",
+    description: "Verify that Docker Model Runner is unavailable, then check the fallback Ollama reviewer.",
     inputSchema: { model: z.string().trim().min(1).optional() },
   },
   async ({ model }) => {
+    await assertOllamaFallbackAllowed();
     const result = await probeOllama({ model });
     return { content: [{ type: "text", text: `Ollama ${result.model} is available.` }], structuredContent: result };
   },
@@ -101,7 +104,7 @@ server.registerTool(
   "ask_ollama",
   {
     title: "Ask local Ollama reviewer",
-    description: "Start a bounded local-model review with read-only repository inspection tools.",
+    description: "Start a bounded Ollama fallback review only when Docker Model Runner is unavailable.",
     inputSchema: sharedInput,
   },
   (input, extra) => runWithProgress(input, extra),
@@ -111,7 +114,7 @@ server.registerTool(
   "continue_ollama",
   {
     title: "Continue local Ollama review",
-    description: "Continue an Ollama review conversation in the same MCP process.",
+    description: "Continue an Ollama fallback review only while Docker Model Runner remains unavailable.",
     inputSchema: {
       ...sharedInput,
       conversationId: z.string().uuid().describe("The conversationId returned by ask_ollama."),

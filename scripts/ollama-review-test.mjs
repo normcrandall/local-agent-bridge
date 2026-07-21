@@ -6,6 +6,11 @@ import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadOllamaSession, saveOllamaSession } from "../src/ollama-session-store.mjs";
+import {
+  assertOllamaFallbackAllowed,
+  availableDockerReviewer,
+  OLLAMA_DOCKER_PRIORITY_MESSAGE,
+} from "../src/local-review-priority.mjs";
 import { DEFAULT_OLLAMA_MODEL, executeOllamaReviewTool, runOllamaReview } from "../src/ollama-review.mjs";
 import { ollamaToolRequest } from "../src/tool-requests.mjs";
 import { runConversation } from "../src/talk-protocol.mjs";
@@ -16,6 +21,15 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const repository = await mkdtemp(join(tmpdir(), "ollama-review-test-"));
 try {
   assert.equal(DEFAULT_OLLAMA_MODEL, "qwen3.6:latest");
+  const dockerAvailable = async () => ({ available: true, model: "ai/qwen3.6" });
+  const dockerUnavailable = async () => { throw new Error("connect ECONNREFUSED"); };
+  assert.equal((await availableDockerReviewer({ probeDocker: dockerAvailable })).model, "ai/qwen3.6");
+  assert.equal(await availableDockerReviewer({ probeDocker: dockerUnavailable }), null);
+  await assert.rejects(
+    assertOllamaFallbackAllowed({ probeDocker: dockerAvailable }),
+    new RegExp(OLLAMA_DOCKER_PRIORITY_MESSAGE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+  );
+  assert.equal(await assertOllamaFallbackAllowed({ probeDocker: dockerUnavailable }), true);
   execFileSync("git", ["init", "-b", "main"], { cwd: repository, stdio: "ignore" });
   execFileSync("git", ["config", "user.name", "Test"], { cwd: repository });
   execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repository });
