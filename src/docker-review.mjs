@@ -58,11 +58,11 @@ function equivalentModelName(left, right) {
   return normalize(left) === normalize(right);
 }
 
-export async function probeDockerModelRunner({ model, baseUrl, fetchImpl = fetch } = {}) {
+export async function probeDockerModelRunner({ model, baseUrl, fetchImpl = fetch, timeoutMs = 5_000 } = {}) {
   const configuration = await loadDockerModelRunnerConfig();
   const selectedModel = model || configuration.model;
   const selectedBaseUrl = normalizedBaseUrl(baseUrl || configuration.baseUrl);
-  const response = await fetchImpl(`${selectedBaseUrl}/api/tags`, { signal: AbortSignal.timeout(5_000) });
+  const response = await fetchImpl(`${selectedBaseUrl}/api/tags`, { signal: AbortSignal.timeout(timeoutMs) });
   if (!response.ok) throw new Error(`Docker Model Runner health check returned HTTP ${response.status}.`);
   const payload = await response.json();
   const models = (payload.models || []).map((entry) => entry.name || entry.model).filter(Boolean);

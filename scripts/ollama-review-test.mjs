@@ -3,9 +3,15 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadOllamaSession, saveOllamaSession } from "../src/ollama-session-store.mjs";
+import {
+  assertOllamaFallbackAllowed,
+  availableDockerReviewer,
+  OLLAMA_DOCKER_PRIORITY_MESSAGE,
+} from "../src/local-review-priority.mjs";
 import { DEFAULT_OLLAMA_MODEL, executeOllamaReviewTool, runOllamaReview } from "../src/ollama-review.mjs";
 import { ollamaToolRequest } from "../src/tool-requests.mjs";
 import { runConversation } from "../src/talk-protocol.mjs";
@@ -16,6 +22,19 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 const repository = await mkdtemp(join(tmpdir(), "ollama-review-test-"));
 try {
   assert.equal(DEFAULT_OLLAMA_MODEL, "qwen3.6:latest");
+  const dockerAvailable = async () => ({ available: true, model: "ai/qwen3.6" });
+  const dockerUnavailable = async () => { throw new Error("connect ECONNREFUSED"); };
+  assert.equal((await availableDockerReviewer({ probeDocker: dockerAvailable })).model, "ai/qwen3.6");
+  const unavailableDocker = await availableDockerReviewer({ probeDocker: dockerUnavailable });
+  assert.equal(unavailableDocker.available, false);
+  assert.match(unavailableDocker.reason, /ECONNREFUSED/);
+  await assert.rejects(
+    assertOllamaFallbackAllowed({ probeDocker: dockerAvailable }),
+    new RegExp(OLLAMA_DOCKER_PRIORITY_MESSAGE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+  );
+  const fallback = await assertOllamaFallbackAllowed({ probeDocker: dockerUnavailable });
+  assert.equal(fallback.allowed, true);
+  assert.match(fallback.dockerUnavailableReason, /ECONNREFUSED/);
   execFileSync("git", ["init", "-b", "main"], { cwd: repository, stdio: "ignore" });
   execFileSync("git", ["config", "user.name", "Test"], { cwd: repository });
   execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repository });
@@ -131,17 +150,55 @@ try {
   );
   assert.equal(selectRoles({ taskNumber: 3, agents: ["ollama", "codex"] }).writer, "codex");
 
+  const dockerStub = createServer((request, response) => {
+    if (request.url === "/api/tags") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ models: [{ name: "ai/qwen3.6" }] }));
+      return;
+    }
+    response.writeHead(404).end();
+  });
+  await new Promise((resolve, reject) => {
+    dockerStub.once("error", reject);
+    dockerStub.listen(0, "127.0.0.1", resolve);
+  });
+  const dockerStubPort = dockerStub.address().port;
   const client = new Client({ name: "ollama-review-test", version: "0.1.0" });
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [join(import.meta.dirname, "..", "src", "ollama-bridge.mjs")],
     cwd: repository,
-    env: { ...process.env, BRIDGE_WORKSPACE_ROOT: repository },
+    env: {
+      ...process.env,
+      BRIDGE_WORKSPACE_ROOT: repository,
+      DOCKER_MODEL_RUNNER_HOST: `http://127.0.0.1:${dockerStubPort}`,
+      DOCKER_MODEL_RUNNER_MODEL: "ai/qwen3.6",
+    },
   });
   try {
     await client.connect(transport);
     const tools = await client.listTools();
     assert.deepEqual(tools.tools.map((tool) => tool.name).sort(), ["ask_ollama", "continue_ollama", "get_ollama_status"]);
+    const suppressed = await client.callTool({ name: "get_ollama_status", arguments: {} });
+    assert.equal(suppressed.isError, true);
+    assert.match(suppressed.content[0].text, /Ollama is disabled while Docker Model Runner is available/);
+    const suppressedAsk = await client.callTool({
+      name: "ask_ollama",
+      arguments: { prompt: "Review this change", cwd: ".", mode: "review" },
+    });
+    assert.equal(suppressedAsk.isError, true);
+    assert.match(suppressedAsk.content[0].text, /Ollama is disabled while Docker Model Runner is available/);
+    const suppressedContinue = await client.callTool({
+      name: "continue_ollama",
+      arguments: {
+        conversationId: "123e4567-e89b-42d3-a456-426614174099",
+        prompt: "Continue the review",
+        cwd: ".",
+        mode: "review",
+      },
+    });
+    assert.equal(suppressedContinue.isError, true);
+    assert.match(suppressedContinue.content[0].text, /Ollama is disabled while Docker Model Runner is available/);
     const rejected = await client.callTool({
       name: "ask_ollama",
       arguments: { prompt: "Implement this", cwd: ".", mode: "work" },
@@ -150,6 +207,7 @@ try {
     assert.match(rejected.content[0].text, /review-only/);
   } finally {
     await client.close();
+    await new Promise((resolve) => dockerStub.close(resolve));
   }
 
   console.log("Ollama review-only provider tests passed.");
