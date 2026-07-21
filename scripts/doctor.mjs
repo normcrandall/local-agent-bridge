@@ -3,9 +3,16 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { GITHUB_LOGIN_PATTERN } from "../src/github-app-auth.mjs";
+import { DEFAULT_OLLAMA_CONFIG, DEFAULT_OLLAMA_MODEL } from "../src/ollama-review.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 let failed = false;
+
+function configuredOllamaModel() {
+  const configPath = process.env.AGENT_BRIDGE_OLLAMA_CONFIG || DEFAULT_OLLAMA_CONFIG;
+  const configured = existsSync(configPath) ? JSON.parse(readFileSync(configPath, "utf8")) : {};
+  return String(process.env.OLLAMA_MODEL || configured.model || DEFAULT_OLLAMA_MODEL).trim();
+}
 
 function check(label, test, detail = "") {
   try {
@@ -75,13 +82,19 @@ check("Antigravity CLI", () => {
   return result.status === 0;
 }, "install or repair Antigravity CLI, or set AGY_BIN");
 
+const expectedOllamaModel = configuredOllamaModel();
 check("Ollama local reviewer", () => {
   const ollama = process.env.OLLAMA_BIN || "/usr/local/bin/ollama";
   const version = spawnSync(ollama, ["--version"], { encoding: "utf8" });
   if (version.status !== 0) return false;
   const models = spawnSync(ollama, ["list"], { encoding: "utf8", timeout: 10_000 });
-  return models.status === 0 && /(?:^|\n)gemma4(?::latest)?\s/m.test(models.stdout || "");
-}, "install Ollama and pull gemma4, or set OLLAMA_BIN");
+  const installed = String(models.stdout || "")
+    .split("\n")
+    .slice(1)
+    .map((line) => line.trim().split(/\s+/)[0]?.toLowerCase())
+    .filter(Boolean);
+  return models.status === 0 && installed.includes(expectedOllamaModel.toLowerCase());
+}, `install Ollama and pull ${expectedOllamaModel}, or set OLLAMA_BIN`);
 
 check("Docker Model Runner local reviewer", () => {
   const docker = process.env.DOCKER_BIN || "/usr/local/bin/docker";

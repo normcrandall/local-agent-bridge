@@ -6,7 +6,7 @@ import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadOllamaSession, saveOllamaSession } from "../src/ollama-session-store.mjs";
-import { executeOllamaReviewTool, runOllamaReview } from "../src/ollama-review.mjs";
+import { DEFAULT_OLLAMA_MODEL, executeOllamaReviewTool, runOllamaReview } from "../src/ollama-review.mjs";
 import { ollamaToolRequest } from "../src/tool-requests.mjs";
 import { runConversation } from "../src/talk-protocol.mjs";
 import { selectRoles } from "../src/operations.mjs";
@@ -15,6 +15,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 
 const repository = await mkdtemp(join(tmpdir(), "ollama-review-test-"));
 try {
+  assert.equal(DEFAULT_OLLAMA_MODEL, "qwen3.6:latest");
   execFileSync("git", ["init", "-b", "main"], { cwd: repository, stdio: "ignore" });
   execFileSync("git", ["config", "user.name", "Test"], { cwd: repository });
   execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repository });
@@ -114,8 +115,8 @@ try {
     workspaceRoot: repository,
     fallbackModels: [],
     fetchImpl: async (_url, request) => {
-      assert.equal(JSON.parse(request.body).model, "gemma4:latest");
-      return { ok: true, json: async () => ({ model: "gemma4:latest", message: { role: "assistant", content: "No findings." } }) };
+      assert.equal(JSON.parse(request.body).model, "qwen3.6:latest");
+      return { ok: true, json: async () => ({ model: "qwen3.6:latest", message: { role: "assistant", content: "No findings." } }) };
     },
   });
   assert.equal(defaultModelResult.result, "No findings.");

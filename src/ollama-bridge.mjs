@@ -15,7 +15,7 @@ const sharedInput = {
   prompt: z.string().min(1).describe("A self-contained review task for the local Ollama model."),
   cwd: z.string().optional().describe("Project-relative directory. Defaults to the bridge workspace root."),
   mode: z.enum(["review", "work"]).default("review").describe("Ollama is review-only; work is rejected."),
-  model: z.string().trim().min(1).optional().describe("Optional Ollama model. Omit to use ~/.config/local-agent-bridge/ollama.json or gemma4:latest."),
+  model: z.string().trim().min(1).optional().describe("Optional Ollama model. Omit to use ~/.config/local-agent-bridge/ollama.json or qwen3.6:latest."),
   fallbackModels: z.array(z.string().trim().min(1)).max(5).optional().describe("Ordered local models used only when the preferred model cannot fit or the Ollama server is overloaded."),
   timeoutSeconds: z.number().int().min(10).max(7200).default(1800),
 };

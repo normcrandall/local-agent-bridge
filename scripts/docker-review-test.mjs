@@ -8,7 +8,12 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { dockerSessionDirectory, loadDockerSession, saveDockerSession } from "../src/docker-session-store.mjs";
-import { loadDockerModelRunnerConfig, probeDockerModelRunner, runDockerModelReview } from "../src/docker-review.mjs";
+import {
+  DEFAULT_DOCKER_MODEL_RUNNER_MODEL,
+  loadDockerModelRunnerConfig,
+  probeDockerModelRunner,
+  runDockerModelReview,
+} from "../src/docker-review.mjs";
 import { executeLocalReviewTool } from "../src/ollama-review.mjs";
 import { dockerToolRequest } from "../src/tool-requests.mjs";
 import { runConversation } from "../src/talk-protocol.mjs";
@@ -17,6 +22,7 @@ import { selectRoles } from "../src/operations.mjs";
 const repository = await mkdtemp(join(tmpdir(), "docker-review-test-"));
 const configPath = join(repository, "docker-model-runner.json");
 try {
+  assert.equal(DEFAULT_DOCKER_MODEL_RUNNER_MODEL, "ai/qwen3.6");
   execFileSync("git", ["init", "-b", "main"], { cwd: repository, stdio: "ignore" });
   execFileSync("git", ["config", "user.name", "Test"], { cwd: repository });
   execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repository });
@@ -94,17 +100,19 @@ try {
   assert.equal(requests[1].messages.at(-1).role, "tool");
   assert.equal(result.model, "docker.io/ai/qwen2.5-coder:latest");
 
+  process.env.AGENT_BRIDGE_DOCKER_MODEL_RUNNER_CONFIG = join(repository, "missing-docker-config.json");
   const defaultModelResponse = await runDockerModelReview({
     prompt: "Return a concise review.",
     cwd: ".",
     workspaceRoot: repository,
     fallbackModels: [],
     fetchImpl: async (_url, request) => {
-      assert.equal(JSON.parse(request.body).model, "ai/qwen2.5-coder");
-      return { ok: true, json: async () => ({ model: "ai/qwen2.5-coder", message: { role: "assistant", content: "No findings." } }) };
+      assert.equal(JSON.parse(request.body).model, "ai/qwen3.6");
+      return { ok: true, json: async () => ({ model: "ai/qwen3.6", message: { role: "assistant", content: "No findings." } }) };
     },
   });
   assert.equal(defaultModelResponse.result, "No findings.");
+  process.env.AGENT_BRIDGE_DOCKER_MODEL_RUNNER_CONFIG = configPath;
 
   assert.throws(
     () => dockerToolRequest({ prompt: "implement", cwd: repository, mode: "work" }),

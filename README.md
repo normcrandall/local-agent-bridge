@@ -16,9 +16,9 @@ The adapters shell out to the already-authenticated Claude Code and Antigravity 
 ```sh
 npm install
 docker desktop enable model-runner --tcp 12434
-docker model pull ai/qwen2.5-coder
+docker model pull ai/qwen3.6
 # Optional secondary local backend:
-ollama pull gemma4
+ollama pull qwen3.6
 npm run install:global
 npm run doctor
 npm run smoke
@@ -48,7 +48,7 @@ Docker Model Runner is the preferred local review backend. It is opt-in, indepen
 
 ```sh
 docker desktop enable model-runner --tcp 12434
-docker model pull ai/qwen2.5-coder
+docker model pull ai/qwen3.6
 mkdir -p ~/.config/local-agent-bridge
 cp config/docker-model-runner.example.json ~/.config/local-agent-bridge/docker-model-runner.json
 chmod 600 ~/.config/local-agent-bridge/docker-model-runner.json
@@ -60,13 +60,13 @@ Docker receives only bounded repository-state, file-read, literal-search, and Gi
 
 ### Local Ollama reviewer (secondary)
 
-Ollama remains an opt-in review-only fallback when Docker Model Runner is unavailable or the user explicitly requests Ollama. Configure its model and loopback endpoint by copying [`config/ollama.example.json`](config/ollama.example.json) to `~/.config/local-agent-bridge/ollama.json`; if the file is absent, the bridge uses `gemma4:latest` at `http://127.0.0.1:11434`. `OLLAMA_MODEL` and `OLLAMA_HOST` are explicit machine overrides. This release rejects non-loopback endpoints.
+Ollama remains an opt-in review-only fallback when Docker Model Runner is unavailable or the user explicitly requests Ollama. Qwen 3.6 is the primary local-review model on both runtimes; Gemma remains a later fallback for comparative evaluation. Configure the model and loopback endpoint by copying [`config/ollama.example.json`](config/ollama.example.json) to `~/.config/local-agent-bridge/ollama.json`; if the file is absent, the bridge uses `qwen3.6:latest` at `http://127.0.0.1:11434`. `OLLAMA_MODEL` and `OLLAMA_HOST` are explicit machine overrides. This release rejects non-loopback endpoints.
 
 ```sh
 mkdir -p ~/.config/local-agent-bridge
 cp config/ollama.example.json ~/.config/local-agent-bridge/ollama.json
 chmod 600 ~/.config/local-agent-bridge/ollama.json
-ollama pull gemma4
+ollama pull qwen3.6
 ```
 
 Use `agents: ["ollama"]` for a bounded local review or include `ollama` alongside cloud participants. In work mode, choose Claude, Codex, or Antigravity as the writer; schema and runtime guards prevent Ollama from being selected or promoted as writer. The local model receives only bounded read-only repository tools. It receives no shell, browser, source-write, builder, commit, push, or merge capability, and `verificationCommands` remain unavailable.
@@ -689,15 +689,15 @@ Claude Code, Codex, Antigravity, Docker Model Runner, and Ollama capacity failur
     "claude": "claude-opus-4-8",
     "codex": "gpt-5.6-sol",
     "antigravity": "Gemini 3.1 Pro (High)",
-    "docker": "ai/qwen2.5-coder",
-    "ollama": "gemma4:31b-coding-mtp-bf16"
+    "docker": "ai/qwen3.6",
+    "ollama": "qwen3.6:latest"
   },
   "modelFallbacks": {
     "claude": ["claude-opus-4-6", "claude-sonnet-5"],
     "codex": ["gpt-5.6-terra"],
     "antigravity": ["Gemini 3.1 Pro (Low)", "Gemini 3.5 Flash (High)"],
-    "docker": ["ai/qwen3-coder", "ai/devstral-small-2", "ai/qwen2.5-coder"],
-    "ollama": ["gemma4:31b", "qwen3-coder:30b", "gemma4:latest"]
+    "docker": ["ai/qwen3-coder", "ai/devstral-small-2", "ai/qwen2.5-coder", "ai/gemma4:31B"],
+    "ollama": ["qwen3-coder:30b", "qwen3.5:27b", "gemma4:31b", "gemma4:latest"]
   }
 }
 ```
@@ -718,8 +718,8 @@ Disable a model once for every new delegated bridge turn instead of repeating th
 bridge models disable claude fable
 bridge models disable codex gpt-5.6-sol
 bridge models disable antigravity "Gemini 3.1 Pro (High)"
-bridge models disable docker "ai/qwen2.5-coder"
-bridge models disable ollama "gemma4:31b-coding-mtp-bf16"
+bridge models disable docker "ai/qwen3-coder"
+bridge models disable ollama "gemma4:latest"
 bridge models status
 ```
 
