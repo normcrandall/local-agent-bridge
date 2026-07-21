@@ -378,7 +378,7 @@ export function createAgentPool({
           fallbackModels: modelFallbacks.ollama,
           timeoutSeconds: turnTimeoutSeconds,
         });
-      } else {
+      } else if (agent === "docker") {
         const dockerPrompt = effectiveGithubReview
           ? `${effectivePrompt}${reviewEnvelopeInstructions({ githubReview: effectiveGithubReview, handoffPath, provider: "Docker Model Runner" })}`
           : effectivePrompt;
@@ -391,6 +391,8 @@ export function createAgentPool({
           fallbackModels: modelFallbacks.docker,
           timeoutSeconds: turnTimeoutSeconds,
         });
+      } else {
+        throw new Error(`Unsupported provider: ${agent}`);
       }
       request._meta = { progressToken: `${agent}-${Date.now()}` };
       let fallbackSlots = 0;

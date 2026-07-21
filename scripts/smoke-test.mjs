@@ -88,6 +88,7 @@ async function callBridgeWithoutModel() {
       "Bash(git diff --check)",
       `Edit(/${resolve(root, ".bridge/test-handoffs/smoke-review.md")})`,
       `Write(/${resolve(root, ".bridge/test-handoffs/smoke-review.md")})`,
+      "mcp__github_review__write_handoff",
       "mcp__github_review__submit_pr_review",
     ]) {
       if (!allowed.includes(rule)) throw new Error(`Claude review permission is missing: ${rule}`);

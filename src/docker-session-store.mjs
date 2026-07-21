@@ -12,7 +12,7 @@ function validatedConversationId(value) {
 }
 
 export function dockerSessionDirectory(workspaceRoot, {
-  stateRoot = resolve(homedir(), ".local/state/local-agent-bridge"),
+  stateRoot = process.env.AGENT_BRIDGE_STATE_DIR || resolve(homedir(), ".local/state/local-agent-bridge"),
 } = {}) {
   const workspaceKey = createHash("sha256").update(resolve(workspaceRoot)).digest("hex");
   return resolve(stateRoot, "docker-sessions", workspaceKey);

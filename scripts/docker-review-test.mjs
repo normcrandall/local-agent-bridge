@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { loadDockerSession, saveDockerSession } from "../src/docker-session-store.mjs";
+import { dockerSessionDirectory, loadDockerSession, saveDockerSession } from "../src/docker-session-store.mjs";
 import { loadDockerModelRunnerConfig, probeDockerModelRunner, runDockerModelReview } from "../src/docker-review.mjs";
 import { executeLocalReviewTool } from "../src/ollama-review.mjs";
 import { dockerToolRequest } from "../src/tool-requests.mjs";
@@ -50,6 +50,9 @@ try {
   }, { stateRoot });
   const restored = await loadDockerSession(repository, conversationId, { stateRoot });
   assert.equal(restored.messages[0].content, "prior review");
+  process.env.AGENT_BRIDGE_STATE_DIR = stateRoot;
+  assert.equal(dockerSessionDirectory(repository).startsWith(stateRoot), true);
+  delete process.env.AGENT_BRIDGE_STATE_DIR;
   await assert.rejects(
     loadDockerSession(repository, "123e4567-e89b-42d3-a456-426614174001", { stateRoot }),
     /Unknown Docker Model Runner conversation/,

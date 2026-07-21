@@ -297,6 +297,9 @@ export async function runLocalReview({
   const actualRoot = realpathSync(workspaceRoot);
   const startedAt = Date.now();
   const actualCwd = containedWorkspace(actualRoot, cwd);
+  if (provider !== "ollama" && !suppliedConfiguration) {
+    throw new Error(`${providerLabel} must supply its provider-specific local model configuration.`);
+  }
   const configuration = suppliedConfiguration || await loadOllamaConfig();
   const configuredFallbacks = fallbackModels === undefined
     ? loadConfiguredFallbackModels(provider)

@@ -87,10 +87,10 @@ export function providerCapabilities({ home = homedir() } = {}) {
     docker: (() => {
       const binary = process.env.DOCKER_BIN || spawnSync("/usr/bin/env", ["which", "docker"], { encoding: "utf8" }).stdout?.trim();
       if (!binary || !existsSync(binary)) return { available: false, reason: "docker was not found" };
-      const result = spawnSync(binary, ["model", "status"], { encoding: "utf8" });
+      const result = spawnSync(binary, ["model", "status"], { encoding: "utf8", timeout: 10_000 });
       return result.status === 0
         ? { available: true, binary, negotiated: { version: (result.stdout || result.stderr).trim() } }
-        : { available: false, binary, reason: (result.stderr || result.stdout).trim() };
+        : { available: false, binary, reason: (result.stderr || result.stdout || result.error?.message || "docker model status failed").trim() };
     })(),
   };
   return {

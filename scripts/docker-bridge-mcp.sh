@@ -1,7 +1,9 @@
 #!/bin/zsh
 set -eu
 
-ROOT="${BRIDGE_RUNTIME_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+ROOT="${BRIDGE_RUNTIME_ROOT:-${0:A:h:h}}"
+export BRIDGE_RUNTIME_ROOT="$ROOT"
+export BRIDGE_WORKSPACE_ROOT="${BRIDGE_WORKSPACE_ROOT:-$ROOT}"
 
 if [[ -n "${NODE_BIN:-}" && -x "${NODE_BIN}" ]]; then
   exec "$NODE_BIN" "$ROOT/src/docker-bridge.mjs"
@@ -11,10 +13,9 @@ if command -v node >/dev/null 2>&1; then
   exec "$(command -v node)" "$ROOT/src/docker-bridge.mjs"
 fi
 
-FALLBACK_NODE="$HOME/.nvm/versions/node/v24.14.0/bin/node"
-if [[ -x "$FALLBACK_NODE" ]]; then
-  exec "$FALLBACK_NODE" "$ROOT/src/docker-bridge.mjs"
-fi
+for FALLBACK_NODE in "$HOME"/.nvm/versions/node/*/bin/node(N); do
+  [[ -x "$FALLBACK_NODE" ]] && exec "$FALLBACK_NODE" "$ROOT/src/docker-bridge.mjs"
+done
 
-echo "Node.js is required to run the Docker Model Runner MCP bridge." >&2
+print -u2 "Node.js not found. Set NODE_BIN to an absolute Node.js path."
 exit 127
