@@ -1,10 +1,11 @@
 # Claude Code collaboration guidance
 
-Codex is available through the project MCP server named `codex`. Antigravity is available through the project MCP server named `antigravity`.
+Codex is available through the project MCP server named `codex`. Antigravity is available through the project MCP server named `antigravity`. Ollama is available through `ollama` as a hard review-only local provider.
 
 Prefer the installed collaboration skills as the user-facing interface. Announce the skill and the exact peer or broker it will call before starting:
 
 - Use `/ask-agent` for one bounded handoff or review.
+- Use Ollama only for review. Never select it as a writer, give it verification commands, or treat its evaluation-period approval as a merge gate.
 - Use `/run-roundtable` for a persistent multi-agent collaboration.
 - Use `/show-collaboration` to inspect, monitor, or resume collaboration history.
 - Use `/replay-collaboration` to run a deterministic replay of collaboration incidents.

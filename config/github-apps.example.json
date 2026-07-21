@@ -50,6 +50,15 @@
           "your-personal-account": 77777777,
           "your-organization": 88888888
         }
+      },
+      "ollama": {
+        "appId": "YOUR_LOCAL_REVIEWER_APP_ID",
+        "expectedLogin": "your-local-reviewer[bot]",
+        "privateKeyPath": "~/.config/local-agent-bridge/github-apps/your-local-reviewer.pem",
+        "installations": {
+          "your-personal-account": 99999999,
+          "your-organization": 10101010
+        }
       }
     }
   }

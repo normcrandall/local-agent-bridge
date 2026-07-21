@@ -70,6 +70,16 @@ export BRIDGE_WORKSPACE_ROOT="\${AGENT_BRIDGE_WORKSPACE:-$PWD}"
 
 exec "$RUNTIME/scripts/antigravity-bridge-mcp.sh"
 `,
+  "agent-ollama-mcp": `#!/bin/zsh
+set -eu
+
+RUNTIME="$HOME/.local/share/agent-bridge/runtime"
+export NODE_BIN=${JSON.stringify(process.execPath)}
+export BRIDGE_RUNTIME_ROOT="$RUNTIME"
+export BRIDGE_WORKSPACE_ROOT="\${AGENT_BRIDGE_WORKSPACE:-$PWD}"
+
+exec "$RUNTIME/scripts/ollama-bridge-mcp.sh"
+`,
   "agent-collaboration-mcp": `#!/bin/zsh
 set -eu
 
@@ -212,6 +222,10 @@ const claudeUserConfigPath = resolve(homedir(), ".claude.json");
 const claudeUserConfig = await readJson(claudeUserConfigPath);
 claudeUserConfig.mcpServers = {
   ...(claudeUserConfig.mcpServers || {}),
+  ollama: {
+    command: resolve(binRoot, "agent-ollama-mcp"),
+    args: [],
+  },
   collaboration_wake: {
     command: resolve(binRoot, "agent-bridge-claude-wake-channel"),
     args: [],
@@ -224,6 +238,17 @@ let antigravitySettings = await readJson(antigravitySettingsPath);
 antigravitySettings = addCommandHook(antigravitySettings, "AfterAgent", `${hookLauncher} antigravity stop`, { timeout: 5_000 });
 antigravitySettings = addCommandHook(antigravitySettings, "SessionStart", `${hookLauncher} antigravity session_start`, { timeout: 5_000 });
 await writeJson(antigravitySettingsPath, antigravitySettings);
+
+const antigravityMcpPath = resolve(homedir(), ".gemini/config/mcp_config.json");
+const antigravityMcp = await readJson(antigravityMcpPath);
+antigravityMcp.mcpServers = {
+  ...(antigravityMcp.mcpServers || {}),
+  ollama: {
+    command: resolve(binRoot, "agent-ollama-mcp"),
+    args: [],
+  },
+};
+await writeJson(antigravityMcpPath, antigravityMcp);
 
 const codexConfigPath = resolve(homedir(), ".codex/config.toml");
 let codexConfig = await readText(codexConfigPath);
@@ -259,6 +284,9 @@ codexHooks = addCommandHook(codexHooks, "Stop", `${hookLauncher} codex stop`);
 codexHooks = addCommandHook(codexHooks, "SessionStart", `${hookLauncher} codex session_start`);
 await writeJson(codexHookPath, codexHooks);
 codexConfig = ensureCodexHookConfiguration(codexConfig);
+if (!/^\[mcp_servers\.ollama\]\s*$/m.test(codexConfig)) {
+  codexConfig = `${codexConfig.trimEnd()}\n\n[mcp_servers.ollama]\ncommand = ${JSON.stringify(resolve(binRoot, "agent-ollama-mcp"))}\nargs = []\nstartup_timeout_sec = 20\ntool_timeout_sec = 1800\nenabled = true\nrequired = false\ndefault_tools_approval_mode = "prompt"\n`;
+}
 await writeTextAtomic(codexConfigPath, codexConfig);
 
 const portableSkills = await exportSkills({ homeRoot: homedir(), sourceRoot });

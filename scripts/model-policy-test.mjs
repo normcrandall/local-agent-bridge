@@ -28,6 +28,7 @@ try {
     claude: { disabledModels: [] },
     codex: { disabledModels: [] },
     antigravity: { disabledModels: [] },
+    ollama: { disabledModels: [] },
   });
   assert.deepEqual(empty.builtInGuards.claude, ["fable requires explicit per-request authorization"]);
 
@@ -55,7 +56,7 @@ try {
     env: environment,
   });
   assert.notEqual(invalid.status, 0);
-  assert.match(invalid.stderr, /provider must be one of claude, codex, antigravity/i);
+  assert.match(invalid.stderr, /provider must be one of claude, codex, antigravity, ollama/i);
 
   updateModelPolicy("disable", "claude", "fable", { path: configPath });
   const claudeRoute = resolveModelRoute({
@@ -85,6 +86,15 @@ try {
     fallbackModels: ["gemini 3.1 pro (high)"],
     policyPath: configPath,
   }), /disables every requested antigravity model/i);
+
+  updateModelPolicy("disable", "ollama", "gemma4:latest", { path: configPath });
+  const ollamaRoute = resolveModelRoute({
+    provider: "ollama",
+    configuredModel: "gemma4:latest",
+    fallbackModels: ["gemma4:31b"],
+    policyPath: configPath,
+  });
+  assert.equal(ollamaRoute.model, "gemma4:31b");
 } finally {
   rmSync(temporary, { recursive: true, force: true });
 }

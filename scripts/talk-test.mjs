@@ -4,6 +4,7 @@ import { parseHandoffEnvelope, parseStatus, runConversation } from "../src/talk-
 assert.equal(parseStatus("hello\nSTATUS: AGREED"), "AGREED");
 assert.equal(parseStatus("no marker"), "CONTINUE");
 assert.equal(parseStatus("STATUS: AGREED\nchanged my mind\nSTATUS: CONTINUE"), "CONTINUE");
+assert.equal(parseStatus("STATUS: AGREED — the task has a verified conclusion."), "AGREED");
 
 const parsedHandoff = parseHandoffEnvelope(`Completed the requested implementation.
 HANDOFF: {"outcome":"completed","summary":"Implemented the change.","artifacts":["src/example.mjs"],"verification":["npm test: passed"],"commit":"abc1234","pullRequest":"https://github.com/owner/repo/pull/1","remaining":[],"nextAction":"chair_verify"}

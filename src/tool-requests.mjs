@@ -170,3 +170,23 @@ export function antigravityToolRequest({
   }
   return { name: "ask_antigravity", arguments: arguments_ };
 }
+
+export function ollamaToolRequest({
+  prompt,
+  sessionId = null,
+  cwd = ".",
+  mode = "review",
+  model = null,
+  fallbackModels,
+  timeoutSeconds = 1800,
+}) {
+  if (mode !== "review") throw new Error("Ollama is review-only and cannot receive a work-mode request.");
+  const arguments_ = { prompt, cwd, mode, timeoutSeconds };
+  if (model) arguments_.model = model;
+  if (fallbackModels !== undefined) arguments_.fallbackModels = fallbackModels;
+  if (sessionId) {
+    arguments_.conversationId = sessionId;
+    return { name: "continue_ollama", arguments: arguments_ };
+  }
+  return { name: "ask_ollama", arguments: arguments_ };
+}

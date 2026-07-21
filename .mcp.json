@@ -12,6 +12,12 @@
       "args": [],
       "env": {}
     },
+    "ollama": {
+      "type": "stdio",
+      "command": "agent-ollama-mcp",
+      "args": [],
+      "env": {}
+    },
     "collaboration": {
       "type": "stdio",
       "command": "agent-collaboration-mcp",

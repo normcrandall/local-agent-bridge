@@ -22,7 +22,7 @@ import {
   waitForCollaborationChange,
 } from "./collaboration-store.mjs";
 import { reapProcessTree } from "./process-reaper.mjs";
-import { KNOWN_AGENTS, validateAgents } from "./talk-protocol.mjs";
+import { DEFAULT_AGENTS, KNOWN_AGENTS, validateAgents, WRITER_AGENTS } from "./talk-protocol.mjs";
 import { createWorktree, isSafeWorkerPid, preflight, selectRoles } from "./operations.mjs";
 import { cleanupWriterCheckout, isLinkedGitCheckout, prepareWriterCheckout, recoverWriterCheckout } from "./writer-checkout.mjs";
 import { createDecisionReceipt, DECISION_CATEGORIES } from "./decision-policy.mjs";
@@ -413,6 +413,7 @@ const modelsSchema = z.object({
   claude: z.string().min(1).optional(),
   codex: z.string().min(1).optional(),
   antigravity: z.string().min(1).optional(),
+  ollama: z.string().min(1).optional(),
 }).optional().describe(
   "Optional exact model overrides. Omit a provider to use that provider's configured model.",
 );
@@ -420,6 +421,7 @@ const modelFallbacksSchema = z.object({
   claude: z.array(z.string().trim().min(1)).max(5).optional(),
   codex: z.array(z.string().trim().min(1)).max(5).optional(),
   antigravity: z.array(z.string().trim().min(1)).max(5).optional(),
+  ollama: z.array(z.string().trim().min(1)).max(5).optional(),
 }).strict().optional().describe(
   "Ordered provider models to try after an overload response. Claude uses its native fallback flag; Codex and Antigravity retry through the bridge. A later provider-recovery attempt starts again from the preferred configured model. Omit to use the machine-local config; pass a provider's [] to disable it for this collaboration.",
 );
@@ -434,6 +436,7 @@ const providerConcurrencySchema = z.object({
   claude: providerConcurrencyRoleSchema.optional(),
   codex: providerConcurrencyRoleSchema.optional(),
   antigravity: providerConcurrencyRoleSchema.optional(),
+  ollama: providerConcurrencyRoleSchema.optional(),
 }).strict().optional().describe(
   "Optional lower per-provider live-call limits. The machine-local provider-concurrency policy is a hard ceiling; defaults are work 5 and review 10.",
 );
@@ -465,6 +468,7 @@ const githubReviewSchema = z.object({
     claude: z.string().regex(GITHUB_LOGIN_PATTERN).optional(),
     codex: z.string().regex(GITHUB_LOGIN_PATTERN).optional(),
     antigravity: z.string().regex(GITHUB_LOGIN_PATTERN).optional(),
+    ollama: z.string().regex(GITHUB_LOGIN_PATTERN).optional(),
   }).strict().optional(),
 }).strict().optional().describe(
   "Explicitly authorize reviewers to write their handoff and submit one formal review to this exact PR head. The active provider's configured reviewer App is selected by default. Requires handoffPath.",
@@ -599,11 +603,11 @@ server.registerTool(
       "Start a detached durable provider job or bounded multi-provider collaboration. Returns immediately; call get_collaboration with the returned ID for progress.",
     inputSchema: {
       task: z.string().min(1).describe("Shared objective, constraints, and expected deliverable."),
-      agents: z.array(z.enum(KNOWN_AGENTS)).min(1).max(3).default(KNOWN_AGENTS),
+      agents: z.array(z.enum(KNOWN_AGENTS)).min(1).max(KNOWN_AGENTS.length).default(DEFAULT_AGENTS),
       startAgent: z.enum(KNOWN_AGENTS).optional().describe("Defaults to the first item in agents."),
       workspace: z.string().optional().describe("Project-relative directory; defaults to the bridge project."),
       mode: z.enum(["review", "work"]).default("review"),
-      writer: z.enum(KNOWN_AGENTS).optional().describe(
+      writer: z.enum(WRITER_AGENTS).optional().describe(
         "The only agent allowed to edit in work mode. Defaults to startAgent and must be selected in agents.",
       ),
       browser: z.boolean().default(false).describe("Enable isolated browser access where supported."),
@@ -637,6 +641,9 @@ server.registerTool(
       taskNumber: input.taskNumber, agents: input.agents, offset: input.rotationOffset,
     });
     const requestedWriter = input.mode === "work" ? (input.writer || participantRotation?.writer || input.startAgent || input.agents[0]) : null;
+    if (requestedWriter && !WRITER_AGENTS.includes(requestedWriter)) {
+      throw new Error(`Provider ${requestedWriter} is review-only and cannot be selected as writer.`);
+    }
     const native = resolveNativeChair({
       chair: input.chair || null, agents: input.agents, startAgent: input.startAgent,
       writer: requestedWriter, mode: input.mode,
@@ -1277,7 +1284,7 @@ server.registerTool(
       expectedRevision: z.number().int().min(1),
       itemId: z.string().min(1).max(200),
       status: portfolioStatusSchema,
-      writer: z.enum(KNOWN_AGENTS).optional(),
+      writer: z.enum(WRITER_AGENTS).optional(),
       collaborationId: collaborationId.optional(),
       worktree: z.string().max(5_000).optional(),
       branch: z.string().max(1_000).optional(),

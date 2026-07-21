@@ -6,7 +6,7 @@ import { probeProviderCapabilities } from "./provider-cli-capabilities.mjs";
 import { resolveGitHubMergeEnforcement } from "./github-merge-enforcement.mjs";
 
 export const POLICY_REPORT_VERSION = 1;
-export const POLICY_PROVIDERS = ["claude", "codex", "antigravity"];
+export const POLICY_PROVIDERS = ["claude", "codex", "antigravity", "ollama"];
 const BUILDER_OPERATIONS = [
   "ensure_pull_request",
   "read_review_threads",
@@ -223,16 +223,16 @@ function providerPermissions(provider, { mode, role, workProfile, permissionProf
       : provider === "claude" ? `${workProfile}-profiled` : `${workProfile}-sandboxed`;
   return {
     read: true,
-    write: !reviewer,
-    shell,
-    browser: provider === "antigravity" ? false : "isolated",
+    write: provider !== "ollama" && !reviewer,
+    shell: provider === "ollama" ? false : shell,
+    browser: ["antigravity", "ollama"].includes(provider) ? false : "isolated",
   };
 }
 
 function expectedPeerServers(host) {
-  if (host === "claude") return ["codex", "antigravity", "collaboration"];
-  if (host === "antigravity") return ["codex", "claude_code", "collaboration"];
-  return ["claude_code", "antigravity", "collaboration"];
+  if (host === "claude") return ["codex", "antigravity", "ollama", "collaboration"];
+  if (host === "antigravity") return ["codex", "claude_code", "ollama", "collaboration"];
+  return ["claude_code", "antigravity", "ollama", "collaboration"];
 }
 
 export function collectPolicySnapshot({
@@ -294,7 +294,8 @@ export function collectPolicySnapshot({
     const command = provider === "antigravity" ? "agy" : provider;
     const explicit = provider === "claude" ? process.env.CLAUDE_BIN
       : provider === "codex" ? process.env.CODEX_BRIDGE_CODEX_BIN
-        : process.env.AGY_BIN;
+        : provider === "antigravity" ? process.env.AGY_BIN
+          : process.env.OLLAMA_BIN;
     const requestedBinary = explicit || command;
     const binary = requestedBinary.includes("/") ? requestedBinary : which(requestedBinary);
     let availability;
@@ -302,7 +303,13 @@ export function collectPolicySnapshot({
     if (!binary) availability = observation("missing", `${command} was not found.`, source("/usr/bin/env", `which ${command}`));
     else {
       try {
-        cli = probeProviderCapabilities({ provider, binary });
+        if (provider === "ollama") {
+          const result = spawnSync(binary, ["--version"], { encoding: "utf8", timeout: 10_000 });
+          if (result.status !== 0) throw new Error((result.stderr || result.stdout || "Ollama probe failed.").trim());
+          cli = { provider, version: (result.stdout || result.stderr).trim(), reviewOnly: true };
+        } else {
+          cli = probeProviderCapabilities({ provider, binary });
+        }
         availability = observation("available", `${provider} CLI ${cli.version} was probed without using its capability cache.`, source(binary));
       } catch (error) {
         availability = observation("unavailable", error.message, source(binary));

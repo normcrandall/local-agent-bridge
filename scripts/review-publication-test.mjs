@@ -8,6 +8,7 @@ import {
   republishValidatedReview,
   resolveReviewPublication,
 } from "../src/review-publication.mjs";
+import { localReviewEnvelopePolicy, localReviewPublicationPolicy } from "../src/agent-pool.mjs";
 
 const githubReview = { repository: "owner/repo", prNumber: 1, headSha: "a".repeat(40) };
 assert.equal(assertReviewWorkspaceHead({ expectedHeadSha: "a".repeat(40), observedHeadSha: "A".repeat(40) }), true);
@@ -155,5 +156,57 @@ const prompt = localReviewPrompt("Review this diff.", "reviewer App unavailable"
 assert.match(prompt, /Complete the independent review and durable handoff/);
 assert.match(prompt, /trusted human must approve the exact head/i);
 assert.match(prompt, /do not claim.*formal GitHub review/i);
+
+const noTarget = { available: true, binding: null, reason: null };
+assert.equal(localReviewPublicationPolicy("ollama", noTarget), noTarget, "a local review without a PR target must preserve its null publication binding");
+const localTarget = localReviewPublicationPolicy("ollama", {
+  available: true,
+  binding: { repository: "owner/repo", publishStatusGate: true },
+  statusGateAvailable: true,
+});
+assert.equal(localTarget.binding.publishStatusGate, false);
+assert.equal(localTarget.statusGateAvailable, false);
+assert.equal(localTarget.authorizing, false);
+
+const localAndCloud = orderReviewProbes({
+  requestedStartAgent: "ollama",
+  githubReview,
+  probes: [
+    { agent: "ollama", available: true, reviewPublication: { available: true, authorizing: false } },
+    { agent: "claude", available: true, reviewPublication: { available: true, authorizing: true } },
+  ],
+});
+assert.deepEqual(localAndCloud.agents, ["claude", "ollama"]);
+assert.equal(localAndCloud.startAgent, "claude");
+assert.deepEqual(localAndCloud.publication.authorizingAgents, ["claude"]);
+assert.deepEqual(localAndCloud.publication.nonAuthorizingAgents, ["ollama"]);
+assert.equal(localAndCloud.publication.humanApprovalRequired, false);
+
+const localOnlyPublication = orderReviewProbes({
+  requestedStartAgent: "ollama",
+  githubReview,
+  probes: [{ agent: "ollama", available: true, reviewPublication: { available: true, authorizing: false } }],
+});
+assert.equal(localOnlyPublication.publication.status, "available");
+assert.equal(localOnlyPublication.publication.humanApprovalRequired, true);
+const localPublished = recordReviewPublicationResult(localOnlyPublication.publication, { agent: "ollama", published: true });
+assert.equal(localPublished.humanApprovalRequired, true);
+
+const evaluationApproval = localReviewEnvelopePolicy("ollama", {
+  event: "APPROVE",
+  body: "No blockers found.",
+  handoff: "# Review",
+  comments: [],
+});
+assert.equal(evaluationApproval.event, "COMMENT");
+assert.match(evaluationApproval.body, /non-authorizing/);
+const evaluationRequestChanges = localReviewEnvelopePolicy("ollama", {
+  event: "REQUEST_CHANGES",
+  body: "A defect remains.",
+  handoff: "# Review",
+  comments: [],
+});
+assert.equal(evaluationRequestChanges.event, "COMMENT");
+assert.match(evaluationRequestChanges.body, /request for changes \(non-authorizing\)/);
 
 console.log("Review publication fallback tests passed: publishable-first ordering, local degradation, and trusted-human escalation.");

@@ -5,13 +5,16 @@ import {
 } from "./context-capsule.mjs";
 
 const STATUSES = new Set(["CONTINUE", "AGREED", "NEEDS_USER"]);
-export const KNOWN_AGENTS = ["claude", "codex", "antigravity"];
+export const KNOWN_AGENTS = ["claude", "codex", "antigravity", "ollama"];
+export const WRITER_AGENTS = ["claude", "codex", "antigravity"];
+export const DEFAULT_AGENTS = [...WRITER_AGENTS];
 const MAX_CAPSULE_PROTOCOL_RETRIES = 2;
 
 const DISPLAY_NAMES = {
   claude: "Claude Code",
   codex: "Codex",
   antigravity: "Antigravity",
+  ollama: "Ollama",
 };
 
 export function agentName(agent) {
@@ -20,7 +23,7 @@ export function agentName(agent) {
 }
 
 export function parseStatus(message) {
-  const matches = [...message.matchAll(/^STATUS:\s*(CONTINUE|AGREED|NEEDS_USER)\s*$/gim)];
+  const matches = [...message.matchAll(/^STATUS:\s*(CONTINUE|AGREED|NEEDS_USER)(?:\s+[—-]\s*[^\r\n]+)?\s*$/gim)];
   const status = matches.at(-1)?.[1]?.toUpperCase() || "CONTINUE";
   return STATUSES.has(status) ? status : "CONTINUE";
 }
@@ -67,7 +70,7 @@ function capsuleProtocolRetryMessage(code, attempt) {
 
 export function validateAgents(agents, startAgent) {
   if (!Array.isArray(agents) || agents.length < 1 || agents.length > KNOWN_AGENTS.length) {
-    throw new Error("agents must contain one to three supported agents.");
+    throw new Error(`agents must contain one to ${KNOWN_AGENTS.length} supported agents.`);
   }
   if (new Set(agents).size !== agents.length || agents.some((agent) => !KNOWN_AGENTS.includes(agent))) {
     throw new Error(`agents must be unique values from: ${KNOWN_AGENTS.join(", ")}.`);
@@ -106,10 +109,10 @@ Conversation rules:
 - Keep each turn focused and under 700 words.
 - When resolving a concrete choice, emit one single-line receipt before STATUS using: DECISION: {"question":"...","category":"reversible_technical","alternatives":["..."],"decision":"...","confidence":0.8,"dissent":[],"rollbackPath":"...","owner":"agent-name"}. Protected categories are escalated; this never grants new authority.
 - When your bounded assignment is ready to hand back, emit one validated single-line receipt before STATUS using: HANDOFF: {"outcome":"completed|blocked|needs_review|continue","summary":"...","artifacts":["..."],"verification":["..."],"commit":null,"pullRequest":null,"remaining":[],"nextAction":"chair_verify|peer_review|writer_fix|continue|needs_user"}. Report only observed evidence. Use outcome completed with nextAction chair_verify when the chair should independently verify completion.
-- End with exactly one status line:
-  STATUS: CONTINUE — more useful discussion or work remains.
-  STATUS: AGREED — the task has a sufficiently verified shared conclusion.
-  STATUS: NEEDS_USER — progress requires a user decision; ask one concrete question immediately before this line.`;
+- End with exactly one bare status line and no suffix or explanation on that line. Put any explanation immediately before it. Choose one literal marker:
+  STATUS: CONTINUE
+  STATUS: AGREED
+  STATUS: NEEDS_USER`;
 }
 
 export function firstTurnPrompt({ agent, agents, task, mode, browser, writer }) {
@@ -160,6 +163,7 @@ export async function runConversation({
   validateAgents(agents, startAgent);
   if (!["review", "work"].includes(mode)) throw new Error("mode must be review or work.");
   if (writer && !agents.includes(writer)) throw new Error("writer must be included in agents.");
+  if (writer && !WRITER_AGENTS.includes(writer)) throw new Error(`${agentName(writer)} is review-only and cannot be selected as writer.`);
 
   const activeAgents = [...agents];
   const unavailableAgents = { ...(initialState?.unavailableAgents || {}) };
@@ -201,7 +205,7 @@ export async function runConversation({
     const prompt = previousMessage === null
       ? firstTurnPrompt({ agent, agents: activeAgents, task, mode, browser, writer: effectiveWriter })
       : replyPrompt({ agent, agents: activeAgents, task, previousAgent, previousMessage, mode, browser, writer: effectiveWriter });
-    const agentMode = mode === "work" && effectiveWriter && agent !== effectiveWriter ? "review" : mode;
+    const agentMode = agent === "ollama" || (mode === "work" && effectiveWriter && agent !== effectiveWriter) ? "review" : mode;
     let response;
     try {
       response = await send({ agent, prompt, sessionId: sessions[agent], mode: agentMode, browser });
@@ -224,7 +228,21 @@ export async function runConversation({
       activeAgents.splice(agentIndex, 1);
       if (agentIndex >= activeAgents.length) agentIndex = 0;
       agreementStreak = 0;
-      if (effectiveWriter === agent) effectiveWriter = activeAgents[agentIndex] || null;
+      if (effectiveWriter === agent) {
+        effectiveWriter = activeAgents.find((candidate) => WRITER_AGENTS.includes(candidate)) || null;
+        if (!effectiveWriter) {
+          await onAgentUnavailable({ agent, reason, availableAgents: [...activeAgents], writer: null });
+          const state = stateSnapshot();
+          await onState(state);
+          return {
+            reason: "failed",
+            error: "No write-capable provider is currently available; remaining participants are review-only.",
+            turns,
+            sessions,
+            state,
+          };
+        }
+      }
       await onAgentUnavailable({
         agent,
         reason,

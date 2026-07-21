@@ -1,6 +1,6 @@
 ---
 name: ask-agent
-description: Hand off one bounded task to Claude Code, Codex, or Antigravity with a visible receipt showing the exact peer, MCP tool, workspace, permissions, and model policy. Use when the user asks one agent to review, plan, implement, browse, verify, or give a second opinion, or when they ask what is being delegated.
+description: Hand off one bounded task to Claude Code, Codex, Antigravity, or the local review-only Ollama provider with a visible receipt showing the exact peer, MCP tool, workspace, permissions, and model policy.
 ---
 
 # Ask Agent
@@ -18,6 +18,7 @@ Map the requested peer to its provider adapter:
 | Claude Code | `ask_claude` | `continue_claude` |
 | Codex | `codex` | `codex-reply` |
 | Antigravity | `ask_antigravity` | `continue_antigravity` |
+| Ollama (review-only) | `ask_ollama` | `continue_ollama` |
 
 If the required tool is unavailable, stop and identify the missing server. Never silently substitute a different peer.
 
@@ -26,6 +27,8 @@ Use the persistent `collaboration.start_collaboration` interface with `agents: [
 Pass the current host as `chair` with its provider and absolute workspace. Do not delegate to that same provider unless the user explicitly requests same-provider delegation; otherwise keep the native chair and call only the named peer.
 
 Default to read-only review. Permit work mode only when the user requested edits. Omit `model` unless the user explicitly supplied an override. Use browser access only when required by the task.
+
+Ollama is a hard review-only provider. Never select it as `writer` or request `mode: work`; do not pass browser or `verificationCommands`. It may inspect repository state, files, literal searches, and Git diffs only through bounded adapter tools. Its `APPROVE` verdict is evaluation-only and publishes as a non-authorizing comment, while findings and `REQUEST_CHANGES` remain visible.
 
 Claude model policy: Never select, inherit, or fall back to Fable unless the user's current request explicitly asks for Fable by name. Saved settings, earlier requests, session history, aliases, and caller-supplied fallback chains do not count. Preserve any configured non-Fable Claude model. If the configured or default Claude model resolves to Fable without that permission, override it with `claude-opus-4-8[1m]` and remove Fable from `modelFallbacks.claude`. Announce an explicitly authorized Fable use before starting. For that authorized phase only, pass `allowClaudeFable: true` to collaboration or `allowFable: true` to a direct Claude call. Never set either field otherwise; authorization resets on every collaboration continuation.
 

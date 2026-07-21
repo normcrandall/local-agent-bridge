@@ -43,6 +43,7 @@ try {
     claude: { work: 5, review: 10 },
     codex: { work: 5, review: 10 },
     antigravity: { work: 5, review: 10 },
+    ollama: { work: 1, review: 10 },
   });
   assert.deepEqual(normalizeProviderConcurrency({}), DEFAULT_PROVIDER_CONCURRENCY);
   assert.deepEqual(normalizeProviderConcurrency({ claude: { review: 3 } }).claude, {
@@ -50,6 +51,15 @@ try {
     review: 3,
   });
   assert.throws(() => normalizeProviderConcurrency({ claude: { review: 0 } }), /integer from 1 to 20/);
+  await assert.rejects(
+    acquireProviderCapacity(root, {
+      provider: "ollama",
+      role: "work",
+      collaborationId: collaborationId("99"),
+      limits: DEFAULT_PROVIDER_CONCURRENCY,
+    }),
+    /review-only.*work capacity/,
+  );
 
   const configPath = join(root, "provider-concurrency.json");
   await writeFile(configPath, `${JSON.stringify({

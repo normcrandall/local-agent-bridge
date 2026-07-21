@@ -32,6 +32,10 @@ const servers = {
     launcher: resolve(homedir(), ".local/bin/agent-antigravity-mcp"),
     requiredTools: ["ask_antigravity", "continue_antigravity"],
   },
+  ollama: {
+    launcher: resolve(homedir(), ".local/bin/agent-ollama-mcp"),
+    requiredTools: ["ask_ollama", "continue_ollama", "get_ollama_status"],
+  },
   collaboration: {
     launcher,
     requiredTools: [

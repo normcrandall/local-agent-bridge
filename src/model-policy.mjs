@@ -10,7 +10,7 @@ import {
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 
-export const MODEL_PROVIDERS = ["claude", "codex", "antigravity"];
+export const MODEL_PROVIDERS = ["claude", "codex", "antigravity", "ollama"];
 export const DEFAULT_MODEL_POLICY_CONFIG = resolve(
   homedir(),
   ".config/local-agent-bridge/model-policy.json",
@@ -114,6 +114,7 @@ export function modelPolicyStatus({ path } = {}) {
       claude: ["fable requires explicit per-request authorization"],
       codex: [],
       antigravity: [],
+      ollama: [],
     },
   };
 }
