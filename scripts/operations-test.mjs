@@ -18,6 +18,7 @@ import {
 assert.equal(isTransportLivenessSummary("Claude Code is still working (30s heartbeat)."), true);
 assert.equal(isTransportLivenessSummary("The local reviewer is still working; its last repository action remains current."), true);
 assert.equal(isTransportLivenessSummary("Codex is still working around the auth guard."), false);
+assert.equal(isTransportLivenessSummary("Codex is still working."), false);
 assert.equal(isTransportLivenessSummary("Inspecting files; tests come next."), false);
 assert.equal(isSafeWorkerPid(123), true);
 assert.equal(isSafeWorkerPid(1), false);

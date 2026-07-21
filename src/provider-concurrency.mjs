@@ -358,6 +358,9 @@ export async function acquireProviderCapacity(root, {
 } = {}) {
   if (!PROVIDER_NAMES.includes(provider)) throw new Error(`Unsupported provider: ${provider}`);
   if (!["work", "review"].includes(role)) throw new Error(`Unsupported provider role: ${role}`);
+  if (provider === "ollama" && role === "work") {
+    throw new Error("Ollama is review-only and cannot acquire provider work capacity.");
+  }
   if (!/^bridge-[0-9a-f-]{36}$/.test(collaborationId || "")) {
     throw new Error("A valid collaborationId is required for provider capacity.");
   }

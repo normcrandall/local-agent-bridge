@@ -200,5 +200,13 @@ const evaluationApproval = localReviewEnvelopePolicy("ollama", {
 });
 assert.equal(evaluationApproval.event, "COMMENT");
 assert.match(evaluationApproval.body, /non-authorizing/);
+const evaluationRequestChanges = localReviewEnvelopePolicy("ollama", {
+  event: "REQUEST_CHANGES",
+  body: "A defect remains.",
+  handoff: "# Review",
+  comments: [],
+});
+assert.equal(evaluationRequestChanges.event, "COMMENT");
+assert.match(evaluationRequestChanges.body, /request for changes \(non-authorizing\)/);
 
 console.log("Review publication fallback tests passed: publishable-first ordering, local degradation, and trusted-human escalation.");

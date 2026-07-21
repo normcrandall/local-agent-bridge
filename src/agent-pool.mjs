@@ -51,13 +51,13 @@ export function localReviewPublicationPolicy(agent, result) {
 }
 
 export function localReviewEnvelopePolicy(agent, authoredEnvelope) {
-  return agent === "ollama" && authoredEnvelope.event === "APPROVE"
-    ? {
-      ...authoredEnvelope,
-      event: "COMMENT",
-      body: `Evaluation-only local approval (non-authorizing):\n\n${authoredEnvelope.body}`,
-    }
-    : authoredEnvelope;
+  if (agent !== "ollama" || authoredEnvelope.event === "COMMENT") return authoredEnvelope;
+  const verdict = authoredEnvelope.event === "APPROVE" ? "approval" : "request for changes";
+  return {
+    ...authoredEnvelope,
+    event: "COMMENT",
+    body: `Evaluation-only local ${verdict} (non-authorizing):\n\n${authoredEnvelope.body}`,
+  };
 }
 
 // A raw-delivery shell command that must never be granted to an autonomous

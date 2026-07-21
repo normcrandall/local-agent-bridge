@@ -51,6 +51,15 @@ try {
     review: 3,
   });
   assert.throws(() => normalizeProviderConcurrency({ claude: { review: 0 } }), /integer from 1 to 20/);
+  await assert.rejects(
+    acquireProviderCapacity(root, {
+      provider: "ollama",
+      role: "work",
+      collaborationId: collaborationId("99"),
+      limits: DEFAULT_PROVIDER_CONCURRENCY,
+    }),
+    /review-only.*work capacity/,
+  );
 
   const configPath = join(root, "provider-concurrency.json");
   await writeFile(configPath, `${JSON.stringify({

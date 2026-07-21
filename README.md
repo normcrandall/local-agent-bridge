@@ -52,7 +52,7 @@ ollama pull gemma4
 
 Use `agents: ["ollama"]` for a bounded local review or include `ollama` alongside cloud participants. In work mode, choose Claude, Codex, or Antigravity as the writer; schema and runtime guards prevent Ollama from being selected or promoted as writer. The local model receives only bounded read-only repository tools. It receives no shell, browser, source-write, builder, commit, push, or merge capability, and `verificationCommands` remain unavailable.
 
-The adapter emits progress when the model inspects repository state, files, searches, or diffs. Conversation state is stored owner-only under `~/.local/state/local-agent-bridge/ollama-sessions`, keyed by the canonical workspace path, so `continue_ollama` preserves context when its MCP process restarts. Configure ordered memory/capacity fallbacks under `providers.ollama.fallbackModels` in [`config/model-fallbacks.example.json`](config/model-fallbacks.example.json). During the initial evaluation period, an Ollama `APPROVE` verdict is published as a non-authorizing PR `COMMENT`, never as `agent-review=success`; `REQUEST_CHANGES` and inline findings remain visible. This allows real review history without letting an unevaluated local model independently unlock a merge.
+The adapter emits progress when the model inspects repository state, files, searches, or diffs. Conversation state is stored owner-only under `~/.local/state/local-agent-bridge/ollama-sessions`, keyed by the canonical workspace path, so `continue_ollama` preserves context when its MCP process restarts. Configure ordered memory/capacity fallbacks under `providers.ollama.fallbackModels` in [`config/model-fallbacks.example.json`](config/model-fallbacks.example.json). During the initial evaluation period, Ollama `APPROVE` and `REQUEST_CHANGES` verdicts are both published as non-authorizing PR `COMMENT` reviews, never as `agent-review=success`; inline findings and the original local verdict remain visible. This allows real review history without letting an unevaluated local model independently unlock or block a merge.
 
 ## Move the bridge to another computer
 
@@ -818,7 +818,7 @@ When repository policy says the PR is the source of truth, both directions produ
 - Codex primary → delegated Claude receives bound `github_review.write_handoff` and `github_review.submit_pr_review` tools.
 - Claude primary → delegated Codex receives the same two bound tools while its source sandbox remains read-only.
 - Claude or Codex primary → delegated Antigravity authors a strict handoff/review envelope; the broker validates it and publishes that exact payload through the same target-bound bot adapter because `agy` has no per-session MCP injection.
-- Any primary → delegated Ollama uses bounded local repository tools and authors the same envelope. Requests for changes publish normally; local approval is deliberately downgraded to a non-authorizing comment during evaluation.
+- Any primary → delegated Ollama uses bounded local repository tools and authors the same envelope. During evaluation, both approval and requests for changes are deliberately published as non-authorizing comments.
 
 The caller passes an exact PR authorization object. Omit `expectedLogin` to select the active provider's configured reviewer App automatically:
 
