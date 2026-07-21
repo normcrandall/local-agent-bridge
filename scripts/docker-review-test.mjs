@@ -100,17 +100,19 @@ try {
   assert.equal(requests[1].messages.at(-1).role, "tool");
   assert.equal(result.model, "docker.io/ai/qwen2.5-coder:latest");
 
+  process.env.AGENT_BRIDGE_DOCKER_MODEL_RUNNER_CONFIG = join(repository, "missing-docker-config.json");
   const defaultModelResponse = await runDockerModelReview({
     prompt: "Return a concise review.",
     cwd: ".",
     workspaceRoot: repository,
     fallbackModels: [],
     fetchImpl: async (_url, request) => {
-      assert.equal(JSON.parse(request.body).model, "ai/qwen2.5-coder");
-      return { ok: true, json: async () => ({ model: "ai/qwen2.5-coder", message: { role: "assistant", content: "No findings." } }) };
+      assert.equal(JSON.parse(request.body).model, "ai/qwen3.6");
+      return { ok: true, json: async () => ({ model: "ai/qwen3.6", message: { role: "assistant", content: "No findings." } }) };
     },
   });
   assert.equal(defaultModelResponse.result, "No findings.");
+  process.env.AGENT_BRIDGE_DOCKER_MODEL_RUNNER_CONFIG = configPath;
 
   assert.throws(
     () => dockerToolRequest({ prompt: "implement", cwd: repository, mode: "work" }),

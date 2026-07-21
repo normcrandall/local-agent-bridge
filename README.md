@@ -696,7 +696,7 @@ Claude Code, Codex, Antigravity, Docker Model Runner, and Ollama capacity failur
     "claude": ["claude-opus-4-6", "claude-sonnet-5"],
     "codex": ["gpt-5.6-terra"],
     "antigravity": ["Gemini 3.1 Pro (Low)", "Gemini 3.5 Flash (High)"],
-    "docker": ["ai/qwen3-coder", "ai/devstral-small-2", "ai/qwen2.5-coder"],
+    "docker": ["ai/qwen3-coder", "ai/devstral-small-2", "ai/qwen2.5-coder", "ai/gemma4:31B"],
     "ollama": ["qwen3-coder:30b", "qwen3.5:27b", "gemma4:31b", "gemma4:latest"]
   }
 }
@@ -718,8 +718,8 @@ Disable a model once for every new delegated bridge turn instead of repeating th
 bridge models disable claude fable
 bridge models disable codex gpt-5.6-sol
 bridge models disable antigravity "Gemini 3.1 Pro (High)"
-bridge models disable docker "ai/qwen3.6"
-bridge models disable ollama "qwen3.6:latest"
+bridge models disable docker "ai/qwen3-coder"
+bridge models disable ollama "gemma4:latest"
 bridge models status
 ```
 

@@ -31,7 +31,8 @@
       "fallbackModels": [
         "ai/qwen3-coder",
         "ai/devstral-small-2",
-        "ai/qwen2.5-coder"
+        "ai/qwen2.5-coder",
+        "ai/gemma4:31B"
       ]
     }
   }
