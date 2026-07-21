@@ -7,7 +7,7 @@ import { loadConfiguredFallbackModels, normalizeFallbackModels } from "./model-f
 import { resolveModelRoute } from "./model-policy.mjs";
 
 export const DEFAULT_OLLAMA_CONFIG = resolve(homedir(), ".config/local-agent-bridge/ollama.json");
-export const DEFAULT_OLLAMA_MODEL = "gemma4:latest";
+export const DEFAULT_OLLAMA_MODEL = "qwen3.6:latest";
 export const DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434";
 
 const MAX_FILE_LINES = 400;

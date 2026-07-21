@@ -1,5 +1,5 @@
 {
   "version": 1,
-  "model": "ai/qwen2.5-coder",
+  "model": "ai/qwen3.6",
   "baseUrl": "http://127.0.0.1:12434"
 }

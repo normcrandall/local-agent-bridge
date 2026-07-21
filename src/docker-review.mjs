@@ -7,7 +7,7 @@ export const DEFAULT_DOCKER_MODEL_RUNNER_CONFIG = resolve(
   homedir(),
   ".config/local-agent-bridge/docker-model-runner.json",
 );
-export const DEFAULT_DOCKER_MODEL_RUNNER_MODEL = "ai/qwen2.5-coder";
+export const DEFAULT_DOCKER_MODEL_RUNNER_MODEL = "ai/qwen3.6";
 export const DEFAULT_DOCKER_MODEL_RUNNER_BASE_URL = "http://127.0.0.1:12434";
 
 function normalizedBaseUrl(value) {
