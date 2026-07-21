@@ -283,7 +283,12 @@ function runClaude({
       allowedTools.push(`Edit(${permissionPath})`, `Write(${permissionPath})`);
     }
     if (browser) allowedTools.push("mcp__playwright__*");
-    if (githubReview) allowedTools.push("mcp__github_review__submit_pr_review");
+    if (githubReview) {
+      allowedTools.push(
+        "mcp__github_review__write_handoff",
+        "mcp__github_review__submit_pr_review",
+      );
+    }
     args.push("--allowedTools", ...allowedTools, "--permission-mode", "dontAsk");
   } else if (permissionProfile === "yolo") {
     args.push("--dangerously-skip-permissions");

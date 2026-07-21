@@ -88,6 +88,7 @@ async function callBridgeWithoutModel() {
       "Bash(git diff --check)",
       `Edit(/${resolve(root, ".bridge/test-handoffs/smoke-review.md")})`,
       `Write(/${resolve(root, ".bridge/test-handoffs/smoke-review.md")})`,
+      "mcp__github_review__write_handoff",
       "mcp__github_review__submit_pr_review",
     ]) {
       if (!allowed.includes(rule)) throw new Error(`Claude review permission is missing: ${rule}`);
@@ -453,6 +454,11 @@ const ollamaTools = await listTools(
   "/bin/zsh",
   [resolve(root, "scripts/ollama-bridge-mcp.sh")],
 );
+const dockerTools = await listTools(
+  "Docker Model Runner review bridge",
+  "/bin/zsh",
+  [resolve(root, "scripts/docker-bridge-mcp.sh")],
+);
 const collaborationTools = await listTools(
   "Persistent collaboration",
   "/bin/zsh",
@@ -477,6 +483,9 @@ for (const required of ["ask_antigravity", "continue_antigravity"]) {
 }
 for (const required of ["ask_ollama", "continue_ollama", "get_ollama_status"]) {
   if (!names(ollamaTools).includes(required)) throw new Error(`Missing Ollama review tool: ${required}`);
+}
+for (const required of ["ask_docker", "continue_docker", "get_docker_status"]) {
+  if (!names(dockerTools).includes(required)) throw new Error(`Missing Docker Model Runner review tool: ${required}`);
 }
 for (const required of [
   "acknowledge_coordinator_wake",
@@ -535,6 +544,10 @@ for (const property of ["prompt", "mode", "model", "fallbackModels", "verificati
 const ollamaSchema = ollamaTools.find((tool) => tool.name === "ask_ollama")?.inputSchema?.properties || {};
 for (const property of ["prompt", "mode", "model", "fallbackModels", "timeoutSeconds"]) {
   if (!(property in ollamaSchema)) throw new Error(`Ollama bridge schema is missing: ${property}`);
+}
+const dockerSchema = dockerTools.find((tool) => tool.name === "ask_docker")?.inputSchema?.properties || {};
+for (const property of ["prompt", "mode", "model", "fallbackModels", "timeoutSeconds"]) {
+  if (!(property in dockerSchema)) throw new Error(`Docker Model Runner bridge schema is missing: ${property}`);
 }
 const collaborationSchema = collaborationTools.find((tool) => tool.name === "start_collaboration")?.inputSchema?.properties || {};
 for (const property of [

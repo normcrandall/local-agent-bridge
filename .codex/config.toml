@@ -34,6 +34,15 @@ enabled = true
 required = false
 default_tools_approval_mode = "prompt"
 
+[mcp_servers.docker]
+command = "agent-docker-mcp"
+args = []
+startup_timeout_sec = 20
+tool_timeout_sec = 1800
+enabled = true
+required = false
+default_tools_approval_mode = "prompt"
+
 [mcp_servers.collaboration]
 command = "agent-collaboration-mcp"
 args = []

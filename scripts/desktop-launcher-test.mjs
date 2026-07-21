@@ -36,6 +36,10 @@ const servers = {
     launcher: resolve(homedir(), ".local/bin/agent-ollama-mcp"),
     requiredTools: ["ask_ollama", "continue_ollama", "get_ollama_status"],
   },
+  docker: {
+    launcher: resolve(homedir(), ".local/bin/agent-docker-mcp"),
+    requiredTools: ["ask_docker", "continue_docker", "get_docker_status"],
+  },
   collaboration: {
     launcher,
     requiredTools: [

@@ -25,6 +25,13 @@
         "qwen3-coder:30b",
         "gemma4:latest"
       ]
+    },
+    "docker": {
+      "fallbackModels": [
+        "ai/qwen3-coder",
+        "ai/devstral-small-2",
+        "ai/qwen2.5-coder"
+      ]
     }
   }
 }

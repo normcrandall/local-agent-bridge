@@ -13,7 +13,7 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { collaborationDirectory } from "./collaboration-store.mjs";
 
-export const PROVIDER_NAMES = ["claude", "codex", "antigravity", "ollama"];
+export const PROVIDER_NAMES = ["claude", "codex", "antigravity", "docker", "ollama"];
 
 // Issue #55: a collaboration that already holds every capacity slot for a
 // provider/role would wait forever on its own live slot. Fail fast instead of
@@ -133,6 +133,8 @@ export const DEFAULT_PROVIDER_CONCURRENCY = Object.freeze({
   // The shared capacity schema requires a positive work value, but Ollama is
   // rejected as a writer before capacity acquisition. This slot is unreachable.
   ollama: Object.freeze({ work: 1, review: 10 }),
+  // Docker Model Runner shares the same hard review-only boundary.
+  docker: Object.freeze({ work: 1, review: 10 }),
 });
 
 function capacity(value, label) {
@@ -358,8 +360,8 @@ export async function acquireProviderCapacity(root, {
 } = {}) {
   if (!PROVIDER_NAMES.includes(provider)) throw new Error(`Unsupported provider: ${provider}`);
   if (!["work", "review"].includes(role)) throw new Error(`Unsupported provider role: ${role}`);
-  if (provider === "ollama" && role === "work") {
-    throw new Error("Ollama is review-only and cannot acquire provider work capacity.");
+  if (["ollama", "docker"].includes(provider) && role === "work") {
+    throw new Error(`${provider === "ollama" ? "Ollama" : "Docker Model Runner"} is review-only and cannot acquire provider work capacity.`);
   }
   if (!/^bridge-[0-9a-f-]{36}$/.test(collaborationId || "")) {
     throw new Error("A valid collaborationId is required for provider capacity.");

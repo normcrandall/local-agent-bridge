@@ -1,6 +1,6 @@
 ---
 name: run-roundtable
-description: Start and visibly monitor a persistent collaboration among Claude Code, Codex, Antigravity, and the optional review-only Ollama provider.
+description: Start and visibly monitor a persistent collaboration among Claude Code, Codex, Antigravity, and optional review-only Docker Model Runner or Ollama providers.
 ---
 
 # Run Roundtable
@@ -11,7 +11,7 @@ Accept natural language or an explicit form such as `$run-roundtable --agents cl
 
 ## Start visibly
 
-Resolve participants, order, mode, maximum turns, and roles. Default to the three cloud agents, review mode, and six turns; include Ollama when the user requests local review. In work mode select exactly one writer from Claude, Codex, or Antigravity. Ollama is always a reviewer and can never be selected or promoted as writer. Omit all model fields unless the user explicitly overrides them.
+Resolve participants, order, mode, maximum turns, and roles. Default to the three cloud agents, review mode, and six turns. When the user requests local review without naming a backend, include Docker Model Runner first and retain Ollama as the fallback. In work mode select exactly one writer from Claude, Codex, or Antigravity. Docker and Ollama are always reviewers and can never be selected or promoted as writer. Omit all model fields unless the user explicitly overrides them.
 
 Claude model policy: Never select, inherit, or fall back to Fable unless the user's current request explicitly asks for Fable by name. Saved settings, earlier requests, session history, aliases, and caller-supplied fallback chains do not count. Preserve any configured non-Fable Claude model. If the configured or default Claude model resolves to Fable without that permission, override it with `claude-opus-4-8[1m]` and remove Fable from `modelFallbacks.claude`. Announce an explicitly authorized Fable use before starting. For that authorized phase only, pass `allowClaudeFable: true` to collaboration or `allowFable: true` to a direct Claude call. Never set either field otherwise; authorization resets on every collaboration continuation.
 

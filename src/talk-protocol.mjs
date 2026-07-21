@@ -5,7 +5,7 @@ import {
 } from "./context-capsule.mjs";
 
 const STATUSES = new Set(["CONTINUE", "AGREED", "NEEDS_USER"]);
-export const KNOWN_AGENTS = ["claude", "codex", "antigravity", "ollama"];
+export const KNOWN_AGENTS = ["claude", "codex", "antigravity", "docker", "ollama"];
 export const WRITER_AGENTS = ["claude", "codex", "antigravity"];
 export const DEFAULT_AGENTS = [...WRITER_AGENTS];
 const MAX_CAPSULE_PROTOCOL_RETRIES = 2;
@@ -14,6 +14,7 @@ const DISPLAY_NAMES = {
   claude: "Claude Code",
   codex: "Codex",
   antigravity: "Antigravity",
+  docker: "Docker Model Runner",
   ollama: "Ollama",
 };
 
@@ -205,7 +206,7 @@ export async function runConversation({
     const prompt = previousMessage === null
       ? firstTurnPrompt({ agent, agents: activeAgents, task, mode, browser, writer: effectiveWriter })
       : replyPrompt({ agent, agents: activeAgents, task, previousAgent, previousMessage, mode, browser, writer: effectiveWriter });
-    const agentMode = agent === "ollama" || (mode === "work" && effectiveWriter && agent !== effectiveWriter) ? "review" : mode;
+    const agentMode = ["ollama", "docker"].includes(agent) || (mode === "work" && effectiveWriter && agent !== effectiveWriter) ? "review" : mode;
     let response;
     try {
       response = await send({ agent, prompt, sessionId: sessions[agent], mode: agentMode, browser });

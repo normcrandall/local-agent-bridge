@@ -27,6 +27,8 @@ For pull-request work, read repository policy. When it requires the reviewer to 
 
 For an autonomous PR-review leg, keep all eligible non-writer providers in one ordered roster and set `maxTurns` to the number of successful reviews required. A failed provider does not consume a turn. The broker preflights reviewer-App publication, runs publishable identities first, and treats an unbound reviewer as local-only rather than discarding its model review. If every App is unavailable, preserve the durable local findings and require an exact-head approval from a configured trusted human instead of terminating. Use a single candidate only when the user explicitly pins that provider.
 
+When adding a local reviewer, prefer Docker Model Runner before Ollama. Both are hard review-only, receive no verification commands, and produce non-authorizing advisory review history only.
+
 Before starting, display:
 
 ```text

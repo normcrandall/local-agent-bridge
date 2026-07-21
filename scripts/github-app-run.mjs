@@ -21,8 +21,8 @@ const [role, reviewerProvider, ...extraRoleParts] = roleArgument.split(":");
 if (!["builder", "reviewer"].includes(role)
   || extraRoleParts.length
   || (role === "builder" && reviewerProvider)
-  || (role === "reviewer" && reviewerProvider && !["claude", "codex", "antigravity", "ollama"].includes(reviewerProvider))) {
-  console.error("ROLE must be builder, reviewer, reviewer:claude, reviewer:codex, reviewer:antigravity, or reviewer:ollama.");
+  || (role === "reviewer" && reviewerProvider && !["claude", "codex", "antigravity", "docker", "ollama"].includes(reviewerProvider))) {
+  console.error("ROLE must be builder, reviewer, reviewer:claude, reviewer:codex, reviewer:antigravity, reviewer:ollama, or reviewer:docker.");
   process.exit(2);
 }
 

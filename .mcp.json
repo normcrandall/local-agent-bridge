@@ -18,6 +18,12 @@
       "args": [],
       "env": {}
     },
+    "docker": {
+      "type": "stdio",
+      "command": "agent-docker-mcp",
+      "args": [],
+      "env": {}
+    },
     "collaboration": {
       "type": "stdio",
       "command": "agent-collaboration-mcp",

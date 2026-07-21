@@ -7,7 +7,7 @@ import process from "node:process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { runConversation } from "../src/talk-protocol.mjs";
-import { antigravityToolRequest, claudeToolRequest, codexToolRequest, ollamaToolRequest } from "../src/tool-requests.mjs";
+import { antigravityToolRequest, claudeToolRequest, codexToolRequest, dockerToolRequest, ollamaToolRequest } from "../src/tool-requests.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 
@@ -18,12 +18,13 @@ function usage() {
 Options:
   --turns <2-20>       Maximum individual agent turns (default: 6)
   --agents <list>      Comma-separated agents (default: claude,codex)
-                       Supported: claude,codex,antigravity,ollama
+                       Supported: claude,codex,antigravity,docker,ollama
   --start <agent>      First agent; defaults to the first name in --agents
   --claude-model <id>  Claude alias or full model ID
   --codex-model <id>   Codex alias or full model ID
   --antigravity-model <label>  Antigravity model label
   --ollama-model <name> Local Ollama review model
+  --docker-model <name> Local Docker Model Runner review model
   --work               Allow sequential workspace edits (default is read-only)
   --browser            Give both agents an isolated Playwright browser
   --dry-run            Validate and print configuration without model calls
@@ -49,6 +50,7 @@ function parseArgs(argv) {
     codexModel: null,
     antigravityModel: null,
     ollamaModel: null,
+    dockerModel: null,
   };
   const taskParts = [];
   for (let index = 0; index < argv.length; index += 1) {
@@ -99,6 +101,12 @@ function parseArgs(argv) {
       options.ollamaModel = value;
       continue;
     }
+    if (arg === "--docker-model") {
+      const value = argv[++index];
+      if (!value || value.startsWith("--")) throw new Error("--docker-model requires a value");
+      options.dockerModel = value;
+      continue;
+    }
     if (arg === "--") {
       taskParts.push(...argv.slice(index + 1));
       break;
@@ -145,14 +153,14 @@ async function main() {
   if (!Number.isInteger(options.maxTurns) || options.maxTurns < 2 || options.maxTurns > 20) {
     throw new Error("--turns must be an integer from 2 to 20");
   }
-  const supportedAgents = ["claude", "codex", "antigravity", "ollama"];
+  const supportedAgents = ["claude", "codex", "antigravity", "docker", "ollama"];
   if (
     options.agents.length < 2
-    || options.agents.length > 4
+    || options.agents.length > 5
     || new Set(options.agents).size !== options.agents.length
     || options.agents.some((agent) => !supportedAgents.includes(agent))
   ) {
-    throw new Error("--agents must contain two to four unique values from claude,codex,antigravity,ollama");
+    throw new Error("--agents must contain two to five unique values from claude,codex,antigravity,docker,ollama");
   }
   if (!options.agents.includes(options.startAgent)) {
     throw new Error("--start must be included in --agents");
@@ -169,6 +177,7 @@ async function main() {
       codexModel: options.codexModel || "default",
       antigravityModel: options.antigravityModel || "default",
       ollamaModel: options.ollamaModel || "default",
+      dockerModel: options.dockerModel || "default",
     }, null, 2));
     return;
   }
@@ -191,6 +200,7 @@ async function main() {
     codexModel: options.codexModel,
     antigravityModel: options.antigravityModel,
     ollamaModel: options.ollamaModel,
+    dockerModel: options.dockerModel,
   });
 
   const clients = {};
@@ -201,6 +211,7 @@ async function main() {
       codex: "scripts/codex-mcp.sh",
       antigravity: "scripts/antigravity-bridge-mcp.sh",
       ollama: "scripts/ollama-bridge-mcp.sh",
+      docker: "scripts/docker-bridge-mcp.sh",
     };
     const script = resolve(root, scripts[agent]);
     clients[agent] = await connect(script, agent);
@@ -236,13 +247,21 @@ async function main() {
         mode,
         model: options.antigravityModel,
       });
-    } else {
+    } else if (agent === "ollama") {
       request = ollamaToolRequest({
         prompt,
         sessionId,
         cwd: root,
         mode,
         model: options.ollamaModel,
+      });
+    } else {
+      request = dockerToolRequest({
+        prompt,
+        sessionId,
+        cwd: root,
+        mode,
+        model: options.dockerModel,
       });
     }
     const result = await client.callTool(request);
@@ -253,7 +272,7 @@ async function main() {
   console.log(`Conversation: ${options.task}`);
   console.log(`Agents: ${options.agents.join(" → ")}`);
   console.log(`Mode: ${options.mode}; max turns: ${options.maxTurns}; browser: ${options.browser ? "isolated" : "off"}`);
-  console.log(`Models: Claude=${options.claudeModel || "default"}; Codex=${options.codexModel || "default"}; Antigravity=${options.antigravityModel || "default"}; Ollama=${options.ollamaModel || "default"}`);
+  console.log(`Models: Claude=${options.claudeModel || "default"}; Codex=${options.codexModel || "default"}; Antigravity=${options.antigravityModel || "default"}; Ollama=${options.ollamaModel || "default"}; Docker=${options.dockerModel || "default"}`);
   console.log(`Transcript: ${transcriptPath}\n`);
 
   try {
