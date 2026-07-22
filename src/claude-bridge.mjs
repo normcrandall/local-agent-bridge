@@ -326,6 +326,7 @@ Work permission contract:
   args.push("--", `${prompt}${permissionContract}`);
 
   return new Promise((resolvePromise, rejectPromise) => {
+    const wallStartedAt = Date.now();
     const child = spawn(CLAUDE_BIN, args, {
       cwd: actualCwd,
       env: { ...process.env, CLAUDE_BRIDGE_ACTIVE: "1" },
@@ -337,6 +338,13 @@ Work permission contract:
     let lastProgressSummary = "";
     let stderr = "";
     let timedOut = false;
+    let firstEventMs = null;
+    let toolMs = 0;
+    let toolCalls = 0;
+    let testsMs = 0;
+    let testCalls = 0;
+    const activeTools = new Map();
+    const verificationSet = new Set(verificationCommands.map((command) => command.trim()));
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill("SIGTERM");
@@ -353,8 +361,42 @@ Work permission contract:
       for (const line of lines) {
         try {
           const event = JSON.parse(line);
-          if (event.type !== "assistant" || !Array.isArray(event.message?.content)) continue;
-          const summary = event.message.content
+          const observedAt = Date.now();
+          if (firstEventMs === null) firstEventMs = observedAt - wallStartedAt;
+          const blocks = Array.isArray(event.message?.content) ? event.message.content : [];
+          for (const block of blocks) {
+            if (block.type === "tool_use") {
+              const command = block.name === "Bash" ? String(block.input?.command || "").trim() : null;
+              activeTools.set(block.id, { startedAt: observedAt, name: block.name, command });
+              toolCalls += 1;
+              if (verificationSet.has(command)) {
+                testCalls += 1;
+                const summary = `Claude is running verification command: ${command}`;
+                if (summary !== lastProgressSummary) {
+                  lastProgressSummary = summary;
+                  onProgress(summary);
+                }
+              }
+            }
+            if (block.type === "tool_result" && block.tool_use_id) {
+              const active = activeTools.get(block.tool_use_id);
+              if (active) {
+                const durationMs = Math.max(0, observedAt - active.startedAt);
+                toolMs += durationMs;
+                if (verificationSet.has(active.command)) {
+                  testsMs += durationMs;
+                  const summary = `Claude finished verification command: ${active.command}`;
+                  if (summary !== lastProgressSummary) {
+                    lastProgressSummary = summary;
+                    onProgress(summary);
+                  }
+                }
+                activeTools.delete(block.tool_use_id);
+              }
+            }
+          }
+          if (event.type !== "assistant") continue;
+          const summary = blocks
             .filter((block) => block.type === "text" && typeof block.text === "string")
             .map((block) => block.text.trim())
             .filter(Boolean)
@@ -395,6 +437,18 @@ Work permission contract:
           .filter(Boolean);
         const parsed = parsedLines.findLast((event) => event.type === "result") || parsedLines.at(-1) || JSON.parse(stdout);
         const modelsUsed = Object.keys(parsed.modelUsage || {});
+        const totalMs = Date.now() - wallStartedAt;
+        const timing = {
+          totalMs,
+          providerReportedMs: parsed.duration_ms ?? null,
+          firstResponseMs: firstEventMs,
+          toolMs,
+          toolCalls,
+          testsMs,
+          testCalls,
+          inferenceMs: Math.max(0, totalMs - toolMs),
+          inferenceEstimated: true,
+        };
         resolvePromise({
           result: parsed.result ?? "",
           sessionId: parsed.session_id ?? null,
@@ -415,8 +469,10 @@ Work permission contract:
           fallbackManagedBy: resolvedFallbackModels.length ? "claude-cli" : null,
           modelPolicy: { ...modelPolicy, machine: machineModelPolicy },
           handoffPath: actualHandoffPath,
+          timing,
         });
       } catch {
+        const totalMs = Date.now() - wallStartedAt;
         resolvePromise({
           result: clipped(stdout),
           sessionId: null,
@@ -431,6 +487,17 @@ Work permission contract:
           fallbackManagedBy: resolvedFallbackModels.length ? "claude-cli" : null,
           modelPolicy: { ...modelPolicy, machine: machineModelPolicy },
           handoffPath: actualHandoffPath,
+          timing: {
+            totalMs,
+            providerReportedMs: null,
+            firstResponseMs: firstEventMs,
+            toolMs,
+            toolCalls,
+            testsMs,
+            testCalls,
+            inferenceMs: Math.max(0, totalMs - toolMs),
+            inferenceEstimated: true,
+          },
         });
       }
     });

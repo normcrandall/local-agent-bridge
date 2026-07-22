@@ -71,6 +71,7 @@ export function createAgentPool({
   modelFallbacks = {},
   allowClaudeFable = false,
   verificationCommands = [],
+  reusableVerificationCommands = [],
   workCommands = [],
   workProfile = "exact",
   permissionProfile = "standard",
@@ -81,7 +82,11 @@ export function createAgentPool({
   turnTimeoutSeconds = 600,
   autonomous = false,
   writableRoots = [],
+  onTiming = async () => {},
 }) {
+  const emitTiming = async (event) => {
+    await Promise.resolve(onTiming(event)).catch(() => {});
+  };
   // Fail-closed autonomy: an autonomous council/portfolio/take-the-helm lane may
   // only deliver GitHub mutations through a bound githubBuilder. Without one it
   // must not fall back to raw push, gh pull-request mutation, gh api, PAT, or
@@ -139,6 +144,8 @@ export function createAgentPool({
         GITHUB_REVIEW_TOKEN_FILE: resolve(process.env.HOME, ".config/ghtoken"),
       },
     });
+    const timingKey = `publication:${agent}:${Date.now()}`;
+    await emitTiming({ action: "start", name: "publication", key: timingKey, at: new Date().toISOString(), metadata: { agent, channel: "github_review" } });
     try {
       await publisher.connect(transport, { timeout: 5_000 });
       const handoff = await publisher.callTool({
@@ -154,6 +161,7 @@ export function createAgentPool({
       return review.structuredContent;
     } finally {
       await publisher.close().catch(() => {});
+      await emitTiming({ action: "finish", name: "publication", key: timingKey, at: new Date().toISOString(), metadata: { agent, channel: "github_review" } });
     }
   }
 
@@ -199,16 +207,22 @@ export function createAgentPool({
     const envelope = parseBuilderEnvelope(message);
     const builder = await boundBuilderClient();
     const receipts = [];
-    for (const operation of envelope.operations) {
-      const { operation: name, ...input } = operation;
-      if (name === "ensure_pull_request") receipts.push(await builder.ensurePullRequest(input));
-      else if (name === "reply_review_thread") receipts.push(await builder.replyReviewThread(input));
-      else if (name === "resolve_review_thread") receipts.push(await builder.resolveReviewThread(input));
-      else if (name === "mark_ready") receipts.push(await builder.markReady());
-      else if (name === "merge") receipts.push(await builder.merge(input));
-      else if (name === "create_branch") receipts.push(await builder.createBranch(input));
-      else if (name === "push_branch") receipts.push(await builder.pushBranch(input));
-      else if (name === "replace_branch") receipts.push(await builder.replaceBranch(input));
+    const timingKey = `publication:antigravity-builder:${Date.now()}`;
+    await emitTiming({ action: "start", name: "publication", key: timingKey, at: new Date().toISOString(), metadata: { agent: "antigravity", channel: "github_builder" } });
+    try {
+      for (const operation of envelope.operations) {
+        const { operation: name, ...input } = operation;
+        if (name === "ensure_pull_request") receipts.push(await builder.ensurePullRequest(input));
+        else if (name === "reply_review_thread") receipts.push(await builder.replyReviewThread(input));
+        else if (name === "resolve_review_thread") receipts.push(await builder.resolveReviewThread(input));
+        else if (name === "mark_ready") receipts.push(await builder.markReady());
+        else if (name === "merge") receipts.push(await builder.merge(input));
+        else if (name === "create_branch") receipts.push(await builder.createBranch(input));
+        else if (name === "push_branch") receipts.push(await builder.pushBranch(input));
+        else if (name === "replace_branch") receipts.push(await builder.replaceBranch(input));
+      }
+    } finally {
+      await emitTiming({ action: "finish", name: "publication", key: timingKey, at: new Date().toISOString(), metadata: { agent: "antigravity", channel: "github_builder" } });
     }
     return receipts;
   }
@@ -222,6 +236,8 @@ export function createAgentPool({
       ollama: "scripts/ollama-bridge-mcp.sh",
       docker: "scripts/docker-bridge-mcp.sh",
     };
+    const timingKey = `provider_startup:${agent}`;
+    await emitTiming({ action: "start", name: "provider_startup", key: timingKey, at: new Date().toISOString(), metadata: { agent } });
     const client = new Client({ name: `agent-bridge-worker-${agent}`, version: "0.2.0" });
     const transport = new StdioClientTransport({
       command: "/bin/zsh",
@@ -232,9 +248,11 @@ export function createAgentPool({
     try {
       await client.connect(transport, { timeout: 5_000 });
       clients[agent] = client;
+      await emitTiming({ action: "finish", name: "provider_startup", key: timingKey, at: new Date().toISOString(), metadata: { agent } });
       return client;
     } catch (error) {
       await client.close().catch(() => {});
+      await emitTiming({ action: "finish", name: "provider_startup", key: timingKey, at: new Date().toISOString(), metadata: { agent, error: error.message } });
       throw error;
     }
   }
@@ -277,16 +295,18 @@ export function createAgentPool({
       }
     },
     async send({ agent, prompt, sessionId, mode, browser }, onProgress = () => {}) {
-      // Issue #55: fail-closed provider capability boundary. A bounded command-running
-      // review is dispatched only to a provider that can enforce an exact command grant
-      // (Claude). Codex/Antigravity carry no enforceable grant, so a review with
-      // verification commands is rejected here, before the provider spawns; they may
-      // still run static review with no verification commands.
+      // Issue #55: fail-closed provider capability boundary. This checks the effective
+      // commands that will actually be dispatched. Exact-head receipts intentionally
+      // remove completed gates before this boundary, allowing a provider to perform a
+      // static review without ever receiving those commands.
       assertProviderVerificationCapability({ provider: agent, mode, verificationCommands });
+      const runnableVerificationCommands = agent === "claude" && mode === "review"
+        ? [...new Set([...verificationCommands, ...reusableVerificationCommands])]
+        : verificationCommands;
       // Enforce the coordinator command allowlist on every provider request path before
       // dispatch. Review calls may run only the verification gates; work calls also cover
       // the coordinator work commands. Any command outside the allowlist fails here.
-      admitProviderCommands({ mode, verificationCommands, workCommands });
+      admitProviderCommands({ mode, verificationCommands: runnableVerificationCommands, workCommands });
       const client = await clientFor(agent);
       const permissionDecision = providerPermissionDecisionForRequest({
         provider: agent,
@@ -314,7 +334,7 @@ export function createAgentPool({
           model: models.claude,
           fallbackModels: modelFallbacks.claude,
           allowFable: allowClaudeFable,
-          verificationCommands: permissionDecision.verificationCommands,
+          verificationCommands: runnableVerificationCommands,
           workCommands,
           workProfile: effectiveWorkProfile,
           permissionProfile: effectivePermissionProfile,
@@ -445,6 +465,7 @@ export function createAgentPool({
         metadata: {
           usage: structured.usage || structured.tokenUsage || null,
           durationMs: structured.durationMs || structured.duration_ms || null,
+          timing: structured.timing || null,
           permissionProfile: effectivePermissionProfile,
           permissionReason: permissionDecision.permissionReason,
           modelRouting: ["claude", "codex", "ollama", "docker"].includes(agent) ? {

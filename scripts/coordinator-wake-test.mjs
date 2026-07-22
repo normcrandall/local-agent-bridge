@@ -16,6 +16,7 @@ import {
   listCoordinatorStates,
   markCoordinatorWakeDelivered,
 } from "../src/coordinator-wake.mjs";
+import { createPerformanceTimeline, markPerformanceMilestone } from "../src/performance-timeline.mjs";
 
 const root = await mkdtemp(join(tmpdir(), "agent-bridge-wake-test-"));
 process.env.BRIDGE_COLLABORATION_DIR = join(root, "state");
@@ -56,6 +57,11 @@ try {
         summary: "Review completed with no findings.",
       },
     },
+    performance: markPerformanceMilestone(
+      createPerformanceTimeline(new Date(Date.now() - 1_000).toISOString()),
+      "provider_completed",
+      { at: new Date(Date.now() - 500).toISOString() },
+    ),
   }));
   states = await listCoordinatorStates({ root, provider: "codex", cwd: root });
   decision = coordinatorHookDecision(states);
@@ -88,6 +94,9 @@ try {
     action: "completed",
   });
   assert.equal(acknowledged.coordinatorWake.status, "acknowledged");
+  assert.ok(acknowledged.performanceSummary.byName.completion_to_wake.totalMs >= 0);
+  assert.ok(acknowledged.performanceSummary.byName.wake_delivery.totalMs >= 0);
+  assert.ok(acknowledged.performanceSummary.byName.wake_acknowledgement.totalMs >= 0);
   states = await listCoordinatorStates({ root, provider: "codex", cwd: root });
   assert.equal(states.length, 0);
 

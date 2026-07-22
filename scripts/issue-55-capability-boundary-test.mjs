@@ -45,6 +45,10 @@ try {
   assert.doesNotThrow(() => assertProviderVerificationCapability({ provider: "antigravity", mode: "review", verificationCommands: [] }));
   assert.doesNotThrow(() => assertProviderVerificationCapability({ provider: "antigravity", mode: "review", verificationCommands }));
   assert.doesNotThrow(() => assertProviderVerificationCapability({ provider: "codex", mode: "review", verificationCommands: [] }));
+  assert.doesNotThrow(() => assertProviderVerificationCapability({ provider: "docker", mode: "review", verificationCommands: [] }), "receipt-backed Docker review is static and receives no command");
+  assert.doesNotThrow(() => assertProviderVerificationCapability({ provider: "ollama", mode: "review", verificationCommands: [] }), "receipt-backed Ollama review is static and receives no command");
+  assert.throws(() => assertProviderVerificationCapability({ provider: "docker", mode: "review", verificationCommands }), /cannot enforce an exact command grant/);
+  assert.throws(() => assertProviderVerificationCapability({ provider: "ollama", mode: "review", verificationCommands }), /cannot enforce an exact command grant/);
   // Claude may run a command-running review because it enforces exact Bash() grants.
   assert.doesNotThrow(() => assertProviderVerificationCapability({ provider: "claude", mode: "review", verificationCommands }));
 

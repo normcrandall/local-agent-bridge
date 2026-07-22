@@ -97,8 +97,11 @@ try {
   assert.match(result.result, /No blocking findings/);
   assert.equal(requests[0].tools.some((tool) => tool.function.name === "git_diff"), true);
   assert.equal(requests[0].think, false);
+  assert.equal(Object.hasOwn(requests[0], "keep_alive"), false);
   assert.equal(requests[1].messages.at(-1).role, "tool");
   assert.equal(result.model, "docker.io/ai/qwen2.5-coder:latest");
+  assert.equal(result.timing.apiCalls, 2);
+  assert.equal(result.timing.toolCalls, 1);
 
   process.env.AGENT_BRIDGE_DOCKER_MODEL_RUNNER_CONFIG = join(repository, "missing-docker-config.json");
   const defaultModelResponse = await runDockerModelReview({

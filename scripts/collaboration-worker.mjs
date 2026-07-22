@@ -30,6 +30,15 @@ import { enqueueCoordinatorWake } from "../src/coordinator-wake.mjs";
 import { createBoundBuilderClient } from "../src/github-builder-client.mjs";
 import { createInstallationToken } from "../src/github-app-auth.mjs";
 import { providerPermissionDecisionForRequest } from "../src/verification-allowlist.mjs";
+import {
+  createPerformanceTimeline,
+  finishPerformanceSpan,
+  markPerformanceMilestone,
+  startPerformanceSpan,
+  summarizePerformance,
+} from "../src/performance-timeline.mjs";
+import { createVerificationTimingTracker } from "../src/verification-timing.mjs";
+import { assertRepositoryEvidenceHead } from "../src/repository-evidence.mjs";
 
 const runtimeRoot = realpathSync(
   process.env.BRIDGE_RUNTIME_ROOT || process.env.BRIDGE_ROOT || fileURLToPath(new URL("..", import.meta.url)),
@@ -46,6 +55,29 @@ let pool = null;
 let state = null;
 let claimClient = null;
 let workerHeadSha = null;
+
+async function recordTiming(event) {
+  const at = event.at || new Date().toISOString();
+  try {
+    return await updateCollaboration(workspaceRoot, id, (current) => {
+      let performance = current.performance || createPerformanceTimeline(current.createdAt || at);
+      if (event.action === "start") {
+        performance = startPerformanceSpan(performance, event.name, {
+          at, key: event.key, category: event.category || "active", metadata: event.metadata || {},
+        });
+      } else if (event.action === "finish") {
+        performance = finishPerformanceSpan(performance, event.name, {
+          at, key: event.key, metadata: event.metadata || {},
+        });
+      } else if (event.action === "milestone") {
+        performance = markPerformanceMilestone(performance, event.name, { at, metadata: event.metadata || {} });
+      }
+      return { ...current, performance, performanceSummary: summarizePerformance(performance) };
+    });
+  } catch {
+    return null;
+  }
+}
 
 function gitValue(workspace, args, label) {
   const result = spawnSync("git", args, { cwd: workspace, encoding: "utf8" });
@@ -182,6 +214,7 @@ try {
     error: null,
     runStartedAt: current.runStartedAt || new Date().toISOString(),
   }));
+  await recordTiming({ action: "finish", name: "queueing", key: `queueing:${state.runSequence || 1}`, at: new Date().toISOString(), metadata: { runSequence: state.runSequence || 1 } });
   await appendEvent(workspaceRoot, id, { type: "run_started", at: new Date().toISOString(), pid: process.pid });
 
   if (claimClient) {
@@ -209,6 +242,15 @@ try {
     });
   }
 
+  if (state.evidence?.repository?.headSha) {
+    const evidenceHead = spawnSync("git", ["rev-parse", "HEAD"], { cwd: state.workspace, encoding: "utf8" });
+    if (evidenceHead.status !== 0) throw new Error(`Unable to verify repository evidence head: ${(evidenceHead.stderr || evidenceHead.stdout || "git failed").trim()}`);
+    assertRepositoryEvidenceHead({
+      expectedHeadSha: state.evidence.repository.headSha,
+      observedHeadSha: evidenceHead.stdout.trim(),
+    });
+  }
+
   pool = createAgentPool({
     root: runtimeRoot,
     workspace: state.workspace,
@@ -216,6 +258,7 @@ try {
     modelFallbacks: state.modelFallbacks || {},
     allowClaudeFable: state.allowClaudeFable === true,
     verificationCommands: state.verificationCommands || [],
+    reusableVerificationCommands: (state.verificationReceipts || []).map((receipt) => receipt.command).filter(Boolean),
     workCommands: state.workCommands || [],
     workProfile: state.workProfile || "exact",
     permissionProfile: state.permissionProfile || "standard",
@@ -230,8 +273,11 @@ try {
     writableRoots: state.mode === "work" && state.worktree?.strategy === "self-contained"
       ? [state.worktree.gitMetadataRoot]
       : [],
+    onTiming: recordTiming,
   });
+  await recordTiming({ action: "start", name: "provider_preflight", key: `provider_preflight:${state.runSequence || 1}`, metadata: { agents: state.agents } });
   const probes = await Promise.all(state.agents.map((agent) => pool.probe(agent)));
+  await recordTiming({ action: "finish", name: "provider_preflight", key: `provider_preflight:${state.runSequence || 1}`, metadata: { available: probes.filter((probe) => probe.available).map((probe) => probe.agent) } });
   const reviewOrder = orderReviewProbes({
     probes,
     requestedStartAgent: state.startAgent,
@@ -296,6 +342,8 @@ try {
       const capacityRole = call.mode === "work" ? "work" : "review";
       const capacityLimits = state.providerConcurrency || await loadProviderConcurrency();
       let lastCapacityWaitSignature = null;
+      let capacityQueued = false;
+      const capacityTimingKey = `capacity_queue:${call.agent}:${startedAt}`;
       let capacityLease;
       try {
         // Issue #55: before acquiring capacity, reject a verification command that would
@@ -315,6 +363,10 @@ try {
           limits: capacityLimits,
           onWait: async ({ limit, inUse, position }) => {
             const now = new Date().toISOString();
+            if (!capacityQueued) {
+              capacityQueued = true;
+              await recordTiming({ action: "start", name: "capacity_queue", key: capacityTimingKey, at: now, metadata: { agent: call.agent, role: capacityRole } });
+            }
             // Issue #55: put the explicit capacity-wait reason into the live narrative.
             const wait = capacityWaitNarrative({ agent: call.agent, role: capacityRole, limit, inUse, position });
             await updateCollaboration(workspaceRoot, id, (current) => ({
@@ -352,6 +404,9 @@ try {
             }
           },
         });
+        if (capacityQueued) {
+          await recordTiming({ action: "finish", name: "capacity_queue", key: capacityTimingKey, metadata: { agent: call.agent, role: capacityRole } });
+        }
       } catch (error) {
         await updateCollaboration(workspaceRoot, id, (current) => ({
           ...current,
@@ -410,7 +465,28 @@ try {
         }));
       };
       let heartbeat = null;
+      const providerTimingKey = `provider_turn:${call.agent}:${startedAt}`;
+      const firstProgressTimingKey = `first_progress:${call.agent}:${startedAt}`;
+      let firstProgressObserved = false;
+      const verificationTiming = createVerificationTimingTracker({
+        onStart: ({ command, key, at, metadata }) => recordTiming({
+          action: "start",
+          name: "tests",
+          key: `${key}:${call.agent}:${startedAt}`,
+          at,
+          metadata: { agent: call.agent, command, ...metadata },
+        }),
+        onFinish: ({ command, key, at, metadata }) => recordTiming({
+          action: "finish",
+          name: "tests",
+          key: `${key}:${call.agent}:${startedAt}`,
+          at,
+          metadata: { agent: call.agent, command, ...metadata },
+        }),
+      });
       try {
+        await recordTiming({ action: "start", name: "provider_turn", key: providerTimingKey, at: startedAt, metadata: { agent: call.agent, mode: call.mode } });
+        await recordTiming({ action: "start", name: "first_progress", key: firstProgressTimingKey, at: startedAt, metadata: { agent: call.agent } });
         await writeActiveCall();
         await appendEvent(workspaceRoot, id, {
           type: "agent_started",
@@ -435,8 +511,19 @@ try {
           const incoming = progress.summary?.trim().slice(0, 500);
           if (incoming && isTransportLivenessSummary(incoming)) livenessMessage = incoming;
           else if (incoming) {
+            if (!firstProgressObserved) {
+              firstProgressObserved = true;
+              await recordTiming({ action: "finish", name: "first_progress", key: firstProgressTimingKey, at: progress.at, metadata: { agent: call.agent } });
+            }
             // Issue #55: name the active verification command in the live narrative.
             activeCommand = activeVerificationCommand(incoming, state.verificationCommands || []);
+            const commandFinished = activeCommand && /\b(?:finished|completed)\b/i.test(incoming);
+            await verificationTiming.observe({
+              command: activeCommand,
+              finished: commandFinished,
+              at: progress.at,
+              metadata: commandFinished ? { completionInferred: call.agent !== "claude" } : {},
+            });
             const narrative = verificationNarrative({
               agent: call.agent,
               providerSummary: incoming,
@@ -469,6 +556,21 @@ try {
           }
         });
         if (heartbeat) clearInterval(heartbeat);
+        const completedAt = new Date().toISOString();
+        if (!firstProgressObserved) {
+          await recordTiming({ action: "finish", name: "first_progress", key: firstProgressTimingKey, at: completedAt, metadata: { agent: call.agent, noProgress: true } });
+        }
+        await verificationTiming.finishAll({ at: completedAt, metadata: { completionInferred: true } });
+        const measured = response.metadata?.timing;
+        for (const [name, durationMs] of [["inference", measured?.inferenceMs], ["tools", measured?.toolMs]]) {
+          if (!Number.isFinite(durationMs) || durationMs < 0) continue;
+          const key = `${name}:${call.agent}:${startedAt}`;
+          const measuredStart = new Date(Math.max(Date.parse(startedAt), Date.parse(completedAt) - durationMs)).toISOString();
+          await recordTiming({ action: "start", name, key, at: measuredStart, metadata: { agent: call.agent, measured: true } });
+          await recordTiming({ action: "finish", name, key, at: completedAt, metadata: { agent: call.agent, calls: name === "tools" ? measured.toolCalls : measured.apiCalls } });
+        }
+        await recordTiming({ action: "finish", name: "provider_turn", key: providerTimingKey, at: completedAt, metadata: { agent: call.agent, timing: response.metadata?.timing || null } });
+        await recordTiming({ action: "milestone", name: "provider_completed", at: completedAt, metadata: { agent: call.agent } });
         await updateCollaboration(workspaceRoot, id, (current) => ({
           ...current,
           runtime: { ...current.runtime, activeCall: null },
@@ -482,6 +584,10 @@ try {
         return response;
       } catch (error) {
         if (heartbeat) clearInterval(heartbeat);
+        const failedAt = new Date().toISOString();
+        await verificationTiming.finishAll({ at: failedAt, metadata: { failed: true } }).catch(() => {});
+        await recordTiming({ action: "finish", name: "first_progress", key: firstProgressTimingKey, at: failedAt, metadata: { agent: call.agent, failed: true } }).catch(() => {});
+        await recordTiming({ action: "finish", name: "provider_turn", key: providerTimingKey, at: failedAt, metadata: { agent: call.agent, failed: true } }).catch(() => {});
         if (error?.indeterminate) {
           lastSummary = `Caller lost contact with ${call.agent}; execution state is unknown and ownership is preserved.`;
           await writeActiveCall({ status: "indeterminate", phase: "unknown", summary: lastSummary });
@@ -718,6 +824,8 @@ try {
     process.exitCode = 1;
   }
 } finally {
+  const cleanupTimingKey = `cleanup:${state?.runSequence || 1}:${Date.now()}`;
+  await recordTiming({ action: "start", name: "cleanup", key: cleanupTimingKey, metadata: { runSequence: state?.runSequence || 1 } }).catch(() => {});
   await pool?.close().catch(() => {});
   await releaseWorkspace?.().catch(() => {});
   await releaseWorker?.().catch(() => {});
@@ -728,4 +836,5 @@ try {
       workerLeaseReleased: true, finishedAt: new Date().toISOString(),
     },
   })).catch(() => {});
+  await recordTiming({ action: "finish", name: "cleanup", key: cleanupTimingKey, metadata: { runSequence: state?.runSequence || 1 } }).catch(() => {});
 }

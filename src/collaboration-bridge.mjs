@@ -30,6 +30,15 @@ import { resolveNativeChair } from "./native-chair.mjs";
 import { clearTerminalRuntime, legacyWorkerCommandMatches, reconciliationAction, workerCancellationMatches, workerCommandMatches } from "./collaboration-cleanup.mjs";
 import { acknowledgeCompletion } from "./handoff-protocol.mjs";
 import { readContextCapsule } from "./context-capsule.mjs";
+import { createEvidenceStore } from "./evidence-store.mjs";
+import { assertRepositoryEvidenceHead, captureRepositoryEvidence, formatRepositoryEvidence, readRepositoryHead } from "./repository-evidence.mjs";
+import { formatReusableVerification, resolveVerificationPlan } from "./verification-receipts.mjs";
+import {
+  createPerformanceTimeline,
+  markPerformanceMilestone,
+  startPerformanceSpan,
+  summarizePerformance,
+} from "./performance-timeline.mjs";
 import { replayIncident, formatReplayHuman } from "./incident-replay.mjs";
 import { analyzePortfolio, buildExecutionWaves, normalizePortfolioItems } from "./portfolio-scheduler.mjs";
 import { createPortfolio, listPortfolios, readPortfolio, updatePortfolio } from "./portfolio-store.mjs";
@@ -64,6 +73,7 @@ import { startSupervisedWorker } from "./worker-supervisor-client.mjs";
 const RUNTIME_ROOT = realpathSync(process.env.BRIDGE_RUNTIME_ROOT || process.env.BRIDGE_ROOT || process.cwd());
 const WORKSPACE_ROOT = realpathSync(process.env.BRIDGE_WORKSPACE_ROOT || process.env.BRIDGE_ROOT || process.cwd());
 const PORTFOLIO_ROOT = resolve(process.env.BRIDGE_PORTFOLIO_DIR || collaborationDirectory(WORKSPACE_ROOT), "portfolios");
+const EVIDENCE_ROOT = resolve(collaborationDirectory(WORKSPACE_ROOT), "evidence");
 const TERMINAL_STATUSES = new Set(["agreed", "needs_user", "turn_limit", "failed", "cancelled", "budget"]);
 const STATUS_VALUES = ["queued", "running", "recovering", "cancelling", "indeterminate", ...TERMINAL_STATUSES];
 
@@ -264,16 +274,43 @@ async function reconcileInterruptedCleanup() {
 function compactStatusView(view) {
   const {
     task: _task,
+    taskBase: _taskBase,
     models: _models,
     modelFallbacks: _modelFallbacks,
     providerConcurrency: _providerConcurrency,
+    requestedVerificationCommands: _requestedVerificationCommands,
     verificationCommands: _verificationCommands,
     workCommands: _workCommands,
     preflight: _preflight,
     capabilities: _capabilities,
+    performance: _performance,
+    verificationReceipts: _verificationReceipts,
+    evidence: _evidence,
     ...status
   } = view;
-  return status;
+  const repository = view.evidence?.repository;
+  return {
+    ...status,
+    ...(view.evidence ? {
+      evidence: {
+        repository: repository ? {
+          repository: repository.repository,
+          headSha: repository.headSha,
+          baseSha: repository.baseSha || null,
+          clean: repository.clean,
+          fileCount: repository.fileCount,
+          changedFileCount: repository.changedFiles?.length || 0,
+          repositoryMapComplete: repository.repositoryMapComplete !== false,
+          diffComplete: repository.diffComplete !== false,
+          environmentFingerprintComplete: repository.environmentFingerprintComplete !== false,
+        } : null,
+        cacheMetrics: view.evidence.cacheMetrics || repository?.cacheMetrics || null,
+        avoidedCommands: view.evidence.avoidedCommands || 0,
+        estimatedAvoidedMs: view.evidence.estimatedAvoidedMs || 0,
+      },
+    } : {}),
+    verificationReceiptCount: view.verificationReceipts?.length || 0,
+  };
 }
 
 function refreshPortfolioState(state) {
@@ -317,6 +354,19 @@ async function releaseLinkedIssueClaim(item, outcome) {
     outcome,
   });
   return { released: true, issueNumber: collaboration.issueClaim.issueNumber };
+}
+
+async function markLinkedCollaborationPerformance(item, name, metadata = {}) {
+  if (!item?.collaborationId) return null;
+  const at = new Date().toISOString();
+  return updateCollaboration(WORKSPACE_ROOT, item.collaborationId, (current) => {
+    const performance = markPerformanceMilestone(
+      current.performance || createPerformanceTimeline(current.createdAt || at),
+      name,
+      { at, metadata: { portfolioItemId: item.id, ...metadata } },
+    );
+    return { ...current, performance, performanceSummary: summarizePerformance(performance) };
+  }).catch(() => null);
 }
 
 function portfolioLaneOutcome(item, collaboration, expectedHeadSha) {
@@ -683,6 +733,9 @@ server.registerTool(
     let resolvedIssueClaim = input.issueClaim ? { ...input.issueClaim } : null;
     let resolvedTask = input.task;
     let issueContext = null;
+    let repositoryEvidence = null;
+    let verificationPlan = { reusable: [], pendingCommands: input.verificationCommands || [], avoidedCommands: 0, estimatedAvoidedMs: 0 };
+    const evidenceStore = createEvidenceStore({ directory: EVIDENCE_ROOT });
 
     if (input.issueClaim) {
       const { acquireClaimLease } = await import("./github-issue-claims.mjs");
@@ -718,6 +771,8 @@ server.registerTool(
         repository,
         issueNumber: input.issueClaim.issueNumber,
         task: input.task,
+        evidenceStore,
+        evidenceScope: { repository, headSha },
       });
       resolvedTask = hydrated.task;
       issueContext = hydrated.metadata;
@@ -814,9 +869,28 @@ server.registerTool(
           worktree: resolvedIssueClaim.worktree,
         });
       }
+      repositoryEvidence = await captureRepositoryEvidence({
+        workspace,
+        store: evidenceStore,
+        repository: input.issueClaim?.repository || input.githubReview?.repository || input.githubBuilder?.repository,
+        headSha: input.githubReview?.headSha || input.githubBuilder?.headSha || undefined,
+        baseSha: input.githubBuilder?.baseSha || resolvedIssueClaim?.baseSha || null,
+        allowMissingHead: !input.issueClaim && !input.githubReview && !input.githubBuilder && !input.worktree,
+      });
+      const taskBase = resolvedTask;
+      resolvedTask = [taskBase, formatRepositoryEvidence(repositoryEvidence)].filter(Boolean).join("\n\n");
+      verificationPlan = await resolveVerificationPlan({
+        store: evidenceStore,
+        repositoryEvidence,
+        commands: input.verificationCommands || [],
+      });
+      if (verificationPlan.reusable.length) {
+        resolvedTask = `${resolvedTask}\n\n${formatReusableVerification(verificationPlan.reusable)}`;
+      }
       const state = await createCollaboration(WORKSPACE_ROOT, {
         id: collaborationId,
         task: resolvedTask,
+        taskBase,
         workspace,
         agents: delegatedAgents,
         participants: input.chair ? [input.chair.provider, ...delegatedAgents.filter((agent) => agent !== input.chair.provider)] : delegatedAgents,
@@ -831,7 +905,9 @@ server.registerTool(
         modelFallbacks: input.modelFallbacks || {},
         allowClaudeFable: input.allowClaudeFable === true,
         providerConcurrency: await loadProviderConcurrency({ overrides: input.providerConcurrency || {} }),
-        verificationCommands: input.verificationCommands || [],
+        requestedVerificationCommands: input.verificationCommands || [],
+        verificationCommands: verificationPlan.pendingCommands,
+        verificationReceipts: verificationPlan.reusable,
         workCommands: input.workCommands || [],
         workProfile: input.workProfile || "exact",
         permissionProfile: effectivePermissionProfile,
@@ -841,6 +917,12 @@ server.registerTool(
         githubBuilder: input.githubBuilder || null,
         issueClaim: resolvedIssueClaim,
         issueContext,
+        evidence: {
+          repository: repositoryEvidence,
+          cacheMetrics: evidenceStore.metrics(),
+          avoidedCommands: verificationPlan.avoidedCommands,
+          estimatedAvoidedMs: verificationPlan.estimatedAvoidedMs,
+        },
         rotation: rotated ? { taskNumber: input.taskNumber, offset: input.rotationOffset, ...rotated } : null,
         worktree,
         preflight: readiness,
@@ -856,6 +938,11 @@ server.registerTool(
         decisions: [],
         handoffs: [],
         completion: null,
+        performance: startPerformanceSpan(
+          createPerformanceTimeline(new Date().toISOString()),
+          "queueing",
+          { key: "queueing:1", category: "active", metadata: { runSequence: 1 } },
+        ),
         runSequence: 1,
         coordinatorWake: null,
         nativeChairTurns: [],
@@ -1315,8 +1402,12 @@ server.registerTool(
     const patch = Object.fromEntries(Object.entries({ status, ...details }).filter(([, value]) => value !== undefined));
     const result = await updatePortfolio(PORTFOLIO_ROOT, id, expectedRevision, (current) => updatePortfolioItemState(current, itemId, patch));
 
+    const updatedItem = result.items.find((item) => item.id === String(itemId));
+    if (status === "reviewing") await markLinkedCollaborationPerformance(updatedItem, "review_started");
+    if (status === "ready_to_merge") await markLinkedCollaborationPerformance(updatedItem, "review_completed");
+
     if (status === "obsolete") {
-      await releaseLinkedIssueClaim(result.items.find((item) => item.id === itemId), "obsolete");
+      await releaseLinkedIssueClaim(updatedItem, "obsolete");
     }
 
     return toolResponse(result);
@@ -1339,10 +1430,12 @@ server.registerTool(
   },
   async ({ portfolioId: id, expectedRevision, itemId, prNumber, headSha, priority }) => {
     blockNestedCollaboration();
-    return toolResponse(await updatePortfolio(PORTFOLIO_ROOT, id, expectedRevision, (current) => updatePortfolioItemState({
+    const result = await updatePortfolio(PORTFOLIO_ROOT, id, expectedRevision, (current) => updatePortfolioItemState({
       ...current,
       mergeTrain: enqueueMergeCandidate(current.mergeTrain, { itemId, prNumber, headSha, priority }),
-    }, itemId, { status: "ready_to_merge", prNumber, headSha })));
+    }, itemId, { status: "ready_to_merge", prNumber, headSha }));
+    await markLinkedCollaborationPerformance(result.items.find((item) => item.id === String(itemId)), "review_completed", { prNumber, headSha });
+    return toolResponse(result);
   },
 );
 
@@ -1408,7 +1501,9 @@ server.registerTool(
   },
   async ({ portfolioId: id, itemId, observedTargetSha, observedHeadSha }) => {
     const current = await readPortfolio(PORTFOLIO_ROOT, id);
-    return toolResponse({ portfolioId: id, revision: current.revision, authorization: mergeAuthorization(current.mergeTrain, { itemId, observedTargetSha, observedHeadSha }) });
+    const authorization = mergeAuthorization(current.mergeTrain, { itemId, observedTargetSha, observedHeadSha });
+    await markLinkedCollaborationPerformance(current.items.find((item) => item.id === String(itemId)), "merge_authorized", { observedTargetSha, observedHeadSha });
+    return toolResponse({ portfolioId: id, revision: current.revision, authorization });
   },
 );
 
@@ -1479,8 +1574,86 @@ server.registerTool(
       mergeTrain: recordMergeResult(current.mergeTrain, { itemId, expectedTargetSha, expectedHeadSha, mergedSha }),
     }, itemId, { status: "merged", summary: `Merged as ${mergedSha}` }));
 
-    await releaseLinkedIssueClaim(updatedState.items.find((item) => item.id === itemId), "merged");
+    const mergedItem = updatedState.items.find((item) => item.id === String(itemId));
+    await markLinkedCollaborationPerformance(mergedItem, "merge_completed", { mergedSha });
+    await releaseLinkedIssueClaim(mergedItem, "merged");
     return toolResponse(updatedState);
+  },
+);
+
+server.registerTool(
+  "record_verification_receipt",
+  {
+    title: "Record exact-head verification receipt",
+    description: "Persist a chair- or CI-attested verification result so later reviewers can reuse it only at the same clean head and environment fingerprint.",
+    inputSchema: {
+      collaborationId,
+      command: z.string().trim().min(1).max(500),
+      exitCode: z.number().int(),
+      startedAt: z.string().datetime(),
+      completedAt: z.string().datetime(),
+      source: z.enum(["chair", "github_ci"]),
+      attestation: z.enum(["authoritative", "observed", "claimed"]).default("claimed"),
+      outputDigest: z.string().regex(/^[0-9a-f]{64}$/i),
+      outputSummary: z.string().max(4_000).optional(),
+    },
+  },
+  async ({ collaborationId: id, command, exitCode, startedAt, completedAt, source, attestation, outputDigest, outputSummary }) => {
+    blockNestedCollaboration();
+    const current = await readCollaboration(WORKSPACE_ROOT, id);
+    const repositoryEvidence = current.evidence?.repository;
+    if (!repositoryEvidence?.repository || !repositoryEvidence?.headSha || !repositoryEvidence?.environmentFingerprint) {
+      throw new Error(`Collaboration ${id} has no exact-head repository evidence.`);
+    }
+    const authorizedCommands = new Set([
+      ...(current.requestedVerificationCommands || []),
+      ...(current.verificationCommands || []),
+    ]);
+    if (!authorizedCommands.has(command)) {
+      throw new Error(`Verification command was not declared for collaboration ${id}: ${command}`);
+    }
+    const store = createEvidenceStore({ directory: EVIDENCE_ROOT });
+    const currentEvidence = await captureRepositoryEvidence({
+      workspace: current.workspace,
+      store,
+      repository: repositoryEvidence.repository,
+      headSha: repositoryEvidence.headSha,
+      baseSha: repositoryEvidence.baseSha || null,
+    });
+    if (!currentEvidence.clean) {
+      throw new Error("Verification receipts can be recorded only for a clean workspace.");
+    }
+    if (currentEvidence.environmentFingerprint !== repositoryEvidence.environmentFingerprint) {
+      throw new Error("Verification environment changed after evidence capture; refresh the collaboration before recording this receipt.");
+    }
+    const recorded = await store.recordVerificationReceipt({
+      repository: repositoryEvidence.repository,
+      headSha: repositoryEvidence.headSha,
+      command,
+      cwd: ".",
+      environmentFingerprint: repositoryEvidence.environmentFingerprint,
+      exitCode,
+      startedAt,
+      completedAt,
+      source,
+      attestation,
+      outputDigest,
+      outputSummary: outputSummary || null,
+    });
+    const receipt = recorded.value;
+    await updateCollaboration(WORKSPACE_ROOT, id, (previous) => ({
+      ...previous,
+      verificationReceipts: [
+        ...(previous.verificationReceipts || []).filter((existing) => existing.command !== command),
+        receipt,
+      ],
+      evidence: {
+        ...(previous.evidence || {}),
+        cacheMetrics: store.metrics(),
+      },
+    }));
+    await appendEvent(WORKSPACE_ROOT, id, { type: "verification_receipt_recorded", at: new Date().toISOString(), receipt });
+    return toolResponse({ collaborationId: id, receipt, digest: recorded.digest });
   },
 );
 
@@ -1729,14 +1902,63 @@ server.registerTool(
         worktree: resolvedContinuationIssueClaim.worktree || current.workspace,
       });
     }
-    const state = await updateCollaboration(WORKSPACE_ROOT, id, (previous) => {
+    const requestedContinuationCommands = verificationCommands
+      || current.requestedVerificationCommands
+      || current.verificationCommands
+      || [];
+    const continuationStore = createEvidenceStore({ directory: EVIDENCE_ROOT });
+    const activeGithubReview = githubReview || current.githubReview || null;
+    const activeGithubBuilder = githubBuilder || current.githubBuilder || null;
+    const continuationEvidence = await captureRepositoryEvidence({
+      workspace: current.workspace,
+      store: continuationStore,
+      repository: resolvedContinuationIssueClaim?.repository || activeGithubReview?.repository || activeGithubBuilder?.repository,
+      headSha: activeGithubReview?.headSha || activeGithubBuilder?.headSha || undefined,
+      baseSha: activeGithubBuilder?.baseSha || resolvedContinuationIssueClaim?.baseSha || null,
+      allowMissingHead: !current.evidence?.repository?.headSha
+        && !resolvedContinuationIssueClaim
+        && !activeGithubReview
+        && !activeGithubBuilder
+        && !current.worktree,
+    });
+    const continuationVerificationPlan = await resolveVerificationPlan({
+      store: continuationStore,
+      repositoryEvidence: continuationEvidence,
+      commands: requestedContinuationCommands,
+    });
+    const continuationMessage = [
+      message,
+      formatRepositoryEvidence(continuationEvidence),
+      formatReusableVerification(continuationVerificationPlan.reusable),
+    ].filter(Boolean).join("\n\n");
+    const state = await updateCollaboration(WORKSPACE_ROOT, id, async (previous) => {
       if (["queued", "running", "recovering", "cancelling", "indeterminate"].includes(previous.status)
         || previous.workspaceOperation || previous.runtime?.activeCall
         || (isSafeWorkerPid(previous.workerPid) && processAlive(previous.workerPid))) {
         throw new Error(`Collaboration ${id} execution ownership changed before continuation could be reserved.`);
       }
+      const nextRunSequence = (previous.runSequence || 1) + 1;
+      const queuedAt = new Date().toISOString();
+      const performance = startPerformanceSpan(
+        previous.performance || createPerformanceTimeline(previous.createdAt || queuedAt),
+        "queueing",
+        { key: `queueing:${nextRunSequence}`, at: queuedAt, metadata: { runSequence: nextRunSequence } },
+      );
+      const refreshedTask = [
+        previous.taskBase || previous.task,
+        formatRepositoryEvidence(continuationEvidence),
+        formatReusableVerification(continuationVerificationPlan.reusable),
+      ].filter(Boolean).join("\n\n");
+      if (continuationEvidence?.headSha) {
+        assertRepositoryEvidenceHead({
+          expectedHeadSha: continuationEvidence.headSha,
+          observedHeadSha: await readRepositoryHead(previous.workspace),
+        });
+      }
       return {
         ...previous,
+        task: refreshedTask,
+        taskBase: previous.taskBase || previous.task,
         status: "queued",
         cancelRequested: false,
         error: null,
@@ -1747,7 +1969,9 @@ server.registerTool(
           : previous.modelFallbacks || {},
         allowClaudeFable: allowClaudeFable === true,
         providerConcurrency: resolvedProviderConcurrency,
-        verificationCommands: verificationCommands || previous.verificationCommands || [],
+        requestedVerificationCommands: requestedContinuationCommands,
+        verificationCommands: continuationVerificationPlan.pendingCommands,
+        verificationReceipts: continuationVerificationPlan.reusable,
         workCommands: workCommands || previous.workCommands || [],
         workProfile: workProfile || previous.workProfile || "exact",
         permissionProfile: permissionProfile || previous.permissionProfile || "standard",
@@ -1759,12 +1983,20 @@ server.registerTool(
         providerRecovery: providerRecovery || previous.providerRecovery || { enabled: true, maxAttempts: 3, backoffSeconds: [15, 60, 180] },
         providerRecoveryState: { attempts: 0, status: "idle" },
         ciTracking: ciTracking || previous.ciTracking || null,
+        evidence: {
+          repository: continuationEvidence,
+          cacheMetrics: continuationStore.metrics(),
+          avoidedCommands: continuationVerificationPlan.avoidedCommands,
+          estimatedAvoidedMs: continuationVerificationPlan.estimatedAvoidedMs,
+        },
         turnTimeoutSeconds: turnTimeoutSeconds || previous.turnTimeoutSeconds || 600,
         decisionPolicy: decisionPolicy || previous.decisionPolicy || { additionalEscalations: [], maxDialogueTurns: 4 },
         decisionPolicyEnabled: decisionPolicy ? true : previous.decisionPolicyEnabled || false,
         budgetExceeded: false,
         decisionEscalation: null,
-        runSequence: (previous.runSequence || 1) + 1,
+        performance,
+        performanceSummary: summarizePerformance(performance),
+        runSequence: nextRunSequence,
         coordinatorWake: previous.coordinatorWake?.status === "acknowledged"
           ? previous.coordinatorWake
           : null,
@@ -1773,7 +2005,7 @@ server.registerTool(
           : additionalTurns },
         runtime: {
           ...previous.runtime,
-          previousMessage: message,
+          previousMessage: continuationMessage,
           previousAgent: null,
           agreementStreak: 0,
           availableAgents: previous.agents,
@@ -1784,7 +2016,12 @@ server.registerTool(
           : null,
       };
     });
-    await appendEvent(WORKSPACE_ROOT, id, { type: "user_continued", at: new Date().toISOString(), message });
+    await appendEvent(WORKSPACE_ROOT, id, {
+      type: "user_continued",
+      at: new Date().toISOString(),
+      message,
+      evidence: state.evidence,
+    });
     await startWorker(id);
     return toolResponse(await collaborationView(WORKSPACE_ROOT, state.id, 1));
   },

@@ -56,6 +56,8 @@ chmod 600 ~/.config/local-agent-bridge/docker-model-runner.json
 
 The adapter uses Docker's documented Ollama-compatible loopback API at `http://127.0.0.1:12434`; `DOCKER_MODEL_RUNNER_MODEL` and `DOCKER_MODEL_RUNNER_HOST` are explicit machine overrides. Non-loopback endpoints are rejected because Docker Model Runner's local API is unauthenticated. Use `agents: ["docker"]` for local review. A mixed `docker`/`ollama` roster is safe because Ollama preflight reports unavailable while the selected Docker reviewer route is healthy. The MCP exposes `ask_docker`, durable `continue_docker`, and `get_docker_status`; state is stored owner-only under `~/.local/state/local-agent-bridge/docker-sessions`.
 
+The machine supervisor keeps the selected local route warm. It preloads Docker with `docker model run --detach` every four minutes; only when Docker preflight fails does it send Ollama an empty generation request with `keep_alive: "30m"`. Set `AGENT_BRIDGE_KEEP_MODELS_WARM=0` to disable this, `AGENT_BRIDGE_MODEL_WARM_INTERVAL_MS` to change the interval, or `AGENT_BRIDGE_LOCAL_MODEL_KEEP_ALIVE` to change the Ollama residency request. `bridge supervisor status` exposes the latest `modelWarmth` result. A successful Docker preflight retains Docker priority even if its optional preload command fails.
+
 Docker receives only bounded repository-state, file-read, literal-search, and Git-diff tools. It receives no shell, browser, verification-command, source-write, builder, commit, push, or merge capability. Both `APPROVE` and `REQUEST_CHANGES` publish only as non-authorizing PR comments during evaluation, so Docker contributes review evidence without unlocking or blocking a merge gate. Configure fallbacks under `providers.docker.fallbackModels` and disable a model machine-wide with `bridge models disable docker <model>`.
 
 ### Local Ollama reviewer (secondary)
@@ -556,6 +558,25 @@ Make every heartbeat poll a separate `get_collaboration` call with `waitSeconds:
 
 A native chair no longer has to infer that a peer finished from a stale heartbeat. Terminal phases enqueue `coordinatorWake`; the installed Stop/AfterAgent hook blocks the host while state is advancing and surfaces actionable completion, while SessionStart re-injects an unprocessed wake after a restart. A repeated Stop against an unchanged signature is allowed to exit so a broken host cannot loop forever; the wake remains durable. Claude's `collaboration_wake` Channel provides a live push path when launched through `claude-collab`. These mechanisms complement bounded broker polling; they do not create hidden shell pollers or bypass protected user/indeterminate boundaries.
 
+### Evidence reuse, compact continuations, and performance timing
+
+The broker stores content-addressed evidence under its owner-only state directory. Repository maps and diffs are keyed by repository plus exact base/head SHA. Claimed-issue and comment reads use a short 30-second cache so concurrent startup avoids duplicate GitHub calls without treating mutable issue text as permanently immutable. Authorization-critical PR state, review state, checks, and merge state are always read fresh.
+
+Each participant receives the full task only on its first turn. Resumed turns carry a compact delta containing the latest unseen peer evidence, current repository/diff evidence, and any newly reusable verification receipts. Runtime `promptMetrics` reports full versus delta prompts, characters sent, estimated tokens, and avoided repeated characters.
+
+Verification may be reused only from a recorded receipt whose repository, exact head SHA, command, working directory, and environment fingerprint all match. The workspace must also be clean, the command must have exited zero, and its attestation must be `authoritative` or `observed`; claimed results and failures never suppress a gate. `record_verification_receipt` defaults to `claimed`, so a trusted chair or CI adapter must explicitly attest evidence it actually observed before reuse. Collaboration state reports reused receipts, commands still pending, avoided command count, and estimated avoided milliseconds. Claude retains a narrow permission to rerun a reused command when it explicitly rejects a receipt; Docker and Ollama may consume the receipt as static review evidence only when every gate is removed from their effective dispatch, and must request fresh verification if they reject it. If any pending command remains, the local-provider capability boundary rejects them before launch.
+
+`get_collaboration` exposes `performanceSummary` and the bounded underlying timeline. Active spans cover queueing, capacity wait, provider startup, first progress, provider execution, inference, tools, tests, review publication, builder publication, and cleanup. Dead-time spans make the handoff pipeline visible:
+
+- `completion_to_wake`: provider completion to wake creation.
+- `wake_delivery`: wake creation to host delivery.
+- `wake_acknowledgement`: delivery to coordinator acknowledgement.
+- `wake_to_review`: acknowledgement to review start.
+- `review_to_merge_authorization`: completed review to exact-head merge authorization.
+- `merge_execution`: authorization to recorded merge.
+
+Use these spans to distinguish model/tool latency from orchestration stalls. `activeTimeMs` is wall-clock time across the union of active intervals, so nested provider/tool/test spans are not double-counted; `attributedActiveTimeMs` retains their summed per-span attribution for breakdowns. Cache metrics include hits, misses, refreshes, avoided loads, avoided commands, and estimated avoided test time; mutable or security-sensitive GitHub checks are deliberately excluded from cache reuse.
+
 A timeout or lost transport becomes `indeterminate`, not unavailable. The broker preserves writer ownership and blocks replacement work in that workspace until the user inspects the provider/workspace and explicitly cancels. Only a confirmed provider failure permits removal from the rotation; cancellation terminates the detached process group.
 
 Delegated peer processes inherit a recursion marker. If a participant tries to start or continue another persistent collaboration through its own MCP tools, the nested mutation is rejected; only the active broker routes turns.
@@ -911,5 +932,8 @@ The Codex/ChatGPT desktop built-in browser cannot be passed through this bridge:
 - `NODE_BIN`: absolute path to Node.js for the adapter launcher.
 - `CODEX_BRIDGE_CODEX_BIN`: absolute path to a working `codex` binary for Claude-to-Codex.
 - `AGY_BIN`: absolute path to the Antigravity CLI executable.
+- `AGENT_BRIDGE_KEEP_MODELS_WARM`: `0` disables supervisor-managed local-model warming; `1` forces it on (it is on by default outside tests).
+- `AGENT_BRIDGE_MODEL_WARM_INTERVAL_MS`: local-model warm tick interval; defaults to four minutes.
+- `AGENT_BRIDGE_LOCAL_MODEL_KEEP_ALIVE`: Ollama `keep_alive` value used by review calls and warm ticks; defaults to `30m`.
 
 The global Codex CLI is installed and verified. The project MCP wrapper also retains the ChatGPT.app-bundled binary as a fallback.

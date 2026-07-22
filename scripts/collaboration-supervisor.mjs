@@ -17,6 +17,7 @@ import {
 import { TERMINAL_COLLABORATION_STATUSES } from "../src/collaboration-cleanup.mjs";
 import { enqueueCoordinatorWake } from "../src/coordinator-wake.mjs";
 import { sanitizeWorkerEnvironment, supervisorEndpoint } from "../src/worker-supervisor-protocol.mjs";
+import { createLocalModelWarmer } from "../src/local-model-warmth.mjs";
 
 const PROTOCOL_VERSION = 1;
 const runtimeRoot = resolve(process.env.BRIDGE_RUNTIME_ROOT || fileURLToPath(new URL("..", import.meta.url)));
@@ -32,6 +33,8 @@ const startOperations = new Map();
 let stopping = false;
 let ready = false;
 let refreshing = false;
+let modelWarmthStatus = { status: "starting", provider: null };
+const modelWarmer = createLocalModelWarmer({ onStatus: (status) => { modelWarmthStatus = status; } });
 
 function processAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 1) return false;
@@ -349,6 +352,7 @@ const server = createServer((socket) => {
             refreshing,
             monitoredWorkers: monitored.size,
             workerPids: [...monitored.keys()].sort((left, right) => left - right),
+            modelWarmth: modelWarmthStatus,
           };
         } else if (request.type === "start") {
           result = await serializeStart(request.collaborationId, () => startWorker({
@@ -398,6 +402,7 @@ await atomicMetadata({
   stateDirectory,
 });
 await adoptRecordedWorkers();
+modelWarmer.start();
 ready = true;
 
 const monitor = setInterval(() => {
@@ -436,6 +441,7 @@ async function shutdown(signal) {
   if (stopping) return;
   stopping = true;
   clearInterval(monitor);
+  modelWarmer.stop();
   await atomicMetadata({
     protocol: PROTOCOL_VERSION,
     supervisorId,

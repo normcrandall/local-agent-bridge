@@ -52,10 +52,12 @@ try {
   });
   assert.equal(result.structuredContent.threadId, "11111111-1111-4111-8111-111111111111");
   assert.equal(result.structuredContent.content, "FAKE_CODEX_COMPLETE");
+  assert.equal(result.structuredContent.timing.toolCalls, 1);
+  assert.ok(result.structuredContent.timing.totalMs >= result.structuredContent.timing.toolMs);
   assert.ok(messages.includes("Codex is analyzing the task."));
   assert.ok(messages.includes("Inspecting the relevant files."));
-  assert.ok(messages.includes("Codex is running a workspace command."));
-  assert.ok(messages.includes("Codex finished a workspace command (exit 0)."));
+  assert.ok(messages.includes("Codex is running workspace command: test"));
+  assert.ok(messages.includes("Codex finished workspace command: test (exit 0)."));
   assert.ok(messages.includes("Codex finished the turn."));
 
   const reply = await client.callTool({

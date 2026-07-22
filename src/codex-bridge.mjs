@@ -86,8 +86,8 @@ function eventSummary(event) {
   }
   if (item.type === "command_execution") {
     return event.type === "item.started"
-      ? "Codex is running a workspace command."
-      : `Codex finished a workspace command${item.exit_code === null || item.exit_code === undefined ? "." : ` (exit ${item.exit_code}).`}`;
+      ? `Codex is running workspace command: ${clipped(String(item.command || "unknown"), 300)}`
+      : `Codex finished workspace command: ${clipped(String(item.command || "unknown"), 300)}${item.exit_code === null || item.exit_code === undefined ? "." : ` (exit ${item.exit_code}).`}`;
   }
   if (item.type === "file_change") return "Codex is applying workspace changes.";
   if (item.type === "mcp_tool_call") return "Codex is using an MCP tool.";
@@ -124,6 +124,7 @@ function runCodexAttempt({ prompt, cwd, sandbox, approvalPolicy, config = {}, mo
   args.push(prompt);
 
   return new Promise((resolvePromise, rejectPromise) => {
+    const wallStartedAt = Date.now();
     const child = spawn(CODEX_BIN, args, {
       cwd: actualCwd,
       env: { ...process.env, CODEX_BRIDGE_ACTIVE: "1" },
@@ -134,6 +135,10 @@ function runCodexAttempt({ prompt, cwd, sandbox, approvalPolicy, config = {}, mo
     let sessionId = threadId || null;
     let finalMessage = "";
     let eventError = null;
+    let firstEventMs = null;
+    let toolMs = 0;
+    let toolCalls = 0;
+    const activeTools = new Map();
 
     const consume = (line) => {
       if (!line.trim()) return;
@@ -142,6 +147,21 @@ function runCodexAttempt({ prompt, cwd, sandbox, approvalPolicy, config = {}, mo
         event = JSON.parse(line);
       } catch {
         return;
+      }
+      const observedAt = Date.now();
+      if (firstEventMs === null) firstEventMs = observedAt - wallStartedAt;
+      const item = event.item || {};
+      const timedTool = ["command_execution", "mcp_tool_call", "web_search"].includes(item.type);
+      if (timedTool && event.type === "item.started") {
+        activeTools.set(item.id || `${item.type}:${toolCalls}`, observedAt);
+        toolCalls += 1;
+      } else if (timedTool && event.type === "item.completed") {
+        const key = item.id || [...activeTools.keys()].find((candidate) => candidate.startsWith(`${item.type}:`));
+        const started = activeTools.get(key);
+        if (started !== undefined) {
+          toolMs += Math.max(0, observedAt - started);
+          activeTools.delete(key);
+        }
       }
       if (event.type === "thread.started" && event.thread_id) sessionId = event.thread_id;
       if (event.type === "item.completed" && event.item?.type === "agent_message" && event.item.text?.trim()) {
@@ -172,7 +192,20 @@ function runCodexAttempt({ prompt, cwd, sandbox, approvalPolicy, config = {}, mo
         rejectPromise(error);
         return;
       }
-      resolvePromise({ content: clipped(finalMessage || "Codex returned no text."), threadId: sessionId, isError: false });
+      const totalMs = Date.now() - wallStartedAt;
+      resolvePromise({
+        content: clipped(finalMessage || "Codex returned no text."),
+        threadId: sessionId,
+        isError: false,
+        timing: {
+          totalMs,
+          firstResponseMs: firstEventMs,
+          toolMs,
+          toolCalls,
+          inferenceMs: Math.max(0, totalMs - toolMs),
+          inferenceEstimated: true,
+        },
+      });
     });
   });
 }

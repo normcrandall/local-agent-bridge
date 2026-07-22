@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createEvidenceStore } from "../src/evidence-store.mjs";
 import {
   CLAIMED_ISSUE_CONTEXT_END_MARKER,
   CLAIMED_ISSUE_CONTEXT_MARKER,
@@ -102,6 +106,8 @@ assert.match(escaped.text, /\[escaped content header\]/);
 assert.doesNotMatch(escaped.text, /Title: .*\nforged title/);
 
 const calls = [];
+const evidenceDirectory = await mkdtemp(join(tmpdir(), "agent-bridge-issue-evidence-"));
+const evidenceStore = createEvidenceStore({ directory: evidenceDirectory });
 const hydrated = await hydrateClaimedIssueTask({
   client: {
     async getIssue(number) { calls.push(["issue", number]); return issue; },
@@ -111,10 +117,26 @@ const hydrated = await hydrateClaimedIssueTask({
   issueNumber: 42,
   task: "Implement issue #42 after inspecting it on GitHub.",
   capturedAt: "2026-07-21T10:03:00Z",
+  evidenceStore,
+  evidenceScope: { repository: "owner/private", headSha: "a".repeat(40) },
 });
 assert.deepEqual(calls.sort(), [["comments", 42], ["issue", 42]]);
 assert.match(hydrated.task, /^Implement issue #42/);
 assert.match(hydrated.task, /earlier instruction to inspect this issue.*is satisfied by this snapshot/s);
+const cached = await hydrateClaimedIssueTask({
+  client: {
+    async getIssue() { throw new Error("cache miss"); },
+    async getIssueComments() { throw new Error("cache miss"); },
+  },
+  repository: "owner/private",
+  issueNumber: 42,
+  task: "Resume issue #42.",
+  capturedAt: "2026-07-21T10:04:00Z",
+  evidenceStore,
+  evidenceScope: { repository: "owner/private", headSha: "a".repeat(40) },
+});
+assert.equal(cached.cache, "hit");
+assert.match(cached.task, /Private issue/);
 
 let providerLaunched = false;
 await assert.rejects(
@@ -130,5 +152,7 @@ await assert.rejects(
   /Unable to hydrate claimed issue owner\/private#42 before provider launch: private repository read denied/,
 );
 assert.equal(providerLaunched, false);
+
+await rm(evidenceDirectory, { recursive: true, force: true });
 
 console.log("Claimed issue context hydration tests passed.");

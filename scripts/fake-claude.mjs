@@ -18,6 +18,17 @@ const mcpConfig = configIndex >= 0
   : null;
 
 const delayMs = Number.parseInt(process.env.FAKE_CLAUDE_DELAY_MS || "0", 10);
+if (process.env.FAKE_CLAUDE_TOOL_EVENT === "1") {
+  process.stdout.write(`${JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "tool_use", id: "tool-1", name: "Bash", input: { command: "npm test" } }] },
+  })}\n`);
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+  process.stdout.write(`${JSON.stringify({
+    type: "user",
+    message: { content: [{ type: "tool_result", tool_use_id: "tool-1", content: "passed" }] },
+  })}\n`);
+}
 if (delayMs > 0) {
   process.stdout.write(`${JSON.stringify({
     type: "assistant",

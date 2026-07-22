@@ -124,9 +124,12 @@ try {
   assert.match(result.result, /app\.mjs:2/);
   assert.equal(requests.length, 3);
   assert.equal(requests[0].tools.some((tool) => tool.function.name === "git_diff"), true);
+  assert.equal(requests[0].keep_alive, "30m");
   assert.equal(requests[1].messages.at(-1).role, "tool");
   assert.match(requests[2].messages.at(-1).content, /final review now/);
   assert.equal(progress.some((message) => /inspecting app\.mjs/.test(message)), true);
+  assert.equal(result.timing.apiCalls, 3);
+  assert.equal(result.timing.toolCalls, 1);
 
   const defaultModelResult = await runOllamaReview({
     prompt: "Return a concise review.",

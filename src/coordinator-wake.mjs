@@ -6,6 +6,7 @@ import {
   readCollaboration,
   updateCollaboration,
 } from "./collaboration-store.mjs";
+import { createPerformanceTimeline, markPerformanceMilestone, summarizePerformance } from "./performance-timeline.mjs";
 
 const ACTIVE_STATUSES = new Set(["queued", "running", "recovering", "cancelling"]);
 const TERMINAL_STATUSES = new Set(["agreed", "needs_user", "turn_limit", "failed", "cancelled", "budget"]);
@@ -115,8 +116,15 @@ export async function enqueueCoordinatorWake(root, id, { force = false } = {}) {
     const key = wakeKey(current, classification);
     if (!force && current.coordinatorWake?.key === key) return current;
     created = true;
+    const performance = markPerformanceMilestone(
+      current.performance || createPerformanceTimeline(current.createdAt || at),
+      "coordinator_wake_enqueued",
+      { at, metadata: { sequence: (current.coordinatorWake?.sequence || 0) + 1 } },
+    );
     return {
       ...current,
+      performance,
+      performanceSummary: summarizePerformance(performance),
       coordinatorWake: {
         sequence: (current.coordinatorWake?.sequence || 0) + 1,
         key,
@@ -160,8 +168,15 @@ export async function markCoordinatorWakeDelivered(root, id, sequence, delivery)
     }
     if (wake.status === "acknowledged") return current;
     delivered = true;
+    const performance = markPerformanceMilestone(
+      current.performance || createPerformanceTimeline(current.createdAt || at),
+      "coordinator_wake_delivered",
+      { at, metadata: { sequence } },
+    );
     return {
       ...current,
+      performance,
+      performanceSummary: summarizePerformance(performance),
       coordinatorWake: {
         ...wake,
         status: "delivered",
@@ -198,8 +213,15 @@ export async function acknowledgeCoordinatorWake(root, id, sequence, {
     }
     if (wake.status === "acknowledged") return current;
     acknowledged = true;
+    const performance = markPerformanceMilestone(
+      current.performance || createPerformanceTimeline(current.createdAt || at),
+      "coordinator_wake_acknowledged",
+      { at, metadata: { sequence, action } },
+    );
     return {
       ...current,
+      performance,
+      performanceSummary: summarizePerformance(performance),
       coordinatorWake: {
         ...wake,
         status: "acknowledged",

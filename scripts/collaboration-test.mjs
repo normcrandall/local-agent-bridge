@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -14,6 +14,26 @@ import "./issue-55-capability-boundary-test.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const stateDirectory = await mkdtemp(join(tmpdir(), "agent-collaboration-test-"));
+const cleanWorkspace = join(root, ".bridge", "test-workspaces", stateDirectory.split("/").at(-1));
+const unbornWorkspace = `${cleanWorkspace}-unborn`;
+await mkdir(cleanWorkspace, { recursive: true });
+await writeFile(join(cleanWorkspace, "README.md"), "# Clean collaboration fixture\n");
+for (const args of [
+  ["init", "-q"],
+  ["config", "user.email", "bridge@example.test"],
+  ["config", "user.name", "Bridge Test"],
+  ["remote", "add", "origin", "https://github.com/veliqon/collaboration-fixture.git"],
+  ["add", "README.md"],
+  ["commit", "-qm", "fixture"],
+]) {
+  const result = spawnSync("git", args, { cwd: cleanWorkspace, encoding: "utf8" });
+  if (result.status !== 0) throw new Error(`Unable to prepare collaboration fixture: ${result.stderr || result.stdout}`);
+}
+await mkdir(unbornWorkspace, { recursive: true });
+{
+  const result = spawnSync("git", ["init", "-q"], { cwd: unbornWorkspace, encoding: "utf8" });
+  if (result.status !== 0) throw new Error(`Unable to prepare unborn collaboration fixture: ${result.stderr || result.stdout}`);
+}
 const fakeCodex = join(stateDirectory, "codex");
 await writeFile(fakeCodex, `#!/bin/sh\nexec "${process.execPath}" "${resolve(root, "scripts/fixtures/fake-codex-progress.mjs")}" "$@"\n`);
 await chmod(fakeCodex, 0o700);
@@ -120,6 +140,7 @@ try {
     "record_native_chair_turn",
     "record_portfolio_merge",
     "record_portfolio_merge_validation",
+    "record_verification_receipt",
     "recover_portfolio_merge_validation",
     "recover_writer_checkout",
     "refresh_portfolio_target",
@@ -270,10 +291,40 @@ try {
     /Autonomous delivery requires a bound githubBuilder/,
   );
 
+  const unbornStarted = await firstClient.callTool({
+    name: "start_collaboration",
+    arguments: {
+      task: "Review a freshly initialized repository before its first commit",
+      workspace: unbornWorkspace,
+      agents: ["claude"],
+      maxTurns: 1,
+      verificationCommands: ["npm test"],
+    },
+  });
+  assert.notEqual(unbornStarted.isError, true);
+  assert.equal(unbornStarted.structuredContent.evidence.repository, null);
+  assert.deepEqual(unbornStarted.structuredContent.verificationCommands, ["npm test"]);
+  const unbornFirstRun = await waitForStop(firstClient, unbornStarted.structuredContent.id);
+  assert.equal(unbornFirstRun.status, "turn_limit", unbornFirstRun.error || "unborn repository first run failed");
+  const unbornContinued = await firstClient.callTool({
+    name: "continue_collaboration",
+    arguments: {
+      collaborationId: unbornStarted.structuredContent.id,
+      message: "Continue without exact-head evidence until the first commit exists.",
+      additionalTurns: 1,
+    },
+  });
+  assert.notEqual(unbornContinued.isError, true);
+  assert.equal(unbornContinued.structuredContent.evidence.repository, null);
+  assert.deepEqual(unbornContinued.structuredContent.verificationCommands, ["npm test"]);
+  const unbornSecondRun = await waitForStop(firstClient, unbornStarted.structuredContent.id);
+  assert.equal(unbornSecondRun.status, "turn_limit", unbornSecondRun.error || "unborn repository continuation failed");
+
   const started = await firstClient.callTool({
     name: "start_collaboration",
     arguments: {
       task: "Verify portable collaboration state",
+      workspace: cleanWorkspace,
       agents: ["claude"],
       maxTurns: 2,
       modelFallbacks: { claude: ["claude-opus-4-6", "claude-sonnet-5"], codex: ["5.6 terra"] },
@@ -283,6 +334,7 @@ try {
     },
   });
   assert.notEqual(started.isError, true);
+  const initialEvidenceHead = spawnSync("git", ["rev-parse", "HEAD"], { cwd: cleanWorkspace, encoding: "utf8" }).stdout.trim();
   const id = started.structuredContent.id;
   assert.match(id, /^bridge-[0-9a-f-]{36}$/);
   await firstClient.close();
@@ -417,7 +469,13 @@ try {
   });
   assert.deepEqual(compactPoll.structuredContent.turns, []);
   assert.equal(Object.hasOwn(compactPoll.structuredContent, "task"), false);
+  assert.equal(Object.hasOwn(compactPoll.structuredContent, "requestedVerificationCommands"), false);
   assert.equal(Object.hasOwn(compactPoll.structuredContent, "verificationCommands"), false);
+  assert.equal(Object.hasOwn(compactPoll.structuredContent, "performance"), false);
+  assert.equal(Object.hasOwn(compactPoll.structuredContent, "verificationReceipts"), false);
+  assert.equal(Object.hasOwn(compactPoll.structuredContent.evidence.repository, "changedFiles"), false);
+  assert.equal(compactPoll.structuredContent.evidence.estimatedAvoidedMs, 0);
+  assert.ok(compactPoll.structuredContent.performanceSummary);
   assert.doesNotMatch(compactPoll.content[0].text, /Latest turn/);
 
   const zeroTurnPoll = await secondClient.callTool({
@@ -432,6 +490,23 @@ try {
     arguments: { collaborationId: id, detail: "full", includeTurns: 20, afterTurn: 1 },
   });
   assert.deepEqual(incrementalPoll.structuredContent.turns.map((turn) => turn.number), [2]);
+
+  const verificationReceipt = await secondClient.callTool({
+    name: "record_verification_receipt",
+    arguments: {
+      collaborationId: id,
+      command: "npm test",
+      exitCode: 0,
+      startedAt: "2026-07-22T12:00:00.000Z",
+      completedAt: "2026-07-22T12:00:05.000Z",
+      source: "chair",
+      attestation: "authoritative",
+      outputDigest: "a".repeat(64),
+      outputSummary: "Offline fixture gate passed.",
+    },
+  });
+  assert.notEqual(verificationReceipt.isError, true, "a clean exact-head gate may mint a reusable receipt");
+  assert.equal(verificationReceipt.structuredContent.receipt.command, "npm test");
 
   const continued = await secondClient.callTool({
     name: "continue_collaboration",
@@ -454,8 +529,32 @@ try {
   });
   assert.equal(secondRun.allowClaudeFable, false, "Fable authorization must not survive collaboration continuation");
   assert.match(secondRun.turns[2].message, /Continue from this second app/);
-  assert.match(secondRun.turns[2].message, /Bash\(npm test\)/);
+  assert.match(secondRun.turns[2].message, /Bash\(npm test\)/, "Claude must retain narrow permission to challenge and rerun a reused receipt");
+  assert.match(secondRun.turns[2].message, /Broker-attested verification receipts reused/);
+  assert.equal(secondRun.evidence.avoidedCommands, 1);
+  assert.deepEqual(secondRun.verificationCommands, []);
+  assert.match(secondRun.task, /Broker-attested verification receipts reused/);
+  assert.doesNotMatch(secondRun.taskBase, /Broker-cached exact-head evidence/);
   assert.match(secondRun.turns[2].message, /collaboration-review\.md/);
+
+  await writeFile(join(cleanWorkspace, "SECOND.md"), "# New exact head\n");
+  for (const args of [["add", "SECOND.md"], ["commit", "-qm", "advance fixture"]]) {
+    const result = spawnSync("git", args, { cwd: cleanWorkspace, encoding: "utf8" });
+    if (result.status !== 0) throw new Error(`Unable to advance collaboration fixture: ${result.stderr || result.stdout}`);
+  }
+  const advancedEvidenceHead = spawnSync("git", ["rev-parse", "HEAD"], { cwd: cleanWorkspace, encoding: "utf8" }).stdout.trim();
+  assert.notEqual(advancedEvidenceHead, initialEvidenceHead);
+  const refreshedContinuation = await secondClient.callTool({
+    name: "continue_collaboration",
+    arguments: { collaborationId: id, message: "Refresh after the checked-out head advanced.", additionalTurns: 1 },
+  });
+  assert.notEqual(refreshedContinuation.isError, true);
+  const refreshedRun = await waitForStop(secondClient, id);
+  assert.equal(refreshedRun.runtime.turnCount, 5);
+  assert.match(refreshedRun.task, new RegExp(advancedEvidenceHead));
+  assert.doesNotMatch(refreshedRun.task, new RegExp(initialEvidenceHead), "continuation task must replace stale exact-head evidence");
+  assert.equal(refreshedRun.evidence.avoidedCommands, 0, "an old-head receipt must not suppress a new-head gate");
+  assert.deepEqual(refreshedRun.verificationCommands, ["npm test"]);
 
   const listed = await secondClient.callTool({ name: "list_collaborations", arguments: {} });
   assert.equal(listed.structuredContent.collaborations[0].id, id);
@@ -744,5 +843,7 @@ try {
     }
   } catch {}
   await rm(stateDirectory, { recursive: true, force: true });
+  await rm(cleanWorkspace, { recursive: true, force: true });
+  await rm(unbornWorkspace, { recursive: true, force: true });
   await rm(resolve(root, ".bridge/test-handoffs"), { recursive: true, force: true });
 }
