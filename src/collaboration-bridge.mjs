@@ -1691,11 +1691,15 @@ server.registerTool(
     }
     const recordedAt = new Date().toISOString();
     const state = await updateCollaboration(WORKSPACE_ROOT, id, (previous) => {
-      const performance = markPerformanceMilestone(
-        previous.performance || createPerformanceTimeline(previous.createdAt || recordedAt),
-        "handoff_acknowledged",
-        { at: recordedAt, metadata: { sequence, accepted } },
-      );
+      const basePerformance = previous.performance || createPerformanceTimeline(previous.createdAt || recordedAt);
+      const wakeOwnsAcknowledgement = previous.coordinatorWake?.sourceHandoffSequence === sequence;
+      const performance = wakeOwnsAcknowledgement
+        ? basePerformance
+        : markPerformanceMilestone(
+          basePerformance,
+          "handoff_acknowledged",
+          { at: recordedAt, metadata: { sequence, accepted } },
+        );
       return {
         ...previous,
         completion: acknowledgeCompletion(previous.completion, {

@@ -49,7 +49,9 @@ function sha256(value) {
 
 export function assertRepositoryEvidenceHead({ expectedHeadSha, observedHeadSha } = {}) {
   if (!expectedHeadSha || !observedHeadSha || observedHeadSha !== expectedHeadSha) {
-    throw new Error(`Repository evidence head mismatch: expected ${expectedHeadSha || "unknown"}, observed ${observedHeadSha || "unknown"}.`);
+    const error = new Error(`Repository evidence head mismatch: expected ${expectedHeadSha || "unknown"}, observed ${observedHeadSha || "unknown"}.`);
+    error.code = "VERIFICATION_HEAD_CHANGED";
+    throw error;
   }
   return observedHeadSha;
 }

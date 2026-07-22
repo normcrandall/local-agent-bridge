@@ -346,6 +346,7 @@ Work permission contract:
     let testCalls = 0;
     const activeTools = new Map();
     const verificationResults = [];
+    let reviewPublished = false;
     const verificationSet = new Set(verificationCommands.map((command) => command.trim()));
     const timer = setTimeout(() => {
       timedOut = true;
@@ -390,14 +391,14 @@ Work permission contract:
               if (active) {
                 const durationMs = Math.max(0, observedAt - active.startedAt);
                 toolMs += durationMs;
-                if (verificationSet.has(active.command)) {
+                if (verificationSet.has(active.command) && typeof block.is_error === "boolean") {
                   testsMs += durationMs;
                   const serializedOutput = typeof block.content === "string"
                     ? block.content
                     : JSON.stringify(block.content ?? null);
                   verificationResults.push({
                     command: active.command,
-                    exitCode: block.is_error === true ? 1 : 0,
+                    exitCode: block.is_error ? 1 : 0,
                     startedAt: active.startedAtIso,
                     completedAt: new Date(observedAt).toISOString(),
                     outputDigest: createHash("sha256").update(serializedOutput).digest("hex"),
@@ -408,6 +409,9 @@ Work permission contract:
                     lastProgressSummary = summary;
                     onProgress(summary);
                   }
+                }
+                if (active.name === "mcp__github_review__submit_pr_review" && block.is_error === false) {
+                  reviewPublished = true;
                 }
                 activeTools.delete(block.tool_use_id);
               }
@@ -489,6 +493,7 @@ Work permission contract:
           handoffPath: actualHandoffPath,
           timing,
           verificationResults,
+          reviewPublished,
         });
       } catch {
         const totalMs = Date.now() - wallStartedAt;
@@ -518,6 +523,7 @@ Work permission contract:
             inferenceEstimated: true,
           },
           verificationResults,
+          reviewPublished,
         });
       }
     });

@@ -142,6 +142,7 @@ function runCodexAttempt({ prompt, cwd, sandbox, approvalPolicy, config = {}, mo
     const activeTools = new Map();
     const verificationSet = new Set(verificationCommands.map((command) => String(command).trim()));
     const verificationResults = [];
+    let reviewPublished = false;
 
     const consume = (line) => {
       if (!line.trim()) return;
@@ -179,6 +180,15 @@ function runCodexAttempt({ prompt, cwd, sandbox, approvalPolicy, config = {}, mo
             });
           }
           activeTools.delete(key);
+        }
+        const server = String(item.server || item.server_name || "").replace(/^mcp__/, "");
+        const tool = String(item.tool || item.name || item.tool_name || "").replace(/^mcp__github_review__/, "");
+        if (item.type === "mcp_tool_call"
+          && server === "github_review"
+          && tool === "submit_pr_review"
+          && !item.error
+          && !["failed", "error"].includes(String(item.status || "").toLowerCase())) {
+          reviewPublished = true;
         }
       }
       if (event.type === "thread.started" && event.thread_id) sessionId = event.thread_id;
@@ -224,6 +234,7 @@ function runCodexAttempt({ prompt, cwd, sandbox, approvalPolicy, config = {}, mo
           inferenceEstimated: true,
         },
         verificationResults,
+        reviewPublished,
       });
     });
   });

@@ -3,7 +3,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createEvidenceStore } from "../src/evidence-store.mjs";
-import { persistObservedVerificationResults, resolveVerificationPlan } from "../src/verification-receipts.mjs";
+import {
+  assertObservedVerificationEvidence,
+  persistObservedVerificationResults,
+  resolveVerificationPlan,
+} from "../src/verification-receipts.mjs";
 
 const directory = await mkdtemp(join(tmpdir(), "agent-bridge-verification-plan-"));
 const headSha = "a".repeat(40);
@@ -84,6 +88,20 @@ try {
   });
   assert.equal(observedPlan.avoidedCommands, 1);
   assert.equal(observedPlan.reusable[0].source, "claude");
+
+  const expectedEvidence = { headSha, environmentFingerprint: "environment-2" };
+  assert.equal(assertObservedVerificationEvidence({
+    expected: expectedEvidence,
+    observed: { ...expectedEvidence, clean: true },
+  }).clean, true);
+  assert.throws(() => assertObservedVerificationEvidence({
+    expected: expectedEvidence,
+    observed: { headSha: "f".repeat(40), environmentFingerprint: "environment-2" },
+  }), (error) => error.code === "VERIFICATION_HEAD_CHANGED");
+  assert.throws(() => assertObservedVerificationEvidence({
+    expected: expectedEvidence,
+    observed: { headSha, environmentFingerprint: "environment-3" },
+  }), (error) => error.code === "VERIFICATION_ENVIRONMENT_CHANGED");
 
   const rejectedDirtyObservation = await persistObservedVerificationResults({
     store,

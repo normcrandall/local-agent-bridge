@@ -26,7 +26,27 @@ if (process.env.FAKE_CLAUDE_TOOL_EVENT === "1") {
   await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
   process.stdout.write(`${JSON.stringify({
     type: "user",
-    message: { content: [{ type: "tool_result", tool_use_id: "tool-1", content: "passed" }] },
+    message: { content: [{ type: "tool_result", tool_use_id: "tool-1", content: "passed", is_error: false }] },
+  })}\n`);
+  if (process.env.FAKE_CLAUDE_AMBIGUOUS_TOOL_RESULT === "1") {
+    process.stdout.write(`${JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "tool_use", id: "tool-2", name: "Bash", input: { command: "git diff --check" } }] },
+    })}\n`);
+    process.stdout.write(`${JSON.stringify({
+      type: "user",
+      message: { content: [{ type: "tool_result", tool_use_id: "tool-2", content: "ambiguous result" }] },
+    })}\n`);
+  }
+}
+if (process.env.FAKE_CLAUDE_REVIEW_TOOL_EVENT === "1") {
+  process.stdout.write(`${JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "tool_use", id: "review-1", name: "mcp__github_review__submit_pr_review", input: {} }] },
+  })}\n`);
+  process.stdout.write(`${JSON.stringify({
+    type: "user",
+    message: { content: [{ type: "tool_result", tool_use_id: "review-1", content: "published", is_error: false }] },
   })}\n`);
 }
 if (delayMs > 0) {

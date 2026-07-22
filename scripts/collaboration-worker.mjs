@@ -41,7 +41,7 @@ import {
 import { createVerificationTimingTracker } from "../src/verification-timing.mjs";
 import { assertRepositoryEvidenceHead, captureRepositoryEvidence } from "../src/repository-evidence.mjs";
 import { createEvidenceStore } from "../src/evidence-store.mjs";
-import { persistObservedVerificationResults } from "../src/verification-receipts.mjs";
+import { assertObservedVerificationEvidence, persistObservedVerificationResults } from "../src/verification-receipts.mjs";
 
 const runtimeRoot = realpathSync(
   process.env.BRIDGE_RUNTIME_ROOT || process.env.BRIDGE_ROOT || fileURLToPath(new URL("..", import.meta.url)),
@@ -585,8 +585,10 @@ try {
               workspace: current.workspace,
               store,
               repository: previousEvidence?.repository,
+              headSha: previousEvidence?.headSha,
               baseSha: previousEvidence?.baseSha || null,
             });
+            assertObservedVerificationEvidence({ expected: previousEvidence, observed: repositoryEvidence });
             const persisted = await persistObservedVerificationResults({
               store,
               repositoryEvidence,
@@ -628,7 +630,11 @@ try {
               type: "verification_receipt_skipped",
               at: new Date().toISOString(),
               agent: call.agent,
-              reason: "evidence_capture_failed",
+              reason: error.code === "VERIFICATION_HEAD_CHANGED"
+                ? "head_changed_during_verification"
+                : error.code === "VERIFICATION_ENVIRONMENT_CHANGED"
+                  ? "environment_changed_during_verification"
+                  : "evidence_capture_failed",
               error: error.message,
             }).catch(() => {});
           }
@@ -640,7 +646,7 @@ try {
             reason: "mutable_work_mode",
           });
         }
-        if (response.metadata?.reviewPublication?.available) {
+        if (response.metadata?.reviewPublication?.published) {
           await recordTiming({
             action: "milestone",
             name: "formal_review_published",
@@ -747,7 +753,7 @@ try {
             if (delivery) completion = { ...completion, delivery: { ...delivery, at: new Date().toISOString() } };
           }
         }
-        const reviewPublication = turn.metadata?.reviewPublication?.available
+        const reviewPublication = turn.metadata?.reviewPublication?.published
           ? recordReviewPublicationResult(current.reviewPublication, { agent: turn.agent, published: true })
           : current.reviewPublication;
         return {

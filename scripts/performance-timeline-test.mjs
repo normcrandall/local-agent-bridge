@@ -43,20 +43,35 @@ assert.equal(summary.byName.merge_ci_validation.totalMs, 30000);
 assert.equal(summary.byName.merge_policy_wait.totalMs, 5000);
 assert.equal(summary.byName.github_merge_execution.totalMs, 5000);
 assert.equal(summary.deadTimeMs, 80_000);
+assert.equal(summary.attributedDeadTimeMs, 80_000);
 assert.equal(summary.activeTimeMs, 2_000, "wall-clock active time must merge overlapping spans");
 assert.equal(summary.attributedActiveTimeMs, 3_200, "per-span attribution remains available for breakdowns");
 
 let noDelivery = createPerformanceTimeline("2026-07-22T13:00:00.000Z");
 noDelivery = markPerformanceMilestone(noDelivery, "provider_completed", { at: "2026-07-22T13:00:01.000Z" });
 noDelivery = markPerformanceMilestone(noDelivery, "handoff_completed", { at: "2026-07-22T13:00:02.000Z" });
-noDelivery = markPerformanceMilestone(noDelivery, "coordinator_wake_enqueued", { at: "2026-07-22T13:00:03.000Z" });
-noDelivery = markPerformanceMilestone(noDelivery, "coordinator_wake_acknowledged", { at: "2026-07-22T13:00:13.000Z" });
 noDelivery = markPerformanceMilestone(noDelivery, "handoff_acknowledged", { at: "2026-07-22T13:00:17.000Z" });
 const noDeliverySummary = summarizePerformance(noDelivery);
-assert.equal(noDeliverySummary.byName.wake_acknowledgement.totalMs, 10_000,
-  "an undelivered native-chair wake must measure enqueue-to-acknowledgement");
 assert.equal(noDeliverySummary.byName.handoff_to_chair_acknowledgement.totalMs, 15_000,
   "a handoff without a delivery adapter must still measure chair acknowledgement delay");
+
+let undeliveredWake = createPerformanceTimeline("2026-07-22T14:00:00.000Z");
+undeliveredWake = markPerformanceMilestone(undeliveredWake, "provider_completed", { at: "2026-07-22T14:00:01.000Z" });
+undeliveredWake = markPerformanceMilestone(undeliveredWake, "coordinator_wake_enqueued", { at: "2026-07-22T14:00:03.000Z" });
+undeliveredWake = markPerformanceMilestone(undeliveredWake, "coordinator_wake_acknowledged", { at: "2026-07-22T14:00:13.000Z" });
+const undeliveredWakeSummary = summarizePerformance(undeliveredWake);
+assert.equal(undeliveredWakeSummary.byName.wake_acknowledgement.totalMs, 10_000,
+  "an undelivered native-chair wake must measure enqueue-to-acknowledgement");
+
+let overlappingDeadTime = createPerformanceTimeline("2026-07-22T15:00:00.000Z");
+overlappingDeadTime = markPerformanceMilestone(overlappingDeadTime, "provider_completed", { at: "2026-07-22T15:00:01.000Z" });
+overlappingDeadTime = markPerformanceMilestone(overlappingDeadTime, "handoff_completed", { at: "2026-07-22T15:00:02.000Z" });
+overlappingDeadTime = markPerformanceMilestone(overlappingDeadTime, "coordinator_wake_enqueued", { at: "2026-07-22T15:00:03.000Z" });
+overlappingDeadTime = markPerformanceMilestone(overlappingDeadTime, "coordinator_wake_acknowledged", { at: "2026-07-22T15:00:13.000Z" });
+overlappingDeadTime = markPerformanceMilestone(overlappingDeadTime, "handoff_acknowledged", { at: "2026-07-22T15:00:17.000Z" });
+const overlappingSummary = summarizePerformance(overlappingDeadTime);
+assert.equal(overlappingSummary.deadTimeMs, 16_000, "wall-clock dead time must not double-count overlapping acknowledgement spans");
+assert.equal(overlappingSummary.attributedDeadTimeMs, 27_000, "per-span dead-time attribution remains available for diagnosis");
 
 const verificationEvents = [];
 const tracker = createVerificationTimingTracker({

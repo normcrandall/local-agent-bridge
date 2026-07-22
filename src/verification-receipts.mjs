@@ -24,6 +24,25 @@ export async function resolveVerificationPlan({ store, repositoryEvidence, comma
   return { reusable, pendingCommands, avoidedCommands: reusable.length, estimatedAvoidedMs };
 }
 
+export function assertObservedVerificationEvidence({ expected, observed } = {}) {
+  if (!expected?.headSha || !expected?.environmentFingerprint) {
+    const error = new Error("Observed verification requires the collaboration's original exact-head environment evidence.");
+    error.code = "MISSING_EXPECTED_EVIDENCE";
+    throw error;
+  }
+  if (!observed?.headSha || observed.headSha !== expected.headSha) {
+    const error = new Error(`Repository head changed while verification ran: expected ${expected.headSha}, observed ${observed?.headSha || "unknown"}.`);
+    error.code = "VERIFICATION_HEAD_CHANGED";
+    throw error;
+  }
+  if (observed.environmentFingerprint !== expected.environmentFingerprint) {
+    const error = new Error("Verification environment changed while the provider gate was running.");
+    error.code = "VERIFICATION_ENVIRONMENT_CHANGED";
+    throw error;
+  }
+  return observed;
+}
+
 export async function persistObservedVerificationResults({
   store,
   repositoryEvidence,

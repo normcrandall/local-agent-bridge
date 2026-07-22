@@ -108,8 +108,9 @@ export function summarizePerformance(timeline) {
   const current = normalize(timeline);
   const byName = {};
   const activeIntervals = [];
+  const deadIntervals = [];
   let attributedActiveTimeMs = 0;
-  let deadTimeMs = 0;
+  let attributedDeadTimeMs = 0;
   for (const span of current.spans) {
     const entry = byName[span.name] || { count: 0, totalMs: 0, maxMs: 0, category: span.category };
     entry.count += 1;
@@ -117,7 +118,10 @@ export function summarizePerformance(timeline) {
     entry.maxMs = Math.max(entry.maxMs, span.durationMs);
     entry.meanMs = Math.round(entry.totalMs / entry.count);
     byName[span.name] = entry;
-    if (span.category === "dead_time") deadTimeMs += span.durationMs;
+    if (span.category === "dead_time") {
+      attributedDeadTimeMs += span.durationMs;
+      deadIntervals.push([timestamp(span.startedAt), timestamp(span.completedAt)]);
+    }
     else {
       attributedActiveTimeMs += span.durationMs;
       activeIntervals.push([timestamp(span.startedAt), timestamp(span.completedAt)]);
@@ -140,10 +144,28 @@ export function summarizePerformance(timeline) {
     }
   }
   if (activeStart !== null) activeTimeMs += Math.max(0, activeEnd - activeStart);
+  deadIntervals.sort((left, right) => left[0] - right[0]);
+  let deadTimeMs = 0;
+  let deadStart = null;
+  let deadEnd = null;
+  for (const [startedAt, completedAt] of deadIntervals) {
+    if (deadStart === null) {
+      deadStart = startedAt;
+      deadEnd = completedAt;
+    } else if (startedAt <= deadEnd) {
+      deadEnd = Math.max(deadEnd, completedAt);
+    } else {
+      deadTimeMs += Math.max(0, deadEnd - deadStart);
+      deadStart = startedAt;
+      deadEnd = completedAt;
+    }
+  }
+  if (deadStart !== null) deadTimeMs += Math.max(0, deadEnd - deadStart);
   return {
     activeTimeMs,
     attributedActiveTimeMs,
     deadTimeMs,
+    attributedDeadTimeMs,
     byName,
     openSpans: Object.values(current.active),
     latestMilestone: current.milestones.at(-1) || null,
