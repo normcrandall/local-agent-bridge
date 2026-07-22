@@ -102,6 +102,10 @@ try {
     expected: expectedEvidence,
     observed: { headSha, environmentFingerprint: "environment-3" },
   }), (error) => error.code === "VERIFICATION_ENVIRONMENT_CHANGED");
+  assert.throws(() => assertObservedVerificationEvidence({
+    expected: null,
+    observed: { headSha, environmentFingerprint: "environment-2" },
+  }), (error) => error.code === "MISSING_EXPECTED_EVIDENCE");
 
   const rejectedDirtyObservation = await persistObservedVerificationResults({
     store,

@@ -634,7 +634,9 @@ try {
                 ? "head_changed_during_verification"
                 : error.code === "VERIFICATION_ENVIRONMENT_CHANGED"
                   ? "environment_changed_during_verification"
-                  : "evidence_capture_failed",
+                  : error.code === "MISSING_EXPECTED_EVIDENCE"
+                    ? "missing_baseline_evidence"
+                    : "evidence_capture_failed",
               error: error.message,
             }).catch(() => {});
           }

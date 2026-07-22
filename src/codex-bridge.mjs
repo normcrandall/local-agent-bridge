@@ -187,7 +187,7 @@ function runCodexAttempt({ prompt, cwd, sandbox, approvalPolicy, config = {}, mo
           && server === "github_review"
           && tool === "submit_pr_review"
           && !item.error
-          && !["failed", "error"].includes(String(item.status || "").toLowerCase())) {
+          && String(item.status || "").toLowerCase() === "completed") {
           reviewPublished = true;
         }
       }

@@ -88,6 +88,19 @@ try {
   assert.equal(invocations[0].includes("--color"), false);
   assert.equal(invocations[1].includes("--color"), false);
 
+  const ambiguousPublication = await client.callTool({
+    name: "codex",
+    arguments: {
+      prompt: "ambiguous review publication",
+      cwd: resolve(import.meta.dirname, ".."),
+      sandbox: "read-only",
+      "approval-policy": "never",
+      config: {},
+    },
+  });
+  assert.equal(ambiguousPublication.structuredContent.reviewPublished, false,
+    "a completed MCP event without an explicit completed status must not prove review publication");
+
   fallbackClient = new Client({ name: "codex-overload-fallback-test", version: "1" });
   const fallbackMessages = [];
   await fallbackClient.connect(new StdioClientTransport({

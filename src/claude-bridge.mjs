@@ -391,19 +391,21 @@ Work permission contract:
               if (active) {
                 const durationMs = Math.max(0, observedAt - active.startedAt);
                 toolMs += durationMs;
-                if (verificationSet.has(active.command) && typeof block.is_error === "boolean") {
+                if (verificationSet.has(active.command)) {
                   testsMs += durationMs;
-                  const serializedOutput = typeof block.content === "string"
-                    ? block.content
-                    : JSON.stringify(block.content ?? null);
-                  verificationResults.push({
-                    command: active.command,
-                    exitCode: block.is_error ? 1 : 0,
-                    startedAt: active.startedAtIso,
-                    completedAt: new Date(observedAt).toISOString(),
-                    outputDigest: createHash("sha256").update(serializedOutput).digest("hex"),
-                    outputSummary: clipped(serializedOutput, 1_000),
-                  });
+                  if (typeof block.is_error === "boolean") {
+                    const serializedOutput = typeof block.content === "string"
+                      ? block.content
+                      : JSON.stringify(block.content ?? null);
+                    verificationResults.push({
+                      command: active.command,
+                      exitCode: block.is_error ? 1 : 0,
+                      startedAt: active.startedAtIso,
+                      completedAt: new Date(observedAt).toISOString(),
+                      outputDigest: createHash("sha256").update(serializedOutput).digest("hex"),
+                      outputSummary: clipped(serializedOutput, 1_000),
+                    });
+                  }
                   const summary = `Claude finished verification command: ${active.command}`;
                   if (summary !== lastProgressSummary) {
                     lastProgressSummary = summary;
