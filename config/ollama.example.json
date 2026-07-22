@@ -1,5 +1,6 @@
 {
   "version": 1,
   "model": "qwen3.6:latest",
-  "baseUrl": "http://127.0.0.1:11434"
+  "baseUrl": "http://127.0.0.1:11434",
+  "keepAlive": "30m"
 }

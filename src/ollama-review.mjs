@@ -9,6 +9,7 @@ import { resolveModelRoute } from "./model-policy.mjs";
 export const DEFAULT_OLLAMA_CONFIG = resolve(homedir(), ".config/local-agent-bridge/ollama.json");
 export const DEFAULT_OLLAMA_MODEL = "qwen3.6:latest";
 export const DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434";
+export const DEFAULT_LOCAL_MODEL_KEEP_ALIVE = "30m";
 
 const MAX_FILE_LINES = 400;
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
@@ -40,6 +41,7 @@ export async function loadOllamaConfig({
   return {
     model,
     baseUrl: normalizedBaseUrl(environment.OLLAMA_HOST || configured.baseUrl || DEFAULT_OLLAMA_BASE_URL),
+    keepAlive: String(environment.OLLAMA_KEEP_ALIVE || configured.keepAlive || DEFAULT_LOCAL_MODEL_KEEP_ALIVE),
     configPath,
     configured: Boolean(configured.version),
   };
@@ -256,11 +258,13 @@ function toolSummary(name, args) {
   return "Local reviewer is inspecting repository state.";
 }
 
-async function localOllamaCompatibleChat({ baseUrl, model, messages, fetchImpl, signal, providerLabel, think }) {
+async function localOllamaCompatibleChat({ baseUrl, model, messages, fetchImpl, signal, providerLabel, think, keepAlive }) {
+  const body = { model, messages, tools: LOCAL_REVIEW_TOOLS, stream: false, think };
+  if (keepAlive) body.keep_alive = keepAlive;
   const response = await fetchImpl(`${baseUrl}/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ model, messages, tools: LOCAL_REVIEW_TOOLS, stream: false, think }),
+    body: JSON.stringify(body),
     signal,
   });
   if (!response.ok) {
@@ -292,6 +296,7 @@ export async function runLocalReview({
   providerLabel = "Ollama",
   configuration: suppliedConfiguration,
   think = true,
+  keepAlive,
 } = {}) {
   if (!prompt?.trim()) throw new Error("A prompt is required.");
   const actualRoot = realpathSync(workspaceRoot);
@@ -318,6 +323,9 @@ export async function runLocalReview({
   let selectedModel = candidates[candidateIndex];
   const attemptedModels = [];
   const selectedBaseUrl = normalizedBaseUrl(baseUrl || configuration.baseUrl);
+  const configuredKeepAlive = keepAlive ?? configuration.keepAlive
+    ?? (providerLabel === "Ollama" ? DEFAULT_LOCAL_MODEL_KEEP_ALIVE : null);
+  const selectedKeepAlive = configuredKeepAlive ? String(configuredKeepAlive) : null;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error(`${providerLabel} review timed out.`)), timeoutSeconds * 1000);
   const system = [
@@ -331,6 +339,7 @@ export async function runLocalReview({
     : [{ role: "system", content: system }, { role: "user", content: prompt }];
   let toolCalls = 0;
   let emptyFinalRetries = 0;
+  const timing = { apiCalls: 0, inferenceMs: 0, toolCalls: 0, toolMs: 0, firstResponseMs: null };
   try {
     while (toolCalls <= MAX_TOOL_CALLS) {
       onProgress(toolCalls ? "Local reviewer is synthesizing the inspected evidence." : `Starting local review with ${selectedModel}.`);
@@ -338,6 +347,7 @@ export async function runLocalReview({
       while (true) {
         if (!attemptedModels.includes(selectedModel)) attemptedModels.push(selectedModel);
         try {
+          const inferenceStartedAt = Date.now();
           result = await localOllamaCompatibleChat({
             baseUrl: selectedBaseUrl,
             model: selectedModel,
@@ -346,7 +356,12 @@ export async function runLocalReview({
             signal: controller.signal,
             providerLabel,
             think,
+            keepAlive: selectedKeepAlive,
           });
+          const inferenceElapsed = Date.now() - inferenceStartedAt;
+          timing.apiCalls += 1;
+          timing.inferenceMs += inferenceElapsed;
+          if (timing.firstResponseMs === null) timing.firstResponseMs = Date.now() - startedAt;
           break;
         } catch (error) {
           if (!isLocalCapacityError(error) || candidateIndex >= candidates.length - 1) throw error;
@@ -386,6 +401,12 @@ export async function runLocalReview({
             completionTokens: result.eval_count || 0,
           },
           durationMs: result.total_duration ? Math.round(result.total_duration / 1_000_000) : Date.now() - startedAt,
+          timing: {
+            ...timing,
+            totalMs: Date.now() - startedAt,
+            modelReportedMs: result.total_duration ? Math.round(result.total_duration / 1_000_000) : null,
+            keepAlive: selectedKeepAlive,
+          },
         };
       }
       for (const call of calls) {
@@ -396,11 +417,14 @@ export async function runLocalReview({
         const args = call?.function?.arguments || {};
         onProgress(toolSummary(name, args));
         let content;
+        const toolStartedAt = Date.now();
         try {
           content = JSON.stringify(executeLocalReviewTool({ cwd: actualCwd, name, arguments: args }));
         } catch (error) {
           content = JSON.stringify({ error: error.message });
         }
+        timing.toolCalls += 1;
+        timing.toolMs += Date.now() - toolStartedAt;
         messages.push({ role: "tool", tool_name: name, content: clipped(content) });
       }
     }

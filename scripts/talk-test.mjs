@@ -41,6 +41,18 @@ assert.equal(outcome.turns.length, 3);
 assert.deepEqual(calls.map((call) => call.agent), ["claude", "codex", "claude"]);
 assert.equal(calls[2].sessionId, "claude-1");
 assert.match(calls[1].prompt, /I propose interface A/);
+assert.match(calls[0].prompt, /Shared task:\nChoose an interface/);
+assert.match(calls[1].prompt, /Shared task:\nChoose an interface/, "a participant's first exposure receives the full task");
+assert.doesNotMatch(calls[2].prompt, /Shared task:\nChoose an interface/, "a resumed provider receives only the new evidence delta");
+assert.match(calls[2].prompt, /A handles the edge case/);
+assert.match(calls[2].prompt, /Current compact contract: you are the reviewer/);
+assert.match(calls[2].prompt, /HANDOFF receipt/);
+assert.match(calls[2].prompt, /STATUS: NEEDS_USER/);
+assert.deepEqual(outcome.state.participantCursors, { claude: 2, codex: 1 });
+assert.equal(outcome.state.promptMetrics.fullPrompts, 2);
+assert.equal(outcome.state.promptMetrics.deltaPrompts, 1);
+assert.ok(outcome.state.promptMetrics.avoidedCharacters > 0);
+assert.ok(outcome.state.promptMetrics.estimatedTokensSent > 0);
 
 const handoffOutcome = await runConversation({
   task: "Implement a bounded change",

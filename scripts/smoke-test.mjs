@@ -36,7 +36,7 @@ async function callBridgeWithoutModel() {
     command: "/bin/zsh",
     args: [resolve(root, "scripts/claude-bridge-mcp.sh")],
     cwd: root,
-    env: { ...cleanProcessEnv, CLAUDE_BIN: resolve(root, "scripts/fake-claude.mjs") },
+    env: { ...cleanProcessEnv, CLAUDE_BIN: resolve(root, "scripts/fake-claude.mjs"), FAKE_CLAUDE_TOOL_EVENT: "1" },
   });
   try {
     await client.connect(transport);
@@ -73,6 +73,9 @@ async function callBridgeWithoutModel() {
     const invocation = JSON.parse(result.structuredContent.result);
     if (result.structuredContent.model !== "claude-opus-4-6") {
       throw new Error("Claude modelUsage was not surfaced in the routing receipt");
+    }
+    if (result.structuredContent.timing?.toolCalls !== 1 || result.structuredContent.timing?.testCalls !== 1) {
+      throw new Error("Claude tool and verification timing were not surfaced in the routing receipt");
     }
     const permissionIndex = invocation.args.indexOf("--permission-mode");
     if (invocation.args[permissionIndex + 1] !== "dontAsk") {
@@ -502,6 +505,7 @@ for (const required of [
   "enqueue_portfolio_merge",
   "begin_portfolio_merge_validation",
   "record_portfolio_merge_validation",
+  "record_verification_receipt",
   "authorize_portfolio_merge",
   "recover_portfolio_merge_validation",
   "refresh_portfolio_target",

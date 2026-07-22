@@ -38,6 +38,8 @@ Never substitute a long-running Bash, sleep, `gh`, or PR polling loop for broker
 
 When a native-chair collaboration stops, treat `coordinatorWake` as the authoritative resume signal. Fetch the new terminal turn and completion receipt, perform its exact next action, then call `acknowledge_coordinator_wake` with the current sequence. Stop and session-start hooks keep the chair alive or restore the pending wake across restarts. Never acknowledge before processing it. A `needs_user` or `indeterminate` wake is a protected boundary: explain it and allow the host turn to stop instead of looping.
 
+Use collaboration evidence instead of repeating work. The broker sends the full task once per participant and compact unseen deltas on resumed turns. Reuse a verification receipt only when the broker marks it reusable for the exact repository/head/command/environment and the workspace is clean; claimed evidence never replaces a gate. Inspect `performanceSummary` for queue, startup, first-progress, inference, tool, test, publication, cleanup, and completion-to-wake-to-review-to-merge dead time before diagnosing a slow provider.
+
 - Use `ask_claude` for an independent second opinion, review, or bounded delegated task.
 - Use `ask_antigravity` for a bounded Gemini/Antigravity second opinion and `continue_antigravity` only with its returned `conversationId`.
 - Use `ask_ollama` for the secondary bounded local review and `continue_ollama` only with its returned `conversationId`. Ollama has bounded read-only repository tools, no shell/browser/write/builder capability, and cannot use `mode: work`.

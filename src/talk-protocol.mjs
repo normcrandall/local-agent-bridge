@@ -140,6 +140,27 @@ ${previousMessage}
 Respond directly. Check claims against the workspace when relevant, resolve disagreements with evidence, and move toward a concrete outcome.`;
 }
 
+function agentModeFor(agent, mode, writer) {
+  return ["ollama", "docker"].includes(agent) || (mode === "work" && writer && agent !== writer)
+    ? "review"
+    : mode;
+}
+
+export function deltaReplyPrompt({ agent, previousAgent, previousMessage, mode, browser, writer }) {
+  const previousName = previousAgent ? agentName(previousAgent) : "the user";
+  const role = mode === "work"
+    ? agent === writer ? "writer" : "reviewer"
+    : "reviewer";
+  return `New collaboration evidence from ${previousName} since your last turn:
+---
+${previousMessage}
+---
+
+Current compact contract: you are the ${role}; mode is ${mode}; isolated browser access is ${browser ? "available when needed" : "disabled"}. Do not invoke another participant. Keep the turn focused, emit any DECISION or HANDOFF receipt before the final status, and end with exactly one bare STATUS: CONTINUE, STATUS: AGREED, or STATUS: NEEDS_USER line.
+
+Respond directly to this delta, verify relevant claims against the workspace, and move toward the bounded outcome.`;
+}
+
 export async function runConversation({
   task,
   maxTurns = 6,
@@ -180,6 +201,15 @@ export async function runConversation({
   let agreementStreak = initialState?.agreementStreak ?? 0;
   let totalTurnCount = initialState?.turnCount ?? 0;
   let effectiveWriter = writer;
+  const participantCursors = { ...(initialState?.participantCursors || {}) };
+  const promptMetrics = {
+    charactersSent: 0,
+    estimatedTokensSent: 0,
+    fullPrompts: 0,
+    deltaPrompts: 0,
+    avoidedCharacters: 0,
+    ...(initialState?.promptMetrics || {}),
+  };
   const turns = [];
   const capsuleProtocolRetries = Object.fromEntries(agents.map((agent) => [agent, 0]));
 
@@ -193,6 +223,8 @@ export async function runConversation({
     previousAgent,
     agreementStreak,
     turnCount: totalTurnCount,
+    participantCursors: { ...participantCursors },
+    promptMetrics: { ...promptMetrics },
   });
 
   let completedTurns = 0;
@@ -203,10 +235,23 @@ export async function runConversation({
     }
     const number = totalTurnCount + 1;
     const agent = activeAgents[agentIndex];
-    const prompt = previousMessage === null
+    const fullPrompt = previousMessage === null
       ? firstTurnPrompt({ agent, agents: activeAgents, task, mode, browser, writer: effectiveWriter })
       : replyPrompt({ agent, agents: activeAgents, task, previousAgent, previousMessage, mode, browser, writer: effectiveWriter });
-    const agentMode = ["ollama", "docker"].includes(agent) || (mode === "work" && effectiveWriter && agent !== effectiveWriter) ? "review" : mode;
+    const useDelta = previousMessage !== null && Boolean(sessions[agent]);
+    const prompt = useDelta
+      ? deltaReplyPrompt({ agent, previousAgent, previousMessage, mode: agentModeFor(agent, mode, effectiveWriter), browser, writer: effectiveWriter })
+      : fullPrompt;
+    promptMetrics.charactersSent += prompt.length;
+    promptMetrics.estimatedTokensSent += Math.ceil(prompt.length / 4);
+    if (useDelta) {
+      promptMetrics.deltaPrompts += 1;
+      promptMetrics.avoidedCharacters += Math.max(0, fullPrompt.length - prompt.length);
+    } else {
+      promptMetrics.fullPrompts += 1;
+    }
+    participantCursors[agent] = totalTurnCount;
+    const agentMode = agentModeFor(agent, mode, effectiveWriter);
     let response;
     try {
       response = await send({ agent, prompt, sessionId: sessions[agent], mode: agentMode, browser });
