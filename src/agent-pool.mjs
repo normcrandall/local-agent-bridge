@@ -466,6 +466,7 @@ export function createAgentPool({
           usage: structured.usage || structured.tokenUsage || null,
           durationMs: structured.durationMs || structured.duration_ms || null,
           timing: structured.timing || null,
+          verificationResults: structured.verificationResults || [],
           permissionProfile: effectivePermissionProfile,
           permissionReason: permissionDecision.permissionReason,
           modelRouting: ["claude", "codex", "ollama", "docker"].includes(agent) ? {

@@ -44,6 +44,7 @@ try {
       sandbox: "read-only",
       "approval-policy": "never",
       config: {},
+      verificationCommands: ["test"],
     },
     _meta: { progressToken: "codex-progress-test" },
   }, undefined, {
@@ -54,6 +55,9 @@ try {
   assert.equal(result.structuredContent.content, "FAKE_CODEX_COMPLETE");
   assert.equal(result.structuredContent.timing.toolCalls, 1);
   assert.ok(result.structuredContent.timing.totalMs >= result.structuredContent.timing.toolMs);
+  assert.equal(result.structuredContent.verificationResults[0].command, "test");
+  assert.equal(result.structuredContent.verificationResults[0].exitCode, 0);
+  assert.match(result.structuredContent.verificationResults[0].outputDigest, /^[0-9a-f]{64}$/);
   assert.ok(messages.includes("Codex is analyzing the task."));
   assert.ok(messages.includes("Inspecting the relevant files."));
   assert.ok(messages.includes("Codex is running workspace command: test"));

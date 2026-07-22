@@ -22,9 +22,12 @@ timeline = markPerformanceMilestone(timeline, "coordinator_wake_enqueued", { at:
 timeline = markPerformanceMilestone(timeline, "coordinator_wake_delivered", { at: "2026-07-22T12:01:05.000Z" });
 timeline = markPerformanceMilestone(timeline, "coordinator_wake_acknowledged", { at: "2026-07-22T12:01:15.000Z" });
 timeline = markPerformanceMilestone(timeline, "review_started", { at: "2026-07-22T12:01:20.000Z" });
-timeline = markPerformanceMilestone(timeline, "review_completed", { at: "2026-07-22T12:02:00.000Z" });
-timeline = markPerformanceMilestone(timeline, "merge_authorized", { at: "2026-07-22T12:02:30.000Z" });
-timeline = markPerformanceMilestone(timeline, "merge_completed", { at: "2026-07-22T12:02:35.000Z" });
+timeline = markPerformanceMilestone(timeline, "formal_review_published", { at: "2026-07-22T12:02:00.000Z" });
+timeline = markPerformanceMilestone(timeline, "review_completed", { at: "2026-07-22T12:02:10.000Z" });
+timeline = markPerformanceMilestone(timeline, "merge_validation_started", { at: "2026-07-22T12:02:20.000Z" });
+timeline = markPerformanceMilestone(timeline, "merge_validation_completed", { at: "2026-07-22T12:02:50.000Z" });
+timeline = markPerformanceMilestone(timeline, "merge_authorized", { at: "2026-07-22T12:02:55.000Z" });
+timeline = markPerformanceMilestone(timeline, "merge_completed", { at: "2026-07-22T12:03:00.000Z" });
 
 const summary = summarizePerformance(timeline);
 assert.equal(summary.byName.queueing.totalMs, 1000);
@@ -34,11 +37,26 @@ assert.equal(summary.byName.completion_to_wake.totalMs, 2000);
 assert.equal(summary.byName.wake_delivery.totalMs, 3000);
 assert.equal(summary.byName.wake_acknowledgement.totalMs, 10000);
 assert.equal(summary.byName.wake_to_review.totalMs, 5000);
-assert.equal(summary.byName.review_to_merge_authorization.totalMs, 30000);
-assert.equal(summary.byName.merge_execution.totalMs, 5000);
-assert.equal(summary.deadTimeMs, 55_000);
+assert.equal(summary.byName.formal_review_to_portfolio_review.totalMs, 10000);
+assert.equal(summary.byName.merge_coordinator_wait.totalMs, 10000);
+assert.equal(summary.byName.merge_ci_validation.totalMs, 30000);
+assert.equal(summary.byName.merge_policy_wait.totalMs, 5000);
+assert.equal(summary.byName.github_merge_execution.totalMs, 5000);
+assert.equal(summary.deadTimeMs, 80_000);
 assert.equal(summary.activeTimeMs, 2_000, "wall-clock active time must merge overlapping spans");
 assert.equal(summary.attributedActiveTimeMs, 3_200, "per-span attribution remains available for breakdowns");
+
+let noDelivery = createPerformanceTimeline("2026-07-22T13:00:00.000Z");
+noDelivery = markPerformanceMilestone(noDelivery, "provider_completed", { at: "2026-07-22T13:00:01.000Z" });
+noDelivery = markPerformanceMilestone(noDelivery, "handoff_completed", { at: "2026-07-22T13:00:02.000Z" });
+noDelivery = markPerformanceMilestone(noDelivery, "coordinator_wake_enqueued", { at: "2026-07-22T13:00:03.000Z" });
+noDelivery = markPerformanceMilestone(noDelivery, "coordinator_wake_acknowledged", { at: "2026-07-22T13:00:13.000Z" });
+noDelivery = markPerformanceMilestone(noDelivery, "handoff_acknowledged", { at: "2026-07-22T13:00:17.000Z" });
+const noDeliverySummary = summarizePerformance(noDelivery);
+assert.equal(noDeliverySummary.byName.wake_acknowledgement.totalMs, 10_000,
+  "an undelivered native-chair wake must measure enqueue-to-acknowledgement");
+assert.equal(noDeliverySummary.byName.handoff_to_chair_acknowledgement.totalMs, 15_000,
+  "a handoff without a delivery adapter must still measure chair acknowledgement delay");
 
 const verificationEvents = [];
 const tracker = createVerificationTimingTracker({

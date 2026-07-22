@@ -94,6 +94,7 @@ export function codexToolRequest({
   };
   if (model) arguments_.model = model;
   if (fallbackModels !== undefined) arguments_.fallbackModels = fallbackModels;
+  if (verificationCommands.length) arguments_.verificationCommands = verificationCommands;
   arguments_.config = {};
   if (mode === "work" && !yolo) {
     arguments_.config["sandbox_workspace_write.network_access"] = workProfile === "deliver";

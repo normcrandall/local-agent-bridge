@@ -11,6 +11,7 @@ import {
   acquireWorkerLock,
   acquireWorkspaceLock,
   appendEvent,
+  collaborationDirectory,
   readCollaboration,
   updateCollaboration,
 } from "../src/collaboration-store.mjs";
@@ -38,7 +39,9 @@ import {
   summarizePerformance,
 } from "../src/performance-timeline.mjs";
 import { createVerificationTimingTracker } from "../src/verification-timing.mjs";
-import { assertRepositoryEvidenceHead } from "../src/repository-evidence.mjs";
+import { assertRepositoryEvidenceHead, captureRepositoryEvidence } from "../src/repository-evidence.mjs";
+import { createEvidenceStore } from "../src/evidence-store.mjs";
+import { persistObservedVerificationResults } from "../src/verification-receipts.mjs";
 
 const runtimeRoot = realpathSync(
   process.env.BRIDGE_RUNTIME_ROOT || process.env.BRIDGE_ROOT || fileURLToPath(new URL("..", import.meta.url)),
@@ -48,6 +51,7 @@ const workspaceRoot = realpathSync(
 );
 const id = process.argv[2];
 if (!id) throw new Error("A collaboration ID is required.");
+const EVIDENCE_ROOT = resolve(collaborationDirectory(workspaceRoot), "evidence");
 
 let releaseWorker = null;
 let releaseWorkspace = null;
@@ -571,6 +575,79 @@ try {
         }
         await recordTiming({ action: "finish", name: "provider_turn", key: providerTimingKey, at: completedAt, metadata: { agent: call.agent, timing: response.metadata?.timing || null } });
         await recordTiming({ action: "milestone", name: "provider_completed", at: completedAt, metadata: { agent: call.agent } });
+        const verificationResults = response.metadata?.verificationResults || [];
+        if (verificationResults.length && call.mode === "review") {
+          try {
+            const current = await readCollaboration(workspaceRoot, id);
+            const previousEvidence = current.evidence?.repository;
+            const store = createEvidenceStore({ directory: EVIDENCE_ROOT });
+            const repositoryEvidence = await captureRepositoryEvidence({
+              workspace: current.workspace,
+              store,
+              repository: previousEvidence?.repository,
+              baseSha: previousEvidence?.baseSha || null,
+            });
+            const persisted = await persistObservedVerificationResults({
+              store,
+              repositoryEvidence,
+              results: verificationResults,
+              authorizedCommands: current.requestedVerificationCommands || current.verificationCommands || [],
+              provider: call.agent,
+            });
+            if (persisted.recorded.length) {
+              await updateCollaboration(workspaceRoot, id, (previous) => ({
+                ...previous,
+                verificationReceipts: [
+                  ...(previous.verificationReceipts || []).filter((receipt) => !persisted.recorded.some((candidate) => candidate.command === receipt.command)),
+                  ...persisted.recorded,
+                ],
+                evidence: {
+                  ...(previous.evidence || {}),
+                  repository: repositoryEvidence,
+                  cacheMetrics: store.metrics(),
+                },
+              }));
+              for (const receipt of persisted.recorded) {
+                await appendEvent(workspaceRoot, id, {
+                  type: "verification_receipt_recorded",
+                  at: new Date().toISOString(),
+                  receipt,
+                });
+              }
+            }
+            for (const skipped of persisted.skipped) {
+              await appendEvent(workspaceRoot, id, {
+                type: "verification_receipt_skipped",
+                at: new Date().toISOString(),
+                agent: call.agent,
+                ...skipped,
+              });
+            }
+          } catch (error) {
+            await appendEvent(workspaceRoot, id, {
+              type: "verification_receipt_skipped",
+              at: new Date().toISOString(),
+              agent: call.agent,
+              reason: "evidence_capture_failed",
+              error: error.message,
+            }).catch(() => {});
+          }
+        } else if (verificationResults.length) {
+          await appendEvent(workspaceRoot, id, {
+            type: "verification_receipt_skipped",
+            at: new Date().toISOString(),
+            agent: call.agent,
+            reason: "mutable_work_mode",
+          });
+        }
+        if (response.metadata?.reviewPublication?.available) {
+          await recordTiming({
+            action: "milestone",
+            name: "formal_review_published",
+            at: completedAt,
+            metadata: { agent: call.agent, authorizing: response.metadata.reviewPublication.authorizing !== false },
+          });
+        }
         await updateCollaboration(workspaceRoot, id, (current) => ({
           ...current,
           runtime: { ...current.runtime, activeCall: null },
@@ -618,7 +695,8 @@ try {
       return false;
     },
     onTurn: async (turn) => {
-      await appendEvent(workspaceRoot, id, { type: "turn", at: new Date().toISOString(), ...turn });
+      const recordedAt = new Date().toISOString();
+      await appendEvent(workspaceRoot, id, { type: "turn", at: recordedAt, ...turn });
       await updateCollaboration(workspaceRoot, id, (current) => {
         const previousUsage = current.usage?.[turn.agent] || { costUsd: 0, tokens: 0, turns: 0 };
         const observed = turn.metadata?.usage || {};
@@ -677,6 +755,14 @@ try {
           completion, handoffs, reviewPublication,
         };
       });
+      if (turn.handoff) {
+        await recordTiming({
+          action: "milestone",
+          name: "handoff_completed",
+          at: recordedAt,
+          metadata: { agent: turn.agent, turn: turn.number, outcome: turn.handoff.outcome },
+        });
+      }
     },
     onAgentUnavailable: async (failure) => {
       await appendEvent(workspaceRoot, id, {

@@ -77,6 +77,11 @@ async function callBridgeWithoutModel() {
     if (result.structuredContent.timing?.toolCalls !== 1 || result.structuredContent.timing?.testCalls !== 1) {
       throw new Error("Claude tool and verification timing were not surfaced in the routing receipt");
     }
+    if (result.structuredContent.verificationResults?.[0]?.command !== "npm test"
+      || result.structuredContent.verificationResults?.[0]?.exitCode !== 0
+      || !/^[0-9a-f]{64}$/.test(result.structuredContent.verificationResults?.[0]?.outputDigest || "")) {
+      throw new Error("Claude exact-command verification result was not surfaced as observed evidence");
+    }
     const permissionIndex = invocation.args.indexOf("--permission-mode");
     if (invocation.args[permissionIndex + 1] !== "dontAsk") {
       throw new Error("Claude review mode is not locked to dontAsk permissions");

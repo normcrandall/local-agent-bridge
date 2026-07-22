@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { createCollaboration } from "../src/collaboration-store.mjs";
 // Issue #55 dispatch/narrative fixtures: command allowlist admission and command-aware narrative.
 import "./issue-40-autonomy-test.mjs";
 import "./issue-55-allowlist-test.mjs";
@@ -14,6 +15,7 @@ import "./issue-55-capability-boundary-test.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const stateDirectory = await mkdtemp(join(tmpdir(), "agent-collaboration-test-"));
+process.env.BRIDGE_COLLABORATION_DIR = stateDirectory;
 const cleanWorkspace = join(root, ".bridge", "test-workspaces", stateDirectory.split("/").at(-1));
 const unbornWorkspace = `${cleanWorkspace}-unborn`;
 await mkdir(cleanWorkspace, { recursive: true });
@@ -111,6 +113,7 @@ let heartbeatClient;
 let cancellationClient;
 let codexFallbackClient;
 let completionClient;
+let receiptClient;
 let capacityClient;
 let recoveryClient;
 try {
@@ -179,9 +182,23 @@ try {
     },
   })).structuredContent;
   assert.match(portfolio.id, /^helm-/);
+  const timingLane = await createCollaboration(root, {
+    task: "Track the complete portfolio merge path",
+    workspace: root,
+    agents: ["claude"],
+    status: "agreed",
+    runtime: { turnCount: 1 },
+  });
   portfolio = (await firstClient.callTool({
     name: "update_portfolio_item",
-    arguments: { portfolioId: portfolio.id, expectedRevision: portfolio.revision, itemId: "101", status: "implementing", writer: "claude" },
+    arguments: {
+      portfolioId: portfolio.id,
+      expectedRevision: portfolio.revision,
+      itemId: "101",
+      status: "implementing",
+      writer: "claude",
+      collaborationId: timingLane.id,
+    },
   })).structuredContent;
   portfolio = (await firstClient.callTool({
     name: "enqueue_portfolio_merge",
@@ -213,6 +230,13 @@ try {
   })).structuredContent;
   assert.equal(portfolio.items.find((item) => item.id === "101").status, "merged");
   assert.equal(portfolio.schedule.selected[0].id, "102");
+  const timedMergeLane = (await firstClient.callTool({
+    name: "get_collaboration",
+    arguments: { collaborationId: timingLane.id, detail: "full", includeTurns: 0 },
+  })).structuredContent;
+  for (const span of ["merge_coordinator_wait", "merge_ci_validation", "merge_policy_wait", "github_merge_execution"]) {
+    assert.ok(timedMergeLane.performanceSummary.byName[span], `portfolio merge timing must include ${span}`);
+  }
 
   const failedLaneId = "bridge-00000000-0000-4000-8000-000000000040";
   let failedLanePortfolio = (await firstClient.callTool({
@@ -354,6 +378,27 @@ try {
   assert.match(firstRun.turns[0].message, /claude-opus-4-6,claude-sonnet-5/);
   assert.match(firstRun.turns[0].message, /Bash\(npm test\)/);
   assert.match(firstRun.turns[0].message, /collaboration-review\.md/);
+
+  receiptClient = await connect("collaboration-test-observed-receipt", { FAKE_CLAUDE_TOOL_EVENT: "1" });
+  const receiptStarted = await receiptClient.callTool({
+    name: "start_collaboration",
+    arguments: {
+      task: "Capture exact-command review evidence",
+      workspace: cleanWorkspace,
+      agents: ["claude"],
+      mode: "review",
+      maxTurns: 1,
+      verificationCommands: ["npm test"],
+    },
+  });
+  const receiptRun = await waitForStop(receiptClient, receiptStarted.structuredContent.id);
+  assert.equal(receiptRun.verificationReceipts.length, 1);
+  assert.equal(receiptRun.verificationReceipts[0].command, "npm test");
+  assert.equal(receiptRun.verificationReceipts[0].source, "claude");
+  assert.equal(receiptRun.verificationReceipts[0].attestation, "observed");
+  const receiptEvents = (await readFile(join(stateDirectory, `${receiptRun.id}.jsonl`), "utf8"))
+    .split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  assert.ok(receiptEvents.some((event) => event.type === "verification_receipt_recorded"));
 
   completionClient = await connect("collaboration-test-completion", { FAKE_CLAUDE_HANDOFF: "1" });
   const completionStarted = await completionClient.callTool({
@@ -825,6 +870,7 @@ try {
   await cancellationClient?.close().catch(() => {});
   await codexFallbackClient?.close().catch(() => {});
   await completionClient?.close().catch(() => {});
+  await receiptClient?.close().catch(() => {});
   await capacityClient?.close().catch(() => {});
   await recoveryClient?.close().catch(() => {});
   try {
