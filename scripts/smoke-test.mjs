@@ -36,7 +36,13 @@ async function callBridgeWithoutModel() {
     command: "/bin/zsh",
     args: [resolve(root, "scripts/claude-bridge-mcp.sh")],
     cwd: root,
-    env: { ...cleanProcessEnv, CLAUDE_BIN: resolve(root, "scripts/fake-claude.mjs"), FAKE_CLAUDE_TOOL_EVENT: "1" },
+    env: {
+      ...cleanProcessEnv,
+      CLAUDE_BIN: resolve(root, "scripts/fake-claude.mjs"),
+      FAKE_CLAUDE_TOOL_EVENT: "1",
+      FAKE_CLAUDE_AMBIGUOUS_TOOL_RESULT: "1",
+      FAKE_CLAUDE_REVIEW_TOOL_EVENT: "1",
+    },
   });
   try {
     await client.connect(transport);
@@ -74,8 +80,17 @@ async function callBridgeWithoutModel() {
     if (result.structuredContent.model !== "claude-opus-4-6") {
       throw new Error("Claude modelUsage was not surfaced in the routing receipt");
     }
-    if (result.structuredContent.timing?.toolCalls !== 1 || result.structuredContent.timing?.testCalls !== 1) {
+    if (result.structuredContent.timing?.toolCalls !== 3 || result.structuredContent.timing?.testCalls !== 2) {
       throw new Error("Claude tool and verification timing were not surfaced in the routing receipt");
+    }
+    if (result.structuredContent.verificationResults?.[0]?.command !== "npm test"
+      || result.structuredContent.verificationResults?.[0]?.exitCode !== 0
+      || !/^[0-9a-f]{64}$/.test(result.structuredContent.verificationResults?.[0]?.outputDigest || "")
+      || result.structuredContent.verificationResults.length !== 1) {
+      throw new Error("Claude exact-command verification result was not surfaced as observed evidence");
+    }
+    if (result.structuredContent.reviewPublished !== true) {
+      throw new Error("Claude's successful bound review publication was not surfaced");
     }
     const permissionIndex = invocation.args.indexOf("--permission-mode");
     if (invocation.args[permissionIndex + 1] !== "dontAsk") {

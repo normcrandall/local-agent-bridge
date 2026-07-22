@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdtempSync,
@@ -344,6 +345,8 @@ Work permission contract:
     let testsMs = 0;
     let testCalls = 0;
     const activeTools = new Map();
+    const verificationResults = [];
+    let reviewPublished = false;
     const verificationSet = new Set(verificationCommands.map((command) => command.trim()));
     const timer = setTimeout(() => {
       timedOut = true;
@@ -367,7 +370,12 @@ Work permission contract:
           for (const block of blocks) {
             if (block.type === "tool_use") {
               const command = block.name === "Bash" ? String(block.input?.command || "").trim() : null;
-              activeTools.set(block.id, { startedAt: observedAt, name: block.name, command });
+              activeTools.set(block.id, {
+                startedAt: observedAt,
+                startedAtIso: new Date(observedAt).toISOString(),
+                name: block.name,
+                command,
+              });
               toolCalls += 1;
               if (verificationSet.has(command)) {
                 testCalls += 1;
@@ -385,11 +393,27 @@ Work permission contract:
                 toolMs += durationMs;
                 if (verificationSet.has(active.command)) {
                   testsMs += durationMs;
+                  if (typeof block.is_error === "boolean") {
+                    const serializedOutput = typeof block.content === "string"
+                      ? block.content
+                      : JSON.stringify(block.content ?? null);
+                    verificationResults.push({
+                      command: active.command,
+                      exitCode: block.is_error ? 1 : 0,
+                      startedAt: active.startedAtIso,
+                      completedAt: new Date(observedAt).toISOString(),
+                      outputDigest: createHash("sha256").update(serializedOutput).digest("hex"),
+                      outputSummary: clipped(serializedOutput, 1_000),
+                    });
+                  }
                   const summary = `Claude finished verification command: ${active.command}`;
                   if (summary !== lastProgressSummary) {
                     lastProgressSummary = summary;
                     onProgress(summary);
                   }
+                }
+                if (active.name === "mcp__github_review__submit_pr_review" && block.is_error === false) {
+                  reviewPublished = true;
                 }
                 activeTools.delete(block.tool_use_id);
               }
@@ -470,6 +494,8 @@ Work permission contract:
           modelPolicy: { ...modelPolicy, machine: machineModelPolicy },
           handoffPath: actualHandoffPath,
           timing,
+          verificationResults,
+          reviewPublished,
         });
       } catch {
         const totalMs = Date.now() - wallStartedAt;
@@ -498,6 +524,8 @@ Work permission contract:
             inferenceMs: Math.max(0, totalMs - toolMs),
             inferenceEstimated: true,
           },
+          verificationResults,
+          reviewPublished,
         });
       }
     });

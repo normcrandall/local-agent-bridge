@@ -100,6 +100,30 @@ try {
   states = await listCoordinatorStates({ root, provider: "codex", cwd: root });
   assert.equal(states.length, 0);
 
+  const pendingOnly = await createCollaboration(root, {
+    task: "Native chair receives a wake without a delivery adapter",
+    workspace: root,
+    agents: ["claude"],
+    participants: ["codex", "claude"],
+    chair: { provider: "codex", source: "native-chair" },
+    status: "agreed",
+    runSequence: 1,
+    runtime: { turnCount: 1 },
+    completion: {
+      sequence: 1,
+      acknowledged: false,
+      nextAction: "chair_verify",
+      lastHandoff: { agent: "claude", outcome: "completed", summary: "Ready." },
+    },
+  });
+  const pendingWake = await enqueueCoordinatorWake(root, pendingOnly.id);
+  const pendingAcknowledged = await acknowledgeCoordinatorWake(root, pendingOnly.id, pendingWake.coordinatorWake.sequence, {
+    provider: "codex",
+    summary: "Processed without an external delivery channel.",
+  });
+  assert.ok(pendingAcknowledged.performanceSummary.byName.wake_acknowledgement.totalMs >= 0,
+    "pending-to-acknowledged wakes must be timed even when deliveredAt is absent");
+
   const protectedState = await createCollaboration(root, {
     task: "Protected decision",
     workspace: root,

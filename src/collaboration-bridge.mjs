@@ -1454,10 +1454,16 @@ server.registerTool(
   },
   async ({ portfolioId: id, expectedRevision, itemId, observedTargetSha, observedHeadSha }) => {
     blockNestedCollaboration();
-    return toolResponse(await updatePortfolio(PORTFOLIO_ROOT, id, expectedRevision, (current) => updatePortfolioItemState({
+    const result = await updatePortfolio(PORTFOLIO_ROOT, id, expectedRevision, (current) => updatePortfolioItemState({
       ...current,
       mergeTrain: beginMergeValidation(current.mergeTrain, { itemId, observedTargetSha, observedHeadSha }),
-    }, itemId, { status: "integrating" })));
+    }, itemId, { status: "integrating" }));
+    await markLinkedCollaborationPerformance(
+      result.items.find((item) => item.id === String(itemId)),
+      "merge_validation_started",
+      { observedTargetSha, observedHeadSha },
+    );
+    return toolResponse(result);
   },
 );
 
@@ -1478,12 +1484,18 @@ server.registerTool(
   },
   async ({ portfolioId: id, expectedRevision, itemId, outcome, checks, dossier, error }) => {
     blockNestedCollaboration();
-    return toolResponse(await updatePortfolio(PORTFOLIO_ROOT, id, expectedRevision, (current) => {
+    const result = await updatePortfolio(PORTFOLIO_ROOT, id, expectedRevision, (current) => {
       const normalizedDossier = dossier ? createArbitrationDossier(dossier) : null;
       const mergeTrain = recordMergeValidation(current.mergeTrain, { itemId, outcome, checks, dossier: normalizedDossier, error });
       const status = outcome === "passed" ? "ready_to_merge" : outcome === "conflict" ? "arbitrating" : "repairing";
       return updatePortfolioItemState({ ...current, mergeTrain }, itemId, { status, summary: error || undefined });
-    }));
+    });
+    await markLinkedCollaborationPerformance(
+      result.items.find((item) => item.id === String(itemId)),
+      "merge_validation_completed",
+      { outcome, checks: checks.length },
+    );
+    return toolResponse(result);
   },
 );
 
@@ -1678,17 +1690,30 @@ server.registerTool(
       throw new Error(`Collaboration ${id} is ${current.status}; acknowledge the HANDOFF after the delegated phase stops.`);
     }
     const recordedAt = new Date().toISOString();
-    const state = await updateCollaboration(WORKSPACE_ROOT, id, (previous) => ({
-      ...previous,
-      completion: acknowledgeCompletion(previous.completion, {
-        sequence,
-        accepted,
-        summary: acknowledgementSummary,
-        verification,
-        remaining,
-        at: recordedAt,
-      }),
-    }));
+    const state = await updateCollaboration(WORKSPACE_ROOT, id, (previous) => {
+      const basePerformance = previous.performance || createPerformanceTimeline(previous.createdAt || recordedAt);
+      const wakeOwnsAcknowledgement = previous.coordinatorWake?.sourceHandoffSequence === sequence;
+      const performance = wakeOwnsAcknowledgement
+        ? basePerformance
+        : markPerformanceMilestone(
+          basePerformance,
+          "handoff_acknowledged",
+          { at: recordedAt, metadata: { sequence, accepted } },
+        );
+      return {
+        ...previous,
+        completion: acknowledgeCompletion(previous.completion, {
+          sequence,
+          accepted,
+          summary: acknowledgementSummary,
+          verification,
+          remaining,
+          at: recordedAt,
+        }),
+        performance,
+        performanceSummary: summarizePerformance(performance),
+      };
+    });
     await appendEvent(WORKSPACE_ROOT, id, {
       type: "handoff_acknowledged",
       at: recordedAt,

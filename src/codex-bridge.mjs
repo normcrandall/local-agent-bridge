@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -95,7 +96,7 @@ function eventSummary(event) {
   return null;
 }
 
-function runCodexAttempt({ prompt, cwd, sandbox, approvalPolicy, config = {}, model, threadId, onProgress }) {
+function runCodexAttempt({ prompt, cwd, sandbox, approvalPolicy, config = {}, model, threadId, verificationCommands = [], onProgress }) {
   if (process.env.CODEX_BRIDGE_ACTIVE === "1") {
     throw new Error("Nested Codex bridge invocation blocked to prevent an agent loop.");
   }
@@ -139,6 +140,9 @@ function runCodexAttempt({ prompt, cwd, sandbox, approvalPolicy, config = {}, mo
     let toolMs = 0;
     let toolCalls = 0;
     const activeTools = new Map();
+    const verificationSet = new Set(verificationCommands.map((command) => String(command).trim()));
+    const verificationResults = [];
+    let reviewPublished = false;
 
     const consume = (line) => {
       if (!line.trim()) return;
@@ -153,14 +157,38 @@ function runCodexAttempt({ prompt, cwd, sandbox, approvalPolicy, config = {}, mo
       const item = event.item || {};
       const timedTool = ["command_execution", "mcp_tool_call", "web_search"].includes(item.type);
       if (timedTool && event.type === "item.started") {
-        activeTools.set(item.id || `${item.type}:${toolCalls}`, observedAt);
+        activeTools.set(item.id || `${item.type}:${toolCalls}`, {
+          observedAt,
+          startedAt: new Date(observedAt).toISOString(),
+          command: item.type === "command_execution" ? String(item.command || "").trim() : null,
+        });
         toolCalls += 1;
       } else if (timedTool && event.type === "item.completed") {
         const key = item.id || [...activeTools.keys()].find((candidate) => candidate.startsWith(`${item.type}:`));
         const started = activeTools.get(key);
         if (started !== undefined) {
-          toolMs += Math.max(0, observedAt - started);
+          toolMs += Math.max(0, observedAt - started.observedAt);
+          if (verificationSet.has(started.command) && Number.isInteger(item.exit_code)) {
+            const serializedOutput = String(item.aggregated_output ?? item.output ?? "");
+            verificationResults.push({
+              command: started.command,
+              exitCode: item.exit_code,
+              startedAt: started.startedAt,
+              completedAt: new Date(observedAt).toISOString(),
+              outputDigest: createHash("sha256").update(serializedOutput).digest("hex"),
+              outputSummary: clipped(serializedOutput, 1_000),
+            });
+          }
           activeTools.delete(key);
+        }
+        const server = String(item.server || item.server_name || "").replace(/^mcp__/, "");
+        const tool = String(item.tool || item.name || item.tool_name || "").replace(/^mcp__github_review__/, "");
+        if (item.type === "mcp_tool_call"
+          && server === "github_review"
+          && tool === "submit_pr_review"
+          && !item.error
+          && String(item.status || "").toLowerCase() === "completed") {
+          reviewPublished = true;
         }
       }
       if (event.type === "thread.started" && event.thread_id) sessionId = event.thread_id;
@@ -205,6 +233,8 @@ function runCodexAttempt({ prompt, cwd, sandbox, approvalPolicy, config = {}, mo
           inferenceMs: Math.max(0, totalMs - toolMs),
           inferenceEstimated: true,
         },
+        verificationResults,
+        reviewPublished,
       });
     });
   });
@@ -219,6 +249,7 @@ async function runCodex({
   model,
   fallbackModels,
   threadId,
+  verificationCommands = [],
   onProgress,
 }) {
   let configured;
@@ -262,6 +293,7 @@ async function runCodex({
         config,
         model: candidate,
         threadId: activeThreadId,
+        verificationCommands,
         onProgress,
       });
       return {
@@ -311,6 +343,7 @@ const newTurnInput = {
   fallbackModels: z.array(z.string().trim().min(1)).max(5).optional().describe(
     "Ordered models to try only when Codex reports that the current model is overloaded. Omit to use ~/.config/local-agent-bridge/model-fallbacks.json; pass [] to disable configured fallbacks.",
   ),
+  verificationCommands: z.array(z.string().trim().min(1).max(500)).max(20).default([]),
 };
 
 async function runWithProgress(input, extra, threadId) {
@@ -333,6 +366,7 @@ async function runWithProgress(input, extra, threadId) {
     model: input.model,
     fallbackModels: input.fallbackModels,
     threadId,
+    verificationCommands: input.verificationCommands || [],
     onProgress: notify,
   });
 }

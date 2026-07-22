@@ -1,13 +1,29 @@
 const MAX_SPANS = 250;
 const MAX_MILESTONES = 250;
 
-const DEAD_TIME_PAIRS = {
-  coordinator_wake_enqueued: ["provider_completed", "completion_to_wake"],
-  coordinator_wake_delivered: ["coordinator_wake_enqueued", "wake_delivery"],
-  coordinator_wake_acknowledged: ["coordinator_wake_delivered", "wake_acknowledgement"],
-  review_started: ["coordinator_wake_acknowledged", "wake_to_review"],
-  merge_authorized: ["review_completed", "review_to_merge_authorization"],
-  merge_completed: ["merge_authorized", "merge_execution"],
+const DEAD_TIME_TRANSITIONS = {
+  coordinator_wake_enqueued: { priors: ["provider_completed"], span: "completion_to_wake" },
+  coordinator_wake_delivered: { priors: ["coordinator_wake_enqueued"], span: "wake_delivery" },
+  coordinator_wake_acknowledged: {
+    priors: ["coordinator_wake_delivered", "coordinator_wake_enqueued"],
+    span: "wake_acknowledgement",
+  },
+  handoff_acknowledged: {
+    priors: ["handoff_completed", "provider_completed"],
+    span: "handoff_to_chair_acknowledgement",
+  },
+  review_started: {
+    priors: ["coordinator_wake_acknowledged", "handoff_acknowledged"],
+    span: "wake_to_review",
+  },
+  review_completed: { priors: ["formal_review_published"], span: "formal_review_to_portfolio_review" },
+  merge_validation_started: { priors: ["review_completed"], span: "merge_coordinator_wait" },
+  merge_validation_completed: { priors: ["merge_validation_started"], span: "merge_ci_validation" },
+  merge_authorized: {
+    priors: ["merge_validation_completed", "review_completed"],
+    span: "merge_policy_wait",
+  },
+  merge_completed: { priors: ["merge_authorized"], span: "github_merge_execution" },
 };
 
 function timestamp(value) {
@@ -59,19 +75,28 @@ export function markPerformanceMilestone(timeline, name, { at = new Date().toISO
   if (!String(name || "").trim()) throw new Error("Performance milestone name is required.");
   timestamp(at);
   const next = normalize(timeline);
-  const pair = DEAD_TIME_PAIRS[name];
-  if (pair) {
-    const [priorName, spanName] = pair;
-    const prior = [...next.milestones].reverse().find((entry) => entry.name === priorName);
+  const transition = DEAD_TIME_TRANSITIONS[name];
+  if (transition) {
+    const prior = transition.priors
+      .map((priorName) => [...next.milestones].reverse().find((entry) => entry.name === priorName))
+      .filter(Boolean)
+      .sort((left, right) => timestamp(right.at) - timestamp(left.at))[0];
     if (prior && timestamp(at) >= timestamp(prior.at)) {
-      next.spans.push(completedSpan({
-        name: spanName,
-        category: "dead_time",
-        startedAt: prior.at,
-        completedAt: at,
-        metadata: { from: priorName, to: name },
-      }));
-      next.spans = next.spans.slice(-MAX_SPANS);
+      const alreadyRecorded = next.spans.some((span) => (
+        span.name === transition.span
+        && span.startedAt === prior.at
+        && span.metadata?.to === name
+      ));
+      if (!alreadyRecorded) {
+        next.spans.push(completedSpan({
+          name: transition.span,
+          category: "dead_time",
+          startedAt: prior.at,
+          completedAt: at,
+          metadata: { from: prior.name, to: name },
+        }));
+        next.spans = next.spans.slice(-MAX_SPANS);
+      }
     }
   }
   next.milestones.push({ name, at, metadata });
@@ -83,8 +108,9 @@ export function summarizePerformance(timeline) {
   const current = normalize(timeline);
   const byName = {};
   const activeIntervals = [];
+  const deadIntervals = [];
   let attributedActiveTimeMs = 0;
-  let deadTimeMs = 0;
+  let attributedDeadTimeMs = 0;
   for (const span of current.spans) {
     const entry = byName[span.name] || { count: 0, totalMs: 0, maxMs: 0, category: span.category };
     entry.count += 1;
@@ -92,7 +118,10 @@ export function summarizePerformance(timeline) {
     entry.maxMs = Math.max(entry.maxMs, span.durationMs);
     entry.meanMs = Math.round(entry.totalMs / entry.count);
     byName[span.name] = entry;
-    if (span.category === "dead_time") deadTimeMs += span.durationMs;
+    if (span.category === "dead_time") {
+      attributedDeadTimeMs += span.durationMs;
+      deadIntervals.push([timestamp(span.startedAt), timestamp(span.completedAt)]);
+    }
     else {
       attributedActiveTimeMs += span.durationMs;
       activeIntervals.push([timestamp(span.startedAt), timestamp(span.completedAt)]);
@@ -115,10 +144,28 @@ export function summarizePerformance(timeline) {
     }
   }
   if (activeStart !== null) activeTimeMs += Math.max(0, activeEnd - activeStart);
+  deadIntervals.sort((left, right) => left[0] - right[0]);
+  let deadTimeMs = 0;
+  let deadStart = null;
+  let deadEnd = null;
+  for (const [startedAt, completedAt] of deadIntervals) {
+    if (deadStart === null) {
+      deadStart = startedAt;
+      deadEnd = completedAt;
+    } else if (startedAt <= deadEnd) {
+      deadEnd = Math.max(deadEnd, completedAt);
+    } else {
+      deadTimeMs += Math.max(0, deadEnd - deadStart);
+      deadStart = startedAt;
+      deadEnd = completedAt;
+    }
+  }
+  if (deadStart !== null) deadTimeMs += Math.max(0, deadEnd - deadStart);
   return {
     activeTimeMs,
     attributedActiveTimeMs,
     deadTimeMs,
+    attributedDeadTimeMs,
     byName,
     openSpans: Object.values(current.active),
     latestMilestone: current.milestones.at(-1) || null,

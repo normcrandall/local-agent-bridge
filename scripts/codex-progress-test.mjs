@@ -30,6 +30,7 @@ const transport = new StdioClientTransport({
     CODEX_BRIDGE_CODEX_BIN: executable,
     BRIDGE_WORKSPACE_ROOT: resolve(import.meta.dirname, ".."),
     FAKE_CODEX_ARGS_FILE: argsFile,
+    FAKE_CODEX_REVIEW_TOOL_EVENT: "1",
   },
 });
 
@@ -44,6 +45,7 @@ try {
       sandbox: "read-only",
       "approval-policy": "never",
       config: {},
+      verificationCommands: ["test"],
     },
     _meta: { progressToken: "codex-progress-test" },
   }, undefined, {
@@ -52,8 +54,12 @@ try {
   });
   assert.equal(result.structuredContent.threadId, "11111111-1111-4111-8111-111111111111");
   assert.equal(result.structuredContent.content, "FAKE_CODEX_COMPLETE");
-  assert.equal(result.structuredContent.timing.toolCalls, 1);
+  assert.equal(result.structuredContent.timing.toolCalls, 2);
   assert.ok(result.structuredContent.timing.totalMs >= result.structuredContent.timing.toolMs);
+  assert.equal(result.structuredContent.verificationResults[0].command, "test");
+  assert.equal(result.structuredContent.verificationResults[0].exitCode, 0);
+  assert.match(result.structuredContent.verificationResults[0].outputDigest, /^[0-9a-f]{64}$/);
+  assert.equal(result.structuredContent.reviewPublished, true);
   assert.ok(messages.includes("Codex is analyzing the task."));
   assert.ok(messages.includes("Inspecting the relevant files."));
   assert.ok(messages.includes("Codex is running workspace command: test"));
@@ -81,6 +87,19 @@ try {
   assert.ok(invocations[1].includes("example.flag=true"));
   assert.equal(invocations[0].includes("--color"), false);
   assert.equal(invocations[1].includes("--color"), false);
+
+  const ambiguousPublication = await client.callTool({
+    name: "codex",
+    arguments: {
+      prompt: "ambiguous review publication",
+      cwd: resolve(import.meta.dirname, ".."),
+      sandbox: "read-only",
+      "approval-policy": "never",
+      config: {},
+    },
+  });
+  assert.equal(ambiguousPublication.structuredContent.reviewPublished, false,
+    "a completed MCP event without an explicit completed status must not prove review publication");
 
   fallbackClient = new Client({ name: "codex-overload-fallback-test", version: "1" });
   const fallbackMessages = [];

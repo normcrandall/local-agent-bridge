@@ -450,9 +450,10 @@ export function createAgentPool({
       }
       if (result.isError) throw new Error(`${agent} MCP call failed: ${textFrom(result)}`);
       let message = textFrom(result);
+      let publishedReviewReceipt = null;
       if (["antigravity", "ollama", "docker"].includes(agent) && effectiveGithubReview) {
-        const receipt = await publishEnvelopeReview(agent, message, effectiveGithubReview);
-        message = `${message}\n\nBound review published as ${receipt.login}: ${receipt.url}`;
+        publishedReviewReceipt = await publishEnvelopeReview(agent, message, effectiveGithubReview);
+        message = `${message}\n\nBound review published as ${publishedReviewReceipt.login}: ${publishedReviewReceipt.url}`;
       }
       if (agent === "antigravity" && githubBuilder && mode === "work") {
         const receipts = await publishAntigravityBuilder(message);
@@ -466,6 +467,7 @@ export function createAgentPool({
           usage: structured.usage || structured.tokenUsage || null,
           durationMs: structured.durationMs || structured.duration_ms || null,
           timing: structured.timing || null,
+          verificationResults: structured.verificationResults || [],
           permissionProfile: effectivePermissionProfile,
           permissionReason: permissionDecision.permissionReason,
           modelRouting: ["claude", "codex", "ollama", "docker"].includes(agent) ? {
@@ -478,6 +480,8 @@ export function createAgentPool({
           } : null,
           reviewPublication: mode === "review" && githubReview ? {
             available: publication.available,
+            published: Boolean(publishedReviewReceipt) || structured.reviewPublished === true,
+            receipt: publishedReviewReceipt,
             authorizing: publication.authorizing !== false,
             login: effectiveGithubReview?.expectedLogin || null,
             reason: publication.reason,
