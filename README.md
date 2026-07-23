@@ -632,6 +632,7 @@ bridge capabilities
 bridge preflight --workspace /path/to/repo --agents claude,codex --mode work --profile deliver
 bridge roles --task 12 --agents claude,codex # --task-number is also accepted
 bridge status
+bridge mission-control # alias: bridge mc
 bridge recover bridge-<uuid>
 bridge archive bridge-<uuid>
 bridge prune --older-than-days 30
@@ -647,6 +648,8 @@ bridge bundle --output ~/agent-bridge-transfer # --destination is also accepted
 - Preflight records provider capabilities, repository state, work profile, branch, and remote readiness.
 - Provider capability preflight probes each installed binary and its relevant subcommands, caches by absolute path/version/size/mtime, and builds new-session and resume argv independently. `bridge capabilities` shows the negotiated matrix and whether it came from a live probe or cache; required missing features stop before model invocation and optional flags are omitted.
 - Status combines provider heartbeat/summary, writer, branch, PR/CI, and known usage.
+- Mission Control is a live, read-only terminal dashboard over the same persisted control plane. It groups collaborations and portfolio lanes by GitHub repository (including linked worktrees), shows the active provider and role, narrative freshness versus heartbeat freshness, handoff/coordinator state, issue/PR/branch details, merge-train blockers, timing, and a compact event timeline. It never starts providers or polls GitHub.
+- Run `bridge mc` in a terminal. Use `j`/`k` or the arrow keys to move, `a` to toggle attention-only versus terminal history, `r` to refresh, and `q` to exit. Use `bridge mc --snapshot` for logs and scripts, `bridge mc --json` for machine-readable state, `bridge mc --repo OWNER/REPO` to focus that exact repository, and `bridge mc --all` to include terminal history. Non-interactive output automatically uses snapshot mode.
 - Recovery is inspect-first; marking indeterminate or cancelling requires an explicit flag.
 - `ciTracking.prNumber` refreshes hosted checks after completed turns.
 - Structured reviews reconcile into accepted, disputed, and rejected evidence rather than majority vote.

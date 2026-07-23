@@ -173,6 +173,9 @@ elif [[ "$COMMAND" == "skills" ]]; then
 elif [[ "$COMMAND" == "models" ]]; then
   shift
   exec "$NODE_BIN" "$RUNTIME/scripts/model-policy-cli.mjs" "$@"
+elif [[ "$COMMAND" == "mc" || "$COMMAND" == "mission-control" ]]; then
+  shift
+  exec "$NODE_BIN" "$RUNTIME/scripts/mission-control.mjs" "$@"
 elif [[ "$COMMAND" == "supervisor" ]]; then
   shift
   exec "$NODE_BIN" "$RUNTIME/scripts/supervisor-control.mjs" "$@"
