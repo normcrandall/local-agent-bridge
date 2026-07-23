@@ -13,6 +13,7 @@ const SKIP_UPDATE = Symbol("skip-user-attention-update");
 
 export const DEFAULT_ATTENTION_REMINDER_MS = 15 * 60 * 1000;
 export const ATTENTION_CLAIM_TIMEOUT_MS = 2 * 60 * 1000;
+export const ATTENTION_RETRY_BASE_MS = 60 * 1000;
 
 function clean(value, limit = 300) {
   return String(value || "").replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim().slice(0, limit);
@@ -27,17 +28,25 @@ function notificationsEnabled(environment = process.env) {
   return !["0", "false", "off", "no"].includes(String(environment.AGENT_BRIDGE_ATTENTION_NOTIFICATIONS || "").toLowerCase());
 }
 
-export function attentionMessage(state) {
-  const wake = state.coordinatorWake;
+export function attentionMessage(state, { environment = process.env } = {}) {
   const repository = state.github?.repository || state.issueClaim?.repository || null;
   const workspace = state.workspace?.split("/").filter(Boolean).at(-1) || "unknown workspace";
+  const includeRepository = environment.AGENT_BRIDGE_ATTENTION_DETAIL === "repository";
   return {
     title: "Agent Bridge needs your input",
-    subtitle: clean(repository || workspace, 120),
+    subtitle: includeRepository ? clean(repository || workspace, 120) : "Protected decision",
     // Notification previews may be visible on a locked screen. Keep the body
     // generic; the durable collaboration receipt remains the source of detail.
     body: "A collaboration is paused at a protected decision. Open Mission Control with: bridge mc --attention",
   };
+}
+
+function notificationEnvironment(environment = process.env) {
+  const allowed = ["HOME", "DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "WAYLAND_DISPLAY", "LANG", "LC_ALL"];
+  return Object.fromEntries([
+    ...allowed.filter((key) => environment[key]).map((key) => [key, environment[key]]),
+    ["PATH", "/usr/bin:/bin"],
+  ]);
 }
 
 export async function deliverAttentionNotification(message, {
@@ -55,24 +64,33 @@ export async function deliverAttentionNotification(message, {
     await run("/usr/bin/osascript", ["-e", script, "--", message.body, message.title, message.subtitle], {
       timeout: 5_000,
       windowsHide: true,
+      env: notificationEnvironment(environment),
     });
     return { delivered: true, adapter: "macos_notification_center" };
   }
   if (platform === "linux") {
-    await run("notify-send", ["--urgency=critical", "--app-name=Agent Bridge", message.title, `${message.subtitle}\n${message.body}`], {
+    await run("/usr/bin/notify-send", ["--urgency=critical", "--app-name=Agent Bridge", message.title, `${message.subtitle}\n${message.body}`], {
       timeout: 5_000,
       windowsHide: true,
+      env: notificationEnvironment(environment),
     });
     return { delivered: true, adapter: "freedesktop_notification" };
   }
   return { delivered: false, adapter: "durable_only", reason: `unsupported_platform_${platform}` };
 }
 
-function wakeNeedsUser(state) {
+export function wakeNeedsUser(state) {
   const wake = state.coordinatorWake;
+  const lifecycle = state.status || state.lifecyclePhase;
   return wake
     && wake.status !== "acknowledged"
-    && (wake.kind === "needs_user" || wake.nextAction === "needs_user" || state.status === "needs_user");
+    && (wake.kind === "needs_user" || wake.nextAction === "needs_user" || lifecycle === "needs_user");
+}
+
+function retryDelay(attention, reminderMs) {
+  if (attention?.status === "delivered") return reminderMs;
+  const exponent = Math.max(0, Math.min(8, (attention?.attempt || 1) - 1));
+  return Math.min(reminderMs, ATTENTION_RETRY_BASE_MS * (2 ** exponent));
 }
 
 export async function signalUserAttention(root, id, {
@@ -82,6 +100,7 @@ export async function signalUserAttention(root, id, {
   platform = process.platform,
   run = execFileAsync,
   environment = process.env,
+  clock = () => Date.now(),
 } = {}) {
   const claimId = randomUUID();
   const at = new Date(now).toISOString();
@@ -91,11 +110,13 @@ export async function signalUserAttention(root, id, {
     await updateCollaboration(root, id, (current) => {
       if (!wakeNeedsUser(current)) throw SKIP_UPDATE;
       const attention = current.coordinatorWake.userAttention || null;
+      if (!notificationsEnabled(environment) && attention?.reason === "disabled_by_policy") throw SKIP_UPDATE;
+      if (attention?.reason?.startsWith("unsupported_platform_")) throw SKIP_UPDATE;
       const activeClaim = attention?.status === "sending"
         && now - dateMs(attention.claimedAt) < ATTENTION_CLAIM_TIMEOUT_MS;
-      const remindedRecently = attention?.lastDeliveredAt
-        && now - dateMs(attention.lastDeliveredAt) < reminderMs;
-      if (activeClaim || (!force && remindedRecently)) throw SKIP_UPDATE;
+      const attemptedRecently = attention?.lastAttemptAt
+        && now - dateMs(attention.lastAttemptAt) < retryDelay(attention, reminderMs);
+      if (activeClaim || (!force && attemptedRecently)) throw SKIP_UPDATE;
       claimed = true;
       claimedState = current;
       return {
@@ -121,12 +142,12 @@ export async function signalUserAttention(root, id, {
   let delivery;
   let error = null;
   try {
-    delivery = await deliverAttentionNotification(attentionMessage(claimedState), { platform, run, environment });
+    delivery = await deliverAttentionNotification(attentionMessage(claimedState, { environment }), { platform, run, environment });
   } catch (caught) {
     error = clean(caught.message || caught, 500);
     delivery = { delivered: false, adapter: platform === "darwin" ? "macos_notification_center" : "platform_notification", reason: error };
   }
-  const completedAt = new Date(now).toISOString();
+  const completedAt = new Date(clock()).toISOString();
   let finalized = false;
   try {
     await updateCollaboration(root, id, (current) => {

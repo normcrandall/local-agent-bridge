@@ -5,8 +5,13 @@ import { resolve } from "node:path";
 import { listCollaborations, readCollaboration } from "../src/collaboration-store.mjs";
 import { deliverAttentionNotification, scanPendingUserAttention } from "../src/user-attention.mjs";
 
-const command = process.argv[2] || "list";
-const stateRoot = resolve(process.env.BRIDGE_COLLABORATION_DIR || resolve(homedir(), ".local/share/agent-bridge/state"));
+const args = process.argv.slice(2);
+const command = args[0] || "list";
+const stateRootIndex = args.indexOf("--state-root");
+const stateRoot = resolve(stateRootIndex >= 0 && args[stateRootIndex + 1]
+  ? args[stateRootIndex + 1]
+  : process.env.BRIDGE_COLLABORATION_DIR || resolve(homedir(), ".local/share/agent-bridge/state"));
+process.env.BRIDGE_COLLABORATION_DIR = stateRoot;
 
 if (command === "test") {
   const result = await deliverAttentionNotification({
@@ -25,7 +30,7 @@ if (command === "notify") {
 }
 
 if (command !== "list") {
-  process.stderr.write("Usage: bridge attention [list|notify|test]\n");
+  process.stderr.write("Usage: bridge attention [list|notify|test] [--state-root PATH]\n");
   process.exit(2);
 }
 

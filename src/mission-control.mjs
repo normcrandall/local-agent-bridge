@@ -6,6 +6,7 @@ import { queryControlPlane } from "./collaboration-store.mjs";
 import { LIVE_COLLABORATION_STATUSES } from "./collaboration-cleanup.mjs";
 import { hostActivityLane, listHostActivities } from "./host-activity-store.mjs";
 import { PORTFOLIO_STATUS_GROUPS } from "./portfolio-status.mjs";
+import { wakeNeedsUser } from "./user-attention.mjs";
 
 const ACTIVE_STATUSES = new Set([
   "queued", "waiting_capacity", "running", "working", "recovering", "cancelling",
@@ -221,11 +222,7 @@ export async function loadMissionControlSnapshot({
   const mode = view || (showAll ? "all" : "live");
   if (!["live", "attention", "all"].includes(mode)) throw new Error(`Unknown Mission Control view: ${mode}`);
   const attention = matching.filter((lane) => isAttentionLane(lane, now));
-  const needsUser = matching.filter((lane) => (
-    String(lane.lifecyclePhase || "").toLowerCase() === "needs_user"
-    || lane.coordinatorWake?.kind === "needs_user"
-    || lane.nextAction === "needs_user"
-  ));
+  const needsUser = matching.filter((lane) => wakeNeedsUser(lane));
   const stale = attention.filter((lane) => isStaleLane(lane, now, staleAfterMs));
   const selected = mode === "all"
     ? matching
@@ -268,6 +265,7 @@ export async function loadMissionControlSnapshot({
     includeStale,
     providerActivity,
     needsUserCount: needsUser.length,
+    needsUserKeys: needsUser.map((lane) => `${lane.id}:${lane.coordinatorWake?.sequence || 0}`).sort(),
     needsUserSignature: needsUser
       .map((lane) => `${lane.id}:${lane.coordinatorWake?.sequence || 0}`)
       .sort()
@@ -276,6 +274,11 @@ export async function loadMissionControlSnapshot({
     visibleLanes: visible.length,
     lanes: visible,
   };
+}
+
+export function newlyObservedAttentionKeys(seenKeys, currentKeys) {
+  const seen = seenKeys instanceof Set ? seenKeys : new Set(seenKeys || []);
+  return (currentKeys || []).filter((key) => !seen.has(key));
 }
 
 function eventSummary(event) {

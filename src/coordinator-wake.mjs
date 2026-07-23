@@ -7,7 +7,7 @@ import {
   updateCollaboration,
 } from "./collaboration-store.mjs";
 import { createPerformanceTimeline, markPerformanceMilestone, summarizePerformance } from "./performance-timeline.mjs";
-import { signalUserAttention } from "./user-attention.mjs";
+import { signalUserAttention, wakeNeedsUser } from "./user-attention.mjs";
 
 const ACTIVE_STATUSES = new Set(["queued", "running", "recovering", "cancelling"]);
 const TERMINAL_STATUSES = new Set(["agreed", "needs_user", "turn_limit", "failed", "cancelled", "budget"]);
@@ -155,8 +155,8 @@ export async function enqueueCoordinatorWake(root, id, { force = false } = {}) {
       at,
       wake: state.coordinatorWake,
     });
-    if (state.coordinatorWake?.kind === "needs_user") {
-      await signalUserAttention(root, id).catch(() => null);
+    if (wakeNeedsUser(state)) {
+      void signalUserAttention(root, id).catch(() => null);
     }
   }
   return state;

@@ -311,9 +311,14 @@ check("Browser launcher executable", () => {
 });
 check("Global user attention signalling", () => {
   const launcher = resolve(homedir(), ".local/bin/bridge");
+  const runtimeScript = resolve(homedir(), ".local/share/agent-bridge/runtime/scripts/user-attention-cli.mjs");
   accessSync(launcher, constants.X_OK);
-  const result = spawnSync(launcher, ["attention", "list"], { encoding: "utf8" });
-  return result.status === 0 && result.stdout.includes('"pending"');
+  accessSync(runtimeScript, constants.R_OK);
+  const expectedStateRoot = resolve(homedir(), ".local/share/agent-bridge/state");
+  const result = spawnSync(launcher, ["attention", "list", "--state-root", expectedStateRoot], { encoding: "utf8" });
+  if (result.status !== 0) return false;
+  const parsed = JSON.parse(result.stdout);
+  return resolve(parsed.stateRoot) === expectedStateRoot && Array.isArray(parsed.pending);
 }, "run npm run install:global to install the needs_user notification and attention CLI");
 
 if (failed) process.exit(1);

@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { createCollaboration, readCollaboration, updateCollaboration } from "../src/collaboration-store.mjs";
 import { acknowledgeCoordinatorWake } from "../src/coordinator-wake.mjs";
-import { scanPendingUserAttention, signalUserAttention } from "../src/user-attention.mjs";
+import { attentionMessage, deliverAttentionNotification, scanPendingUserAttention, signalUserAttention } from "../src/user-attention.mjs";
 
 const root = await mkdtemp(join(tmpdir(), "agent-bridge-user-attention-"));
 process.env.BRIDGE_COLLABORATION_DIR = join(root, "state");
@@ -41,6 +42,7 @@ try {
   assert.equal(calls[0].command, "/usr/bin/osascript");
   assert.ok(calls[0].args.some((argument) => String(argument).includes("Agent Bridge needs your input")));
   assert.doesNotMatch(JSON.stringify(calls[0]), /external expense/, "lock-screen notification text must not expose the decision summary");
+  assert.doesNotMatch(JSON.stringify(calls[0]), new RegExp(root.split("/").at(-1)), "workspace details must be opt-in");
   let state = await readCollaboration(root, collaboration.id);
   assert.equal(state.coordinatorWake.userAttention.status, "delivered");
   assert.equal(state.coordinatorWake.userAttention.attempt, 1);
@@ -83,15 +85,72 @@ try {
     },
   });
   const failRun = async () => { throw new Error("notification service unavailable"); };
-  const firstFailure = await signalUserAttention(root, failed.id, { now, platform: "darwin", run: failRun });
+  const firstFailure = await signalUserAttention(root, failed.id, { now, platform: "darwin", run: failRun, clock: () => now + 500 });
   assert.equal(firstFailure.delivered, false);
   state = await readCollaboration(root, failed.id);
   assert.equal(state.coordinatorWake.userAttention.status, "failed");
-  const recovered = await signalUserAttention(root, failed.id, { now: now + 1_000, platform: "darwin", run });
+  assert.equal(state.coordinatorWake.userAttention.completedAt, new Date(now + 500).toISOString());
+  const backedOff = await signalUserAttention(root, failed.id, { now: now + 30_000, platform: "darwin", run });
+  assert.equal(backedOff.reason, "not_due_or_not_needed");
+  const recovered = await signalUserAttention(root, failed.id, { now: now + 61_000, platform: "darwin", run });
   assert.equal(recovered.delivered, true);
 
+  const disabled = await createCollaboration(root, {
+    task: "Keep desktop notifications disabled",
+    workspace: root,
+    agents: ["claude"],
+    participants: ["codex", "claude"],
+    chair: { provider: "codex", source: "native-chair" },
+    status: "needs_user",
+    coordinatorWake: {
+      sequence: 1,
+      provider: "codex",
+      kind: "needs_user",
+      actionable: false,
+      nextAction: "needs_user",
+      summary: "A disabled notification should not churn state.",
+      status: "pending",
+      createdAt: new Date(now).toISOString(),
+    },
+  });
+  const disabledEnvironment = { AGENT_BRIDGE_ATTENTION_NOTIFICATIONS: "off" };
+  const disabledDelivery = await signalUserAttention(root, disabled.id, { now, platform: "darwin", run, environment: disabledEnvironment });
+  assert.equal(disabledDelivery.reason, "disabled_by_policy");
+  const disabledState = await readCollaboration(root, disabled.id);
+  const disabledUpdatedAt = disabledState.updatedAt;
+  assert.equal(disabledState.coordinatorWake.userAttention.attempt, 1);
+  await scanPendingUserAttention(root, { now: now + 60 * 60_000, platform: "darwin", run, environment: disabledEnvironment });
+  state = await readCollaboration(root, disabled.id);
+  assert.equal(state.updatedAt, disabledUpdatedAt, "disabled notifications must not create a periodic write loop");
+  assert.equal(state.coordinatorWake.userAttention.attempt, 1);
+
+  const hiddenMessage = attentionMessage({ workspace: "/private/client-secret", coordinatorWake: {} });
+  assert.equal(hiddenMessage.subtitle, "Protected decision");
+  const detailedMessage = attentionMessage({ workspace: "/private/client-secret", coordinatorWake: {} }, {
+    environment: { AGENT_BRIDGE_ATTENTION_DETAIL: "repository" },
+  });
+  assert.equal(detailedMessage.subtitle, "client-secret");
+
+  const linuxCalls = [];
+  await deliverAttentionNotification(hiddenMessage, {
+    platform: "linux",
+    environment: { HOME: "/tmp/home", PATH: "/untrusted/bin" },
+    run: async (command, args, options) => { linuxCalls.push({ command, args, options }); },
+  });
+  assert.equal(linuxCalls[0].command, "/usr/bin/notify-send");
+  assert.equal(linuxCalls[0].options.env.PATH, "/usr/bin:/bin");
+
+  const cli = JSON.parse(execFileSync(process.execPath, [
+    resolve(import.meta.dirname, "user-attention-cli.mjs"),
+    "list",
+    "--state-root",
+    process.env.BRIDGE_COLLABORATION_DIR,
+  ], { cwd: tmpdir(), encoding: "utf8", env: { ...process.env, BRIDGE_COLLABORATION_DIR: "" } }));
+  assert.equal(cli.stateRoot, process.env.BRIDGE_COLLABORATION_DIR);
+  assert.ok(cli.pending.some((entry) => entry.collaborationId === disabled.id), "CLI must read the explicit machine state root, not cwd");
+
   await updateCollaboration(root, failed.id, (current) => ({ ...current, status: "agreed" }));
-  console.log("User attention tests passed: immediate delivery, deduplicated reminders, acknowledgement stop, and failed-delivery recovery are verified.");
+  console.log("User attention tests passed: immediate delivery, deduplicated reminders, bounded failure recovery, disabled-policy stability, privacy, and acknowledgement stop are verified.");
 } finally {
   delete process.env.BRIDGE_COLLABORATION_DIR;
   await rm(root, { recursive: true, force: true });

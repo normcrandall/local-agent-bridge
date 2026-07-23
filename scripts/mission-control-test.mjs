@@ -12,6 +12,7 @@ import {
   loadMissionControlSnapshot,
   loadTimeline,
   navigationIntent,
+  newlyObservedAttentionKeys,
   parseRepositoryRemote,
   renderSnapshot,
   readFileRange,
@@ -33,6 +34,9 @@ assert.equal(parseRepositoryRemote("not-a-remote"), null);
 assert.deepEqual(navigationIntent("j", 1), { selectedIndex: 2, preserveSelectedId: false });
 assert.deepEqual(navigationIntent("k", 1), { selectedIndex: 0, preserveSelectedId: false });
 assert.deepEqual(navigationIntent("r", 1), { selectedIndex: 1, preserveSelectedId: true });
+assert.deepEqual(newlyObservedAttentionKeys(new Set(["lane-a:1"]), ["lane-a:1"]), []);
+assert.deepEqual(newlyObservedAttentionKeys(new Set(["lane-a:1", "lane-b:1"]), ["lane-a:1"]), [], "removing a request must not ring again");
+assert.deepEqual(newlyObservedAttentionKeys(new Set(["lane-a:1"]), ["lane-a:1", "lane-b:1"]), ["lane-b:1"]);
 for (const status of PORTFOLIO_STATUSES) {
   const expected = !PORTFOLIO_STATUS_GROUPS.terminal.includes(status);
   assert.equal(isAttentionLane({ lifecyclePhase: status, updatedAt: "2026-07-23T11:59:00.000Z" }, Date.parse("2026-07-23T12:00:00.000Z")), expected, `${status} classification drifted`);
@@ -107,7 +111,7 @@ try {
     task: "x".repeat(700),
     issueClaim: { repository: "veliqon/control-plane", issueNumber: 9 },
   }));
-  await writeFile(join(root, `${needsUserId}.json`), JSON.stringify({
+  const needsUserState = {
     ...base,
     id: needsUserId,
     status: "needs_user",
@@ -116,7 +120,9 @@ try {
     writer: "claude",
     githubReview: { repository: "norm/example", prNumber: 42, headSha: "b".repeat(40) },
     completion: { sequence: 1, acknowledged: false, nextAction: "needs_user", lastHandoff: { outcome: "blocked", summary: "Authorization required" } },
-  }));
+    coordinatorWake: { sequence: 1, kind: "needs_user", status: "pending", nextAction: "needs_user", summary: "Authorization required" },
+  };
+  await writeFile(join(root, `${needsUserId}.json`), JSON.stringify(needsUserState));
   await writeFile(join(root, "portfolios", "helm-44444444-4444-4444-8444-444444444444.json"), JSON.stringify({
     id: "helm-44444444-4444-4444-8444-444444444444",
     workspace,
@@ -134,6 +140,14 @@ try {
   assert.equal(live.collapsedStale.total, 0);
   assert.equal(live.needsUserCount, 1);
   assert.match(live.needsUserSignature, new RegExp(needsUserId));
+  await writeFile(join(root, `${needsUserId}.json`), JSON.stringify({
+    ...needsUserState,
+    coordinatorWake: { ...needsUserState.coordinatorWake, status: "acknowledged" },
+  }));
+  const acknowledgedNeedsUser = await loadMissionControlSnapshot({ stateRoot: root, now });
+  assert.equal(acknowledgedNeedsUser.needsUserCount, 0);
+  assert.doesNotMatch(renderSnapshot(acknowledgedNeedsUser, { width: 88 }), /USER INPUT REQUIRED/);
+  await writeFile(join(root, `${needsUserId}.json`), JSON.stringify(needsUserState));
 
   const hostRoot = join(root, "host-test");
   const sessionId = "private-codex-session-123";
