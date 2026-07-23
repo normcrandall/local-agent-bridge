@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createCollaboration,
+  readCollaboration,
   updateCollaboration,
 } from "../src/collaboration-store.mjs";
 import {
@@ -148,6 +149,11 @@ try {
   }));
   const protectedWake = await enqueueCoordinatorWake(root, protectedState.id);
   assert.equal(protectedWake.coordinatorWake.actionable, false);
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const current = await readCollaboration(root, protectedState.id);
+    if (current.coordinatorWake?.userAttention?.status) break;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+  }
   states = await listCoordinatorStates({ root, provider: "claude", cwd: root });
   decision = coordinatorHookDecision(states);
   assert.equal(decision.decision, "allow");

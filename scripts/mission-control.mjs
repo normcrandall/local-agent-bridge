@@ -8,6 +8,7 @@ import {
   loadMissionControlSnapshot,
   loadTimeline,
   navigationIntent,
+  newlyObservedAttentionKeys,
   renderMissionControl,
   renderSnapshot,
 } from "../src/mission-control.mjs";
@@ -89,6 +90,7 @@ let stopped = false;
 let timer = null;
 let restorePromise = null;
 let terminalRestored = false;
+const seenAttentionKeys = new Set();
 let resolveExit;
 const exitRequested = new Promise((resolvePromise) => { resolveExit = resolvePromise; });
 const restoreSequence = "\x1b[?25h\x1b[?1049l";
@@ -129,6 +131,11 @@ async function draw() {
   try {
     const current = await snapshot();
     if (stopped) return;
+    const newlyObserved = newlyObservedAttentionKeys(seenAttentionKeys, current.needsUserKeys);
+    if (newlyObserved.length) {
+      process.stdout.write("\x07");
+    }
+    for (const key of current.needsUserKeys || []) seenAttentionKeys.add(key);
     if (selectedId) {
       const preserved = current.lanes.findIndex((lane) => lane.id === selectedId);
       if (preserved >= 0) selectedIndex = preserved;

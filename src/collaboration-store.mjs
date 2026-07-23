@@ -180,6 +180,12 @@ export async function listCollaborations(root, { status, limit = 20 } = {}) {
       createdAt: state.createdAt,
       updatedAt: state.updatedAt,
       error: state.error,
+      coordinatorWake: state.coordinatorWake ? {
+        sequence: state.coordinatorWake.sequence,
+        kind: state.coordinatorWake.kind,
+        status: state.coordinatorWake.status,
+        nextAction: state.coordinatorWake.nextAction,
+      } : null,
     }));
 }
 

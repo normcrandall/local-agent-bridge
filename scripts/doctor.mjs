@@ -309,6 +309,17 @@ check("Browser launcher executable", () => {
   accessSync(resolve(root, "scripts/playwright-mcp.sh"), constants.X_OK);
   return true;
 });
+check("Global user attention signalling", () => {
+  const launcher = resolve(homedir(), ".local/bin/bridge");
+  const runtimeScript = resolve(homedir(), ".local/share/agent-bridge/runtime/scripts/user-attention-cli.mjs");
+  accessSync(launcher, constants.X_OK);
+  accessSync(runtimeScript, constants.R_OK);
+  const expectedStateRoot = resolve(homedir(), ".local/share/agent-bridge/state");
+  const result = spawnSync(launcher, ["attention", "list", "--state-root", expectedStateRoot], { encoding: "utf8" });
+  if (result.status !== 0) return false;
+  const parsed = JSON.parse(result.stdout);
+  return resolve(parsed.stateRoot) === expectedStateRoot && Array.isArray(parsed.pending);
+}, "run npm run install:global to install the needs_user notification and attention CLI");
 
 if (failed) process.exit(1);
 console.log("\nConfig checks do not prove live GitHub installation permissions. Run `npm run github-app:verify -- OWNER/REPO` for that repository.");

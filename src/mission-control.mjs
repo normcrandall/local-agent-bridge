@@ -23,6 +23,7 @@ const execFileAsync = promisify(execFile);
 const MAX_TIMELINE_READ_BYTES = 1_048_576;
 const DEFAULT_STALE_AFTER_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_LIVE_HEARTBEAT_AFTER_MS = 60_000;
+const DEFAULT_RECENT_ACTIVITY_AFTER_MS = 5 * 60 * 1000;
 
 const ANSI_PATTERN = /\x1b\[[0-9;]*m/g;
 export const stripAnsi = (value) => String(value || "").replace(ANSI_PATTERN, "");
@@ -163,6 +164,15 @@ export function isLiveLane(lane, now = Date.now(), heartbeatAfterMs = DEFAULT_LI
   return heartbeatAt > 0 && now - heartbeatAt <= heartbeatAfterMs;
 }
 
+export function laneNeedsUser(lane) {
+  const wake = lane.coordinatorWake;
+  if (wake?.status === "acknowledged") return false;
+  const lifecycle = String(lane.status || lane.lifecyclePhase || "").toLowerCase();
+  return lifecycle === "needs_user"
+    || wake?.kind === "needs_user"
+    || wake?.nextAction === "needs_user";
+}
+
 export function isStaleLane(lane, now = Date.now(), staleAfterMs = DEFAULT_STALE_AFTER_MS) {
   if (isLiveLane(lane, now) || String(lane.lifecyclePhase || "").toLowerCase() === "indeterminate") return false;
   const updatedAt = dateMs(lane.updatedAt);
@@ -221,6 +231,7 @@ export async function loadMissionControlSnapshot({
   const mode = view || (showAll ? "all" : "live");
   if (!["live", "attention", "all"].includes(mode)) throw new Error(`Unknown Mission Control view: ${mode}`);
   const attention = matching.filter((lane) => isAttentionLane(lane, now));
+  const needsUser = matching.filter((lane) => laneNeedsUser(lane));
   const stale = attention.filter((lane) => isStaleLane(lane, now, staleAfterMs));
   const selected = mode === "all"
     ? matching
@@ -234,6 +245,23 @@ export async function loadMissionControlSnapshot({
       || dateMs(right.updatedAt) - dateMs(left.updatedAt)
       || left.id.localeCompare(right.id);
   });
+  const recentActivity = matching
+    .filter((lane) => !isLiveLane(lane, now))
+    .filter((lane) => {
+      const updatedAt = dateMs(lane.updatedAt);
+      return updatedAt > 0 && now - updatedAt <= DEFAULT_RECENT_ACTIVITY_AFTER_MS;
+    })
+    .sort((left, right) => dateMs(right.updatedAt) - dateMs(left.updatedAt))
+    .slice(0, 3)
+    .map((lane) => ({
+      id: lane.id,
+      repository: lane.repository,
+      lifecyclePhase: lane.lifecyclePhase,
+      activeAgent: lane.activeAgent || lane.writer || null,
+      summary: lane.narrative?.summary || lane.task || null,
+      updatedAt: lane.updatedAt,
+      nextAction: lane.nextAction || null,
+    }));
 
   const repositories = new Map();
   for (const lane of matching) {
@@ -262,10 +290,22 @@ export async function loadMissionControlSnapshot({
     staleAfterMs,
     includeStale,
     providerActivity,
+    needsUserCount: needsUser.length,
+    needsUserKeys: needsUser.map((lane) => `${lane.id}:${lane.coordinatorWake?.sequence || 0}`).sort(),
+    needsUserSignature: needsUser
+      .map((lane) => `${lane.id}:${lane.coordinatorWake?.sequence || 0}`)
+      .sort()
+      .join("|"),
+    recentActivity,
     totalLanes: matching.length,
     visibleLanes: visible.length,
     lanes: visible,
   };
+}
+
+export function newlyObservedAttentionKeys(seenKeys, currentKeys) {
+  const seen = seenKeys instanceof Set ? seenKeys : new Set(seenKeys || []);
+  return (currentKeys || []).filter((key) => !seen.has(key));
 }
 
 function eventSummary(event) {
@@ -402,11 +442,28 @@ export function renderMissionControl(snapshot, {
   const providerLine = Object.entries(snapshot.providerActivity).map(([provider, count]) => `${provider}:${count}`).join("  ") || "idle";
   lines.push(paint("AGENT BRIDGE MISSION CONTROL", "1;34", color));
   lines.push(truncate(`Mode: ${snapshot.mode} | repos ${snapshot.visibleRepositories ?? snapshot.repositories.length} | lanes ${snapshot.visibleLanes}/${snapshot.totalLanes} | providers ${providerLine}`, usableWidth));
+  if (snapshot.needsUserCount > 0) {
+    lines.push(paint(`!!! USER INPUT REQUIRED: ${snapshot.needsUserCount} collaboration${snapshot.needsUserCount === 1 ? "" : "s"}. Press a to inspect.`, "31;1", color));
+  }
   lines.push(paint("─".repeat(usableWidth), "90", color));
 
   if (!lanes.length) {
     lines.push("No collaboration lanes match this view.");
-    lines.push(snapshot.mode === "live" ? "No providers are currently running. Press a for attention items or h for history." : "Try a different view or --repo filter.");
+    if (snapshot.mode === "live") {
+      lines.push("No providers are currently running.");
+      if (snapshot.recentActivity?.length) {
+        lines.push("Recent activity (the coordinator may be between lanes):");
+        for (const recent of snapshot.recentActivity) {
+          const provider = recent.activeAgent ? ` · ${recent.activeAgent}` : "";
+          const next = recent.nextAction && recent.nextAction !== "none" ? ` · next ${recent.nextAction}` : "";
+          lines.push(truncate(`  ${recent.repository} · ${recent.lifecyclePhase}${provider} · ${age(recent.updatedAt, now)} ago${next}`, usableWidth));
+          if (recent.summary) lines.push(truncate(`    ${recent.summary}`, usableWidth));
+        }
+      }
+      lines.push("Press a for attention items or h for history.");
+    } else {
+      lines.push("Try a different view or --repo filter.");
+    }
   } else {
     const listBudget = interactive
       ? Math.max(4, Math.min(12, Math.floor(height * 0.3)))
