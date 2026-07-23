@@ -451,7 +451,7 @@ export async function queryControlPlane(stateRoot, options = {}) {
       type: "collaboration",
       workspace: cState.workspace || null,
       repository: cState.issueClaim?.repository || cState.githubReview?.repository || cState.githubBuilder?.repository || null,
-      task: String(cState.taskBase || cState.task || "").split(CLAIMED_ISSUE_CONTEXT_MARKER)[0].trim(),
+      task: String(cState.taskBase || cState.task || "").split(CLAIMED_ISSUE_CONTEXT_MARKER)[0].trim().slice(0, 500),
       participants,
       writer,
       activeAgent: activeCall?.agent || cState.runtime?.previousAgent || null,

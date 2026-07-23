@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import {
   loadMissionControlSnapshot,
   loadTimeline,
+  navigationIntent,
   renderMissionControl,
   renderSnapshot,
 } from "../src/mission-control.mjs";
@@ -46,17 +47,19 @@ async function snapshot() {
 
 if (oneShot) {
   const current = await snapshot();
+  let output;
   if (args.includes("--json")) {
-    process.stdout.write(`${JSON.stringify(current, null, 2)}\n`);
+    output = `${JSON.stringify(current, null, 2)}\n`;
   } else {
     const selected = current.lanes[0];
     const timeline = selected ? await loadTimeline(stateRoot, selected.id) : [];
-    process.stdout.write(`${renderSnapshot(current, {
+    output = `${renderSnapshot(current, {
       selectedIndex: 0,
       timeline,
       width: Number.parseInt(process.env.COLUMNS || "120", 10),
-    })}\n`);
+    })}\n`;
   }
+  await new Promise((resolveWrite, rejectWrite) => process.stdout.write(output, (error) => error ? rejectWrite(error) : resolveWrite()));
   process.exit(0);
 }
 
@@ -111,11 +114,12 @@ process.stdin.on("data", async (key) => {
     restore();
     process.exit(0);
   }
-  if (key === "j" || key === "\x1b[B") selectedIndex += 1;
-  else if (key === "k" || key === "\x1b[A") selectedIndex -= 1;
-  else if (key === "g") selectedIndex = 0;
-  else if (key === "G") selectedIndex = Number.MAX_SAFE_INTEGER;
-  else if (key === "a") { showAll = !showAll; selectedIndex = 0; selectedId = null; }
+  if (key === "a") { showAll = !showAll; selectedIndex = 0; selectedId = null; }
+  else {
+    const intent = navigationIntent(key, selectedIndex);
+    selectedIndex = intent.selectedIndex;
+    if (!intent.preserveSelectedId) selectedId = null;
+  }
   await draw();
 });
 process.on("SIGINT", () => { restore(); process.exit(130); });

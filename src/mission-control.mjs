@@ -1,6 +1,7 @@
-import { spawnSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { readFile, stat } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
+import { promisify } from "node:util";
 import { queryControlPlane } from "./collaboration-store.mjs";
 
 const ACTIVE_STATUSES = new Set([
@@ -11,9 +12,18 @@ const ATTENTION_STATUSES = new Set(["needs_user", "indeterminate", "failed", "bu
 const TERMINAL_STATUSES = new Set(["agreed", "completed", "cancelled", "merged", "closed", "obsolete", "superseded", "turn_limit"]);
 const repositoryCache = new Map();
 const timelineCache = new Map();
+const execFileAsync = promisify(execFile);
 
 const ANSI_PATTERN = /\x1b\[[0-9;]*m/g;
 export const stripAnsi = (value) => String(value || "").replace(ANSI_PATTERN, "");
+
+export function navigationIntent(key, selectedIndex) {
+  if (key === "j" || key === "\x1b[B") return { selectedIndex: selectedIndex + 1, preserveSelectedId: false };
+  if (key === "k" || key === "\x1b[A") return { selectedIndex: selectedIndex - 1, preserveSelectedId: false };
+  if (key === "g") return { selectedIndex: 0, preserveSelectedId: false };
+  if (key === "G") return { selectedIndex: Number.MAX_SAFE_INTEGER, preserveSelectedId: false };
+  return { selectedIndex, preserveSelectedId: true };
+}
 
 function clean(value) {
   return String(value ?? "").replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
@@ -42,10 +52,23 @@ export function parseRepositoryRemote(remote) {
   return `${parts.at(-2)}/${parts.at(-1)}`;
 }
 
-function repositoryFromWorkspace(workspace) {
+async function remoteRepository(candidate) {
+  try {
+    const { stdout } = await execFileAsync("git", ["remote", "get-url", "origin"], {
+      cwd: candidate,
+      encoding: "utf8",
+      timeout: 750,
+      maxBuffer: 16_384,
+    });
+    return parseRepositoryRemote(stdout);
+  } catch { return null; }
+}
+
+async function repositoryFromWorkspace(workspace) {
   if (!workspace) return "unknown/local";
   const root = resolve(workspace);
-  if (repositoryCache.has(root)) return repositoryCache.get(root);
+  const cached = repositoryCache.get(root);
+  if (cached && cached.expiresAt > Date.now()) return cached.repository;
   const worktreeMarker = "/.bridge/worktrees/";
   const markerIndex = root.indexOf(worktreeMarker);
   const candidates = markerIndex > 0 ? [root, root.slice(0, markerIndex)] : [root];
@@ -55,25 +78,34 @@ function repositoryFromWorkspace(workspace) {
   }
   let repository = null;
   for (const candidate of candidates) {
-    const result = spawnSync("git", ["remote", "get-url", "origin"], {
-      cwd: candidate,
-      encoding: "utf8",
-      timeout: 1_500,
-    });
-    if (result.status === 0) {
-      repository = parseRepositoryRemote(result.stdout);
-      if (repository) break;
-    }
+    repository = await remoteRepository(candidate);
+    if (repository) break;
   }
   const fallback = repository || `local/${basename(root) || "workspace"}`;
-  repositoryCache.set(root, fallback);
+  repositoryCache.set(root, {
+    repository: fallback,
+    expiresAt: repository ? Number.POSITIVE_INFINITY : Date.now() + 30_000,
+  });
   return fallback;
 }
 
-export function repositoryForLane(lane) {
+export async function repositoryForLane(lane) {
   const explicit = clean(lane.repository).replace(/^https?:\/\/github\.com\//i, "").replace(/\.git$/i, "");
   if (/^[^/\s]+\/[^/\s]+$/.test(explicit)) return explicit;
   return repositoryFromWorkspace(lane.workspace);
+}
+
+async function mapLimit(values, concurrency, mapper) {
+  const output = new Array(values.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(concurrency, values.length) }, async () => {
+    while (next < values.length) {
+      const index = next;
+      next += 1;
+      output[index] = await mapper(values[index], index);
+    }
+  }));
+  return output;
 }
 
 export function isAttentionLane(lane, now = Date.now()) {
@@ -84,7 +116,7 @@ export function isAttentionLane(lane, now = Date.now()) {
   if (["failed", "budget"].includes(status)) return now - dateMs(lane.updatedAt) <= 86_400_000;
   if (lane.handoff && !lane.handoff.acknowledged) return true;
   if (lane.coordinatorWake && !lane.coordinatorWake.acknowledged) return true;
-  return !TERMINAL_STATUSES.has(status);
+  return false;
 }
 
 function statusRank(status) {
@@ -104,7 +136,7 @@ export async function loadMissionControlSnapshot({
   now = Date.now(),
 } = {}) {
   const controlPlane = await queryControlPlane(stateRoot, { includeArchived, now });
-  const allLanes = controlPlane.lanes.map((lane) => ({ ...lane, repository: repositoryForLane(lane) }));
+  const allLanes = await mapLimit(controlPlane.lanes, 12, async (lane) => ({ ...lane, repository: await repositoryForLane(lane) }));
   const normalizedFilter = clean(repositoryFilter).toLowerCase();
   const matching = allLanes.filter((lane) => !normalizedFilter
     || lane.repository.toLowerCase() === normalizedFilter
@@ -260,7 +292,9 @@ export function renderMissionControl(snapshot, {
     lines.push("No collaboration lanes match this view.");
     lines.push(snapshot.mode === "attention" ? "Press a to include terminal history." : "Try a different --repo filter.");
   } else {
-    const listBudget = Math.max(4, Math.min(12, Math.floor(height * 0.3)));
+    const listBudget = interactive
+      ? Math.max(4, Math.min(12, Math.floor(height * 0.3)))
+      : Math.min(50, lanes.length);
     const start = Math.max(0, Math.min(selectedIndex - Math.floor(listBudget / 2), lanes.length - listBudget));
     let lastRepository = null;
     for (let index = start; index < Math.min(lanes.length, start + listBudget); index += 1) {
@@ -275,6 +309,9 @@ export function renderMissionControl(snapshot, {
       const label = lane.issueNumber ? `#${lane.issueNumber}` : lane.id.replace(/^bridge-/, "").slice(0, 8);
       const raw = `${cursor} ${statusSymbol(lane.lifecyclePhase)} ${label} ${lane.lifecyclePhase} ${provider} - ${lane.task || lane.narrative?.summary || "untitled lane"}`;
       lines.push(index === selectedIndex ? paint(truncate(raw, usableWidth), "7", color) : truncate(raw, usableWidth));
+    }
+    if (!interactive && lanes.length > listBudget) {
+      lines.push(`… ${lanes.length - listBudget} more lanes; use --json for complete records`);
     }
   }
 
