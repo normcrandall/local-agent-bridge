@@ -1,6 +1,6 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 import { probeProviderCapabilities } from "./provider-cli-capabilities.mjs";
 import { resolveGitHubMergeEnforcement } from "./github-merge-enforcement.mjs";
@@ -79,6 +79,45 @@ function which(command) {
 function git(workspace, args) {
   const result = spawnSync("git", args, { cwd: workspace, encoding: "utf8", timeout: 10_000 });
   return { ok: result.status === 0, output: (result.stdout || result.stderr || "").trim() };
+}
+
+function inspectWorkspaceGitCustody(workspace) {
+  const gitDirectory = git(workspace, ["rev-parse", "--absolute-git-dir"]);
+  const commonDirectory = git(workspace, ["rev-parse", "--git-common-dir"]);
+  if (!gitDirectory.ok || !commonDirectory.ok) {
+    return observation("unverifiable", "Git metadata directories could not be resolved.", source(workspace));
+  }
+  try {
+    const actualWorkspace = realpathSync(workspace);
+    const gitMetadataRoot = realpathSync(resolve(actualWorkspace, gitDirectory.output));
+    const gitCommonRoot = realpathSync(resolve(actualWorkspace, commonDirectory.output));
+    const fromWorkspace = relative(actualWorkspace, gitMetadataRoot);
+    const contained = fromWorkspace !== ".." && !fromWorkspace.startsWith(`..${sep}`) && !isAbsolute(fromWorkspace);
+    if (gitMetadataRoot !== gitCommonRoot) {
+      return {
+        state: "shared",
+        detail: "The worktree shares Git metadata with another checkout.",
+        gitMetadataRoot,
+        source: source(gitCommonRoot),
+      };
+    }
+    if (!contained) {
+      return {
+        state: "external",
+        detail: "The checkout's Git metadata is outside the delegated workspace.",
+        gitMetadataRoot,
+        source: source(gitMetadataRoot),
+      };
+    }
+    return {
+      state: "self-contained",
+      detail: "The delegated workspace owns its Git metadata.",
+      gitMetadataRoot,
+      source: source(gitMetadataRoot),
+    };
+  } catch (error) {
+    return observation("unverifiable", error.message, source(workspace));
+  }
 }
 
 function configuredMcpServers({ host, home }) {
@@ -356,6 +395,7 @@ export function collectPolicySnapshot({
       branch: git(actualWorkspace, ["branch", "--show-current"]),
       remote,
       repository,
+      gitCustody: inspectWorkspaceGitCustody(actualWorkspace),
     },
     request: {
       providers,
@@ -415,11 +455,35 @@ export function analyzePolicy(snapshot) {
     configuredMode: snapshot.github?.enforcement?.configuredMode ?? "broker",
     capabilities: snapshot.github?.enforcement?.capabilities || {},
   });
+  const writerGitCustodyBlocked = request.mode === "work"
+    && snapshot.workspace?.gitCustody?.state !== "self-contained";
   if (!snapshot.workspace?.exists || !snapshot.workspace?.git?.ok) {
     findings.push(policyFinding({
       code: "workspace-unavailable", severity: "failure", state: "missing", source: source(snapshot.workspace?.path || "."),
       impact: "The requested workspace cannot be inspected as a Git worktree.",
       remediation: "Select an existing repository worktree; do not delegate until its exact path is verified.",
+    }));
+  }
+  if (writerGitCustodyBlocked) {
+    const custody = snapshot.workspace?.gitCustody || {};
+    findings.push(policyFinding({
+      code: custody.state === "shared"
+        ? "writer-git-custody-shared"
+        : custody.state === "external"
+          ? "writer-git-custody-external"
+          : "writer-git-custody-unverifiable",
+      severity: "failure",
+      state: custody.state || "unverifiable",
+      role: "writer",
+      source: custody.source || source(snapshot.workspace?.path || "."),
+      impact: custody.state === "shared"
+        ? "A sandboxed writer can edit files but cannot safely create Git index or ref locks in another checkout's shared metadata."
+        : custody.state === "external"
+          ? "The writer's Git metadata is known to be outside the delegated workspace, so the sandbox cannot safely receive commit custody."
+          : "The bridge cannot prove that the writer owns contained Git metadata required to commit.",
+      remediation: custody.state === "shared"
+        ? "Create a bridge-managed private writer checkout, or recover the stopped linked lane into private Git custody before delegation."
+        : "Move the repository into a self-contained checkout or create a bridge-managed private writer checkout before delegation.",
     }));
   }
   if (mergeEnforcement.blocked) {
@@ -469,6 +533,7 @@ export function analyzePolicy(snapshot) {
       continue;
     }
     const blockers = [];
+    if (writerGitCustodyBlocked) blockers.push("git-custody");
     if (observed.availability.state !== "available") blockers.push("availability");
     if (request.mode === "work" && request.role === "writer" && !observed.permissions.write) blockers.push("write");
     if (request.mode === "work" && request.role === "writer" && !observed.permissions.shell) blockers.push("shell");
@@ -608,6 +673,7 @@ export function analyzePolicy(snapshot) {
     branch: snapshot.workspace?.branch?.ok ? snapshot.workspace.branch.output : null,
     repository: snapshot.workspace?.repository || null,
     remoteConfigured: Boolean(snapshot.workspace?.remote?.ok),
+    gitCustody: snapshot.workspace?.gitCustody?.state || "unverifiable",
   };
   const safeRequest = {
     ...request,

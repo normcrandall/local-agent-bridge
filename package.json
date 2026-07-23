@@ -48,7 +48,7 @@
     "test:codex-isolation": "node scripts/codex-isolation-test.mjs",
     "test:codex-progress": "node scripts/codex-progress-test.mjs",
     "test:operations": "node scripts/operations-test.mjs",
-    "test:writer-checkout": "node scripts/writer-checkout-test.mjs && node scripts/writer-checkout-recovery-control-test.mjs",
+    "test:writer-checkout": "node scripts/writer-checkout-test.mjs && node scripts/writer-checkout-recovery-control-test.mjs && node scripts/existing-writer-custody-test.mjs",
     "test:codex-writer-commit:live": "node scripts/codex-writer-commit-live.mjs",
     "test:portfolio": "node scripts/portfolio-scheduler-test.mjs && node scripts/portfolio-store-test.mjs",
     "test:merge-train": "node scripts/merge-train-test.mjs",

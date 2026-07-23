@@ -24,7 +24,7 @@ import {
 import { reapProcessTree } from "./process-reaper.mjs";
 import { DEFAULT_AGENTS, KNOWN_AGENTS, validateAgents, WRITER_AGENTS } from "./talk-protocol.mjs";
 import { createWorktree, isSafeWorkerPid, preflight, selectRoles } from "./operations.mjs";
-import { cleanupWriterCheckout, isLinkedGitCheckout, prepareWriterCheckout, recoverWriterCheckout } from "./writer-checkout.mjs";
+import { adoptExistingWriterCheckout, cleanupWriterCheckout, isLinkedGitCheckout, prepareWriterCheckout, recoverWriterCheckout } from "./writer-checkout.mjs";
 import { createDecisionReceipt, DECISION_CATEGORIES } from "./decision-policy.mjs";
 import { resolveNativeChair } from "./native-chair.mjs";
 import { clearTerminalRuntime, legacyWorkerCommandMatches, reconciliationAction, workerCancellationMatches, workerCommandMatches } from "./collaboration-cleanup.mjs";
@@ -816,6 +816,14 @@ server.registerTool(
     }
 
     try {
+      let readiness = null;
+      if (!input.worktree) {
+        readiness = preflight({ workspace: requestedWorkspace, agents: delegatedAgents, mode: effectiveMode, workProfile: input.workProfile || "exact", permissionProfile: effectivePermissionProfile });
+        if (!readiness.checks.find((check) => check.name === "workspace")?.ok
+          || !readiness.checks.find((check) => check.name === "git-repository")?.ok) {
+          throw new Error("Collaboration preflight failed: workspace must exist and be a Git repository.");
+        }
+      }
       const worktree = input.worktree
         ? effectiveMode === "work"
           ? prepareWriterCheckout({
@@ -832,12 +840,14 @@ server.registerTool(
             base: input.worktree.base,
             worktreeRoot: input.worktree.root,
           })
-        : null;
+        : effectiveMode === "work"
+          ? adoptExistingWriterCheckout({ workspace: requestedWorkspace })
+          : null;
       const workspace = worktree?.path || requestedWorkspace;
       if (input.chair?.workspace && projectDirectory(input.chair.workspace) !== realpathSync(workspace)) {
         throw new Error("Native chair workspace must match the collaboration workspace.");
       }
-      const readiness = preflight({ workspace, agents: delegatedAgents, mode: effectiveMode, workProfile: input.workProfile || "exact", permissionProfile: effectivePermissionProfile });
+      readiness ||= preflight({ workspace, agents: delegatedAgents, mode: effectiveMode, workProfile: input.workProfile || "exact", permissionProfile: effectivePermissionProfile });
       if (!readiness.checks.find((check) => check.name === "workspace")?.ok
         || !readiness.checks.find((check) => check.name === "git-repository")?.ok) {
         throw new Error("Collaboration preflight failed: workspace must exist and be a Git repository.");
@@ -1177,6 +1187,9 @@ server.registerTool(
     const current = await readCollaboration(WORKSPACE_ROOT, id);
     if (current.mode !== "work" || current.worktree?.strategy !== "self-contained") {
       throw new Error("Writer checkout cleanup requires a work-mode collaboration with private Git custody.");
+    }
+    if (current.worktree?.managed === false) {
+      throw new Error("Writer checkout cleanup is available only for a bridge-managed private checkout; adopted user repositories are never removed.");
     }
     if (!["completed", "failed", "cancelled", "needs_user", "turn_limit"].includes(current.status)) {
       throw new Error(`Writer checkout cleanup requires a stopped inspectable collaboration; current status is ${current.status}.`);
@@ -1944,7 +1957,7 @@ server.registerTool(
         && !resolvedContinuationIssueClaim
         && !activeGithubReview
         && !activeGithubBuilder
-        && !current.worktree,
+        && !current.worktree?.base,
     });
     const continuationVerificationPlan = await resolveVerificationPlan({
       store: continuationStore,

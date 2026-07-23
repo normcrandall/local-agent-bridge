@@ -639,6 +639,7 @@ try {
     name: "start_collaboration",
     arguments: {
       task: "Continue the work lane with the next eligible writer",
+      workspace: cleanWorkspace,
       agents: ["antigravity", "claude"],
       startAgent: "antigravity",
       writer: "antigravity",
