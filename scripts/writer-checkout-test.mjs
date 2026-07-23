@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { prepareWriterCheckout, recoverWriterCheckout } from "../src/writer-checkout.mjs";
+import { adoptExistingWriterCheckout, prepareWriterCheckout, recoverWriterCheckout } from "../src/writer-checkout.mjs";
 import { antigravityToolRequest, claudeToolRequest, codexToolRequest } from "../src/tool-requests.mjs";
 
 function git(cwd, ...args) {
@@ -25,6 +25,10 @@ try {
   git(repository, "remote", "add", "origin", "https://example.invalid/owner/repository.git");
   const sourceHead = git(repository, "rev-parse", "HEAD");
   const sourceGitDirectory = realpathSync(join(repository, ".git"));
+  const adoptedSource = adoptExistingWriterCheckout({ workspace: repository });
+  assert.equal(adoptedSource.strategy, "self-contained");
+  assert.equal(adoptedSource.managed, false);
+  assert.equal(adoptedSource.gitMetadataRoot, sourceGitDirectory);
 
   const checkout = prepareWriterCheckout({
     workspace: repository,
@@ -126,6 +130,10 @@ try {
   const recoveryBase = git(recoveryRepository, "rev-parse", "HEAD");
   git(recoveryRepository, "remote", "add", "origin", "https://example.invalid/owner/recovery.git");
   git(recoveryRepository, "worktree", "add", "-b", "codex/recover-lane", linkedWorktree, "HEAD");
+  assert.throws(
+    () => adoptExistingWriterCheckout({ workspace: linkedWorktree }),
+    /shared Git metadata.*private writer checkout/i,
+  );
   writeFileSync(join(linkedWorktree, "committed-after-base.txt"), "committed in stranded lane\n");
   git(linkedWorktree, "add", "committed-after-base.txt");
   git(linkedWorktree, "commit", "-m", "Stranded lane commit");
@@ -164,3 +172,27 @@ try {
 }
 
 console.log("Writer recovery test passed: tracked, deleted, staged, and untracked changes migrate into private Git custody.");
+
+const externalMetadataTemporary = mkdtempSync(join(tmpdir(), "bridge-external-git-metadata-test-"));
+const externalMetadataRepository = join(externalMetadataTemporary, "repository");
+const externalGitDirectory = join(externalMetadataTemporary, "external.git");
+mkdirSync(externalMetadataRepository);
+
+try {
+  git(externalMetadataRepository, "init", "--initial-branch=main");
+  git(externalMetadataRepository, "config", "user.name", "Bridge Test");
+  git(externalMetadataRepository, "config", "user.email", "bridge@example.invalid");
+  writeFileSync(join(externalMetadataRepository, "README.md"), "external metadata fixture\n");
+  git(externalMetadataRepository, "add", "README.md");
+  git(externalMetadataRepository, "commit", "-m", "External metadata base");
+  renameSync(join(externalMetadataRepository, ".git"), externalGitDirectory);
+  symlinkSync(externalGitDirectory, join(externalMetadataRepository, ".git"), "dir");
+  assert.throws(
+    () => adoptExistingWriterCheckout({ workspace: externalMetadataRepository }),
+    /must stay inside the writer checkout/i,
+  );
+} finally {
+  rmSync(externalMetadataTemporary, { recursive: true, force: true });
+}
+
+console.log("Writer custody containment test passed: external Git metadata is never granted to a delegated sandbox.");

@@ -57,6 +57,7 @@ function snapshot({ providers = ["claude", "codex", "antigravity"], request = {}
       branch: { ok: true, output: "feature" },
       remote: { ok: true, output: "https://secret@example.invalid/token.git" },
       repository: "owner/repo",
+      gitCustody: { state: "self-contained", gitMetadataRoot: "/safe/worktree/.git", source: src("/safe/worktree/.git") },
       ...workspace,
     },
     request: {
@@ -125,6 +126,26 @@ assert.match(readyHuman, /Source:/);
 assert.equal(ready.github.mergeEnforcement.effectiveMode, "broker");
 assert.ok(ready.findings.some((finding) => finding.code === "github-enforcement-broker-only" && finding.severity === "notice"));
 assert.match(readyHuman, /GitHub merge enforcement: configured=broker; effective=broker/);
+
+const sharedWriterCustody = analyzePolicy(snapshot({
+  providers: ["codex"],
+  request: {
+    strictProviders: ["codex"],
+    mode: "work",
+    role: "writer",
+    workProfile: "implement",
+    requireReviewApp: false,
+  },
+  workspace: {
+    gitCustody: { state: "shared", gitMetadataRoot: "/safe/repository/.git/worktrees/lane", source: src("/safe/repository/.git") },
+  },
+  providerOverrides: {
+    codex: { permissions: { read: true, write: true, shell: "implement-sandboxed", browser: "isolated" } },
+  },
+}));
+assert.equal(sharedWriterCustody.ok, false);
+assert.deepEqual(sharedWriterCustody.matrix.codex.blockers, ["git-custody"]);
+assert.ok(sharedWriterCustody.findings.some((finding) => finding.code === "writer-git-custody-shared"));
 
 const explicitRulesetUnavailable = analyzePolicy(snapshot({
   github: {

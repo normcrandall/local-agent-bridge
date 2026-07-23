@@ -24,7 +24,7 @@ import {
 import { reapProcessTree } from "./process-reaper.mjs";
 import { DEFAULT_AGENTS, KNOWN_AGENTS, validateAgents, WRITER_AGENTS } from "./talk-protocol.mjs";
 import { createWorktree, isSafeWorkerPid, preflight, selectRoles } from "./operations.mjs";
-import { cleanupWriterCheckout, isLinkedGitCheckout, prepareWriterCheckout, recoverWriterCheckout } from "./writer-checkout.mjs";
+import { adoptExistingWriterCheckout, cleanupWriterCheckout, isLinkedGitCheckout, prepareWriterCheckout, recoverWriterCheckout } from "./writer-checkout.mjs";
 import { createDecisionReceipt, DECISION_CATEGORIES } from "./decision-policy.mjs";
 import { resolveNativeChair } from "./native-chair.mjs";
 import { clearTerminalRuntime, legacyWorkerCommandMatches, reconciliationAction, workerCancellationMatches, workerCommandMatches } from "./collaboration-cleanup.mjs";
@@ -832,7 +832,9 @@ server.registerTool(
             base: input.worktree.base,
             worktreeRoot: input.worktree.root,
           })
-        : null;
+        : effectiveMode === "work"
+          ? adoptExistingWriterCheckout({ workspace: requestedWorkspace })
+          : null;
       const workspace = worktree?.path || requestedWorkspace;
       if (input.chair?.workspace && projectDirectory(input.chair.workspace) !== realpathSync(workspace)) {
         throw new Error("Native chair workspace must match the collaboration workspace.");

@@ -43,6 +43,32 @@ export function isLinkedGitCheckout(workspace) {
     !== resolvedGitDirectory(actualWorkspace, "--git-common-dir");
 }
 
+export function adoptExistingWriterCheckout({ workspace }) {
+  const actualWorkspace = realpathSync(resolve(workspace));
+  const gitMetadataRoot = resolvedGitDirectory(actualWorkspace, "--absolute-git-dir");
+  const gitCommonRoot = resolvedGitDirectory(actualWorkspace, "--git-common-dir");
+  if (gitMetadataRoot !== gitCommonRoot) {
+    throw new Error(
+      "Existing work workspace uses shared Git metadata; create a private writer checkout or call recover_writer_checkout before continuing.",
+    );
+  }
+  containedPath(actualWorkspace, gitMetadataRoot, "Writer Git metadata");
+  containedPath(actualWorkspace, gitCommonRoot, "Writer common Git metadata");
+  if (!statSync(gitMetadataRoot).isDirectory()) {
+    throw new Error("Writer Git metadata root is not a directory.");
+  }
+  return {
+    path: actualWorkspace,
+    workspace: actualWorkspace,
+    gitMetadataRoot,
+    branch: git(actualWorkspace, ["branch", "--show-current"]) || null,
+    base: git(actualWorkspace, ["rev-parse", "HEAD"]),
+    strategy: "self-contained",
+    managed: false,
+    cleanup: null,
+  };
+}
+
 export function prepareWriterCheckout({
   workspace,
   taskId,
@@ -105,6 +131,7 @@ export function prepareWriterCheckout({
       branch,
       base: baseSha,
       strategy: "self-contained",
+      managed: true,
       cleanup: { strategy: "remove-directory", path: actualPath },
     };
   } catch (error) {
