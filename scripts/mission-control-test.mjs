@@ -2,7 +2,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { appendFile, mkdir, mkdtemp, rename, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -18,6 +18,11 @@ import {
   statusRank,
   stripAnsi,
 } from "../src/mission-control.mjs";
+import {
+  HOST_ACTIVITY_LIVE_MS,
+  hostActivityLane,
+  recordHostActivity,
+} from "../src/host-activity-store.mjs";
 import { PORTFOLIO_STATUSES, PORTFOLIO_STATUS_GROUPS } from "../src/portfolio-status.mjs";
 
 assert.equal(parseRepositoryRemote("https://token@example.com/owner/repo.git"), "owner/repo");
@@ -39,6 +44,8 @@ assert.equal(isLiveLane({ type: "collaboration", lifecyclePhase: "running", hear
 assert.equal(isLiveLane({ type: "collaboration", lifecyclePhase: "running", heartbeat: { heartbeatAt: "2026-07-23T11:58:00.000Z" } }, classificationNow), false);
 assert.equal(isLiveLane({ type: "collaboration", lifecyclePhase: "indeterminate", heartbeat: { heartbeatAt: "2026-07-23T11:59:59.000Z" } }, classificationNow), false);
 assert.equal(isLiveLane({ type: "portfolio_lane", lifecyclePhase: "implementing" }), false);
+assert.equal(isLiveLane({ type: "native_host", lifecyclePhase: "working", hostActivity: { live: true } }), true);
+assert.equal(isLiveLane({ type: "native_host", lifecyclePhase: "working", hostActivity: { live: false } }), false);
 assert.equal(isStaleLane({ type: "portfolio_lane", lifecyclePhase: "blocked", updatedAt: "2026-07-22T10:00:00.000Z" }, Date.parse("2026-07-23T12:00:00.000Z")), true);
 assert.equal(isStaleLane({ type: "portfolio_lane", lifecyclePhase: "integrating", updatedAt: "2026-07-22T10:00:00.000Z" }, Date.parse("2026-07-23T12:00:00.000Z")), false);
 for (const status of PORTFOLIO_STATUS_GROUPS.integration) assert.ok(statusRank(status) < statusRank("ready"));
@@ -125,6 +132,46 @@ try {
   assert.equal(live.providerActivity.codex, 1);
   assert.equal(live.collapsedStale.total, 0);
 
+  const hostRoot = join(root, "host-test");
+  const sessionId = "private-codex-session-123";
+  const hostState = await recordHostActivity(hostRoot, {
+    provider: "codex",
+    sessionId,
+    workspace,
+    model: "gpt-5.6-sol",
+    action: "start",
+    task: "Inspect the native Codex app turn",
+    sourceEvent: "UserPromptSubmit",
+    now,
+  });
+  const hostLive = await loadMissionControlSnapshot({ stateRoot: hostRoot, now });
+  assert.equal(hostLive.totalLanes, 1);
+  assert.equal(hostLive.visibleLanes, 1);
+  assert.equal(hostLive.lanes[0].type, "native_host");
+  assert.equal(hostLive.lanes[0].repository, "veliqon/control-plane");
+  assert.equal(hostLive.lanes[0].activeAgent, "codex");
+  assert.equal(hostLive.providerActivity.codex, 1);
+  const hostStateFile = join(hostRoot, "host-activity", (await readdir(join(hostRoot, "host-activity"))).find((name) => name.endsWith(".json")));
+  assert.doesNotMatch(await readFile(hostStateFile, "utf8"), new RegExp(sessionId));
+  await recordHostActivity(hostRoot, {
+    provider: "codex",
+    sessionId,
+    workspace,
+    action: "stop",
+    sourceEvent: "Stop",
+    now: now + 1_000,
+  });
+  const hostStopped = await loadMissionControlSnapshot({ stateRoot: hostRoot, now: now + 1_000 });
+  assert.equal(hostStopped.totalLanes, 1);
+  assert.equal(hostStopped.visibleLanes, 0);
+  assert.equal(hostStopped.providerActivity.codex, undefined);
+  const expiredHostLane = hostActivityLane({
+    ...hostState,
+    expiresAt: new Date(now + HOST_ACTIVITY_LIVE_MS).toISOString(),
+  }, now + HOST_ACTIVITY_LIVE_MS + 1);
+  assert.equal(expiredHostLane.hostActivity.live, false);
+  assert.equal(isLiveLane(expiredHostLane, now + HOST_ACTIVITY_LIVE_MS + 1), false);
+
   const attention = await loadMissionControlSnapshot({ stateRoot: root, view: "attention", now });
   assert.equal(attention.mode, "attention");
   assert.equal(attention.totalLanes, 4);
@@ -210,7 +257,7 @@ try {
   });
   assert.match(invalidColumnsCli, /AGENT BRIDGE MISSION CONTROL/);
 
-  console.log("Mission Control tests passed: live defaults, attention/stale filtering, repository grouping, timeline rendering, and snapshot CLI behavior are verified.");
+  console.log("Mission Control tests passed: live defaults, native host visibility, attention/stale filtering, repository grouping, timeline rendering, and snapshot CLI behavior are verified.");
 } finally {
   await rm(root, { recursive: true, force: true });
 }

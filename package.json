@@ -50,6 +50,8 @@
     "test:codex-progress": "node scripts/codex-progress-test.mjs",
     "test:operations": "node scripts/operations-test.mjs",
     "test:mission-control": "node scripts/mission-control-test.mjs",
+    "test:host-activity": "node scripts/host-activity-hook-test.mjs",
+    "test:mission-control-terminal": "/usr/bin/expect scripts/mission-control-terminal-test.exp",
     "test:writer-checkout": "node scripts/writer-checkout-test.mjs && node scripts/writer-checkout-recovery-control-test.mjs && node scripts/existing-writer-custody-test.mjs",
     "test:codex-writer-commit:live": "node scripts/codex-writer-commit-live.mjs",
     "test:portfolio": "node scripts/portfolio-scheduler-test.mjs && node scripts/portfolio-store-test.mjs",

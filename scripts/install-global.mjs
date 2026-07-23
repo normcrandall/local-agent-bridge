@@ -128,6 +128,16 @@ export BRIDGE_COLLABORATION_DIR="$HOME/.local/share/agent-bridge/state"
 
 exec "$NODE_BIN" "$RUNTIME/scripts/coordinator-hook.mjs" "$@"
 `,
+  "agent-bridge-host-activity-hook": `#!/bin/zsh
+set -eu
+
+RUNTIME="$HOME/.local/share/agent-bridge/runtime"
+export NODE_BIN=${JSON.stringify(process.execPath)}
+export BRIDGE_RUNTIME_ROOT="$RUNTIME"
+export BRIDGE_COLLABORATION_DIR="$HOME/.local/share/agent-bridge/state"
+
+exec "$NODE_BIN" "$RUNTIME/scripts/host-activity-hook.mjs" "$@"
+`,
   "agent-bridge-claude-wake-channel": `#!/bin/zsh
 set -eu
 
@@ -225,10 +235,16 @@ async function writeTextAtomic(path, content) {
 }
 
 const hookLauncher = resolve(binRoot, "agent-bridge-coordinator-hook");
+const hostActivityHookLauncher = resolve(binRoot, "agent-bridge-host-activity-hook");
 const claudeSettingsPath = resolve(homedir(), ".claude/settings.json");
 let claudeSettings = await readJson(claudeSettingsPath);
 claudeSettings = addCommandHook(claudeSettings, "Stop", `${hookLauncher} claude stop`);
 claudeSettings = addCommandHook(claudeSettings, "SessionStart", `${hookLauncher} claude session_start`);
+claudeSettings = addCommandHook(claudeSettings, "UserPromptSubmit", `${hostActivityHookLauncher} claude start`);
+claudeSettings = addCommandHook(claudeSettings, "PreToolUse", `${hostActivityHookLauncher} claude heartbeat`);
+claudeSettings = addCommandHook(claudeSettings, "PostToolUse", `${hostActivityHookLauncher} claude heartbeat`);
+claudeSettings = addCommandHook(claudeSettings, "Stop", `${hostActivityHookLauncher} claude stop`);
+claudeSettings = addCommandHook(claudeSettings, "SessionEnd", `${hostActivityHookLauncher} claude stop`);
 await writeJson(claudeSettingsPath, claudeSettings);
 
 const claudeUserConfigPath = resolve(homedir(), ".claude.json");
@@ -254,6 +270,11 @@ const antigravitySettingsPath = resolve(homedir(), ".gemini/antigravity-cli/sett
 let antigravitySettings = await readJson(antigravitySettingsPath);
 antigravitySettings = addCommandHook(antigravitySettings, "AfterAgent", `${hookLauncher} antigravity stop`, { timeout: 5_000 });
 antigravitySettings = addCommandHook(antigravitySettings, "SessionStart", `${hookLauncher} antigravity session_start`, { timeout: 5_000 });
+antigravitySettings = addCommandHook(antigravitySettings, "BeforeAgent", `${hostActivityHookLauncher} antigravity start`, { timeout: 5_000 });
+antigravitySettings = addCommandHook(antigravitySettings, "BeforeTool", `${hostActivityHookLauncher} antigravity heartbeat`, { timeout: 5_000 });
+antigravitySettings = addCommandHook(antigravitySettings, "AfterTool", `${hostActivityHookLauncher} antigravity heartbeat`, { timeout: 5_000 });
+antigravitySettings = addCommandHook(antigravitySettings, "AfterAgent", `${hostActivityHookLauncher} antigravity stop`, { timeout: 5_000 });
+antigravitySettings = addCommandHook(antigravitySettings, "SessionEnd", `${hostActivityHookLauncher} antigravity stop`, { timeout: 5_000 });
 await writeJson(antigravitySettingsPath, antigravitySettings);
 
 const antigravityMcpPath = resolve(homedir(), ".gemini/config/mcp_config.json");
@@ -303,6 +324,11 @@ if (legacyCodexHookPath && legacyCodexHookPath !== codexHookPath) {
 }
 codexHooks = addCommandHook(codexHooks, "Stop", `${hookLauncher} codex stop`);
 codexHooks = addCommandHook(codexHooks, "SessionStart", `${hookLauncher} codex session_start`);
+codexHooks = addCommandHook(codexHooks, "UserPromptSubmit", `${hostActivityHookLauncher} codex start`);
+codexHooks = addCommandHook(codexHooks, "PreToolUse", `${hostActivityHookLauncher} codex heartbeat`);
+codexHooks = addCommandHook(codexHooks, "PostToolUse", `${hostActivityHookLauncher} codex heartbeat`);
+codexHooks = addCommandHook(codexHooks, "Stop", `${hostActivityHookLauncher} codex stop`);
+codexHooks = addCommandHook(codexHooks, "SessionEnd", `${hostActivityHookLauncher} codex stop`, { timeout: 3 });
 await writeJson(codexHookPath, codexHooks);
 codexConfig = ensureCodexHookConfiguration(codexConfig);
 if (!/^\[mcp_servers\.ollama\]\s*$/m.test(codexConfig)) {
@@ -332,6 +358,7 @@ console.log(`Installed runtime: ${runtimeRoot}`);
 console.log(`Installed launchers: ${Object.keys(launchers).map((name) => resolve(binRoot, name)).join(", ")}`);
 console.log(`Persistent state: ${stateRoot}`);
 console.log(`Coordinator hooks: Claude Stop/SessionStart, Codex Stop/SessionStart, Antigravity AfterAgent/SessionStart`);
+console.log(`Mission Control host hooks: native Claude, Codex, and Antigravity turn start/progress/stop events`);
 console.log(`Claude wake channel: start Claude with ${resolve(binRoot, "claude-collab")} during the Channels research preview`);
 console.log(`Installed skills: agent-dialogue, ${skillNames.join(", ")}`);
 for (const [target, skills] of Object.entries(portableSkills.exports)) {

@@ -4,6 +4,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { recordHostActivity } from "../src/host-activity-store.mjs";
 
 function inputJson() {
   try { return JSON.parse(readFileSync(0, "utf8")); } catch { return {}; }
@@ -62,6 +63,17 @@ function heartbeatLine(state) {
 }
 
 const input = inputJson();
+await recordHostActivity(
+  resolve(process.env.BRIDGE_COLLABORATION_DIR || join(homedir(), ".local/share/agent-bridge/state")),
+  {
+    provider: "claude",
+    action: "heartbeat",
+    sessionId: input.session_id || input.sessionId || null,
+    workspace: input.workspace?.current_dir || input.cwd || process.cwd(),
+    model: input.model?.display_name || input.model?.id || input.model || null,
+    sourceEvent: "StatusLine",
+  },
+).catch(() => null);
 const lines = [
   baseStatus(input),
   heartbeatLine(activeCollaboration(input.workspace?.current_dir || input.cwd)),
