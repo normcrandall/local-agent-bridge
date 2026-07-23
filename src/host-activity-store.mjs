@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 const PROVIDERS = new Set(["claude", "codex", "antigravity"]);
 export const HOST_ACTIVITY_LIVE_MS = 60 * 60 * 1000;
 export const HOST_ACTIVITY_HISTORY_MS = 24 * 60 * 60 * 1000;
+export const HOST_ACTIVITY_HEARTBEAT_GRACE_MS = 2 * 60 * 1000;
 
 function clean(value, limit = 240) {
   return String(value || "").replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim().slice(0, limit);
@@ -64,6 +65,11 @@ async function readOptional(path) {
   catch (error) { if (error.code === "ENOENT") return null; throw error; }
 }
 
+async function statOptional(path) {
+  try { return await stat(path); }
+  catch (error) { if (error.code === "ENOENT") return null; throw error; }
+}
+
 async function atomicWrite(path, value) {
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
@@ -95,7 +101,7 @@ export async function recordHostActivity(stateRoot, {
   now = Date.now(),
 } = {}) {
   if (!["start", "heartbeat", "stop"].includes(action)) throw new Error(`Unsupported host activity action: ${action}`);
-  const id = hostActivityId({ provider, sessionId, workspace });
+  const id = hostActivityId({ provider, sessionId });
   const target = paths(stateRoot, id);
   await mkdir(target.directory, { recursive: true, mode: 0o700 });
   if (action === "heartbeat") {
@@ -156,7 +162,8 @@ export async function auditHostActivityArtifacts(stateRoot, {
       let state;
       try { state = await readOptional(path); }
       catch {
-        const info = await stat(path);
+        const info = await statOptional(path);
+        if (!info) continue;
         const item = { name: entry.name, type: "state", updatedAt: new Date(info.mtimeMs).toISOString() };
         if (now - info.mtimeMs > olderThanMs) candidates.push(item);
         else preserved.push({ ...item, reason: "invalid_json" });
@@ -171,7 +178,8 @@ export async function auditHostActivityArtifacts(stateRoot, {
       continue;
     }
     if (/^host-(claude|codex|antigravity)-[0-9a-f]{24}\.(lock|json\..+\.tmp)$/.test(entry.name)) {
-      const info = await stat(path);
+      const info = await statOptional(path);
+      if (!info) continue;
       const item = {
         name: entry.name,
         type: entry.name.endsWith(".lock") ? "lock" : "temporary",
@@ -227,7 +235,11 @@ export async function listHostActivities(stateRoot, {
 
 export function hostActivityLane(state, now = Date.now()) {
   const hostProcessAlive = processAlive(state.hostPid);
-  const live = state.active === true && Date.parse(state.expiresAt || "") >= now && hostProcessAlive;
+  const heartbeatAgeMs = Math.max(0, now - dateMs(state.heartbeatAt));
+  const recentReceipt = dateMs(state.heartbeatAt) > 0 && heartbeatAgeMs <= HOST_ACTIVITY_HEARTBEAT_GRACE_MS;
+  const live = state.active === true
+    && Date.parse(state.expiresAt || "") >= now
+    && (hostProcessAlive || recentReceipt);
   return {
     id: state.id,
     type: "native_host",
@@ -253,6 +265,8 @@ export function hostActivityLane(state, now = Date.now()) {
       expiresAt: state.expiresAt,
       sourceEvent: state.sourceEvent,
       processAlive: hostProcessAlive,
+      recentReceipt,
+      livenessProof: hostProcessAlive ? "process" : recentReceipt ? "recent_receipt" : "none",
       live,
     },
     updatedAt: state.updatedAt,

@@ -20,6 +20,7 @@ import {
 } from "../src/mission-control.mjs";
 import {
   HOST_ACTIVITY_LIVE_MS,
+  HOST_ACTIVITY_HEARTBEAT_GRACE_MS,
   hostActivityLane,
   recordHostActivity,
 } from "../src/host-activity-store.mjs";
@@ -173,9 +174,13 @@ try {
   }, now + HOST_ACTIVITY_LIVE_MS + 1);
   assert.equal(expiredHostLane.hostActivity.live, false);
   assert.equal(isLiveLane(expiredHostLane, now + HOST_ACTIVITY_LIVE_MS + 1), false);
-  const deadHostLane = hostActivityLane({ ...hostState, hostPid: 99_999_999 }, now + 1);
-  assert.equal(deadHostLane.hostActivity.processAlive, false);
-  assert.equal(isLiveLane(deadHostLane, now + 1), false);
+  const recentDeadHostLane = hostActivityLane({ ...hostState, hostPid: 99_999_999 }, now + 1);
+  assert.equal(recentDeadHostLane.hostActivity.processAlive, false);
+  assert.equal(recentDeadHostLane.hostActivity.livenessProof, "recent_receipt");
+  assert.equal(isLiveLane(recentDeadHostLane, now + 1), true);
+  const staleDeadHostLane = hostActivityLane({ ...hostState, hostPid: 99_999_999 }, now + HOST_ACTIVITY_HEARTBEAT_GRACE_MS + 1);
+  assert.equal(staleDeadHostLane.hostActivity.livenessProof, "none");
+  assert.equal(isLiveLane(staleDeadHostLane, now + HOST_ACTIVITY_HEARTBEAT_GRACE_MS + 1), false);
 
   const attention = await loadMissionControlSnapshot({ stateRoot: root, view: "attention", now });
   assert.equal(attention.mode, "attention");
