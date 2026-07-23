@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { readFile, stat } from "node:fs/promises";
+import { open, stat } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import { promisify } from "node:util";
 import { queryControlPlane } from "./collaboration-store.mjs";
@@ -16,6 +16,7 @@ const ATTENTION_STATUSES = new Set(["budget", ...PORTFOLIO_STATUS_GROUPS.paused]
 const TERMINAL_STATUSES = new Set(["agreed", "cancelled", "closed", "superseded", "turn_limit", ...PORTFOLIO_STATUS_GROUPS.terminal]);
 const repositoryCache = new Map();
 const timelineCache = new Map();
+let repositoryCacheGeneration = 0;
 const execFileAsync = promisify(execFile);
 
 const ANSI_PATTERN = /\x1b\[[0-9;]*m/g;
@@ -30,6 +31,7 @@ export function navigationIntent(key, selectedIndex) {
 }
 
 export function clearRepositoryCache() {
+  repositoryCacheGeneration += 1;
   repositoryCache.clear();
 }
 
@@ -78,6 +80,7 @@ async function repositoryFromWorkspace(workspace) {
   const cached = repositoryCache.get(root);
   if (cached?.promise) return cached.promise;
   if (cached && cached.expiresAt > Date.now()) return cached.repository;
+  const generation = repositoryCacheGeneration;
   const lookup = (async () => {
     const worktreeMarker = "/.bridge/worktrees/";
     const markerIndex = root.indexOf(worktreeMarker);
@@ -92,10 +95,12 @@ async function repositoryFromWorkspace(workspace) {
       if (repository) break;
     }
     const fallback = repository || `local/${basename(root) || "workspace"}`;
-    repositoryCache.set(root, {
-      repository: fallback,
-      expiresAt: repository ? Number.POSITIVE_INFINITY : Date.now() + 600_000,
-    });
+    if (generation === repositoryCacheGeneration) {
+      repositoryCache.set(root, {
+        repository: fallback,
+        expiresAt: repository ? Number.POSITIVE_INFINITY : Date.now() + 600_000,
+      });
+    }
     return fallback;
   })();
   repositoryCache.set(root, { promise: lookup, expiresAt: Number.POSITIVE_INFINITY });
@@ -132,12 +137,13 @@ export function isAttentionLane(lane, now = Date.now()) {
   return false;
 }
 
-function statusRank(status) {
+export function statusRank(status) {
   const value = String(status || "unknown").toLowerCase();
   if (ATTENTION_STATUSES.has(value)) return 0;
+  if (PORTFOLIO_STATUS_GROUPS.integration.includes(value)) return 1;
   if (["running", "working", "recovering", "cancelling"].includes(value)) return 1;
-  if (["queued", "waiting_capacity", "ready", "claimed"].includes(value)) return 2;
-  if (["implementing", "reviewing", "repairing", "validating", "merge_ready"].includes(value)) return 3;
+  if (PORTFOLIO_STATUS_GROUPS.active.includes(value) || value === "validating") return 2;
+  if (["queued", "waiting_capacity", ...PORTFOLIO_STATUS_GROUPS.ready].includes(value)) return 3;
   return 4;
 }
 
@@ -201,20 +207,33 @@ export async function loadTimeline(stateRoot, id, limit = 8) {
   const path = resolve(stateRoot, `${id}.jsonl`);
   let info;
   try { info = await stat(path); } catch (error) { if (error.code === "ENOENT") return []; throw error; }
-  const cacheKey = `${info.size}:${info.mtimeMs}`;
   const cached = timelineCache.get(path);
-  if (cached?.key === cacheKey) return cached.events.slice(-limit);
-  const events = (await readFile(path, "utf8"))
-    .split("\n")
-    .filter(Boolean)
-    .flatMap((line) => {
-      try {
-        const event = JSON.parse(line);
-        return [{ at: event.at || event.recordedAt || null, type: clean(event.type || "event"), agent: clean(event.agent || event.provider), summary: eventSummary(event) }];
-      } catch { return []; }
-    })
-    .slice(-64);
-  timelineCache.set(path, { key: cacheKey, events });
+  if (cached?.size === info.size && cached.mtimeMs === info.mtimeMs) return cached.events.slice(-limit);
+  const incremental = cached && info.size >= cached.size;
+  const start = incremental ? cached.size : Math.max(0, info.size - 1_048_576);
+  const handle = await open(path, "r");
+  let text;
+  try {
+    const length = Math.max(0, info.size - start);
+    const buffer = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, start);
+    text = `${incremental ? cached.remainder : ""}${buffer.subarray(0, bytesRead).toString("utf8")}`;
+  } finally {
+    await handle.close();
+  }
+  if (!incremental && start > 0) text = text.slice(Math.max(0, text.indexOf("\n") + 1));
+  const lines = text.split("\n");
+  const remainder = text.endsWith("\n") ? "" : lines.pop() || "";
+  const added = lines.filter(Boolean).flatMap((line) => {
+    try {
+      const event = JSON.parse(line);
+      return [{ at: event.at || event.recordedAt || null, type: clean(event.type || "event"), agent: clean(event.agent || event.provider), summary: eventSummary(event) }];
+    } catch { return []; }
+  });
+  const events = [...(incremental ? cached.events : []), ...added].slice(-64);
+  timelineCache.delete(path);
+  timelineCache.set(path, { size: info.size, mtimeMs: info.mtimeMs, remainder, events });
+  while (timelineCache.size > 100) timelineCache.delete(timelineCache.keys().next().value);
   return events.slice(-limit);
 }
 

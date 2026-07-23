@@ -2,7 +2,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -12,6 +12,7 @@ import {
   navigationIntent,
   parseRepositoryRemote,
   renderSnapshot,
+  statusRank,
   stripAnsi,
 } from "../src/mission-control.mjs";
 import { PORTFOLIO_STATUSES, PORTFOLIO_STATUS_GROUPS } from "../src/portfolio-status.mjs";
@@ -28,6 +29,7 @@ for (const status of PORTFOLIO_STATUSES) {
   assert.equal(isAttentionLane({ lifecyclePhase: status, updatedAt: "2026-07-23T11:59:00.000Z" }, Date.parse("2026-07-23T12:00:00.000Z")), expected, `${status} classification drifted`);
 }
 assert.equal(isAttentionLane({ lifecyclePhase: "unknown" }), false);
+for (const status of PORTFOLIO_STATUS_GROUPS.integration) assert.ok(statusRank(status) < statusRank("ready"));
 
 const root = await mkdtemp(join(tmpdir(), "bridge-mission-control-"));
 const workspace = join(root, "workspace");
@@ -109,7 +111,7 @@ try {
   const timeline = await loadTimeline(root, runningId, 5);
   assert.equal(timeline.length, 2);
   assert.equal(timeline.at(-1).summary, "Rendering repository views");
-  await writeFile(join(root, `${runningId}.jsonl`), Array.from({ length: 70 }, (_, index) => JSON.stringify({
+  await appendFile(join(root, `${runningId}.jsonl`), Array.from({ length: 70 }, (_, index) => JSON.stringify({
     type: "user_continued",
     at: `2026-07-23T11:59:${String(index % 60).padStart(2, "0")}.000Z`,
     message: `${index}: ${"sensitive continuation detail ".repeat(20)}`,
