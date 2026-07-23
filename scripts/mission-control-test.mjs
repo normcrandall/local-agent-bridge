@@ -2,7 +2,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -46,6 +46,8 @@ assert.equal(shortRead.consumedSize, shortReadSource.length);
 const root = await mkdtemp(join(tmpdir(), "bridge-mission-control-"));
 const workspace = join(root, "workspace");
 await mkdir(workspace);
+execFileSync("git", ["init", "-q"], { cwd: workspace });
+execFileSync("git", ["remote", "add", "origin", "https://github.com/veliqon/control-plane.git"], { cwd: workspace });
 await mkdir(join(root, "portfolios"));
 const runningId = "bridge-11111111-1111-4111-8111-111111111111";
 const completedId = "bridge-22222222-2222-4222-8222-222222222222";
@@ -99,7 +101,6 @@ try {
   await writeFile(join(root, "portfolios", "helm-44444444-4444-4444-8444-444444444444.json"), JSON.stringify({
     id: "helm-44444444-4444-4444-8444-444444444444",
     workspace,
-    repository: "veliqon/control-plane",
     createdAt: "2026-07-23T09:00:00.000Z",
     updatedAt: "2026-07-23T11:57:00.000Z",
     items: [{ id: "issue-12", title: "Queued portfolio work", issueNumber: 12, status: "ready", writer: "claude", blockedBy: [] }],
@@ -113,9 +114,20 @@ try {
   assert.equal(attention.providerActivity.codex, 1);
   assert.equal(attention.providerActivity.claude, 2);
   assert.ok(attention.lanes.some((lane) => lane.id === runningId && lane.repository === "veliqon/control-plane"));
+  assert.ok(attention.lanes.some((lane) => lane.id.startsWith("helm-") && lane.repository === "veliqon/control-plane"));
   assert.ok(!attention.lanes.some((lane) => lane.id === completedId));
 
+  const similarRepositoryId = "bridge-55555555-5555-4555-8555-555555555555";
+  await writeFile(join(root, `${similarRepositoryId}.json`), JSON.stringify({
+    ...base,
+    id: similarRepositoryId,
+    status: "completed",
+    updatedAt: "2026-07-23T09:00:00.000Z",
+    githubBuilder: { repository: "veliqon/control-plane-extra" },
+  }));
+
   const all = await loadMissionControlSnapshot({ stateRoot: root, showAll: true, repositoryFilter: "veliqon/control-plane", now });
+  assert.equal(all.totalLanes, 3);
   assert.equal(all.visibleLanes, 3);
   assert.ok(all.lanes.some((lane) => lane.id === completedId));
   assert.equal(all.lanes.find((lane) => lane.id === completedId).task.length, 500);
@@ -131,6 +143,27 @@ try {
   const boundedTimeline = await loadTimeline(root, runningId, 100);
   assert.equal(boundedTimeline.length, 64);
   assert.ok(boundedTimeline.every((event) => event.summary.length <= 240));
+  const timelinePath = join(root, `${runningId}.jsonl`);
+  const priorTimelineSize = (await stat(timelinePath)).size;
+  const replacementPath = join(root, "replacement.jsonl");
+  await writeFile(replacementPath, `${JSON.stringify({
+    type: "progress",
+    at: "2026-07-23T12:00:01.000Z",
+    summary: "replacement timeline",
+    padding: "r".repeat(priorTimelineSize + 32),
+  })}\n`);
+  await rename(replacementPath, timelinePath);
+  const replacedTimeline = await loadTimeline(root, runningId, 100);
+  assert.equal(replacedTimeline.length, 1);
+  assert.equal(replacedTimeline[0].summary, "replacement timeline");
+  await appendFile(timelinePath, `${JSON.stringify({ type: "noise", message: "x".repeat(1_100_000) })}\n${JSON.stringify({
+    type: "progress",
+    at: "2026-07-23T12:00:02.000Z",
+    summary: "after oversized delta",
+  })}\n`);
+  const oversizedDeltaTimeline = await loadTimeline(root, runningId, 100);
+  assert.equal(oversizedDeltaTimeline.at(-1).summary, "after oversized delta");
+  assert.ok(oversizedDeltaTimeline.every((event) => event.summary.length <= 240));
   const selectedIndex = attention.lanes.findIndex((lane) => lane.id === runningId);
   const rendered = renderSnapshot(attention, { selectedIndex, timeline, width: 88, height: 100, now });
   assert.match(rendered, /AGENT BRIDGE MISSION CONTROL/);
@@ -146,6 +179,11 @@ try {
   assert.match(cli, /norm\/example/);
   assert.match(cli, /PR #42/);
   assert.doesNotMatch(cli, /Old completed lane/);
+  const invalidColumnsCli = execFileSync(process.execPath, [resolve(import.meta.dirname, "mission-control.mjs"), "--snapshot", "--state-root", root, "--repo", "norm/example"], {
+    encoding: "utf8",
+    env: { ...process.env, COLUMNS: "not-a-number" },
+  });
+  assert.match(invalidColumnsCli, /AGENT BRIDGE MISSION CONTROL/);
 
   console.log("Mission Control tests passed: repository grouping, attention filtering, timeline rendering, and snapshot CLI behavior are verified.");
 } finally {

@@ -59,10 +59,11 @@ if (oneShot) {
   } else {
     const selected = current.lanes[0];
     const timeline = selected ? await loadTimeline(stateRoot, selected.id) : [];
+    const parsedWidth = Number.parseInt(process.env.COLUMNS || "120", 10);
     output = `${renderSnapshot(current, {
       selectedIndex: 0,
       timeline,
-      width: Number.parseInt(process.env.COLUMNS || "120", 10),
+      width: Number.isFinite(parsedWidth) ? parsedWidth : 120,
     })}\n`;
   }
   await new Promise((resolveWrite) => process.stdout.write(output, resolveWrite));
@@ -73,11 +74,12 @@ let selectedIndex = 0;
 let selectedId = null;
 let drawing = false;
 let stopped = false;
+let timer = null;
 
 function restore() {
   if (stopped) return;
   stopped = true;
-  clearInterval(timer);
+  if (timer) clearInterval(timer);
   process.stdin.setRawMode?.(false);
   process.stdin.pause();
   process.stdout.write("\x1b[?25h\x1b[?1049l");
@@ -134,7 +136,7 @@ process.on("SIGTERM", () => { restore(); process.exit(143); });
 process.on("exit", restore);
 process.stdout.on("resize", draw);
 
-const timer = setInterval(draw, refreshMs);
+timer = setInterval(draw, refreshMs);
 timer.unref();
 await draw();
 await new Promise(() => {});

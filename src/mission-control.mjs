@@ -18,6 +18,7 @@ const repositoryCache = new Map();
 const timelineCache = new Map();
 let repositoryCacheGeneration = 0;
 const execFileAsync = promisify(execFile);
+const MAX_TIMELINE_READ_BYTES = 1_048_576;
 
 const ANSI_PATTERN = /\x1b\[[0-9;]*m/g;
 export const stripAnsi = (value) => String(value || "").replace(ANSI_PATTERN, "");
@@ -169,8 +170,7 @@ export async function loadMissionControlSnapshot({
   const allLanes = await mapLimit(controlPlane.lanes, 12, async (lane) => ({ ...lane, repository: await repositoryForLane(lane) }));
   const normalizedFilter = clean(repositoryFilter).toLowerCase();
   const matching = allLanes.filter((lane) => !normalizedFilter
-    || lane.repository.toLowerCase() === normalizedFilter
-    || lane.repository.toLowerCase().includes(normalizedFilter));
+    || lane.repository.toLowerCase() === normalizedFilter);
   const visible = (showAll ? matching : matching.filter((lane) => isAttentionLane(lane, now))).sort((left, right) => {
     const repositoryOrder = left.repository.localeCompare(right.repository);
     if (repositoryOrder) return repositoryOrder;
@@ -219,9 +219,11 @@ export async function loadTimeline(stateRoot, id, limit = 8) {
   let info;
   try { info = await stat(path); } catch (error) { if (error.code === "ENOENT") return []; throw error; }
   const cached = timelineCache.get(path);
-  if (cached?.size === info.size && cached.mtimeMs === info.mtimeMs) return cached.events.slice(-limit);
-  const incremental = cached && info.size >= cached.size;
-  const start = incremental ? cached.size : Math.max(0, info.size - 1_048_576);
+  const sameFile = cached && cached.ino === info.ino && cached.birthtimeMs === info.birthtimeMs;
+  if (sameFile && cached.size === info.size && cached.mtimeMs === info.mtimeMs) return cached.events.slice(-limit);
+  const delta = cached ? info.size - cached.size : Number.POSITIVE_INFINITY;
+  const incremental = sameFile && delta >= 0 && delta <= MAX_TIMELINE_READ_BYTES;
+  const start = incremental ? cached.size : Math.max(0, info.size - MAX_TIMELINE_READ_BYTES);
   const handle = await open(path, "r");
   let text;
   let consumedSize;
@@ -244,7 +246,14 @@ export async function loadTimeline(stateRoot, id, limit = 8) {
   });
   const events = [...(incremental ? cached.events : []), ...added].slice(-64);
   timelineCache.delete(path);
-  timelineCache.set(path, { size: consumedSize, mtimeMs: info.mtimeMs, remainder, events });
+  timelineCache.set(path, {
+    size: consumedSize,
+    mtimeMs: info.mtimeMs,
+    ino: info.ino,
+    birthtimeMs: info.birthtimeMs,
+    remainder,
+    events,
+  });
   while (timelineCache.size > 100) timelineCache.delete(timelineCache.keys().next().value);
   return events.slice(-limit);
 }

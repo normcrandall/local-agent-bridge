@@ -41,7 +41,7 @@ import {
 } from "./performance-timeline.mjs";
 import { replayIncident, formatReplayHuman } from "./incident-replay.mjs";
 import { analyzePortfolio, buildExecutionWaves, normalizePortfolioItems } from "./portfolio-scheduler.mjs";
-import { PORTFOLIO_STATUSES } from "./portfolio-status.mjs";
+import { PORTFOLIO_STATUSES, PORTFOLIO_STATUS_GROUPS } from "./portfolio-status.mjs";
 import { createPortfolio, listPortfolios, readPortfolio, updatePortfolio } from "./portfolio-store.mjs";
 import {
   loadProviderConcurrency,
@@ -316,8 +316,9 @@ function compactStatusView(view) {
 
 function refreshPortfolioState(state) {
   const schedule = analyzePortfolio({ items: state.items, maxParallel: state.maxParallel });
-  const finished = state.items.every((item) => ["merged", "completed", "obsolete"].includes(item.status));
-  const hasActive = state.items.some((item) => ["claimed", "planning", "implementing", "verifying", "reviewing", "repairing", "ready_to_merge", "integrating", "arbitrating"].includes(item.status));
+  const finished = state.items.every((item) => PORTFOLIO_STATUS_GROUPS.terminal.includes(item.status));
+  const activeStatuses = [...PORTFOLIO_STATUS_GROUPS.active, ...PORTFOLIO_STATUS_GROUPS.integration];
+  const hasActive = state.items.some((item) => activeStatuses.includes(item.status));
   return {
     ...state,
     status: finished ? "complete" : hasActive ? "running" : schedule.selected.length ? "ready" : "blocked",
