@@ -87,6 +87,25 @@ export function wakeNeedsUser(state) {
     && (wake.kind === "needs_user" || wake.nextAction === "needs_user" || lifecycle === "needs_user");
 }
 
+export function attentionNeedsUser(state) {
+  if (state.coordinatorWake) return Boolean(wakeNeedsUser(state));
+  return String(state.status || state.lifecyclePhase || "").toLowerCase() === "needs_user";
+}
+
+function attentionReceipt(state) {
+  return state.coordinatorWake?.userAttention || state.userAttention || null;
+}
+
+function withAttentionReceipt(state, receipt) {
+  if (state.coordinatorWake) {
+    return {
+      ...state,
+      coordinatorWake: { ...state.coordinatorWake, userAttention: receipt },
+    };
+  }
+  return { ...state, userAttention: receipt };
+}
+
 function retryDelay(attention, reminderMs) {
   if (attention?.status === "delivered") return reminderMs;
   const exponent = Math.max(0, Math.min(8, (attention?.attempt || 1) - 1));
@@ -108,8 +127,8 @@ export async function signalUserAttention(root, id, {
   let claimedState = null;
   try {
     await updateCollaboration(root, id, (current) => {
-      if (!wakeNeedsUser(current)) throw SKIP_UPDATE;
-      const attention = current.coordinatorWake.userAttention || null;
+      if (!attentionNeedsUser(current)) throw SKIP_UPDATE;
+      const attention = attentionReceipt(current);
       if (!notificationsEnabled(environment) && attention?.reason === "disabled_by_policy") throw SKIP_UPDATE;
       if (attention?.reason?.startsWith("unsupported_platform_")) throw SKIP_UPDATE;
       const activeClaim = attention?.status === "sending"
@@ -119,20 +138,14 @@ export async function signalUserAttention(root, id, {
       if (activeClaim || (!force && attemptedRecently)) throw SKIP_UPDATE;
       claimed = true;
       claimedState = current;
-      return {
-        ...current,
-        coordinatorWake: {
-          ...current.coordinatorWake,
-          userAttention: {
-            ...(attention || {}),
-            status: "sending",
-            claimId,
-            claimedAt: at,
-            attempt: (attention?.attempt || 0) + 1,
-            lastAttemptAt: at,
-          },
-        },
-      };
+      return withAttentionReceipt(current, {
+        ...(attention || {}),
+        status: "sending",
+        claimId,
+        claimedAt: at,
+        attempt: (attention?.attempt || 0) + 1,
+        lastAttemptAt: at,
+      });
     });
   } catch (caught) {
     if (caught !== SKIP_UPDATE) throw caught;
@@ -151,23 +164,18 @@ export async function signalUserAttention(root, id, {
   let finalized = false;
   try {
     await updateCollaboration(root, id, (current) => {
-      if (current.coordinatorWake?.userAttention?.claimId !== claimId) throw SKIP_UPDATE;
+      const attention = attentionReceipt(current);
+      if (attention?.claimId !== claimId) throw SKIP_UPDATE;
       finalized = true;
-      return {
-        ...current,
-        coordinatorWake: {
-          ...current.coordinatorWake,
-          userAttention: {
-            ...current.coordinatorWake.userAttention,
-            status: delivery.delivered ? "delivered" : "failed",
-            adapter: delivery.adapter,
-            lastDeliveredAt: delivery.delivered ? completedAt : current.coordinatorWake.userAttention.lastDeliveredAt || null,
-            completedAt,
-            error,
-            reason: delivery.reason || null,
-          },
-        },
-      };
+      return withAttentionReceipt(current, {
+        ...attention,
+        status: delivery.delivered ? "delivered" : "failed",
+        adapter: delivery.adapter,
+        lastDeliveredAt: delivery.delivered ? completedAt : attention.lastDeliveredAt || null,
+        completedAt,
+        error,
+        reason: delivery.reason || null,
+      });
     });
   } catch (caught) {
     if (caught !== SKIP_UPDATE) throw caught;
@@ -176,7 +184,7 @@ export async function signalUserAttention(root, id, {
     await appendEvent(root, id, {
       type: "user_attention_signalled",
       at: completedAt,
-      wakeSequence: claimedState.coordinatorWake.sequence,
+      wakeSequence: claimedState.coordinatorWake?.sequence || null,
       delivered: delivery.delivered,
       adapter: delivery.adapter,
       reason: delivery.reason || null,
@@ -191,7 +199,7 @@ export async function scanPendingUserAttention(root, options = {}) {
   for (const summary of summaries) {
     if (summary.status !== "needs_user" && summary.coordinatorWake?.kind !== "needs_user") continue;
     const state = await readCollaboration(root, summary.id).catch(() => null);
-    if (!state || !wakeNeedsUser(state)) continue;
+    if (!state || !attentionNeedsUser(state)) continue;
     results.push({ collaborationId: state.id, ...(await signalUserAttention(root, state.id, options)) });
   }
   return results;

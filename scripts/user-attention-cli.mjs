@@ -44,7 +44,7 @@ for (const summary of summaries) {
     collaborationId: state.id,
     workspace: state.workspace,
     summary: state.coordinatorWake?.summary || state.error || state.task,
-    attention: state.coordinatorWake?.userAttention || null,
+    attention: state.coordinatorWake?.userAttention || state.userAttention || null,
   });
 }
 process.stdout.write(`${JSON.stringify({ stateRoot, pending }, null, 2)}\n`);

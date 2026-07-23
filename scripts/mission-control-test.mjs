@@ -120,7 +120,6 @@ try {
     writer: "claude",
     githubReview: { repository: "norm/example", prNumber: 42, headSha: "b".repeat(40) },
     completion: { sequence: 1, acknowledged: false, nextAction: "needs_user", lastHandoff: { outcome: "blocked", summary: "Authorization required" } },
-    coordinatorWake: { sequence: 1, kind: "needs_user", status: "pending", nextAction: "needs_user", summary: "Authorization required" },
   };
   await writeFile(join(root, `${needsUserId}.json`), JSON.stringify(needsUserState));
   await writeFile(join(root, "portfolios", "helm-44444444-4444-4444-8444-444444444444.json"), JSON.stringify({
@@ -142,12 +141,15 @@ try {
   assert.match(live.needsUserSignature, new RegExp(needsUserId));
   await writeFile(join(root, `${needsUserId}.json`), JSON.stringify({
     ...needsUserState,
-    coordinatorWake: { ...needsUserState.coordinatorWake, status: "acknowledged" },
+    coordinatorWake: { sequence: 1, kind: "needs_user", status: "acknowledged", nextAction: "needs_user", summary: "Authorization required" },
   }));
   const acknowledgedNeedsUser = await loadMissionControlSnapshot({ stateRoot: root, now });
   assert.equal(acknowledgedNeedsUser.needsUserCount, 0);
   assert.doesNotMatch(renderSnapshot(acknowledgedNeedsUser, { width: 88 }), /USER INPUT REQUIRED/);
-  await writeFile(join(root, `${needsUserId}.json`), JSON.stringify(needsUserState));
+  await writeFile(join(root, `${needsUserId}.json`), JSON.stringify({
+    ...needsUserState,
+    coordinatorWake: { sequence: 1, kind: "needs_user", status: "pending", nextAction: "needs_user", summary: "Authorization required" },
+  }));
 
   const hostRoot = join(root, "host-test");
   const sessionId = "private-codex-session-123";
@@ -184,6 +186,8 @@ try {
   assert.equal(hostStopped.totalLanes, 1);
   assert.equal(hostStopped.visibleLanes, 0);
   assert.equal(hostStopped.providerActivity.codex, undefined);
+  assert.equal(hostStopped.recentActivity[0].repository, "veliqon/control-plane");
+  assert.match(renderSnapshot(hostStopped, { width: 88, now: now + 1_000 }), /Recent activity \(the coordinator may be between lanes\)/);
   const expiredHostLane = hostActivityLane({
     ...hostState,
     expiresAt: new Date(now + HOST_ACTIVITY_LIVE_MS).toISOString(),

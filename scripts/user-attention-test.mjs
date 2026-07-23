@@ -66,6 +66,20 @@ try {
   assert.equal(afterAcknowledgement.reason, "not_due_or_not_needed");
   assert.equal(calls.length, 2);
 
+  const chairless = await createCollaboration(root, {
+    task: "Wait for input without a native chair",
+    workspace: root,
+    agents: ["claude"],
+    participants: ["claude"],
+    status: "needs_user",
+  });
+  const chairlessDelivery = await signalUserAttention(root, chairless.id, { now, platform: "darwin", run });
+  assert.equal(chairlessDelivery.delivered, true);
+  state = await readCollaboration(root, chairless.id);
+  assert.equal(state.coordinatorWake, undefined);
+  assert.equal(state.userAttention.status, "delivered");
+  assert.equal(state.userAttention.attempt, 1);
+
   const failed = await createCollaboration(root, {
     task: "Retry a failed desktop signal",
     workspace: root,
