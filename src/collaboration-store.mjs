@@ -257,24 +257,33 @@ export async function waitForCollaborationChange(root, id, afterUpdatedAt, timeo
   return readCollaboration(root, id);
 }
 
-export async function archiveCollaboration(root, id) {
+export async function archiveCollaboration(root, id, { expectedUpdatedAt = null } = {}) {
   const target = paths(root, id);
-  const state = await readCollaboration(root, id);
-  if (["queued", "running", "recovering", "cancelling", "indeterminate"].includes(state.status)) {
-    throw new Error(`Cannot archive ${id} while status is ${state.status}.`);
+  await mkdir(target.directory, { recursive: true, mode: 0o700 });
+  const release = await acquireFileLock(target.updateLock);
+  try {
+    const state = await readCollaboration(root, id);
+    if (expectedUpdatedAt && state.updatedAt !== expectedUpdatedAt) {
+      throw new Error(`Cannot archive ${id}: state changed after cleanup audit.`);
+    }
+    if (["queued", "running", "recovering", "cancelling", "indeterminate"].includes(state.status)) {
+      throw new Error(`Cannot archive ${id} while status is ${state.status}.`);
+    }
+    const archive = resolve(target.directory, "archive");
+    await mkdir(archive, { recursive: true, mode: 0o700 });
+    const archivedTranscript = resolve(archive, `${id}.jsonl`);
+    let transcriptMoved = false;
+    try { await rename(target.transcript, archivedTranscript); transcriptMoved = true; }
+    catch (error) { if (error.code !== "ENOENT") throw error; }
+    try { await rename(target.state, resolve(archive, `${id}.json`)); }
+    catch (error) {
+      if (transcriptMoved) await rename(archivedTranscript, target.transcript).catch(() => {});
+      throw error;
+    }
+    return { id, archived: true, status: state.status, archive };
+  } finally {
+    await release();
   }
-  const archive = resolve(target.directory, "archive");
-  await mkdir(archive, { recursive: true, mode: 0o700 });
-  const archivedTranscript = resolve(archive, `${id}.jsonl`);
-  let transcriptMoved = false;
-  try { await rename(target.transcript, archivedTranscript); transcriptMoved = true; }
-  catch (error) { if (error.code !== "ENOENT") throw error; }
-  try { await rename(target.state, resolve(archive, `${id}.json`)); }
-  catch (error) {
-    if (transcriptMoved) await rename(archivedTranscript, target.transcript).catch(() => {});
-    throw error;
-  }
-  return { id, archived: true, status: state.status, archive };
 }
 
 export async function pruneTerminalCollaborations(root, { olderThanDays = 30, now = Date.now() } = {}) {

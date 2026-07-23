@@ -5,6 +5,9 @@ import { promisify } from "node:util";
 import { queryControlPlane } from "./collaboration-store.mjs";
 import { PORTFOLIO_STATUS_GROUPS } from "./portfolio-status.mjs";
 
+const LIVE_COLLABORATION_STATUSES = new Set([
+  "queued", "waiting_capacity", "running", "working", "recovering", "cancelling",
+]);
 const ACTIVE_STATUSES = new Set([
   "queued", "waiting_capacity", "running", "working", "recovering", "cancelling",
   "validating",
@@ -19,6 +22,7 @@ const timelineCache = new Map();
 let repositoryCacheGeneration = 0;
 const execFileAsync = promisify(execFile);
 const MAX_TIMELINE_READ_BYTES = 1_048_576;
+const DEFAULT_STALE_AFTER_MS = 24 * 60 * 60 * 1000;
 
 const ANSI_PATTERN = /\x1b\[[0-9;]*m/g;
 export const stripAnsi = (value) => String(value || "").replace(ANSI_PATTERN, "");
@@ -149,6 +153,39 @@ export function isAttentionLane(lane, now = Date.now()) {
   return false;
 }
 
+export function isLiveLane(lane) {
+  const status = String(lane.lifecyclePhase || "unknown").toLowerCase();
+  if (lane.heartbeat?.heartbeatAt) return true;
+  return ["collaboration", "combined"].includes(lane.type) && LIVE_COLLABORATION_STATUSES.has(status);
+}
+
+export function isStaleLane(lane, now = Date.now(), staleAfterMs = DEFAULT_STALE_AFTER_MS) {
+  if (isLiveLane(lane) || String(lane.lifecyclePhase || "").toLowerCase() === "indeterminate") return false;
+  const updatedAt = dateMs(lane.updatedAt);
+  if (!updatedAt || now - updatedAt < staleAfterMs) return false;
+  const status = String(lane.lifecyclePhase || "unknown").toLowerCase();
+  return lane.type === "portfolio_lane" || ["needs_user", "blocked", "failed", "budget", "ready"].includes(status);
+}
+
+function summarizeCollapsedStale(lanes) {
+  const byStatus = {};
+  const byRepository = {};
+  const portfolios = new Set();
+  for (const lane of lanes) {
+    const status = String(lane.lifecyclePhase || "unknown").toLowerCase();
+    byStatus[status] = (byStatus[status] || 0) + 1;
+    byRepository[lane.repository] = (byRepository[lane.repository] || 0) + 1;
+    if (lane.portfolio?.portfolioId) portfolios.add(lane.portfolio.portfolioId);
+  }
+  return {
+    total: lanes.length,
+    portfolioItems: lanes.filter((lane) => lane.type === "portfolio_lane").length,
+    portfolios: portfolios.size,
+    byStatus,
+    byRepository,
+  };
+}
+
 export function statusRank(status) {
   const value = String(status || "unknown").toLowerCase();
   if (ATTENTION_STATUSES.has(value)) return 0;
@@ -162,7 +199,10 @@ export function statusRank(status) {
 export async function loadMissionControlSnapshot({
   stateRoot,
   includeArchived = false,
+  view = null,
   showAll = false,
+  includeStale = false,
+  staleAfterMs = DEFAULT_STALE_AFTER_MS,
   repositoryFilter = null,
   now = Date.now(),
 } = {}) {
@@ -171,7 +211,16 @@ export async function loadMissionControlSnapshot({
   const normalizedFilter = clean(repositoryFilter).toLowerCase();
   const matching = allLanes.filter((lane) => !normalizedFilter
     || lane.repository.toLowerCase() === normalizedFilter);
-  const visible = (showAll ? matching : matching.filter((lane) => isAttentionLane(lane, now))).sort((left, right) => {
+  const mode = view || (showAll ? "all" : "live");
+  if (!["live", "attention", "all"].includes(mode)) throw new Error(`Unknown Mission Control view: ${mode}`);
+  const attention = matching.filter((lane) => isAttentionLane(lane, now));
+  const stale = attention.filter((lane) => isStaleLane(lane, now, staleAfterMs));
+  const selected = mode === "all"
+    ? matching
+    : mode === "attention"
+      ? attention.filter((lane) => includeStale || !isStaleLane(lane, now, staleAfterMs))
+      : matching.filter((lane) => isLiveLane(lane));
+  const visible = selected.sort((left, right) => {
     const repositoryOrder = left.repository.localeCompare(right.repository);
     if (repositoryOrder) return repositoryOrder;
     return statusRank(left.lifecyclePhase) - statusRank(right.lifecyclePhase)
@@ -181,13 +230,15 @@ export async function loadMissionControlSnapshot({
 
   const repositories = new Map();
   for (const lane of matching) {
-    const summary = repositories.get(lane.repository) || { repository: lane.repository, total: 0, attention: 0 };
+    const summary = repositories.get(lane.repository) || { repository: lane.repository, total: 0, attention: 0, live: 0, visible: 0 };
     summary.total += 1;
     if (isAttentionLane(lane, now)) summary.attention += 1;
+    if (isLiveLane(lane)) summary.live += 1;
     repositories.set(lane.repository, summary);
   }
+  for (const lane of visible) repositories.get(lane.repository).visible += 1;
   const providerActivity = {};
-  for (const lane of matching.filter((entry) => isAttentionLane(entry, now))) {
+  for (const lane of visible) {
     const provider = lane.activeAgent || lane.writer;
     if (!provider) continue;
     providerActivity[provider] = (providerActivity[provider] || 0) + 1;
@@ -196,9 +247,13 @@ export async function loadMissionControlSnapshot({
     version: 1,
     generatedAt: new Date(now).toISOString(),
     stateRoot: resolve(stateRoot),
-    mode: showAll ? "all" : "attention",
+    mode,
     filter: repositoryFilter || null,
     repositories: [...repositories.values()].sort((a, b) => a.repository.localeCompare(b.repository)),
+    visibleRepositories: new Set(visible.map((lane) => lane.repository)).size,
+    collapsedStale: includeStale || mode === "all" ? summarizeCollapsedStale([]) : summarizeCollapsedStale(stale),
+    staleAfterMs,
+    includeStale,
     providerActivity,
     totalLanes: matching.length,
     visibleLanes: visible.length,
@@ -339,12 +394,12 @@ export function renderMissionControl(snapshot, {
   const lines = [];
   const providerLine = Object.entries(snapshot.providerActivity).map(([provider, count]) => `${provider}:${count}`).join("  ") || "idle";
   lines.push(paint("AGENT BRIDGE MISSION CONTROL", "1;34", color));
-  lines.push(truncate(`Mode: ${snapshot.mode} | repos ${snapshot.repositories.length} | lanes ${snapshot.visibleLanes}/${snapshot.totalLanes} | providers ${providerLine}`, usableWidth));
+  lines.push(truncate(`Mode: ${snapshot.mode} | repos ${snapshot.visibleRepositories ?? snapshot.repositories.length} | lanes ${snapshot.visibleLanes}/${snapshot.totalLanes} | providers ${providerLine}`, usableWidth));
   lines.push(paint("─".repeat(usableWidth), "90", color));
 
   if (!lanes.length) {
     lines.push("No collaboration lanes match this view.");
-    lines.push(snapshot.mode === "attention" ? "Press a to include terminal history." : "Try a different --repo filter.");
+    lines.push(snapshot.mode === "live" ? "No providers are currently running. Press a for attention items or h for history." : "Try a different view or --repo filter.");
   } else {
     const listBudget = interactive
       ? Math.max(4, Math.min(12, Math.floor(height * 0.3)))
@@ -357,7 +412,7 @@ export function renderMissionControl(snapshot, {
       const lane = lanes[index];
       if (lane.repository !== lastRepository) {
         const repo = snapshot.repositories.find((entry) => entry.repository === lane.repository);
-        lines.push(paint(`[${lane.repository}] ${repo?.attention || 0} attention / ${repo?.total || 0} total`, "1;35", color));
+        lines.push(paint(`[${lane.repository}] ${repo?.live || 0} live / ${repo?.attention || 0} attention / ${repo?.total || 0} total`, "1;35", color));
         lastRepository = lane.repository;
       }
       const cursor = index === selectedIndex ? ">" : " ";
@@ -369,6 +424,12 @@ export function renderMissionControl(snapshot, {
     if (!interactive && lanes.length > listBudget) {
       lines.push(`… ${lanes.length - listBudget} more lanes; use --json for complete records`);
     }
+  }
+
+  if (snapshot.collapsedStale?.total) {
+    const collapsed = snapshot.collapsedStale;
+    lines.push(paint("─".repeat(usableWidth), "90", color));
+    lines.push(truncate(`Collapsed ${collapsed.total} stale attention items (${collapsed.portfolioItems} portfolio items across ${collapsed.portfolios} portfolios). Press s or use --include-stale to inspect them.`, usableWidth));
   }
 
   if (selected) {
@@ -407,7 +468,7 @@ export function renderMissionControl(snapshot, {
 
   if (interactive) {
     lines.push(paint("─".repeat(usableWidth), "90", color));
-    lines.push("j/k or arrows move | a attention/all | r refresh | q quit");
+    lines.push("j/k or arrows move | l live | a attention | h history | s stale | r refresh | q quit");
   }
   return lines.slice(0, Math.max(1, height)).map((line) => truncateAnsi(line, usableWidth)).join("\n");
 }

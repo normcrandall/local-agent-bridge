@@ -7,6 +7,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   isAttentionLane,
+  isLiveLane,
+  isStaleLane,
   loadMissionControlSnapshot,
   loadTimeline,
   navigationIntent,
@@ -30,6 +32,9 @@ for (const status of PORTFOLIO_STATUSES) {
   assert.equal(isAttentionLane({ lifecyclePhase: status, updatedAt: "2026-07-23T11:59:00.000Z" }, Date.parse("2026-07-23T12:00:00.000Z")), expected, `${status} classification drifted`);
 }
 assert.equal(isAttentionLane({ lifecyclePhase: "unknown" }), false);
+assert.equal(isLiveLane({ type: "collaboration", lifecyclePhase: "running" }), true);
+assert.equal(isLiveLane({ type: "portfolio_lane", lifecyclePhase: "implementing" }), false);
+assert.equal(isStaleLane({ type: "portfolio_lane", lifecyclePhase: "blocked", updatedAt: "2026-07-22T10:00:00.000Z" }, Date.parse("2026-07-23T12:00:00.000Z")), true);
 for (const status of PORTFOLIO_STATUS_GROUPS.integration) assert.ok(statusRank(status) < statusRank("ready"));
 const shortReadSource = Buffer.from("incremental-ledger-data");
 const shortRead = await readFileRange({
@@ -106,7 +111,14 @@ try {
     items: [{ id: "issue-12", title: "Queued portfolio work", issueNumber: 12, status: "ready", writer: "claude", blockedBy: [] }],
   }));
 
-  const attention = await loadMissionControlSnapshot({ stateRoot: root, now });
+  const live = await loadMissionControlSnapshot({ stateRoot: root, now });
+  assert.equal(live.mode, "live");
+  assert.equal(live.totalLanes, 4);
+  assert.equal(live.visibleLanes, 1);
+  assert.equal(live.lanes[0].id, runningId);
+  assert.equal(live.providerActivity.codex, 1);
+
+  const attention = await loadMissionControlSnapshot({ stateRoot: root, view: "attention", now });
   assert.equal(attention.mode, "attention");
   assert.equal(attention.totalLanes, 4);
   assert.equal(attention.visibleLanes, 3);
@@ -116,6 +128,12 @@ try {
   assert.ok(attention.lanes.some((lane) => lane.id === runningId && lane.repository === "veliqon/control-plane"));
   assert.ok(attention.lanes.some((lane) => lane.id.startsWith("helm-") && lane.repository === "veliqon/control-plane"));
   assert.ok(!attention.lanes.some((lane) => lane.id === completedId));
+  const collapsed = await loadMissionControlSnapshot({ stateRoot: root, view: "attention", staleAfterMs: 60_000, now });
+  assert.equal(collapsed.visibleLanes, 1);
+  assert.equal(collapsed.collapsedStale.total, 2);
+  assert.equal(collapsed.collapsedStale.portfolioItems, 1);
+  const revealed = await loadMissionControlSnapshot({ stateRoot: root, view: "attention", staleAfterMs: 60_000, includeStale: true, now });
+  assert.equal(revealed.visibleLanes, 3);
 
   const similarRepositoryId = "bridge-55555555-5555-4555-8555-555555555555";
   await writeFile(join(root, `${similarRepositoryId}.json`), JSON.stringify({
@@ -175,17 +193,17 @@ try {
   const manyLanes = { ...attention, lanes: Array.from({ length: 55 }, (_, index) => ({ ...attention.lanes[0], id: `lane-${index}` })), visibleLanes: 55, totalLanes: 55 };
   assert.match(renderSnapshot(manyLanes, { width: 88 }), /… 5 more lanes; use --json for complete records/);
 
-  const cli = execFileSync(process.execPath, [resolve(import.meta.dirname, "mission-control.mjs"), "--snapshot", "--state-root", root, "--repo", "norm/example"], { encoding: "utf8" });
+  const cli = execFileSync(process.execPath, [resolve(import.meta.dirname, "mission-control.mjs"), "--snapshot", "--attention", "--state-root", root, "--repo", "norm/example"], { encoding: "utf8" });
   assert.match(cli, /norm\/example/);
   assert.match(cli, /PR #42/);
   assert.doesNotMatch(cli, /Old completed lane/);
-  const invalidColumnsCli = execFileSync(process.execPath, [resolve(import.meta.dirname, "mission-control.mjs"), "--snapshot", "--state-root", root, "--repo", "norm/example"], {
+  const invalidColumnsCli = execFileSync(process.execPath, [resolve(import.meta.dirname, "mission-control.mjs"), "--snapshot", "--attention", "--state-root", root, "--repo", "norm/example"], {
     encoding: "utf8",
     env: { ...process.env, COLUMNS: "not-a-number" },
   });
   assert.match(invalidColumnsCli, /AGENT BRIDGE MISSION CONTROL/);
 
-  console.log("Mission Control tests passed: repository grouping, attention filtering, timeline rendering, and snapshot CLI behavior are verified.");
+  console.log("Mission Control tests passed: live defaults, attention/stale filtering, repository grouping, timeline rendering, and snapshot CLI behavior are verified.");
 } finally {
   await rm(root, { recursive: true, force: true });
 }

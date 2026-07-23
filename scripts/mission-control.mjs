@@ -28,7 +28,10 @@ function usage() {
   process.stdout.write(`Options:\n`);
   process.stdout.write(`  --snapshot          Print one human-readable snapshot and exit\n`);
   process.stdout.write(`  --json              Print one JSON snapshot and exit\n`);
-  process.stdout.write(`  --all               Include terminal collaboration history\n`);
+  process.stdout.write(`  --attention         Show current attention items\n`);
+  process.stdout.write(`  --all               Show active terminal history\n`);
+  process.stdout.write(`  --include-stale     Include stale attention and portfolio items\n`);
+  process.stdout.write(`  --stale-after-hours N  Collapse attention items older than N hours (default: 24)\n`);
   process.stdout.write(`  --repo OWNER/REPO   Filter to one repository\n`);
   process.stdout.write(`  --refresh-ms N      Interactive refresh interval (default: 1000)\n`);
   process.stdout.write(`  --state-root PATH   Read a different bridge state directory\n`);
@@ -43,12 +46,20 @@ if (args.includes("--help") || args.includes("-h")) {
 const stateRoot = resolve(value("--state-root", process.env.BRIDGE_COLLABORATION_DIR || resolve(homedir(), ".local/share/agent-bridge/state")));
 const repositoryFilter = value("--repo");
 const refreshMs = Math.max(250, Number.parseInt(value("--refresh-ms", "1000"), 10) || 1000);
-let showAll = args.includes("--all");
+let view = args.includes("--all") ? "all" : args.includes("--attention") ? "attention" : "live";
+let includeStale = args.includes("--include-stale");
+const staleAfterHours = Math.max(1, Number.parseInt(value("--stale-after-hours", "24"), 10) || 24);
 const color = !args.includes("--no-color") && process.env.NO_COLOR === undefined;
 const oneShot = args.includes("--snapshot") || args.includes("--json") || !process.stdin.isTTY || !process.stdout.isTTY;
 
 async function snapshot() {
-  return loadMissionControlSnapshot({ stateRoot, showAll, repositoryFilter });
+  return loadMissionControlSnapshot({
+    stateRoot,
+    view,
+    includeStale,
+    staleAfterMs: staleAfterHours * 60 * 60 * 1000,
+    repositoryFilter,
+  });
 }
 
 if (oneShot) {
@@ -122,7 +133,12 @@ process.stdin.on("data", async (key) => {
     restore();
     process.exit(0);
   }
-  if (key === "a") { showAll = !showAll; selectedIndex = 0; selectedId = null; }
+  if (["l", "a", "h"].includes(key)) {
+    view = key === "l" ? "live" : key === "a" ? "attention" : "all";
+    selectedIndex = 0;
+    selectedId = null;
+  }
+  else if (key === "s") { includeStale = !includeStale; selectedIndex = 0; selectedId = null; }
   else if (key === "r") clearRepositoryCache();
   else {
     const intent = navigationIntent(key, selectedIndex);
