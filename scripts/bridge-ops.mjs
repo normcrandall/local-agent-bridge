@@ -21,6 +21,7 @@ import {
 import { appendEvent, archiveCollaboration, pruneTerminalCollaborations, readCollaboration, updateCollaboration, queryControlPlane } from "../src/collaboration-store.mjs";
 import { clearTerminalRuntime, workerCancellationMatches } from "../src/collaboration-cleanup.mjs";
 import { replayIncident, formatReplayHuman } from "../src/incident-replay.mjs";
+import { applyBridgeCleanup, auditBridgeCleanup, formatCleanupReport } from "../src/state-cleanup.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const stateRoot = process.env.BRIDGE_COLLABORATION_DIR || resolve(homedir(), ".local/share/agent-bridge/state");
@@ -169,6 +170,16 @@ switch (command) {
   case "prune":
     json({ archived: await pruneTerminalCollaborations(root, { olderThanDays: Number(value("--older-than-days", "30")) }) });
     break;
+  case "cleanup": {
+    const olderThanDays = Number.parseInt(value("--older-than-days", "7"), 10);
+    const options = { workspaceRoot: root, stateRoot, olderThanDays };
+    const report = args.includes("--apply")
+      ? await applyBridgeCleanup(options)
+      : await auditBridgeCleanup(options);
+    if (args.includes("--json")) json(report);
+    else process.stdout.write(`${formatCleanupReport(report)}\n`);
+    break;
+  }
   case "worktree":
     json(createWorktree({
       workspace: resolve(value("--workspace", process.cwd())),

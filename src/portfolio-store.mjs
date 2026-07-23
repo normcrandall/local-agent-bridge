@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { PORTFOLIO_STATUS_GROUPS } from "./portfolio-status.mjs";
 
 const ID = /^helm-[0-9a-f-]{36}$/;
 
@@ -89,4 +90,28 @@ export async function listPortfolios(root) {
   const files = (await readdir(root)).filter((name) => /^helm-[0-9a-f-]{36}\.json$/.test(name));
   const states = await Promise.all(files.map((name) => readPortfolio(root, name.slice(0, -5))));
   return states.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+}
+
+export async function archivePortfolio(root, id, { expectedRevision = null } = {}) {
+  const target = paths(root, id);
+  const release = await acquireLock(target.lock);
+  try {
+    const state = await readPortfolio(root, id);
+    if (!Number.isInteger(expectedRevision)) {
+      throw new Error(`Cannot archive portfolio ${id}: an audited revision is required.`);
+    }
+    if (state.revision !== expectedRevision) {
+      throw new Error(`Cannot archive portfolio ${id}: revision changed after cleanup audit.`);
+    }
+    const items = Array.isArray(state.items) ? state.items : [];
+    const terminal = state.status === "complete"
+      && items.every((item) => PORTFOLIO_STATUS_GROUPS.terminal.includes(item.status));
+    if (!terminal) throw new Error(`Cannot archive portfolio ${id} while status is ${state.status || "unknown"}.`);
+    const archive = resolve(root, "archive");
+    await mkdir(archive, { recursive: true, mode: 0o700 });
+    await rename(target.state, resolve(archive, `${id}.json`));
+    return { id, archived: true, status: state.status, itemCount: items.length, archive };
+  } finally {
+    await release();
+  }
 }

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createPortfolio, listPortfolios, readPortfolio, updatePortfolio } from "../src/portfolio-store.mjs";
+import { archivePortfolio, createPortfolio, listPortfolios, readPortfolio, updatePortfolio } from "../src/portfolio-store.mjs";
 
 const root = await mkdtemp(join(tmpdir(), "agent-portfolio-store-"));
 try {
@@ -26,6 +26,15 @@ try {
   assert.equal(recovered.revision, 3);
   const listed = await listPortfolios(root);
   assert.equal(listed[0].id, created.id);
+  const completed = await updatePortfolio(root, created.id, 3, (current) => ({
+    ...current,
+    status: "complete",
+    items: current.items.map((item) => ({ ...item, status: "merged" })),
+  }));
+  await assert.rejects(() => archivePortfolio(root, completed.id, { expectedRevision: completed.revision - 1 }), /revision changed/i);
+  assert.equal((await archivePortfolio(root, completed.id, { expectedRevision: completed.revision })).archived, true);
+  assert.equal((await listPortfolios(root)).length, 0);
+  assert.equal(JSON.parse(await readFile(join(root, "archive", `${completed.id}.json`), "utf8")).status, "complete");
 } finally {
   await rm(root, { recursive: true, force: true });
 }
