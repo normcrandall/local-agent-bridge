@@ -3,12 +3,18 @@
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import {
+  clearRepositoryCache,
   loadMissionControlSnapshot,
   loadTimeline,
   navigationIntent,
   renderMissionControl,
   renderSnapshot,
 } from "../src/mission-control.mjs";
+
+process.stdout.on("error", (error) => {
+  if (error.code === "EPIPE") process.exit(0);
+  throw error;
+});
 
 const args = process.argv.slice(2);
 const value = (flag, fallback = null) => {
@@ -59,7 +65,7 @@ if (oneShot) {
       width: Number.parseInt(process.env.COLUMNS || "120", 10),
     })}\n`;
   }
-  await new Promise((resolveWrite, rejectWrite) => process.stdout.write(output, (error) => error ? rejectWrite(error) : resolveWrite()));
+  await new Promise((resolveWrite) => process.stdout.write(output, resolveWrite));
   process.exit(0);
 }
 
@@ -115,6 +121,7 @@ process.stdin.on("data", async (key) => {
     process.exit(0);
   }
   if (key === "a") { showAll = !showAll; selectedIndex = 0; selectedId = null; }
+  else if (key === "r") clearRepositoryCache();
   else {
     const intent = navigationIntent(key, selectedIndex);
     selectedIndex = intent.selectedIndex;

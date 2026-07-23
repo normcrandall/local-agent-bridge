@@ -41,6 +41,7 @@ import {
 } from "./performance-timeline.mjs";
 import { replayIncident, formatReplayHuman } from "./incident-replay.mjs";
 import { analyzePortfolio, buildExecutionWaves, normalizePortfolioItems } from "./portfolio-scheduler.mjs";
+import { PORTFOLIO_STATUSES } from "./portfolio-status.mjs";
 import { createPortfolio, listPortfolios, readPortfolio, updatePortfolio } from "./portfolio-store.mjs";
 import {
   loadProviderConcurrency,
@@ -596,10 +597,7 @@ const chairSchema = z.object({
   allowSameProviderDelegation: z.boolean().default(false),
 }).strict().optional().describe("Declare the active host as a native participant. Its provider is not delegated again unless explicitly allowed.");
 const portfolioId = z.string().regex(/^helm-[0-9a-f-]{36}$/).describe("Durable portfolio ID returned by create_portfolio.");
-const portfolioStatusSchema = z.enum([
-  "ready", "blocked", "claimed", "planning", "implementing", "verifying", "reviewing", "repairing",
-  "ready_to_merge", "integrating", "arbitrating", "needs_user", "indeterminate", "failed", "merged", "completed", "obsolete",
-]);
+const portfolioStatusSchema = z.enum(PORTFOLIO_STATUSES);
 const portfolioItemSchema = z.object({
   id: z.string().min(1).max(200),
   title: z.string().min(1).max(500).optional(),

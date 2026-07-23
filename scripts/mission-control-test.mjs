@@ -6,6 +6,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
+  isAttentionLane,
   loadMissionControlSnapshot,
   loadTimeline,
   navigationIntent,
@@ -13,6 +14,7 @@ import {
   renderSnapshot,
   stripAnsi,
 } from "../src/mission-control.mjs";
+import { PORTFOLIO_STATUSES, PORTFOLIO_STATUS_GROUPS } from "../src/portfolio-status.mjs";
 
 assert.equal(parseRepositoryRemote("https://token@example.com/owner/repo.git"), "owner/repo");
 assert.equal(parseRepositoryRemote("git@github.com:owner/repo.git"), "owner/repo");
@@ -21,6 +23,11 @@ assert.equal(parseRepositoryRemote("not-a-remote"), null);
 assert.deepEqual(navigationIntent("j", 1), { selectedIndex: 2, preserveSelectedId: false });
 assert.deepEqual(navigationIntent("k", 1), { selectedIndex: 0, preserveSelectedId: false });
 assert.deepEqual(navigationIntent("r", 1), { selectedIndex: 1, preserveSelectedId: true });
+for (const status of PORTFOLIO_STATUSES) {
+  const expected = !PORTFOLIO_STATUS_GROUPS.terminal.includes(status);
+  assert.equal(isAttentionLane({ lifecyclePhase: status, updatedAt: "2026-07-23T11:59:00.000Z" }, Date.parse("2026-07-23T12:00:00.000Z")), expected, `${status} classification drifted`);
+}
+assert.equal(isAttentionLane({ lifecyclePhase: "unknown" }), false);
 
 const root = await mkdtemp(join(tmpdir(), "bridge-mission-control-"));
 const workspace = join(root, "workspace");
@@ -62,7 +69,7 @@ try {
     id: completedId,
     status: "completed",
     updatedAt: "2026-07-23T10:00:00.000Z",
-    task: "Old completed lane",
+    task: "x".repeat(700),
     issueClaim: { repository: "veliqon/control-plane", issueNumber: 9 },
   }));
   await writeFile(join(root, `${needsUserId}.json`), JSON.stringify({
@@ -97,10 +104,19 @@ try {
   const all = await loadMissionControlSnapshot({ stateRoot: root, showAll: true, repositoryFilter: "veliqon/control-plane", now });
   assert.equal(all.visibleLanes, 3);
   assert.ok(all.lanes.some((lane) => lane.id === completedId));
+  assert.equal(all.lanes.find((lane) => lane.id === completedId).task.length, 500);
 
   const timeline = await loadTimeline(root, runningId, 5);
   assert.equal(timeline.length, 2);
   assert.equal(timeline.at(-1).summary, "Rendering repository views");
+  await writeFile(join(root, `${runningId}.jsonl`), Array.from({ length: 70 }, (_, index) => JSON.stringify({
+    type: "user_continued",
+    at: `2026-07-23T11:59:${String(index % 60).padStart(2, "0")}.000Z`,
+    message: `${index}: ${"sensitive continuation detail ".repeat(20)}`,
+  })).join("\n") + "\n");
+  const boundedTimeline = await loadTimeline(root, runningId, 100);
+  assert.equal(boundedTimeline.length, 64);
+  assert.ok(boundedTimeline.every((event) => event.summary.length <= 240));
   const selectedIndex = attention.lanes.findIndex((lane) => lane.id === runningId);
   const rendered = renderSnapshot(attention, { selectedIndex, timeline, width: 88, height: 100, now });
   assert.match(rendered, /AGENT BRIDGE MISSION CONTROL/);

@@ -1,7 +1,9 @@
-const TERMINAL = new Set(["completed", "merged", "obsolete"]);
-const ACTIVE = new Set(["claimed", "planning", "implementing", "verifying", "reviewing", "repairing"]);
-const INTEGRATION = new Set(["ready_to_merge", "integrating", "arbitrating"]);
-const PAUSED = new Set(["blocked", "needs_user", "indeterminate", "failed"]);
+import { PORTFOLIO_STATUS_GROUPS } from "./portfolio-status.mjs";
+
+const TERMINAL = new Set(PORTFOLIO_STATUS_GROUPS.terminal);
+const ACTIVE = new Set(PORTFOLIO_STATUS_GROUPS.active);
+const INTEGRATION = new Set(PORTFOLIO_STATUS_GROUPS.integration);
+const PAUSED = new Set(PORTFOLIO_STATUS_GROUPS.paused);
 
 function strings(value) {
   return [...new Set((value || []).map((item) => String(item).trim()).filter(Boolean))];

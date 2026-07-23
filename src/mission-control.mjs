@@ -3,13 +3,17 @@ import { readFile, stat } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import { promisify } from "node:util";
 import { queryControlPlane } from "./collaboration-store.mjs";
+import { PORTFOLIO_STATUS_GROUPS } from "./portfolio-status.mjs";
 
 const ACTIVE_STATUSES = new Set([
   "queued", "waiting_capacity", "running", "working", "recovering", "cancelling",
-  "ready", "claimed", "implementing", "reviewing", "repairing", "validating", "merge_ready",
+  "validating",
+  ...PORTFOLIO_STATUS_GROUPS.ready,
+  ...PORTFOLIO_STATUS_GROUPS.active,
+  ...PORTFOLIO_STATUS_GROUPS.integration,
 ]);
-const ATTENTION_STATUSES = new Set(["needs_user", "indeterminate", "failed", "budget", "blocked"]);
-const TERMINAL_STATUSES = new Set(["agreed", "completed", "cancelled", "merged", "closed", "obsolete", "superseded", "turn_limit"]);
+const ATTENTION_STATUSES = new Set(["budget", ...PORTFOLIO_STATUS_GROUPS.paused]);
+const TERMINAL_STATUSES = new Set(["agreed", "cancelled", "closed", "superseded", "turn_limit", ...PORTFOLIO_STATUS_GROUPS.terminal]);
 const repositoryCache = new Map();
 const timelineCache = new Map();
 const execFileAsync = promisify(execFile);
@@ -23,6 +27,10 @@ export function navigationIntent(key, selectedIndex) {
   if (key === "g") return { selectedIndex: 0, preserveSelectedId: false };
   if (key === "G") return { selectedIndex: Number.MAX_SAFE_INTEGER, preserveSelectedId: false };
   return { selectedIndex, preserveSelectedId: true };
+}
+
+export function clearRepositoryCache() {
+  repositoryCache.clear();
 }
 
 function clean(value) {
@@ -68,25 +76,30 @@ async function repositoryFromWorkspace(workspace) {
   if (!workspace) return "unknown/local";
   const root = resolve(workspace);
   const cached = repositoryCache.get(root);
+  if (cached?.promise) return cached.promise;
   if (cached && cached.expiresAt > Date.now()) return cached.repository;
-  const worktreeMarker = "/.bridge/worktrees/";
-  const markerIndex = root.indexOf(worktreeMarker);
-  const candidates = markerIndex > 0 ? [root, root.slice(0, markerIndex)] : [root];
-  const parent = dirname(root);
-  if (basename(parent).endsWith("-worktrees")) {
-    candidates.push(resolve(dirname(parent), basename(parent).replace(/-worktrees$/, "")));
-  }
-  let repository = null;
-  for (const candidate of candidates) {
-    repository = await remoteRepository(candidate);
-    if (repository) break;
-  }
-  const fallback = repository || `local/${basename(root) || "workspace"}`;
-  repositoryCache.set(root, {
-    repository: fallback,
-    expiresAt: repository ? Number.POSITIVE_INFINITY : Date.now() + 30_000,
-  });
-  return fallback;
+  const lookup = (async () => {
+    const worktreeMarker = "/.bridge/worktrees/";
+    const markerIndex = root.indexOf(worktreeMarker);
+    const candidates = markerIndex > 0 ? [root, root.slice(0, markerIndex)] : [root];
+    const parent = dirname(root);
+    if (basename(parent).endsWith("-worktrees")) {
+      candidates.push(resolve(dirname(parent), basename(parent).replace(/-worktrees$/, "")));
+    }
+    let repository = null;
+    for (const candidate of candidates) {
+      repository = await remoteRepository(candidate);
+      if (repository) break;
+    }
+    const fallback = repository || `local/${basename(root) || "workspace"}`;
+    repositoryCache.set(root, {
+      repository: fallback,
+      expiresAt: repository ? Number.POSITIVE_INFINITY : Date.now() + 600_000,
+    });
+    return fallback;
+  })();
+  repositoryCache.set(root, { promise: lookup, expiresAt: Number.POSITIVE_INFINITY });
+  return lookup;
 }
 
 export async function repositoryForLane(lane) {
@@ -178,7 +191,7 @@ export async function loadMissionControlSnapshot({
 
 function eventSummary(event) {
   const value = event.summary || event.message || event.outcome || event.status || event.phase || event.error;
-  if (value) return clean(typeof value === "string" ? value : JSON.stringify(value));
+  if (value) return clean(typeof value === "string" ? value : JSON.stringify(value)).slice(0, 240);
   const agent = event.agent || event.provider;
   return agent ? `${clean(agent)} event` : "";
 }
@@ -199,7 +212,8 @@ export async function loadTimeline(stateRoot, id, limit = 8) {
         const event = JSON.parse(line);
         return [{ at: event.at || event.recordedAt || null, type: clean(event.type || "event"), agent: clean(event.agent || event.provider), summary: eventSummary(event) }];
       } catch { return []; }
-    });
+    })
+    .slice(-64);
   timelineCache.set(path, { key: cacheKey, events });
   return events.slice(-limit);
 }
@@ -295,7 +309,9 @@ export function renderMissionControl(snapshot, {
     const listBudget = interactive
       ? Math.max(4, Math.min(12, Math.floor(height * 0.3)))
       : Math.min(50, lanes.length);
-    const start = Math.max(0, Math.min(selectedIndex - Math.floor(listBudget / 2), lanes.length - listBudget));
+    const start = interactive
+      ? Math.max(0, Math.min(selectedIndex - Math.floor(listBudget / 2), lanes.length - listBudget))
+      : 0;
     let lastRepository = null;
     for (let index = start; index < Math.min(lanes.length, start + listBudget); index += 1) {
       const lane = lanes[index];
