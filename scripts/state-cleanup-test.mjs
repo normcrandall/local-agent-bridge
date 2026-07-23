@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { archiveCollaboration } from "../src/collaboration-store.mjs";
 import { archivePortfolio } from "../src/portfolio-store.mjs";
 import { applyBridgeCleanup, auditBridgeCleanup, formatCleanupReport } from "../src/state-cleanup.mjs";
+import { hostActivityId, recordHostActivity } from "../src/host-activity-store.mjs";
 
 const stateRoot = await mkdtemp(join(tmpdir(), "bridge-state-cleanup-"));
 const priorStateRoot = process.env.BRIDGE_COLLABORATION_DIR;
@@ -35,6 +36,23 @@ try {
   await writeCollaboration(ids.needsUser, { status: "needs_user" });
   await writeCollaboration(ids.pendingWake, { status: "agreed", coordinatorWake: { status: "pending" } });
   await writeCollaboration(ids.workspaceOperation, { status: "completed", workspaceOperation: { id: "cleanup-reservation", status: "reserved" } });
+  const oldHostSession = "expired-native-host-session";
+  await recordHostActivity(stateRoot, {
+    provider: "codex",
+    sessionId: oldHostSession,
+    workspace: stateRoot,
+    hostPid: process.pid,
+    action: "start",
+    now: Date.parse(old),
+  });
+  await recordHostActivity(stateRoot, {
+    provider: "codex",
+    sessionId: oldHostSession,
+    workspace: stateRoot,
+    action: "stop",
+    now: Date.parse(old) + 1_000,
+  });
+  const oldHostPath = join(stateRoot, "host-activity", `${hostActivityId({ provider: "codex", sessionId: oldHostSession })}.json`);
 
   const completePortfolio = "helm-55555555-5555-4555-8555-555555555555";
   const blockedPortfolio = "helm-66666666-6666-4666-8666-666666666666";
@@ -63,6 +81,8 @@ try {
   assert.ok(audit.protectedCollaborations.some((entry) => entry.id === ids.pendingWake && entry.reasons.includes("pending_coordinator_wake")));
   assert.ok(audit.protectedCollaborations.some((entry) => entry.id === ids.workspaceOperation && entry.reasons.includes("workspace_operation")));
   assert.deepEqual(audit.stalePortfolios.map((entry) => entry.id), [blockedPortfolio]);
+  assert.equal(audit.hostActivityCleanupCandidates.length, 1);
+  assert.equal(audit.hostActivityCleanupCandidates[0].type, "state");
   assert.match(formatCleanupReport(audit), /dry-run/);
   assert.match(formatCleanupReport(audit), /never auto-cancelled/);
 
@@ -73,6 +93,8 @@ try {
   assert.equal(JSON.parse(await readFile(join(stateRoot, "portfolios", "archive", `${completePortfolio}.json`), "utf8")).status, "complete");
   assert.equal(JSON.parse(await readFile(join(stateRoot, `${ids.needsUser}.json`), "utf8")).status, "needs_user");
   assert.equal(JSON.parse(await readFile(join(stateRoot, "portfolios", `${blockedPortfolio}.json`), "utf8")).status, "blocked");
+  assert.equal(applied.removedHostActivityArtifacts.length, 1);
+  await assert.rejects(() => readFile(oldHostPath), (error) => error.code === "ENOENT");
 
   const changedCollaboration = "bridge-88888888-8888-4888-8888-888888888888";
   await writeCollaboration(changedCollaboration, { status: "completed" });

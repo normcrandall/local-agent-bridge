@@ -140,6 +140,7 @@ try {
     workspace,
     model: "gpt-5.6-sol",
     action: "start",
+    hostPid: process.pid,
     task: "Inspect the native Codex app turn",
     sourceEvent: "UserPromptSubmit",
     now,
@@ -150,6 +151,7 @@ try {
   assert.equal(hostLive.lanes[0].type, "native_host");
   assert.equal(hostLive.lanes[0].repository, "veliqon/control-plane");
   assert.equal(hostLive.lanes[0].activeAgent, "codex");
+  assert.equal(hostLive.lanes[0].hostActivity.processAlive, true);
   assert.equal(hostLive.providerActivity.codex, 1);
   const hostStateFile = join(hostRoot, "host-activity", (await readdir(join(hostRoot, "host-activity"))).find((name) => name.endsWith(".json")));
   assert.doesNotMatch(await readFile(hostStateFile, "utf8"), new RegExp(sessionId));
@@ -171,6 +173,9 @@ try {
   }, now + HOST_ACTIVITY_LIVE_MS + 1);
   assert.equal(expiredHostLane.hostActivity.live, false);
   assert.equal(isLiveLane(expiredHostLane, now + HOST_ACTIVITY_LIVE_MS + 1), false);
+  const deadHostLane = hostActivityLane({ ...hostState, hostPid: 99_999_999 }, now + 1);
+  assert.equal(deadHostLane.hostActivity.processAlive, false);
+  assert.equal(isLiveLane(deadHostLane, now + 1), false);
 
   const attention = await loadMissionControlSnapshot({ stateRoot: root, view: "attention", now });
   assert.equal(attention.mode, "attention");

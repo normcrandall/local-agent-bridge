@@ -71,6 +71,8 @@ await recordHostActivity(
     sessionId: input.session_id || input.sessionId || null,
     workspace: input.workspace?.current_dir || input.cwd || process.cwd(),
     model: input.model?.display_name || input.model?.id || input.model || null,
+    hostPid: process.ppid,
+    lockAttempts: 2,
     sourceEvent: "StatusLine",
   },
 ).catch(() => null);

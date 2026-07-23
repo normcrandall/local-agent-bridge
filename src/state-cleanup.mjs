@@ -7,6 +7,7 @@ import {
 import { LIVE_COLLABORATION_STATUSES } from "./collaboration-cleanup.mjs";
 import { archivePortfolio, listPortfolios } from "./portfolio-store.mjs";
 import { PORTFOLIO_STATUS_GROUPS } from "./portfolio-status.mjs";
+import { auditHostActivityArtifacts, pruneHostActivityArtifacts } from "./host-activity-store.mjs";
 
 const SAFE_COLLABORATION_ARCHIVE_STATUSES = new Set([
   "agreed", "completed", "cancelled", "closed", "superseded", "failed", "turn_limit", "budget",
@@ -121,6 +122,11 @@ export async function auditBridgeCleanup({
     }
   }
 
+  const hostActivityAudit = await auditHostActivityArtifacts(stateRoot, {
+    now,
+    olderThanMs: olderThanDays * 86_400_000,
+  });
+
   return {
     version: 1,
     generatedAt: new Date(now).toISOString(),
@@ -132,6 +138,8 @@ export async function auditBridgeCleanup({
     staleCollaborations,
     stalePortfolios,
     protectedCollaborations,
+    hostActivityCleanupCandidates: hostActivityAudit.candidates,
+    protectedHostActivityArtifacts: hostActivityAudit.preserved,
     counts: {
       collaborations: collaborations.length,
       portfolios: portfolios.length,
@@ -140,6 +148,8 @@ export async function auditBridgeCleanup({
       staleCollaborations: staleCollaborations.length,
       stalePortfolios: stalePortfolios.length,
       protectedCollaborations: protectedCollaborations.length,
+      hostActivityCleanupCandidates: hostActivityAudit.candidates.length,
+      protectedHostActivityArtifacts: hostActivityAudit.preserved.length,
     },
   };
 }
@@ -165,6 +175,11 @@ export async function applyBridgeCleanup(options = {}) {
       failedPortfolios.push({ id: candidate.id, error: error.message });
     }
   }
+  const hostActivityCleanup = await pruneHostActivityArtifacts(options.stateRoot, {
+    now: options.now ?? Date.parse(audit.generatedAt),
+    olderThanMs: audit.olderThanDays * 86_400_000,
+    names: audit.hostActivityCleanupCandidates.map((candidate) => candidate.name),
+  });
   return {
     ...audit,
     applied: true,
@@ -172,6 +187,8 @@ export async function applyBridgeCleanup(options = {}) {
     archivedPortfolios,
     failedCollaborations,
     failedPortfolios,
+    removedHostActivityArtifacts: hostActivityCleanup.removed,
+    failedHostActivityArtifacts: hostActivityCleanup.failed,
   };
 }
 
@@ -179,20 +196,21 @@ export function formatCleanupReport(report, { applied = report.applied === true,
   const lines = [
     `Bridge cleanup ${applied ? "result" : "audit (dry-run)"}`,
     `Cutoff: ${report.cutoff} (${report.olderThanDays} day retention)`,
-    `Archive-ready: ${report.counts.collaborationArchiveCandidates} collaborations, ${report.counts.portfolioArchiveCandidates} portfolios`,
+    `Archive-ready: ${report.counts.collaborationArchiveCandidates} collaborations, ${report.counts.portfolioArchiveCandidates} portfolios; ${report.counts.hostActivityCleanupCandidates || 0} expired host receipts`,
     `Preserved: ${report.counts.protectedCollaborations} protected collaborations, ${report.counts.staleCollaborations} unresolved collaborations, ${report.counts.stalePortfolios} nonterminal portfolios`,
   ];
   if (applied) {
-    lines.push(`Archived: ${report.archivedCollaborations.length} collaborations, ${report.archivedPortfolios.length} portfolios`);
-    if (report.failedCollaborations?.length || report.failedPortfolios?.length) {
-      lines.push(`Skipped after recheck: ${report.failedCollaborations?.length || 0} collaborations, ${report.failedPortfolios?.length || 0} portfolios`);
+    lines.push(`Archived: ${report.archivedCollaborations.length} collaborations, ${report.archivedPortfolios.length} portfolios; removed ${report.removedHostActivityArtifacts?.length || 0} expired host receipts`);
+    if (report.failedCollaborations?.length || report.failedPortfolios?.length || report.failedHostActivityArtifacts?.length) {
+      lines.push(`Skipped after recheck: ${report.failedCollaborations?.length || 0} collaborations, ${report.failedPortfolios?.length || 0} portfolios, ${report.failedHostActivityArtifacts?.length || 0} host receipts`);
     }
-  } else if (report.counts.collaborationArchiveCandidates || report.counts.portfolioArchiveCandidates) {
+  } else if (report.counts.collaborationArchiveCandidates || report.counts.portfolioArchiveCandidates || report.counts.hostActivityCleanupCandidates) {
     lines.push("Run again with --apply to archive only the archive-ready records.");
   }
   const candidates = [
     ...report.collaborationArchiveCandidates.map((entry) => `${entry.id} ${entry.status}`),
     ...report.portfolioArchiveCandidates.map((entry) => `${entry.id} ${entry.status} (${entry.itemCount} items)`),
+    ...report.hostActivityCleanupCandidates.map((entry) => `host-activity/${entry.name} ${entry.type}`),
   ];
   if (candidates.length) {
     lines.push("Candidates:");

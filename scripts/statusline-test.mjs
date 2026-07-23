@@ -14,6 +14,7 @@ try {
     action: "start",
     sessionId: "statusline-session",
     workspace: "/workspace/nolvaren-next",
+    hostPid: process.pid,
     task: "Coordinate the active work",
   });
   const beforeHeartbeat = (await listHostActivities(stateDirectory))[0].heartbeatAt;

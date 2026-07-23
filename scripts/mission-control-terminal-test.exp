@@ -4,17 +4,26 @@ set timeout 15
 set project [file normalize [file join [file dirname [info script]] ..]]
 set stateRoot [file join /tmp "bridge-mc-terminal-[pid]"]
 file mkdir $stateRoot
+proc fail {stateRoot} {
+  file delete -force $stateRoot
+  exit 1
+}
 
 spawn /bin/zsh -f
 send -- "cd '$project'; before=\$(stty -g); node scripts/mission-control.mjs --state-root '$stateRoot' --refresh-ms 250; result=\$?; after=\$(stty -g); if \[\[ \"\$before\" == \"\$after\" \]\]; then echo TERMINAL_OK:\$result; else echo TERMINAL_BAD:\$result; fi; echo INPUT_OK\r"
 expect "AGENT BRIDGE MISSION CONTROL"
-after 30
+after 100
 send -- "q"
 expect {
+  -exact "\033\[?25h\033\[?1049l" {}
+  timeout { fail $stateRoot }
+  eof { fail $stateRoot }
+}
+expect {
   "TERMINAL_OK:0" {}
-  "TERMINAL_BAD:" { exit 1 }
-  timeout { exit 1 }
-  eof { exit 1 }
+  "TERMINAL_BAD:" { fail $stateRoot }
+  timeout { fail $stateRoot }
+  eof { fail $stateRoot }
 }
 expect "INPUT_OK"
 send -- "exit\r"

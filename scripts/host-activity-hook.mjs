@@ -16,6 +16,7 @@ const input = inputJson();
 const stateRoot = resolve(process.env.BRIDGE_COLLABORATION_DIR || resolve(homedir(), ".local/share/agent-bridge/state"));
 const sourceEvent = input.hook_event_name || input.hookEventName || action;
 const tool = input.tool_name || input.toolName || null;
+const sessionId = input.session_id || input.sessionId || input.thread_id || input.threadId || null;
 const task = action === "start" ? input.prompt : null;
 const model = typeof input.model === "string"
   ? input.model
@@ -28,9 +29,10 @@ try {
   await recordHostActivity(stateRoot, {
     provider,
     action,
-    sessionId: input.session_id || input.sessionId || input.thread_id || input.threadId || null,
+    sessionId,
     workspace: input.cwd || process.env.GEMINI_PROJECT_DIR || process.cwd(),
     model,
+    hostPid: process.ppid,
     task,
     summary,
     sourceEvent,

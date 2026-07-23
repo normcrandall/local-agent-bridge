@@ -328,7 +328,7 @@ codexHooks = addCommandHook(codexHooks, "UserPromptSubmit", `${hostActivityHookL
 codexHooks = addCommandHook(codexHooks, "PreToolUse", `${hostActivityHookLauncher} codex heartbeat`);
 codexHooks = addCommandHook(codexHooks, "PostToolUse", `${hostActivityHookLauncher} codex heartbeat`);
 codexHooks = addCommandHook(codexHooks, "Stop", `${hostActivityHookLauncher} codex stop`);
-codexHooks = addCommandHook(codexHooks, "SessionEnd", `${hostActivityHookLauncher} codex stop`, { timeout: 3 });
+codexHooks = addCommandHook(codexHooks, "SessionEnd", `${hostActivityHookLauncher} codex stop`);
 await writeJson(codexHookPath, codexHooks);
 codexConfig = ensureCodexHookConfiguration(codexConfig);
 if (!/^\[mcp_servers\.ollama\]\s*$/m.test(codexConfig)) {
