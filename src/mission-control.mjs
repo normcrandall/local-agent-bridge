@@ -1,0 +1,331 @@
+import { spawnSync } from "node:child_process";
+import { readFile, stat } from "node:fs/promises";
+import { basename, dirname, resolve } from "node:path";
+import { queryControlPlane } from "./collaboration-store.mjs";
+
+const ACTIVE_STATUSES = new Set([
+  "queued", "waiting_capacity", "running", "working", "recovering", "cancelling",
+  "ready", "claimed", "implementing", "reviewing", "repairing", "validating", "merge_ready",
+]);
+const ATTENTION_STATUSES = new Set(["needs_user", "indeterminate", "failed", "budget", "blocked"]);
+const TERMINAL_STATUSES = new Set(["agreed", "completed", "cancelled", "merged", "closed", "obsolete", "superseded", "turn_limit"]);
+const repositoryCache = new Map();
+const timelineCache = new Map();
+
+const ANSI_PATTERN = /\x1b\[[0-9;]*m/g;
+export const stripAnsi = (value) => String(value || "").replace(ANSI_PATTERN, "");
+
+function clean(value) {
+  return String(value ?? "").replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function dateMs(value) {
+  const parsed = Date.parse(value || "");
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+export function parseRepositoryRemote(remote) {
+  const value = clean(remote);
+  if (!value) return null;
+  let path = null;
+  try {
+    const normalized = /^[a-z][a-z0-9+.-]*:\/\//i.test(value) ? value : null;
+    if (normalized) path = new URL(normalized).pathname;
+  } catch {}
+  if (!path) {
+    const scp = value.match(/^[^@\s]+@[^:\s]+:(.+)$/);
+    if (scp) path = scp[1];
+  }
+  if (!path && !value.includes("://")) path = value;
+  const parts = String(path || "").replace(/^\/+|\/+$/g, "").replace(/\.git$/i, "").split("/").filter(Boolean);
+  if (parts.length < 2) return null;
+  return `${parts.at(-2)}/${parts.at(-1)}`;
+}
+
+function repositoryFromWorkspace(workspace) {
+  if (!workspace) return "unknown/local";
+  const root = resolve(workspace);
+  if (repositoryCache.has(root)) return repositoryCache.get(root);
+  const worktreeMarker = "/.bridge/worktrees/";
+  const markerIndex = root.indexOf(worktreeMarker);
+  const candidates = markerIndex > 0 ? [root, root.slice(0, markerIndex)] : [root];
+  const parent = dirname(root);
+  if (basename(parent).endsWith("-worktrees")) {
+    candidates.push(resolve(dirname(parent), basename(parent).replace(/-worktrees$/, "")));
+  }
+  let repository = null;
+  for (const candidate of candidates) {
+    const result = spawnSync("git", ["remote", "get-url", "origin"], {
+      cwd: candidate,
+      encoding: "utf8",
+      timeout: 1_500,
+    });
+    if (result.status === 0) {
+      repository = parseRepositoryRemote(result.stdout);
+      if (repository) break;
+    }
+  }
+  const fallback = repository || `local/${basename(root) || "workspace"}`;
+  repositoryCache.set(root, fallback);
+  return fallback;
+}
+
+export function repositoryForLane(lane) {
+  const explicit = clean(lane.repository).replace(/^https?:\/\/github\.com\//i, "").replace(/\.git$/i, "");
+  if (/^[^/\s]+\/[^/\s]+$/.test(explicit)) return explicit;
+  return repositoryFromWorkspace(lane.workspace);
+}
+
+export function isAttentionLane(lane, now = Date.now()) {
+  const status = String(lane.lifecyclePhase || "unknown").toLowerCase();
+  if (TERMINAL_STATUSES.has(status)) return false;
+  if (ACTIVE_STATUSES.has(status)) return true;
+  if (["needs_user", "indeterminate", "blocked"].includes(status)) return true;
+  if (["failed", "budget"].includes(status)) return now - dateMs(lane.updatedAt) <= 86_400_000;
+  if (lane.handoff && !lane.handoff.acknowledged) return true;
+  if (lane.coordinatorWake && !lane.coordinatorWake.acknowledged) return true;
+  return !TERMINAL_STATUSES.has(status);
+}
+
+function statusRank(status) {
+  const value = String(status || "unknown").toLowerCase();
+  if (ATTENTION_STATUSES.has(value)) return 0;
+  if (["running", "working", "recovering", "cancelling"].includes(value)) return 1;
+  if (["queued", "waiting_capacity", "ready", "claimed"].includes(value)) return 2;
+  if (["implementing", "reviewing", "repairing", "validating", "merge_ready"].includes(value)) return 3;
+  return 4;
+}
+
+export async function loadMissionControlSnapshot({
+  stateRoot,
+  includeArchived = false,
+  showAll = false,
+  repositoryFilter = null,
+  now = Date.now(),
+} = {}) {
+  const controlPlane = await queryControlPlane(stateRoot, { includeArchived, now });
+  const allLanes = controlPlane.lanes.map((lane) => ({ ...lane, repository: repositoryForLane(lane) }));
+  const normalizedFilter = clean(repositoryFilter).toLowerCase();
+  const matching = allLanes.filter((lane) => !normalizedFilter
+    || lane.repository.toLowerCase() === normalizedFilter
+    || lane.repository.toLowerCase().includes(normalizedFilter));
+  const visible = (showAll ? matching : matching.filter((lane) => isAttentionLane(lane, now))).sort((left, right) => {
+    const repositoryOrder = left.repository.localeCompare(right.repository);
+    if (repositoryOrder) return repositoryOrder;
+    return statusRank(left.lifecyclePhase) - statusRank(right.lifecyclePhase)
+      || dateMs(right.updatedAt) - dateMs(left.updatedAt)
+      || left.id.localeCompare(right.id);
+  });
+
+  const repositories = new Map();
+  for (const lane of matching) {
+    const summary = repositories.get(lane.repository) || { repository: lane.repository, total: 0, attention: 0 };
+    summary.total += 1;
+    if (isAttentionLane(lane, now)) summary.attention += 1;
+    repositories.set(lane.repository, summary);
+  }
+  const providerActivity = {};
+  for (const lane of matching.filter((entry) => isAttentionLane(entry, now))) {
+    const provider = lane.activeAgent || lane.writer;
+    if (!provider) continue;
+    providerActivity[provider] = (providerActivity[provider] || 0) + 1;
+  }
+  return {
+    version: 1,
+    generatedAt: new Date(now).toISOString(),
+    stateRoot: resolve(stateRoot),
+    mode: showAll ? "all" : "attention",
+    filter: repositoryFilter || null,
+    repositories: [...repositories.values()].sort((a, b) => a.repository.localeCompare(b.repository)),
+    providerActivity,
+    totalLanes: matching.length,
+    visibleLanes: visible.length,
+    lanes: visible,
+  };
+}
+
+function eventSummary(event) {
+  const value = event.summary || event.message || event.outcome || event.status || event.phase || event.error;
+  if (value) return clean(typeof value === "string" ? value : JSON.stringify(value));
+  const agent = event.agent || event.provider;
+  return agent ? `${clean(agent)} event` : "";
+}
+
+export async function loadTimeline(stateRoot, id, limit = 8) {
+  if (!/^bridge-[0-9a-f-]{36}$/.test(String(id || ""))) return [];
+  const path = resolve(stateRoot, `${id}.jsonl`);
+  let info;
+  try { info = await stat(path); } catch (error) { if (error.code === "ENOENT") return []; throw error; }
+  const cacheKey = `${info.size}:${info.mtimeMs}`;
+  const cached = timelineCache.get(path);
+  if (cached?.key === cacheKey) return cached.events.slice(-limit);
+  const events = (await readFile(path, "utf8"))
+    .split("\n")
+    .filter(Boolean)
+    .flatMap((line) => {
+      try {
+        const event = JSON.parse(line);
+        return [{ at: event.at || event.recordedAt || null, type: clean(event.type || "event"), agent: clean(event.agent || event.provider), summary: eventSummary(event) }];
+      } catch { return []; }
+    });
+  timelineCache.set(path, { key: cacheKey, events });
+  return events.slice(-limit);
+}
+
+function truncate(value, width) {
+  const text = clean(value);
+  if (width <= 0) return "";
+  if (text.length <= width) return text;
+  if (width === 1) return "…";
+  return `${text.slice(0, width - 1)}…`;
+}
+
+function wrap(value, width, prefix = "") {
+  const words = clean(value).split(" ").filter(Boolean);
+  if (!words.length) return [];
+  const contentWidth = Math.max(8, width - prefix.length);
+  const lines = [];
+  let current = "";
+  for (const word of words) {
+    if (!current) current = word;
+    else if (`${current} ${word}`.length <= contentWidth) current += ` ${word}`;
+    else { lines.push(prefix + truncate(current, contentWidth)); current = word; }
+  }
+  if (current) lines.push(prefix + truncate(current, contentWidth));
+  return lines;
+}
+
+function age(value, now = Date.now()) {
+  const ms = dateMs(value);
+  if (!ms) return "unknown";
+  const seconds = Math.max(0, Math.floor((now - ms) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 86_400) return `${Math.floor(seconds / 3600)}h`;
+  return `${Math.floor(seconds / 86_400)}d`;
+}
+
+function performanceLine(summary) {
+  if (!summary) return null;
+  const active = Math.round((summary.activeTimeMs || 0) / 1000);
+  const dead = Math.round((summary.deadTimeMs || 0) / 1000);
+  const latest = summary.latestMilestone?.name;
+  return `Timing: active ${active}s | dead ${dead}s${latest ? ` | latest ${latest}` : ""}`;
+}
+
+function statusSymbol(status) {
+  const value = String(status || "unknown").toLowerCase();
+  if (ATTENTION_STATUSES.has(value)) return "!";
+  if (ACTIVE_STATUSES.has(value)) return "*";
+  if (["agreed", "completed", "merged"].includes(value)) return "+";
+  if (value === "cancelled") return "-";
+  return ".";
+}
+
+function paint(text, code, enabled) {
+  return enabled ? `\x1b[${code}m${text}\x1b[0m` : text;
+}
+
+function statusText(status, enabled) {
+  const value = String(status || "unknown");
+  const lower = value.toLowerCase();
+  const code = ATTENTION_STATUSES.has(lower) ? "31;1" : ACTIVE_STATUSES.has(lower) ? "36;1" : ["agreed", "completed", "merged"].includes(lower) ? "32" : "90";
+  return paint(value, code, enabled);
+}
+
+function field(label, value, width) {
+  if (value === null || value === undefined || value === "") return [];
+  return wrap(`${label}: ${typeof value === "string" ? value : JSON.stringify(value)}`, width);
+}
+
+export function renderMissionControl(snapshot, {
+  selectedIndex = 0,
+  timeline = [],
+  width = 120,
+  height = 40,
+  color = true,
+  interactive = true,
+  now = Date.now(),
+} = {}) {
+  const usableWidth = Math.max(30, width);
+  const lanes = snapshot.lanes;
+  const selected = lanes[Math.min(Math.max(0, selectedIndex), Math.max(0, lanes.length - 1))] || null;
+  const lines = [];
+  const providerLine = Object.entries(snapshot.providerActivity).map(([provider, count]) => `${provider}:${count}`).join("  ") || "idle";
+  lines.push(paint("AGENT BRIDGE MISSION CONTROL", "1;34", color));
+  lines.push(truncate(`Mode: ${snapshot.mode} | repos ${snapshot.repositories.length} | lanes ${snapshot.visibleLanes}/${snapshot.totalLanes} | providers ${providerLine}`, usableWidth));
+  lines.push(paint("─".repeat(usableWidth), "90", color));
+
+  if (!lanes.length) {
+    lines.push("No collaboration lanes match this view.");
+    lines.push(snapshot.mode === "attention" ? "Press a to include terminal history." : "Try a different --repo filter.");
+  } else {
+    const listBudget = Math.max(4, Math.min(12, Math.floor(height * 0.3)));
+    const start = Math.max(0, Math.min(selectedIndex - Math.floor(listBudget / 2), lanes.length - listBudget));
+    let lastRepository = null;
+    for (let index = start; index < Math.min(lanes.length, start + listBudget); index += 1) {
+      const lane = lanes[index];
+      if (lane.repository !== lastRepository) {
+        const repo = snapshot.repositories.find((entry) => entry.repository === lane.repository);
+        lines.push(paint(`[${lane.repository}] ${repo?.attention || 0} attention / ${repo?.total || 0} total`, "1;35", color));
+        lastRepository = lane.repository;
+      }
+      const cursor = index === selectedIndex ? ">" : " ";
+      const provider = lane.activeAgent || lane.writer || "unassigned";
+      const label = lane.issueNumber ? `#${lane.issueNumber}` : lane.id.replace(/^bridge-/, "").slice(0, 8);
+      const raw = `${cursor} ${statusSymbol(lane.lifecyclePhase)} ${label} ${lane.lifecyclePhase} ${provider} - ${lane.task || lane.narrative?.summary || "untitled lane"}`;
+      lines.push(index === selectedIndex ? paint(truncate(raw, usableWidth), "7", color) : truncate(raw, usableWidth));
+    }
+  }
+
+  if (selected) {
+    lines.push(paint("─".repeat(usableWidth), "90", color));
+    lines.push(`${statusText(selected.lifecyclePhase, color)}  ${paint(selected.repository, "1", color)}  ${selected.id}`);
+    lines.push(...field("Workspace", selected.workspace, usableWidth));
+    lines.push(...field("Task", selected.task, usableWidth));
+    const role = [selected.activeAgent && `active ${selected.activeAgent}`, selected.writer && `writer ${selected.writer}`, selected.model && `model ${selected.model}`].filter(Boolean).join(" | ");
+    lines.push(...field("Agent", role, usableWidth));
+    if (selected.narrative?.summary) {
+      const stale = selected.heartbeat?.heartbeatAt && selected.narrative.updatedAt && dateMs(selected.narrative.updatedAt) < dateMs(selected.heartbeat.heartbeatAt) - 60_000;
+      const source = selected.narrative.isPlaceholder ? "broker placeholder" : selected.narrative.source || "provider";
+      lines.push(...wrap(`Narrative (${source}, ${age(selected.narrative.updatedAt, now)} old${stale ? ", stale while heartbeat remains live" : ""}): ${selected.narrative.summary}`, usableWidth));
+    }
+    if (selected.heartbeat?.heartbeatAt) lines.push(`Heartbeat: ${age(selected.heartbeat.heartbeatAt, now)} ago`);
+    const github = [selected.issueNumber && `issue #${selected.issueNumber}`, selected.prNumber && `PR #${selected.prNumber}`, selected.branch, selected.headSha && selected.headSha.slice(0, 12)].filter(Boolean).join(" | ");
+    lines.push(...field("GitHub", github, usableWidth));
+    if (selected.portfolio) {
+      const portfolio = `${selected.portfolio.portfolioId} / ${selected.portfolio.itemId}${selected.portfolio.blockedBy?.length ? ` | blocked by ${selected.portfolio.blockedBy.join(", ")}` : ""}`;
+      lines.push(...field("Portfolio", portfolio, usableWidth));
+    }
+    const blocker = selected.blocker?.error || selected.blocker?.pendingDecision?.question || selected.blocker?.decisionEscalation?.question;
+    lines.push(...field("Blocker", blocker, usableWidth));
+    if (selected.handoff) lines.push(...field("Handoff", `${selected.handoff.outcome || "recorded"} | ${selected.handoff.acknowledged ? "acknowledged" : "awaiting coordinator"} | next ${selected.handoff.nextAction || selected.nextAction}`, usableWidth));
+    lines.push(...field("Next", selected.nextAction, usableWidth));
+    const timing = performanceLine(selected.performanceSummary);
+    if (timing) lines.push(truncate(timing, usableWidth));
+    if (timeline.length) {
+      lines.push(paint("Timeline", "1;34", color));
+      for (const event of timeline.slice(-5)) {
+        const at = event.at ? new Date(event.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "--:--:--";
+        lines.push(truncate(`  ${at} ${event.type}${event.agent ? ` (${event.agent})` : ""}${event.summary ? ` - ${event.summary}` : ""}`, usableWidth));
+      }
+    }
+  }
+
+  if (interactive) {
+    lines.push(paint("─".repeat(usableWidth), "90", color));
+    lines.push("j/k or arrows move | a attention/all | r refresh | q quit");
+  }
+  return lines.slice(0, Math.max(1, height)).map((line) => truncateAnsi(line, usableWidth)).join("\n");
+}
+
+function truncateAnsi(value, width) {
+  if (stripAnsi(value).length <= width) return value;
+  if (!value.includes("\x1b[")) return truncate(value, width);
+  const plain = stripAnsi(value);
+  return truncate(plain, width);
+}
+
+export function renderSnapshot(snapshot, options = {}) {
+  return renderMissionControl(snapshot, { ...options, color: false, interactive: false, height: options.height || 200 });
+}
