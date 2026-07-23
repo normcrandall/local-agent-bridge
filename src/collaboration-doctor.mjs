@@ -456,7 +456,6 @@ export function analyzePolicy(snapshot) {
     capabilities: snapshot.github?.enforcement?.capabilities || {},
   });
   const writerGitCustodyBlocked = request.mode === "work"
-    && request.role === "writer"
     && snapshot.workspace?.gitCustody?.state !== "self-contained";
   if (!snapshot.workspace?.exists || !snapshot.workspace?.git?.ok) {
     findings.push(policyFinding({
@@ -468,15 +467,23 @@ export function analyzePolicy(snapshot) {
   if (writerGitCustodyBlocked) {
     const custody = snapshot.workspace?.gitCustody || {};
     findings.push(policyFinding({
-      code: custody.state === "shared" ? "writer-git-custody-shared" : "writer-git-custody-unverifiable",
+      code: custody.state === "shared"
+        ? "writer-git-custody-shared"
+        : custody.state === "external"
+          ? "writer-git-custody-external"
+          : "writer-git-custody-unverifiable",
       severity: "failure",
       state: custody.state || "unverifiable",
       role: "writer",
       source: custody.source || source(snapshot.workspace?.path || "."),
       impact: custody.state === "shared"
         ? "A sandboxed writer can edit files but cannot safely create Git index or ref locks in another checkout's shared metadata."
-        : "The bridge cannot prove that the writer owns contained Git metadata required to commit.",
-      remediation: "Create a bridge-managed private writer checkout, or recover the stopped linked lane into private Git custody before delegation.",
+        : custody.state === "external"
+          ? "The writer's Git metadata is known to be outside the delegated workspace, so the sandbox cannot safely receive commit custody."
+          : "The bridge cannot prove that the writer owns contained Git metadata required to commit.",
+      remediation: custody.state === "shared"
+        ? "Create a bridge-managed private writer checkout, or recover the stopped linked lane into private Git custody before delegation."
+        : "Move the repository into a self-contained checkout or create a bridge-managed private writer checkout before delegation.",
     }));
   }
   if (mergeEnforcement.blocked) {

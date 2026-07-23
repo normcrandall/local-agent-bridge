@@ -147,6 +147,27 @@ assert.equal(sharedWriterCustody.ok, false);
 assert.deepEqual(sharedWriterCustody.matrix.codex.blockers, ["git-custody"]);
 assert.ok(sharedWriterCustody.findings.some((finding) => finding.code === "writer-git-custody-shared"));
 
+const sharedWorkModeReviewer = analyzePolicy(snapshot({
+  providers: ["codex"],
+  request: { mode: "work", role: "reviewer", workProfile: "implement", requireReviewApp: false },
+  workspace: {
+    gitCustody: { state: "shared", gitMetadataRoot: "/safe/repository/.git/worktrees/lane", source: src("/safe/repository/.git") },
+  },
+}));
+assert.equal(sharedWorkModeReviewer.ok, false);
+assert.ok(sharedWorkModeReviewer.findings.some((finding) => finding.code === "writer-git-custody-shared"));
+
+const externalWriterCustody = analyzePolicy(snapshot({
+  providers: ["codex"],
+  request: { mode: "work", role: "writer", workProfile: "implement", requireReviewApp: false },
+  workspace: {
+    gitCustody: { state: "external", gitMetadataRoot: "/outside/repository.git", source: src("/outside/repository.git") },
+  },
+}));
+assert.equal(externalWriterCustody.ok, false);
+assert.ok(externalWriterCustody.findings.some((finding) => finding.code === "writer-git-custody-external"));
+assert.match(renderPolicyReport(externalWriterCustody), /known to be outside the delegated workspace/);
+
 const explicitRulesetUnavailable = analyzePolicy(snapshot({
   github: {
     enforcement: {

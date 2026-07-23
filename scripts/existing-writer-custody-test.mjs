@@ -11,6 +11,7 @@ const root = resolve(import.meta.dirname, "..");
 const temporary = await mkdtemp("/tmp/bridge-custody-");
 const stateDirectory = join(temporary, "state");
 const standalone = join(temporary, "standalone");
+const unborn = join(temporary, "unborn");
 const source = join(temporary, "source");
 const linked = join(temporary, "linked");
 const argsFile = join(temporary, "codex-args.jsonl");
@@ -32,17 +33,19 @@ async function initializeRepository(path) {
 
 async function waitForStop(client, collaborationId) {
   const deadline = Date.now() + 10_000;
+  let lastView = null;
   while (Date.now() < deadline) {
     const result = await client.callTool({
       name: "get_collaboration",
       arguments: { collaborationId, detail: "full", includeTurns: 1 },
     });
     const view = result.structuredContent;
+    lastView = view;
     if (!["queued", "running", "recovering", "cancelling"].includes(view.status)
-      && !view.workerPid && !view.workerOwner && !view.runtime?.activeCall) return view;
+      && !view.workerPid && !view.workerOwner) return view;
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
   }
-  throw new Error(`Timed out waiting for ${collaborationId}`);
+  throw new Error(`Timed out waiting for ${collaborationId}: ${JSON.stringify({ status: lastView?.status, error: lastView?.error, activeCall: lastView?.runtime?.activeCall, workerPid: lastView?.workerPid })}`);
 }
 
 function writableRootArguments(calls) {
@@ -55,18 +58,26 @@ function writableRootArguments(calls) {
 
 await mkdir(stateDirectory, { recursive: true });
 await initializeRepository(standalone);
+await mkdir(unborn, { recursive: true });
+git(unborn, "init", "--initial-branch=main");
 await initializeRepository(source);
 git(source, "worktree", "add", "-b", "codex/linked-writer", linked, "HEAD");
 await writeFile(fakeCodex, `#!/bin/sh\nexec "${process.execPath}" "${resolve(root, "scripts/fixtures/fake-codex-progress.mjs")}" "$@"\n`);
 await chmod(fakeCodex, 0o700);
 
 const client = new Client({ name: "existing-writer-custody-test", version: "0.2.0" });
+const cleanProcessEnv = Object.fromEntries(
+  Object.entries(process.env).filter(([name]) => (
+    !name.startsWith("BRIDGE_")
+    && !["CLAUDE_BRIDGE_ACTIVE", "CODEX_BRIDGE_ACTIVE", "ANTIGRAVITY_BRIDGE_ACTIVE"].includes(name)
+  )),
+);
 const transport = new StdioClientTransport({
   command: "/bin/zsh",
   args: [resolve(root, "scripts/collaboration-bridge-mcp.sh")],
   cwd: root,
   env: {
-    ...process.env,
+    ...cleanProcessEnv,
     AGENT_BRIDGE_TEST_MODE: "1",
     BRIDGE_WORKSPACE_ROOT: temporary,
     BRIDGE_COLLABORATION_DIR: stateDirectory,
@@ -99,9 +110,38 @@ try {
   const firstRun = await waitForStop(client, started.structuredContent.id);
   assert.equal(firstRun.status, "turn_limit", firstRun.error || "existing checkout work turn failed");
 
+  const cleanupAdopted = await client.callTool({
+    name: "cleanup_writer_checkout",
+    arguments: {
+      collaborationId: started.structuredContent.id,
+      expectedWorkspace: standalone,
+      expectedHeadSha: git(standalone, "rev-parse", "HEAD"),
+    },
+  });
+  assert.equal(cleanupAdopted.isError, true);
+  assert.match(cleanupAdopted.content.map((item) => item.text || "").join("\n"), /bridge-managed.*adopted user repositories/i);
+
+  const unbornStart = await client.callTool({
+    name: "start_collaboration",
+    arguments: {
+      task: "Create the initial commit in an unborn repository",
+      workspace: unborn,
+      agents: ["codex"],
+      mode: "work",
+      writer: "codex",
+      workProfile: "implement",
+      maxTurns: 1,
+    },
+  });
+  assert.notEqual(unbornStart.isError, true, unbornStart.content?.map((item) => item.text || "").join("\n"));
+  assert.equal(unbornStart.structuredContent.worktree.base, null);
+  const unbornRun = await waitForStop(client, unbornStart.structuredContent.id);
+  assert.equal(unbornRun.status, "turn_limit", unbornRun.error || "unborn repository work turn failed");
+
   const calls = (await readFile(argsFile, "utf8")).trim().split("\n").filter(Boolean).map(JSON.parse);
   assert.deepEqual(writableRootArguments(calls), [
     `sandbox_workspace_write.writable_roots=${JSON.stringify([standaloneGitDirectory])}`,
+    `sandbox_workspace_write.writable_roots=${JSON.stringify([await realpath(resolve(unborn, ".git"))])}`,
   ]);
 
   const linkedStart = await client.callTool({

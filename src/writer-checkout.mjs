@@ -17,6 +17,15 @@ function git(cwd, args, { errorMessage, trim = true } = {}) {
   return trim ? result.stdout.trim() : result.stdout;
 }
 
+function optionalGit(cwd, args) {
+  const result = spawnSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+  });
+  return result.status === 0 ? result.stdout.trim() : null;
+}
+
 function containedPath(root, candidate, label) {
   const fromRoot = relative(root, candidate);
   if (fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)) {
@@ -61,8 +70,8 @@ export function adoptExistingWriterCheckout({ workspace }) {
     path: actualWorkspace,
     workspace: actualWorkspace,
     gitMetadataRoot,
-    branch: git(actualWorkspace, ["branch", "--show-current"]) || null,
-    base: git(actualWorkspace, ["rev-parse", "HEAD"]),
+    branch: optionalGit(actualWorkspace, ["branch", "--show-current"]),
+    base: optionalGit(actualWorkspace, ["rev-parse", "--verify", "HEAD^{commit}"]),
     strategy: "self-contained",
     managed: false,
     cleanup: null,

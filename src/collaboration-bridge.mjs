@@ -816,6 +816,14 @@ server.registerTool(
     }
 
     try {
+      let readiness = null;
+      if (!input.worktree) {
+        readiness = preflight({ workspace: requestedWorkspace, agents: delegatedAgents, mode: effectiveMode, workProfile: input.workProfile || "exact", permissionProfile: effectivePermissionProfile });
+        if (!readiness.checks.find((check) => check.name === "workspace")?.ok
+          || !readiness.checks.find((check) => check.name === "git-repository")?.ok) {
+          throw new Error("Collaboration preflight failed: workspace must exist and be a Git repository.");
+        }
+      }
       const worktree = input.worktree
         ? effectiveMode === "work"
           ? prepareWriterCheckout({
@@ -839,7 +847,7 @@ server.registerTool(
       if (input.chair?.workspace && projectDirectory(input.chair.workspace) !== realpathSync(workspace)) {
         throw new Error("Native chair workspace must match the collaboration workspace.");
       }
-      const readiness = preflight({ workspace, agents: delegatedAgents, mode: effectiveMode, workProfile: input.workProfile || "exact", permissionProfile: effectivePermissionProfile });
+      readiness ||= preflight({ workspace, agents: delegatedAgents, mode: effectiveMode, workProfile: input.workProfile || "exact", permissionProfile: effectivePermissionProfile });
       if (!readiness.checks.find((check) => check.name === "workspace")?.ok
         || !readiness.checks.find((check) => check.name === "git-repository")?.ok) {
         throw new Error("Collaboration preflight failed: workspace must exist and be a Git repository.");
@@ -1179,6 +1187,9 @@ server.registerTool(
     const current = await readCollaboration(WORKSPACE_ROOT, id);
     if (current.mode !== "work" || current.worktree?.strategy !== "self-contained") {
       throw new Error("Writer checkout cleanup requires a work-mode collaboration with private Git custody.");
+    }
+    if (current.worktree?.managed !== true) {
+      throw new Error("Writer checkout cleanup is available only for a bridge-managed private checkout; adopted user repositories are never removed.");
     }
     if (!["completed", "failed", "cancelled", "needs_user", "turn_limit"].includes(current.status)) {
       throw new Error(`Writer checkout cleanup requires a stopped inspectable collaboration; current status is ${current.status}.`);
@@ -1946,7 +1957,7 @@ server.registerTool(
         && !resolvedContinuationIssueClaim
         && !activeGithubReview
         && !activeGithubBuilder
-        && !current.worktree,
+        && !current.worktree?.base,
     });
     const continuationVerificationPlan = await resolveVerificationPlan({
       store: continuationStore,

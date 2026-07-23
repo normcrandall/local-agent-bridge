@@ -30,6 +30,14 @@ try {
   assert.equal(adoptedSource.managed, false);
   assert.equal(adoptedSource.gitMetadataRoot, sourceGitDirectory);
 
+  const unbornRepository = join(temporary, "unborn-repository");
+  mkdirSync(unbornRepository);
+  git(unbornRepository, "init", "--initial-branch=main");
+  const adoptedUnborn = adoptExistingWriterCheckout({ workspace: unbornRepository });
+  assert.equal(adoptedUnborn.branch, "main");
+  assert.equal(adoptedUnborn.base, null);
+  assert.equal(adoptedUnborn.managed, false);
+
   const checkout = prepareWriterCheckout({
     workspace: repository,
     taskId: "issue-82",
