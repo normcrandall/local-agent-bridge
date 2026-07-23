@@ -4,6 +4,7 @@ import { basename, dirname, resolve } from "node:path";
 import { promisify } from "node:util";
 import { queryControlPlane } from "./collaboration-store.mjs";
 import { LIVE_COLLABORATION_STATUSES } from "./collaboration-cleanup.mjs";
+import { hostActivityLane, listHostActivities } from "./host-activity-store.mjs";
 import { PORTFOLIO_STATUS_GROUPS } from "./portfolio-status.mjs";
 
 const ACTIVE_STATUSES = new Set([
@@ -154,6 +155,7 @@ export function isAttentionLane(lane, now = Date.now()) {
 
 export function isLiveLane(lane, now = Date.now(), heartbeatAfterMs = DEFAULT_LIVE_HEARTBEAT_AFTER_MS) {
   const status = String(lane.lifecyclePhase || "unknown").toLowerCase();
+  if (lane.type === "native_host") return status === "working" && lane.hostActivity?.live === true;
   if (!["collaboration", "combined"].includes(lane.type)) return false;
   if (!LIVE_COLLABORATION_STATUSES.has(status)) return false;
   if (lane.recovery?.processAlive === true) return true;
@@ -210,7 +212,9 @@ export async function loadMissionControlSnapshot({
   now = Date.now(),
 } = {}) {
   const controlPlane = await queryControlPlane(stateRoot, { includeArchived, now });
-  const allLanes = await mapLimit(controlPlane.lanes, 12, async (lane) => ({ ...lane, repository: await repositoryForLane(lane) }));
+  const hostActivities = await listHostActivities(stateRoot, { now });
+  const rawLanes = [...controlPlane.lanes, ...hostActivities.map((state) => hostActivityLane(state, now))];
+  const allLanes = await mapLimit(rawLanes, 12, async (lane) => ({ ...lane, repository: await repositoryForLane(lane) }));
   const normalizedFilter = clean(repositoryFilter).toLowerCase();
   const matching = allLanes.filter((lane) => !normalizedFilter
     || lane.repository.toLowerCase() === normalizedFilter);
@@ -440,7 +444,7 @@ export function renderMissionControl(snapshot, {
     lines.push(`${statusText(selected.lifecyclePhase, color)}  ${paint(selected.repository, "1", color)}  ${selected.id}`);
     lines.push(...field("Workspace", selected.workspace, usableWidth));
     lines.push(...field("Task", selected.task, usableWidth));
-    const role = [selected.activeAgent && `active ${selected.activeAgent}`, selected.writer && `writer ${selected.writer}`, selected.model && `model ${selected.model}`].filter(Boolean).join(" | ");
+    const role = [selected.type === "native_host" && "native host", selected.activeAgent && `active ${selected.activeAgent}`, selected.writer && `writer ${selected.writer}`, selected.model && `model ${selected.model}`].filter(Boolean).join(" | ");
     lines.push(...field("Agent", role, usableWidth));
     if (selected.narrative?.summary) {
       const stale = selected.heartbeat?.heartbeatAt && selected.narrative.updatedAt && dateMs(selected.narrative.updatedAt) < dateMs(selected.heartbeat.heartbeatAt) - 60_000;

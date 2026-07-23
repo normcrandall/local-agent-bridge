@@ -2,6 +2,7 @@
 
 import { homedir } from "node:os";
 import { resolve } from "node:path";
+import { writeSync } from "node:fs";
 import {
   clearRepositoryCache,
   loadMissionControlSnapshot,
@@ -86,14 +87,40 @@ let selectedId = null;
 let drawing = false;
 let stopped = false;
 let timer = null;
+let restorePromise = null;
+let terminalRestored = false;
+let resolveExit;
+const exitRequested = new Promise((resolvePromise) => { resolveExit = resolvePromise; });
+const restoreSequence = "\x1b[?25h\x1b[?1049l";
 
 function restore() {
-  if (stopped) return;
+  if (restorePromise) return restorePromise;
   stopped = true;
   if (timer) clearInterval(timer);
+  process.stdout.off("resize", draw);
   process.stdin.setRawMode?.(false);
   process.stdin.pause();
-  process.stdout.write("\x1b[?25h\x1b[?1049l");
+  restorePromise = new Promise((resolveRestore) => {
+    process.stdout.write(restoreSequence, () => {
+      terminalRestored = true;
+      resolveRestore();
+    });
+  });
+  return restorePromise;
+}
+
+function restoreSynchronously() {
+  if (terminalRestored) return;
+  try { process.stdin.setRawMode?.(false); } catch {}
+  try { writeSync(process.stdout.fd, restoreSequence); } catch {}
+  terminalRestored = true;
+}
+
+async function shutdown(code) {
+  if (stopped) return;
+  await restore();
+  process.exitCode = code;
+  resolveExit();
 }
 
 async function draw() {
@@ -101,6 +128,7 @@ async function draw() {
   drawing = true;
   try {
     const current = await snapshot();
+    if (stopped) return;
     if (selectedId) {
       const preserved = current.lanes.findIndex((lane) => lane.id === selectedId);
       if (preserved >= 0) selectedIndex = preserved;
@@ -108,6 +136,7 @@ async function draw() {
     selectedIndex = Math.min(Math.max(0, selectedIndex), Math.max(0, current.lanes.length - 1));
     selectedId = current.lanes[selectedIndex]?.id || null;
     const timeline = selectedId ? await loadTimeline(stateRoot, selectedId) : [];
+    if (stopped) return;
     const output = renderMissionControl(current, {
       selectedIndex,
       timeline,
@@ -116,8 +145,10 @@ async function draw() {
       color,
       interactive: true,
     });
+    if (stopped) return;
     process.stdout.write(`\x1b[H\x1b[2J${output}`);
   } catch (error) {
+    if (stopped) return;
     process.stdout.write(`\x1b[H\x1b[2JMission Control refresh failed: ${error.message}\nPress r to retry or q to quit.`);
   } finally {
     drawing = false;
@@ -130,8 +161,8 @@ process.stdin.resume();
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", async (key) => {
   if (key === "q" || key === "\u0003") {
-    restore();
-    process.exit(0);
+    await shutdown(0);
+    return;
   }
   if (["l", "a", "h"].includes(key)) {
     view = key === "l" ? "live" : key === "a" ? "attention" : "all";
@@ -152,12 +183,12 @@ process.stdin.on("data", async (key) => {
   }
   await draw();
 });
-process.on("SIGINT", () => { restore(); process.exit(130); });
-process.on("SIGTERM", () => { restore(); process.exit(143); });
-process.on("exit", restore);
+process.on("SIGINT", () => { void shutdown(130); });
+process.on("SIGTERM", () => { void shutdown(143); });
+process.on("exit", restoreSynchronously);
 process.stdout.on("resize", draw);
 
 timer = setInterval(draw, refreshMs);
 timer.unref();
 await draw();
-await new Promise(() => {});
+await exitRequested;

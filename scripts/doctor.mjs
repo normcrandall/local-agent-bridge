@@ -140,6 +140,7 @@ check("Claude CLI collaboration status line", () => {
     && settings.statusLine?.refreshInterval <= 2;
 }, "point Claude statusLine at agent-bridge-claude-statusline with refreshInterval 2");
 const coordinatorHookLauncher = resolve(homedir(), ".local/bin/agent-bridge-coordinator-hook");
+const hostActivityHookLauncher = resolve(homedir(), ".local/bin/agent-bridge-host-activity-hook");
 function hasCommandHook(settings, event, command) {
   return settings.hooks?.[event]?.some((group) => (
     group.hooks?.some((hook) => hook.type === "command" && hook.command === command)
@@ -151,6 +152,15 @@ check("Claude coordinator lifecycle hooks", () => {
   return hasCommandHook(settings, "Stop", `${coordinatorHookLauncher} claude stop`)
     && hasCommandHook(settings, "SessionStart", `${coordinatorHookLauncher} claude session_start`);
 }, "run npm run install:global to install Claude Stop and SessionStart coordinator hooks");
+check("Claude native host activity hooks", () => {
+  accessSync(hostActivityHookLauncher, constants.X_OK);
+  const settings = JSON.parse(readFileSync(resolve(homedir(), ".claude/settings.json"), "utf8"));
+  return hasCommandHook(settings, "UserPromptSubmit", `${hostActivityHookLauncher} claude start`)
+    && hasCommandHook(settings, "PreToolUse", `${hostActivityHookLauncher} claude heartbeat`)
+    && hasCommandHook(settings, "PostToolUse", `${hostActivityHookLauncher} claude heartbeat`)
+    && hasCommandHook(settings, "Stop", `${hostActivityHookLauncher} claude stop`)
+    && hasCommandHook(settings, "SessionEnd", `${hostActivityHookLauncher} claude stop`);
+}, "run npm run install:global to expose native Claude turns in Mission Control");
 check("Claude collaboration wake channel", () => {
   const config = JSON.parse(readFileSync(resolve(homedir(), ".claude.json"), "utf8"));
   const channelLauncher = resolve(homedir(), ".local/bin/agent-bridge-claude-wake-channel");
@@ -163,6 +173,15 @@ check("Antigravity coordinator lifecycle hooks", () => {
   return hasCommandHook(settings, "AfterAgent", `${coordinatorHookLauncher} antigravity stop`)
     && hasCommandHook(settings, "SessionStart", `${coordinatorHookLauncher} antigravity session_start`);
 }, "run npm run install:global to install Antigravity AfterAgent and SessionStart coordinator hooks");
+check("Antigravity native host activity hooks", () => {
+  accessSync(hostActivityHookLauncher, constants.X_OK);
+  const settings = JSON.parse(readFileSync(resolve(homedir(), ".gemini/antigravity-cli/settings.json"), "utf8"));
+  return hasCommandHook(settings, "BeforeAgent", `${hostActivityHookLauncher} antigravity start`)
+    && hasCommandHook(settings, "BeforeTool", `${hostActivityHookLauncher} antigravity heartbeat`)
+    && hasCommandHook(settings, "AfterTool", `${hostActivityHookLauncher} antigravity heartbeat`)
+    && hasCommandHook(settings, "AfterAgent", `${hostActivityHookLauncher} antigravity stop`)
+    && hasCommandHook(settings, "SessionEnd", `${hostActivityHookLauncher} antigravity stop`);
+}, "run npm run install:global to expose native Antigravity turns in Mission Control");
 check("Codex coordinator lifecycle hooks", () => {
   const config = readFileSync(resolve(homedir(), ".codex/config.toml"), "utf8");
   if (!/^\[features\][\s\S]*?^hooks\s*=\s*true\s*$/m.test(config)) return false;
@@ -171,6 +190,15 @@ check("Codex coordinator lifecycle hooks", () => {
   return hasCommandHook(hooks, "Stop", `${coordinatorHookLauncher} codex stop`)
     && hasCommandHook(hooks, "SessionStart", `${coordinatorHookLauncher} codex session_start`);
 }, "run npm run install:global to install and enable Codex Stop and SessionStart coordinator hooks");
+check("Codex native host activity hooks", () => {
+  accessSync(hostActivityHookLauncher, constants.X_OK);
+  const hooks = JSON.parse(readFileSync(resolve(homedir(), ".codex/hooks.json"), "utf8"));
+  return hasCommandHook(hooks, "UserPromptSubmit", `${hostActivityHookLauncher} codex start`)
+    && hasCommandHook(hooks, "PreToolUse", `${hostActivityHookLauncher} codex heartbeat`)
+    && hasCommandHook(hooks, "PostToolUse", `${hostActivityHookLauncher} codex heartbeat`)
+    && hasCommandHook(hooks, "Stop", `${hostActivityHookLauncher} codex stop`)
+    && hasCommandHook(hooks, "SessionEnd", `${hostActivityHookLauncher} codex stop`);
+}, "run npm run install:global to expose native Codex turns in Mission Control");
 function configuredGitHubEntry(selected) {
   const configPath = resolve(homedir(), ".config/local-agent-bridge/github-apps.json");
   if (!existsSync(configPath)) return false;
