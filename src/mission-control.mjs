@@ -35,6 +35,17 @@ export function clearRepositoryCache() {
   repositoryCache.clear();
 }
 
+export async function readFileRange(handle, start, length) {
+  const buffer = Buffer.alloc(length);
+  let filled = 0;
+  while (filled < length) {
+    const { bytesRead } = await handle.read(buffer, filled, length - filled, start + filled);
+    if (bytesRead === 0) break;
+    filled += bytesRead;
+  }
+  return { buffer: buffer.subarray(0, filled), consumedSize: start + filled };
+}
+
 function clean(value) {
   return String(value ?? "").replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
 }
@@ -213,11 +224,12 @@ export async function loadTimeline(stateRoot, id, limit = 8) {
   const start = incremental ? cached.size : Math.max(0, info.size - 1_048_576);
   const handle = await open(path, "r");
   let text;
+  let consumedSize;
   try {
     const length = Math.max(0, info.size - start);
-    const buffer = Buffer.alloc(length);
-    const { bytesRead } = await handle.read(buffer, 0, length, start);
-    text = `${incremental ? cached.remainder : ""}${buffer.subarray(0, bytesRead).toString("utf8")}`;
+    const range = await readFileRange(handle, start, length);
+    consumedSize = range.consumedSize;
+    text = `${incremental ? cached.remainder : ""}${range.buffer.toString("utf8")}`;
   } finally {
     await handle.close();
   }
@@ -232,7 +244,7 @@ export async function loadTimeline(stateRoot, id, limit = 8) {
   });
   const events = [...(incremental ? cached.events : []), ...added].slice(-64);
   timelineCache.delete(path);
-  timelineCache.set(path, { size: info.size, mtimeMs: info.mtimeMs, remainder, events });
+  timelineCache.set(path, { size: consumedSize, mtimeMs: info.mtimeMs, remainder, events });
   while (timelineCache.size > 100) timelineCache.delete(timelineCache.keys().next().value);
   return events.slice(-limit);
 }

@@ -12,6 +12,7 @@ import {
   navigationIntent,
   parseRepositoryRemote,
   renderSnapshot,
+  readFileRange,
   statusRank,
   stripAnsi,
 } from "../src/mission-control.mjs";
@@ -30,6 +31,17 @@ for (const status of PORTFOLIO_STATUSES) {
 }
 assert.equal(isAttentionLane({ lifecyclePhase: "unknown" }), false);
 for (const status of PORTFOLIO_STATUS_GROUPS.integration) assert.ok(statusRank(status) < statusRank("ready"));
+const shortReadSource = Buffer.from("incremental-ledger-data");
+const shortRead = await readFileRange({
+  async read(buffer, offset, length, position) {
+    const bytesRead = Math.min(3, length, shortReadSource.length - position);
+    if (bytesRead <= 0) return { bytesRead: 0 };
+    shortReadSource.copy(buffer, offset, position, position + bytesRead);
+    return { bytesRead };
+  },
+}, 0, shortReadSource.length);
+assert.equal(shortRead.buffer.toString("utf8"), shortReadSource.toString("utf8"));
+assert.equal(shortRead.consumedSize, shortReadSource.length);
 
 const root = await mkdtemp(join(tmpdir(), "bridge-mission-control-"));
 const workspace = join(root, "workspace");
