@@ -89,6 +89,7 @@ let stopped = false;
 let timer = null;
 let restorePromise = null;
 let terminalRestored = false;
+let lastAttentionSignature = null;
 let resolveExit;
 const exitRequested = new Promise((resolvePromise) => { resolveExit = resolvePromise; });
 const restoreSequence = "\x1b[?25h\x1b[?1049l";
@@ -129,6 +130,10 @@ async function draw() {
   try {
     const current = await snapshot();
     if (stopped) return;
+    if (current.needsUserCount > 0 && current.needsUserSignature !== lastAttentionSignature) {
+      process.stdout.write("\x07");
+    }
+    lastAttentionSignature = current.needsUserSignature || null;
     if (selectedId) {
       const preserved = current.lanes.findIndex((lane) => lane.id === selectedId);
       if (preserved >= 0) selectedIndex = preserved;

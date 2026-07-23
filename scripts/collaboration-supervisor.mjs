@@ -18,6 +18,7 @@ import { TERMINAL_COLLABORATION_STATUSES } from "../src/collaboration-cleanup.mj
 import { enqueueCoordinatorWake } from "../src/coordinator-wake.mjs";
 import { sanitizeWorkerEnvironment, supervisorEndpoint } from "../src/worker-supervisor-protocol.mjs";
 import { createLocalModelWarmer } from "../src/local-model-warmth.mjs";
+import { scanPendingUserAttention } from "../src/user-attention.mjs";
 
 const PROTOCOL_VERSION = 1;
 const runtimeRoot = resolve(process.env.BRIDGE_RUNTIME_ROOT || fileURLToPath(new URL("..", import.meta.url)));
@@ -34,6 +35,7 @@ let stopping = false;
 let ready = false;
 let refreshing = false;
 let modelWarmthStatus = { status: "starting", provider: null };
+let attentionScanRunning = false;
 const modelWarmer = createLocalModelWarmer({ onStatus: (status) => { modelWarmthStatus = status; } });
 
 function processAlive(pid) {
@@ -405,6 +407,20 @@ await adoptRecordedWorkers();
 modelWarmer.start();
 ready = true;
 
+async function scanAttention() {
+  if (attentionScanRunning) return;
+  attentionScanRunning = true;
+  try {
+    await scanPendingUserAttention(workspaceRoot);
+  } catch {
+    // Durable needs_user state remains visible even when desktop delivery fails.
+  } finally {
+    attentionScanRunning = false;
+  }
+}
+
+void scanAttention();
+
 const monitor = setInterval(() => {
   for (const entry of monitored.values()) {
     if (entry.child || entry.checking) continue;
@@ -437,10 +453,14 @@ const monitor = setInterval(() => {
 }, 1_000);
 monitor.unref();
 
+const attentionMonitor = setInterval(() => { void scanAttention(); }, 60_000);
+attentionMonitor.unref();
+
 async function shutdown(signal) {
   if (stopping) return;
   stopping = true;
   clearInterval(monitor);
+  clearInterval(attentionMonitor);
   modelWarmer.stop();
   await atomicMetadata({
     protocol: PROTOCOL_VERSION,

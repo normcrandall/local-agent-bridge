@@ -221,6 +221,11 @@ export async function loadMissionControlSnapshot({
   const mode = view || (showAll ? "all" : "live");
   if (!["live", "attention", "all"].includes(mode)) throw new Error(`Unknown Mission Control view: ${mode}`);
   const attention = matching.filter((lane) => isAttentionLane(lane, now));
+  const needsUser = matching.filter((lane) => (
+    String(lane.lifecyclePhase || "").toLowerCase() === "needs_user"
+    || lane.coordinatorWake?.kind === "needs_user"
+    || lane.nextAction === "needs_user"
+  ));
   const stale = attention.filter((lane) => isStaleLane(lane, now, staleAfterMs));
   const selected = mode === "all"
     ? matching
@@ -262,6 +267,11 @@ export async function loadMissionControlSnapshot({
     staleAfterMs,
     includeStale,
     providerActivity,
+    needsUserCount: needsUser.length,
+    needsUserSignature: needsUser
+      .map((lane) => `${lane.id}:${lane.coordinatorWake?.sequence || 0}`)
+      .sort()
+      .join("|"),
     totalLanes: matching.length,
     visibleLanes: visible.length,
     lanes: visible,
@@ -402,6 +412,9 @@ export function renderMissionControl(snapshot, {
   const providerLine = Object.entries(snapshot.providerActivity).map(([provider, count]) => `${provider}:${count}`).join("  ") || "idle";
   lines.push(paint("AGENT BRIDGE MISSION CONTROL", "1;34", color));
   lines.push(truncate(`Mode: ${snapshot.mode} | repos ${snapshot.visibleRepositories ?? snapshot.repositories.length} | lanes ${snapshot.visibleLanes}/${snapshot.totalLanes} | providers ${providerLine}`, usableWidth));
+  if (snapshot.needsUserCount > 0) {
+    lines.push(paint(`!!! USER INPUT REQUIRED: ${snapshot.needsUserCount} collaboration${snapshot.needsUserCount === 1 ? "" : "s"}. Press a to inspect.`, "31;1", color));
+  }
   lines.push(paint("─".repeat(usableWidth), "90", color));
 
   if (!lanes.length) {

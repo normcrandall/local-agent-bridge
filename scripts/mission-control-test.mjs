@@ -132,6 +132,8 @@ try {
   assert.equal(live.lanes[0].id, runningId);
   assert.equal(live.providerActivity.codex, 1);
   assert.equal(live.collapsedStale.total, 0);
+  assert.equal(live.needsUserCount, 1);
+  assert.match(live.needsUserSignature, new RegExp(needsUserId));
 
   const hostRoot = join(root, "host-test");
   const sessionId = "private-codex-session-123";
@@ -249,6 +251,7 @@ try {
   const selectedIndex = attention.lanes.findIndex((lane) => lane.id === runningId);
   const rendered = renderSnapshot(attention, { selectedIndex, timeline, width: 88, height: 100, now });
   assert.match(rendered, /AGENT BRIDGE MISSION CONTROL/);
+  assert.match(rendered, /USER INPUT REQUIRED: 1 collaboration/);
   assert.match(rendered, /veliqon\/control-plane/);
   assert.match(rendered, /Workspace:/);
   assert.match(rendered, /Narrative .*stale while heartbeat remains live/);
