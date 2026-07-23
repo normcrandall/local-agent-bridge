@@ -1188,7 +1188,7 @@ server.registerTool(
     if (current.mode !== "work" || current.worktree?.strategy !== "self-contained") {
       throw new Error("Writer checkout cleanup requires a work-mode collaboration with private Git custody.");
     }
-    if (current.worktree?.managed !== true) {
+    if (current.worktree?.managed === false) {
       throw new Error("Writer checkout cleanup is available only for a bridge-managed private checkout; adopted user repositories are never removed.");
     }
     if (!["completed", "failed", "cancelled", "needs_user", "turn_limit"].includes(current.status)) {

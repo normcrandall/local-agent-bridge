@@ -123,6 +123,7 @@ try {
   assert.equal(afterRefusedCancel.workspaceOperation.id, "writer-cleanup-reservation-test");
   afterRefusedCancel.status = "needs_user";
   afterRefusedCancel.workspaceOperation = null;
+  delete afterRefusedCancel.worktree.managed;
   await writeFile(join(stateDirectory, `${collaborationId}.json`), `${JSON.stringify(afterRefusedCancel, null, 2)}\n`);
 
   const dirtyCleanup = await client.callTool({
