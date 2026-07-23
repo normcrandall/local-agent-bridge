@@ -4,6 +4,10 @@ export const TERMINAL_COLLABORATION_STATUSES = new Set([
   "agreed", "needs_user", "turn_limit", "failed", "cancelled", "budget",
 ]);
 
+export const LIVE_COLLABORATION_STATUSES = new Set([
+  "queued", "running", "recovering", "cancelling",
+]);
+
 export function clearTerminalRuntime(state, { status = state.status, error = state.error || null, at = new Date().toISOString() } = {}) {
   const terminal = TERMINAL_COLLABORATION_STATUSES.has(status);
   return {

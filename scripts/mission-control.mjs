@@ -138,7 +138,12 @@ process.stdin.on("data", async (key) => {
     selectedIndex = 0;
     selectedId = null;
   }
-  else if (key === "s") { includeStale = !includeStale; selectedIndex = 0; selectedId = null; }
+  else if (key === "s") {
+    if (view !== "attention") view = "attention";
+    includeStale = !includeStale;
+    selectedIndex = 0;
+    selectedId = null;
+  }
   else if (key === "r") clearRepositoryCache();
   else {
     const intent = navigationIntent(key, selectedIndex);

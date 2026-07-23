@@ -32,9 +32,15 @@ for (const status of PORTFOLIO_STATUSES) {
   assert.equal(isAttentionLane({ lifecyclePhase: status, updatedAt: "2026-07-23T11:59:00.000Z" }, Date.parse("2026-07-23T12:00:00.000Z")), expected, `${status} classification drifted`);
 }
 assert.equal(isAttentionLane({ lifecyclePhase: "unknown" }), false);
-assert.equal(isLiveLane({ type: "collaboration", lifecyclePhase: "running" }), true);
+const classificationNow = Date.parse("2026-07-23T12:00:00.000Z");
+assert.equal(isLiveLane({ type: "collaboration", lifecyclePhase: "running" }, classificationNow), false);
+assert.equal(isLiveLane({ type: "collaboration", lifecyclePhase: "running", recovery: { processAlive: true } }, classificationNow), true);
+assert.equal(isLiveLane({ type: "collaboration", lifecyclePhase: "running", heartbeat: { heartbeatAt: "2026-07-23T11:59:30.000Z" } }, classificationNow), true);
+assert.equal(isLiveLane({ type: "collaboration", lifecyclePhase: "running", heartbeat: { heartbeatAt: "2026-07-23T11:58:00.000Z" } }, classificationNow), false);
+assert.equal(isLiveLane({ type: "collaboration", lifecyclePhase: "indeterminate", heartbeat: { heartbeatAt: "2026-07-23T11:59:59.000Z" } }, classificationNow), false);
 assert.equal(isLiveLane({ type: "portfolio_lane", lifecyclePhase: "implementing" }), false);
 assert.equal(isStaleLane({ type: "portfolio_lane", lifecyclePhase: "blocked", updatedAt: "2026-07-22T10:00:00.000Z" }, Date.parse("2026-07-23T12:00:00.000Z")), true);
+assert.equal(isStaleLane({ type: "portfolio_lane", lifecyclePhase: "integrating", updatedAt: "2026-07-22T10:00:00.000Z" }, Date.parse("2026-07-23T12:00:00.000Z")), false);
 for (const status of PORTFOLIO_STATUS_GROUPS.integration) assert.ok(statusRank(status) < statusRank("ready"));
 const shortReadSource = Buffer.from("incremental-ledger-data");
 const shortRead = await readFileRange({
@@ -117,6 +123,7 @@ try {
   assert.equal(live.visibleLanes, 1);
   assert.equal(live.lanes[0].id, runningId);
   assert.equal(live.providerActivity.codex, 1);
+  assert.equal(live.collapsedStale.total, 0);
 
   const attention = await loadMissionControlSnapshot({ stateRoot: root, view: "attention", now });
   assert.equal(attention.mode, "attention");

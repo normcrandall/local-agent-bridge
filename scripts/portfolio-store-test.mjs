@@ -31,7 +31,8 @@ try {
     status: "complete",
     items: current.items.map((item) => ({ ...item, status: "merged" })),
   }));
-  assert.equal((await archivePortfolio(root, completed.id)).archived, true);
+  await assert.rejects(() => archivePortfolio(root, completed.id, { expectedRevision: completed.revision - 1 }), /revision changed/i);
+  assert.equal((await archivePortfolio(root, completed.id, { expectedRevision: completed.revision })).archived, true);
   assert.equal((await listPortfolios(root)).length, 0);
   assert.equal(JSON.parse(await readFile(join(root, "archive", `${completed.id}.json`), "utf8")).status, "complete");
 } finally {

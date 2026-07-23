@@ -97,7 +97,10 @@ export async function archivePortfolio(root, id, { expectedRevision = null } = {
   const release = await acquireLock(target.lock);
   try {
     const state = await readPortfolio(root, id);
-    if (expectedRevision !== null && state.revision !== expectedRevision) {
+    if (!Number.isInteger(expectedRevision)) {
+      throw new Error(`Cannot archive portfolio ${id}: an audited revision is required.`);
+    }
+    if (state.revision !== expectedRevision) {
       throw new Error(`Cannot archive portfolio ${id}: revision changed after cleanup audit.`);
     }
     const items = Array.isArray(state.items) ? state.items : [];

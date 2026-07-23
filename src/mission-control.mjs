@@ -3,11 +3,9 @@ import { open, stat } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import { promisify } from "node:util";
 import { queryControlPlane } from "./collaboration-store.mjs";
+import { LIVE_COLLABORATION_STATUSES } from "./collaboration-cleanup.mjs";
 import { PORTFOLIO_STATUS_GROUPS } from "./portfolio-status.mjs";
 
-const LIVE_COLLABORATION_STATUSES = new Set([
-  "queued", "waiting_capacity", "running", "working", "recovering", "cancelling",
-]);
 const ACTIVE_STATUSES = new Set([
   "queued", "waiting_capacity", "running", "working", "recovering", "cancelling",
   "validating",
@@ -23,6 +21,7 @@ let repositoryCacheGeneration = 0;
 const execFileAsync = promisify(execFile);
 const MAX_TIMELINE_READ_BYTES = 1_048_576;
 const DEFAULT_STALE_AFTER_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_LIVE_HEARTBEAT_AFTER_MS = 60_000;
 
 const ANSI_PATTERN = /\x1b\[[0-9;]*m/g;
 export const stripAnsi = (value) => String(value || "").replace(ANSI_PATTERN, "");
@@ -153,18 +152,22 @@ export function isAttentionLane(lane, now = Date.now()) {
   return false;
 }
 
-export function isLiveLane(lane) {
+export function isLiveLane(lane, now = Date.now(), heartbeatAfterMs = DEFAULT_LIVE_HEARTBEAT_AFTER_MS) {
   const status = String(lane.lifecyclePhase || "unknown").toLowerCase();
-  if (lane.heartbeat?.heartbeatAt) return true;
-  return ["collaboration", "combined"].includes(lane.type) && LIVE_COLLABORATION_STATUSES.has(status);
+  if (!["collaboration", "combined"].includes(lane.type)) return false;
+  if (!LIVE_COLLABORATION_STATUSES.has(status)) return false;
+  if (lane.recovery?.processAlive === true) return true;
+  const heartbeatAt = dateMs(lane.heartbeat?.heartbeatAt);
+  return heartbeatAt > 0 && now - heartbeatAt <= heartbeatAfterMs;
 }
 
 export function isStaleLane(lane, now = Date.now(), staleAfterMs = DEFAULT_STALE_AFTER_MS) {
-  if (isLiveLane(lane) || String(lane.lifecyclePhase || "").toLowerCase() === "indeterminate") return false;
+  if (isLiveLane(lane, now) || String(lane.lifecyclePhase || "").toLowerCase() === "indeterminate") return false;
   const updatedAt = dateMs(lane.updatedAt);
   if (!updatedAt || now - updatedAt < staleAfterMs) return false;
   const status = String(lane.lifecyclePhase || "unknown").toLowerCase();
-  return lane.type === "portfolio_lane" || ["needs_user", "blocked", "failed", "budget", "ready"].includes(status);
+  if (lane.type === "portfolio_lane") return !PORTFOLIO_STATUS_GROUPS.integration.includes(status);
+  return ["needs_user", "blocked", "failed", "budget", "ready"].includes(status);
 }
 
 function summarizeCollapsedStale(lanes) {
@@ -219,7 +222,7 @@ export async function loadMissionControlSnapshot({
     ? matching
     : mode === "attention"
       ? attention.filter((lane) => includeStale || !isStaleLane(lane, now, staleAfterMs))
-      : matching.filter((lane) => isLiveLane(lane));
+      : matching.filter((lane) => isLiveLane(lane, now));
   const visible = selected.sort((left, right) => {
     const repositoryOrder = left.repository.localeCompare(right.repository);
     if (repositoryOrder) return repositoryOrder;
@@ -233,7 +236,7 @@ export async function loadMissionControlSnapshot({
     const summary = repositories.get(lane.repository) || { repository: lane.repository, total: 0, attention: 0, live: 0, visible: 0 };
     summary.total += 1;
     if (isAttentionLane(lane, now)) summary.attention += 1;
-    if (isLiveLane(lane)) summary.live += 1;
+    if (isLiveLane(lane, now)) summary.live += 1;
     repositories.set(lane.repository, summary);
   }
   for (const lane of visible) repositories.get(lane.repository).visible += 1;
@@ -251,7 +254,7 @@ export async function loadMissionControlSnapshot({
     filter: repositoryFilter || null,
     repositories: [...repositories.values()].sort((a, b) => a.repository.localeCompare(b.repository)),
     visibleRepositories: new Set(visible.map((lane) => lane.repository)).size,
-    collapsedStale: includeStale || mode === "all" ? summarizeCollapsedStale([]) : summarizeCollapsedStale(stale),
+    collapsedStale: !includeStale && mode === "attention" ? summarizeCollapsedStale(stale) : summarizeCollapsedStale([]),
     staleAfterMs,
     includeStale,
     providerActivity,

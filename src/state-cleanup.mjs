@@ -4,13 +4,13 @@ import {
   listCollaborations,
   readCollaboration,
 } from "./collaboration-store.mjs";
+import { LIVE_COLLABORATION_STATUSES } from "./collaboration-cleanup.mjs";
 import { archivePortfolio, listPortfolios } from "./portfolio-store.mjs";
 import { PORTFOLIO_STATUS_GROUPS } from "./portfolio-status.mjs";
 
 const SAFE_COLLABORATION_ARCHIVE_STATUSES = new Set([
   "agreed", "completed", "cancelled", "closed", "superseded", "failed", "turn_limit", "budget",
 ]);
-const LIVE_COLLABORATION_STATUSES = new Set(["queued", "running", "recovering", "cancelling"]);
 
 function alive(pid) {
   if (!Number.isInteger(pid) || pid <= 1) return false;
@@ -41,7 +41,7 @@ function collaborationProtectionReasons(state) {
   if (state.runtime?.activeCall) reasons.push("active_provider_call");
   if (pendingWake(state)) reasons.push("pending_coordinator_wake");
   if (pendingHandoff(state)) reasons.push("unacknowledged_handoff");
-  if (state.workspaceOperation?.status === "running") reasons.push("workspace_operation");
+  if (state.workspaceOperation) reasons.push("workspace_operation");
   return reasons;
 }
 
@@ -51,7 +51,6 @@ function collaborationSummary(state, reasons = []) {
     status: state.status,
     updatedAt: state.updatedAt,
     workspace: state.workspace || null,
-    task: String(state.taskBase || state.task || "").slice(0, 160),
     issueClaim: state.issueClaim ? {
       repository: state.issueClaim.repository || null,
       issueNumber: state.issueClaim.issueNumber || null,
@@ -113,8 +112,13 @@ export async function auditBridgeCleanup({
     const items = Array.isArray(state.items) ? state.items : [];
     const terminal = state.status === "complete"
       && items.every((item) => PORTFOLIO_STATUS_GROUPS.terminal.includes(item.status));
-    if (terminal) portfolioArchiveCandidates.push(portfolioSummary(state));
-    else stalePortfolios.push(portfolioSummary(state, [`status:${state.status || "unknown"}`]));
+    if (terminal && Number.isInteger(state.revision)) portfolioArchiveCandidates.push(portfolioSummary(state));
+    else {
+      const reasons = [];
+      if (!terminal) reasons.push(`status:${state.status || "unknown"}`);
+      if (!Number.isInteger(state.revision)) reasons.push("missing_revision");
+      stalePortfolios.push(portfolioSummary(state, reasons));
+    }
   }
 
   return {
@@ -144,18 +148,30 @@ export async function applyBridgeCleanup(options = {}) {
   const audit = await auditBridgeCleanup(options);
   const archivedCollaborations = [];
   const archivedPortfolios = [];
+  const failedCollaborations = [];
+  const failedPortfolios = [];
   for (const candidate of audit.collaborationArchiveCandidates) {
-    archivedCollaborations.push(await archiveCollaboration(options.workspaceRoot, candidate.id, { expectedUpdatedAt: candidate.updatedAt }));
+    try {
+      archivedCollaborations.push(await archiveCollaboration(options.workspaceRoot, candidate.id, { expectedUpdatedAt: candidate.updatedAt }));
+    } catch (error) {
+      failedCollaborations.push({ id: candidate.id, error: error.message });
+    }
   }
   const portfolioRoot = process.env.BRIDGE_PORTFOLIO_DIR || resolve(options.stateRoot, "portfolios");
   for (const candidate of audit.portfolioArchiveCandidates) {
-    archivedPortfolios.push(await archivePortfolio(portfolioRoot, candidate.id, { expectedRevision: candidate.revision }));
+    try {
+      archivedPortfolios.push(await archivePortfolio(portfolioRoot, candidate.id, { expectedRevision: candidate.revision }));
+    } catch (error) {
+      failedPortfolios.push({ id: candidate.id, error: error.message });
+    }
   }
   return {
     ...audit,
     applied: true,
     archivedCollaborations,
     archivedPortfolios,
+    failedCollaborations,
+    failedPortfolios,
   };
 }
 
@@ -168,6 +184,9 @@ export function formatCleanupReport(report, { applied = report.applied === true,
   ];
   if (applied) {
     lines.push(`Archived: ${report.archivedCollaborations.length} collaborations, ${report.archivedPortfolios.length} portfolios`);
+    if (report.failedCollaborations?.length || report.failedPortfolios?.length) {
+      lines.push(`Skipped after recheck: ${report.failedCollaborations?.length || 0} collaborations, ${report.failedPortfolios?.length || 0} portfolios`);
+    }
   } else if (report.counts.collaborationArchiveCandidates || report.counts.portfolioArchiveCandidates) {
     lines.push("Run again with --apply to archive only the archive-ready records.");
   }
