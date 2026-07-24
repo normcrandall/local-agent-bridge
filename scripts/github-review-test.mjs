@@ -8,6 +8,12 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { existsSync, realpathSync, symlinkSync } from "node:fs";
 import { reviewGateState, reviewMarker, submitBoundReview } from "../src/github-review-client.mjs";
+import { createBoundBuilderClient } from "../src/github-builder-client.mjs";
+import {
+  approvedSubmissionEvent,
+  createReviewerThreadController,
+  reviewThreadReceiptPath,
+} from "../src/github-review-threads.mjs";
 import { parseReviewEnvelope, reviewEnvelopeInstructions } from "../src/review-envelope.mjs";
 import { ensureContainedHandoffPath, resolveContainedHandoffPath } from "../src/handoff-path.mjs";
 
@@ -38,6 +44,136 @@ const envelope = parseReviewEnvelope(`Independent review complete.\n---BEGIN BOU
 assert.equal(envelope.event, "APPROVE");
 assert.match(envelope.handoff, /Antigravity review/);
 await assert.rejects(async () => parseReviewEnvelope("no envelope"), /required bound GitHub review envelope/);
+assert.equal(approvedSubmissionEvent("APPROVED"), "APPROVE");
+assert.equal(approvedSubmissionEvent("approved"), "APPROVE");
+assert.equal(approvedSubmissionEvent("COMMENTED"), null);
+assert.equal(approvedSubmissionEvent("PENDING"), null);
+assert.equal(approvedSubmissionEvent(undefined), null);
+assert.equal(
+  reviewThreadReceiptPath({
+    repository: "owner/repo",
+    prNumber: 42,
+    headSha: "a".repeat(40),
+    expectedLogin: "reviewer[bot]",
+    stateRoot: "/bridge-state",
+  }),
+  `/bridge-state/owner__repo--42--${"a".repeat(40)}--reviewer[bot].jsonl`,
+);
+for (const invalid of [
+  { repository: "owner/repo/extra", prNumber: 42, headSha: "a".repeat(40), expectedLogin: "reviewer[bot]" },
+  { repository: "../repo", prNumber: 42, headSha: "a".repeat(40), expectedLogin: "reviewer[bot]" },
+  { repository: "owner/repo", prNumber: 0, headSha: "a".repeat(40), expectedLogin: "reviewer[bot]" },
+  { repository: "owner/repo", prNumber: 42, headSha: "short", expectedLogin: "reviewer[bot]" },
+  { repository: "owner/repo", prNumber: 42, headSha: "a".repeat(40), expectedLogin: "../reviewer" },
+]) {
+  assert.throws(() => reviewThreadReceiptPath({ ...invalid, stateRoot: "/bridge-state" }));
+}
+
+const ownedThread = {
+  id: "PRRT_owned",
+  isResolved: false,
+  comments: { nodes: [{ author: { login: "example-reviewer", __typename: "Bot" } }] },
+};
+const foreignThread = {
+  id: "PRRT_foreign",
+  isResolved: false,
+  comments: { nodes: [{ author: { login: "other-reviewer", __typename: "Bot" } }] },
+};
+const humanThreadWithMatchingLogin = {
+  id: "PRRT_human",
+  isResolved: false,
+  comments: { nodes: [{ author: { login: "example-reviewer", __typename: "User" } }] },
+};
+let submittedEvent = null;
+const resolvedThreadIds = [];
+const reviewerThreadController = createReviewerThreadController({
+  readerClient: {
+    reviewThreads: async () => [ownedThread, foreignThread, humanThreadWithMatchingLogin],
+  },
+  resolverClient: {
+    resolveReviewThread: async ({ threadId }) => {
+      resolvedThreadIds.push(threadId);
+      return { login: "builder[bot]", operation: "resolve_review_thread", threadId };
+    },
+  },
+  expectedLogin: "example-reviewer[bot]",
+  getSubmittedEvent: () => submittedEvent,
+});
+assert.deepEqual(await reviewerThreadController.read(), [ownedThread, foreignThread, humanThreadWithMatchingLogin]);
+await assert.rejects(
+  reviewerThreadController.resolve({ threadId: ownedThread.id }),
+  /must submit.*APPROVE/i,
+);
+submittedEvent = "APPROVE";
+await assert.rejects(
+  reviewerThreadController.resolve({ threadId: foreignThread.id }),
+  /only a thread opened by that same reviewer/i,
+);
+await assert.rejects(
+  reviewerThreadController.resolve({ threadId: humanThreadWithMatchingLogin.id }),
+  /only a thread opened by that same reviewer/i,
+);
+assert.deepEqual(await reviewerThreadController.resolve({ threadId: ownedThread.id }), {
+  authorizedBy: "example-reviewer[bot]",
+  executedBy: "builder[bot]",
+  login: "builder[bot]",
+  operation: "resolve_review_thread",
+  threadId: ownedThread.id,
+});
+assert.deepEqual(resolvedThreadIds, [ownedThread.id]);
+const patThreadController = createReviewerThreadController({
+  readerClient: null,
+  resolverClient: null,
+  expectedLogin: "reviewer",
+  getSubmittedEvent: () => "APPROVE",
+});
+await assert.rejects(patThreadController.read(), /requires the configured reviewer GitHub App/i);
+await assert.rejects(
+  patThreadController.resolve({ threadId: ownedThread.id }),
+  /requires the configured reviewer GitHub App/i,
+);
+const missingExecutorController = createReviewerThreadController({
+  readerClient: { reviewThreads: async () => [ownedThread] },
+  resolverClient: null,
+  expectedLogin: "example-reviewer[bot]",
+  getSubmittedEvent: () => "APPROVE",
+});
+await assert.rejects(
+  missingExecutorController.resolve({ threadId: ownedThread.id }),
+  /requires the configured builder GitHub App executor/i,
+);
+const narrowedReaderClient = createBoundBuilderClient({
+  token: "ghs_test",
+  repository: "example/repo",
+  expectedLogin: "example-reviewer[bot]",
+  verifiedLogin: "example-reviewer[bot]",
+  headSha: "0".repeat(40),
+  prNumber: 1,
+  allowedOperations: ["read_review_threads"],
+});
+await assert.rejects(
+  narrowedReaderClient.resolveReviewThread({ threadId: "x" }),
+  /not authorized/,
+);
+const narrowedExecutorClient = createBoundBuilderClient({
+  token: "ghs_test",
+  repository: "example/repo",
+  expectedLogin: "example-builder[bot]",
+  verifiedLogin: "example-builder[bot]",
+  headSha: "0".repeat(40),
+  prNumber: 1,
+  allowedOperations: ["resolve_review_thread"],
+});
+for (const denied of [
+  () => narrowedExecutorClient.merge({}),
+  () => narrowedExecutorClient.pushBranch({ ref: "refs/heads/x", sha: "0".repeat(40) }),
+  () => narrowedExecutorClient.replaceBranch({ ref: "refs/heads/x", sha: "0".repeat(40) }),
+  () => narrowedExecutorClient.reviewThreads(),
+  () => narrowedExecutorClient.replyReviewThread({ threadId: "x", body: "y" }),
+  () => narrowedExecutorClient.ensurePullRequest({ title: "t", body: "b" }),
+]) {
+  await assert.rejects(denied(), /not authorized/);
+}
 
 // Shared handoff-path containment + recursive parent creation (used by Claude,
 // Codex, and Antigravity handoff writes). Parent directories are created only
@@ -243,6 +379,9 @@ const transport = new StdioClientTransport({
 });
 try {
   await mcpClient.connect(transport);
+  const tools = await mcpClient.listTools();
+  assert.equal(tools.tools.some((tool) => tool.name === "read_review_threads"), false);
+  assert.equal(tools.tools.some((tool) => tool.name === "resolve_review_thread"), false);
   const handoffResult = await mcpClient.callTool({
     name: "write_handoff",
     arguments: { content: "# Review handoff\n\nVerified independently." },

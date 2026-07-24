@@ -7,7 +7,20 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { submitBoundReview } from "./github-review-client.mjs";
-import { canPublishReviewStatus, GITHUB_LOGIN_PATTERN, resolveReviewToken } from "./github-app-auth.mjs";
+import {
+  canPublishReviewStatus,
+  createInstallationToken,
+  DEFAULT_GITHUB_APPS_CONFIG,
+  GITHUB_LOGIN_PATTERN,
+  loadGitHubAppRole,
+  resolveReviewToken,
+} from "./github-app-auth.mjs";
+import { createBoundBuilderClient } from "./github-builder-client.mjs";
+import {
+  approvedSubmissionEvent,
+  createReviewerThreadController,
+  reviewThreadReceiptPath,
+} from "./github-review-threads.mjs";
 
 const repository = process.env.GITHUB_REVIEW_REPOSITORY;
 const prNumber = Number.parseInt(process.env.GITHUB_REVIEW_PR_NUMBER || "", 10);
@@ -26,6 +39,7 @@ if (!Number.isInteger(prNumber) || prNumber < 1) throw new Error("GITHUB_REVIEW_
 if (!/^[0-9a-f]{40}$/i.test(headSha || "")) throw new Error("GITHUB_REVIEW_HEAD_SHA must be a full commit SHA.");
 if (!GITHUB_LOGIN_PATTERN.test(expectedLogin || "")) throw new Error("GITHUB_REVIEW_EXPECTED_LOGIN is invalid.");
 if (!handoffPath) throw new Error("GITHUB_REVIEW_HANDOFF_PATH is required.");
+const authorizingReviewerLogin = expectedLogin;
 
 const credential = await resolveReviewToken({ repository, tokenFile, expectedLogin });
 if (credential.expectedLogin && credential.expectedLogin !== expectedLogin) {
@@ -39,6 +53,21 @@ const statusGateEnabled = Boolean(
   && canPublishReviewStatus(credential.permissions),
 );
 const reviewApiUrl = verifiedLogin ? "https://api.github.com" : apiUrl;
+const appConfigPath = process.env.GITHUB_APP_CONFIG || DEFAULT_GITHUB_APPS_CONFIG;
+let builderRole = null;
+if (appCredential) {
+  try {
+    builderRole = await loadGitHubAppRole({
+      role: "builder",
+      repository,
+      configPath: appConfigPath,
+    });
+  } catch {
+    // Thread resolution is optional. A missing or malformed builder role must
+    // degrade to read-only threads rather than taking down formal review.
+    builderRole = null;
+  }
+}
 
 const inlineComment = z.object({
   path: z.string().min(1),
@@ -53,10 +82,54 @@ const server = new McpServer(
   { name: "bounded-github-review", version: "0.1.0" },
   {
     instructions:
-      `Submit exactly one formal review to ${repository} PR #${prNumber} at ${headSha} as ${expectedLogin}. Write the durable handoff first.${statusGateEnabled ? ` This reviewer App also publishes the exact-head ${statusContext} status.` : " This repository uses the formal App review as its merge gate; no machine status will be published."} A PAT compatibility credential is comment-only. This server cannot access any other repository, PR, commit, or GitHub mutation.`,
+      `Submit exactly one formal review to ${repository} PR #${prNumber} at ${headSha} as ${expectedLogin}. Write the durable handoff first.${statusGateEnabled ? ` This reviewer App also publishes the exact-head ${statusContext} status.` : " This repository uses the formal App review as its merge gate; no machine status will be published."}${appCredential ? builderRole ? " After an APPROVE review, read the bound review threads and authorize resolution only for satisfied threads opened by this reviewer App; GitHub executes the mutation through the bounded builder App because reviewer installation tokens are not repository collaborators." : " After APPROVE, review threads are readable but resolution is unavailable because no builder App executor is configured." : " A PAT compatibility credential is comment-only and cannot read or resolve review threads."} This server cannot access any other repository, PR, commit, or GitHub mutation.`,
   },
 );
 let submittedReview = null;
+let submittedEvent = null;
+const threadReaderClient = appCredential
+  ? createBoundBuilderClient({
+      apiUrl: reviewApiUrl,
+      token,
+      repository,
+      expectedLogin,
+      verifiedLogin,
+      headSha,
+      prNumber,
+      allowedOperations: ["read_review_threads"],
+    })
+  : null;
+const threadResolverClient = appCredential && builderRole
+  ? createBoundBuilderClient({
+      apiUrl: reviewApiUrl,
+      getToken: async () => {
+        const executor = await createInstallationToken({
+          role: "builder",
+          repository,
+          expectedLogin: builderRole.expectedLogin,
+          configPath: appConfigPath,
+        });
+        return { token: executor.token, verifiedLogin: executor.verifiedLogin };
+      },
+      repository,
+      expectedLogin: builderRole.expectedLogin,
+      headSha,
+      prNumber,
+      allowedOperations: ["resolve_review_thread"],
+      receiptPath: reviewThreadReceiptPath({
+        repository,
+        prNumber,
+        headSha,
+        expectedLogin: authorizingReviewerLogin,
+      }),
+    })
+  : null;
+const threadController = createReviewerThreadController({
+  readerClient: threadReaderClient,
+  resolverClient: threadResolverClient,
+  expectedLogin,
+  getSubmittedEvent: () => submittedEvent,
+});
 
 server.registerTool(
   "write_handoff",
@@ -122,6 +195,7 @@ server.registerTool(
       publishGate: statusGateEnabled,
     });
     submittedReview = result;
+    submittedEvent = approvedSubmissionEvent(result.state);
     const gateReceipt = result.gate
       ? `gate \`${result.gate.context}\` = \`${result.gate.state}\``
       : appCredential
@@ -138,5 +212,42 @@ server.registerTool(
     };
   },
 );
+
+if (appCredential) {
+  server.registerTool(
+    "read_review_threads",
+    {
+      title: "Read bound pull request review threads",
+      description: "Read review threads only from the pre-bound pull request at the exact authorized head.",
+      inputSchema: {},
+    },
+    async () => {
+      const threads = await threadController.read();
+      const value = { threads, repository, prNumber, headSha };
+      return {
+        content: [{ type: "text", text: JSON.stringify(value) }],
+        structuredContent: value,
+      };
+    },
+  );
+
+  if (threadResolverClient) {
+    server.registerTool(
+      "resolve_review_thread",
+      {
+        title: "Resolve reviewer-owned pull request thread",
+        description: "After submitting APPROVE, authorize resolution of one satisfied thread opened by this reviewer App; the bounded builder App executes the GitHub mutation.",
+        inputSchema: { threadId: z.string().min(1) },
+      },
+      async ({ threadId }) => {
+        const result = await threadController.resolve({ threadId });
+        return {
+          content: [{ type: "text", text: JSON.stringify(result) }],
+          structuredContent: result,
+        };
+      },
+    );
+  }
+}
 
 await server.connect(new StdioServerTransport());

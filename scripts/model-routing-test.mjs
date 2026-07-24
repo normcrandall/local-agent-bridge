@@ -210,6 +210,7 @@ assert.equal(codexReviewPublication.arguments.config["mcp_servers.github_review.
 assert.equal(codexReviewPublication.arguments.config["mcp_servers.github_review.env.GITHUB_REVIEW_HANDOFF_PATH"], "/workspace/docs/handoffs/task-12.md");
 assert.match(codexReviewPublication.arguments.prompt, /github_review\.write_handoff/);
 assert.match(codexReviewPublication.arguments.prompt, /github_review\.submit_pr_review/);
+assert.match(codexReviewPublication.arguments.prompt, /resolve every satisfied thread/);
 const codexReply = codexToolRequest({
   prompt: "continue",
   cwd: "/workspace",

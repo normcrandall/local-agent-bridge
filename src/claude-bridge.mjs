@@ -289,6 +289,8 @@ function runClaude({
       allowedTools.push(
         "mcp__github_review__write_handoff",
         "mcp__github_review__submit_pr_review",
+        "mcp__github_review__read_review_threads",
+        "mcp__github_review__resolve_review_thread",
       );
     }
     args.push("--allowedTools", ...allowedTools, "--permission-mode", "dontAsk");
@@ -313,7 +315,8 @@ Review permission contract:
 - Treat the workspace source as read-only. Do not modify source, configuration, Git state, or external systems.
 - You may run only these exact verification commands: ${verificationCommands.length ? verificationCommands.map((command) => `\`${command}\``).join(", ") : "none"}.
 ${actualHandoffPath ? `- Write the final handoff to exactly \`${actualHandoffPath}\`. This is the only file you may create or edit.` : "- Return the handoff in your response; no file write was authorized."}
-${githubReview ? `- After writing the handoff, submit one formal PR review to \`${githubReview.repository}\` PR #${githubReview.prNumber} at \`${githubReview.headSha}\` using \`github_review.submit_pr_review\`. Include a general verdict and inline comments for actionable line-specific findings. The tool is pre-bound to \`${githubReview.expectedLogin}\` and this exact PR head${githubReview.publishStatusGate ? "; it also publishes the exact-head agent-review status" : "; the formal App review is the configured review gate"}.` : "- Do not post comments or send messages."}
+${githubReview ? `- After writing the handoff, submit one formal PR review to \`${githubReview.repository}\` PR #${githubReview.prNumber} at \`${githubReview.headSha}\` using \`github_review.submit_pr_review\`. Include a general verdict and inline comments for actionable line-specific findings. The tool is pre-bound to \`${githubReview.expectedLogin}\` and this exact PR head${githubReview.publishStatusGate ? "; it also publishes the exact-head agent-review status" : "; the formal App review is the configured review gate"}.
+- If \`github_review.read_review_threads\` is available, use it after an APPROVE and resolve each satisfied thread opened by this same reviewer through \`github_review.resolve_review_thread\`. Leave unresolved any thread that is not satisfied or was opened by another reviewer.` : "- Do not post comments or send messages."}
 - Do not push, commit, deploy, or perform any other external mutation.`
     : `
 
