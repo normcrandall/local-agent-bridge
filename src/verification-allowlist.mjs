@@ -19,9 +19,34 @@ export class ProviderCommandNotAllowlistedError extends Error {
 // path as the machine default: command-running review requests automatically use
 // `--dangerously-skip-permissions`. That exception is deliberately provider-specific.
 export const PROVIDERS_ENFORCING_EXACT_COMMAND_GRANTS = Object.freeze(["claude"]);
+export const STATIC_ONLY_COMMAND_REVIEW_PROVIDERS = Object.freeze(["codex", "docker", "ollama"]);
+export const UNRESTRICTED_COMMAND_REVIEW_PROVIDERS = Object.freeze(["antigravity"]);
 
 export function providerEnforcesExactCommandGrants(provider) {
   return PROVIDERS_ENFORCING_EXACT_COMMAND_GRANTS.includes(provider);
+}
+
+// Resolve the commands that may actually reach one provider. A review must not fail
+// merely because its coordinator also supplied local/hosted verification gates. When
+// the selected provider cannot enforce exact command grants, keep the review alive as
+// a static pass and withhold every command. The requested commands remain collaboration
+// evidence, but the provider may neither run nor claim them. Antigravity retains its
+// explicit machine policy below; work mode retains its selected sandbox/profile.
+export function providerVerificationPlanForRequest({
+  provider,
+  mode,
+  verificationCommands = [],
+} = {}) {
+  const commands = normalizeVerificationAllowlist(verificationCommands);
+  const staticOnly = mode === "review"
+    && commands.length > 0
+    && STATIC_ONLY_COMMAND_REVIEW_PROVIDERS.includes(provider);
+  return {
+    verificationCommands: staticOnly ? [] : commands,
+    withheldVerificationCommands: staticOnly ? commands : [],
+    staticOnly,
+    reason: staticOnly ? "provider_exact_command_grant_unavailable" : null,
+  };
 }
 
 export class ProviderCommandGrantUnsupportedError extends Error {
@@ -41,7 +66,7 @@ export function assertProviderVerificationCapability({ provider, mode, verificat
   const commands = normalizeVerificationAllowlist(verificationCommands);
   if (mode === "review" && commands.length
     && !providerEnforcesExactCommandGrants(provider)
-    && provider !== "antigravity") {
+    && !UNRESTRICTED_COMMAND_REVIEW_PROVIDERS.includes(provider)) {
     throw new ProviderCommandGrantUnsupportedError(provider, commands);
   }
   return commands;

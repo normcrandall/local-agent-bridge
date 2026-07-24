@@ -216,6 +216,20 @@ assert.equal(redactedFlagsText.includes(generatedToken), false, "Separated secre
 assert.equal(redactedFlagsText.includes("user:password"), false, "Credential-bearing URLs must be redacted");
 assert.match(redactedFlagsText, /--password <redacted>/);
 
+const codexStaticReviewFallback = analyzePolicy(snapshot({
+  providers: ["codex"],
+  request: { requiredCommands: ["pnpm run ci"], requireReviewApp: false },
+  providerOverrides: { codex: { allowedCommands: ["pnpm run ci"] } },
+}));
+assert.equal(codexStaticReviewFallback.ok, true);
+assert.equal(codexStaticReviewFallback.matrix.codex.reviewExecution, "static-only");
+assert.equal(codexStaticReviewFallback.matrix.codex.shell, "verification-only");
+assert.ok(codexStaticReviewFallback.findings.some((finding) => (
+  finding.code === "provider-static-review-fallback" && finding.severity === "constraint"
+)));
+assert.match(renderPolicyReport(codexStaticReviewFallback), /continue the exact-head review as static-only/);
+assert.match(renderPolicyReport(codexStaticReviewFallback), /reviewExecution=static-only/);
+
 const broken = snapshot({
   request: {
     strictProviders: ["claude", "codex", "antigravity"],

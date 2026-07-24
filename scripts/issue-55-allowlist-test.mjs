@@ -14,9 +14,22 @@ import {
   providerEnforcesExactCommandGrants,
   providerPermissionDecisionForRequest,
   providerPermissionProfileForRequest,
+  providerVerificationPlanForRequest,
+  PROVIDERS_ENFORCING_EXACT_COMMAND_GRANTS,
+  STATIC_ONLY_COMMAND_REVIEW_PROVIDERS,
+  UNRESTRICTED_COMMAND_REVIEW_PROVIDERS,
 } from "../src/verification-allowlist.mjs";
+import { POLICY_PROVIDERS } from "../src/collaboration-doctor.mjs";
 
 // Normalization: trim, drop empties, de-duplicate, stable order.
+const commandReviewPolicyProviders = [
+  ...PROVIDERS_ENFORCING_EXACT_COMMAND_GRANTS,
+  ...STATIC_ONLY_COMMAND_REVIEW_PROVIDERS,
+  ...UNRESTRICTED_COMMAND_REVIEW_PROVIDERS,
+];
+assert.equal(new Set(commandReviewPolicyProviders).size, commandReviewPolicyProviders.length);
+assert.deepEqual(commandReviewPolicyProviders.toSorted(), POLICY_PROVIDERS.toSorted());
+
 assert.deepEqual(
   normalizeVerificationAllowlist(["  npm run test:collaboration  ", "", "npm run test:collaboration", "npm run smoke"]),
   ["npm run test:collaboration", "npm run smoke"],
@@ -103,6 +116,36 @@ assert.equal(providerPermissionProfileForRequest({
   mode: "review",
   verificationCommands: [],
 }), "standard");
+assert.deepEqual(providerVerificationPlanForRequest({
+  provider: "codex",
+  mode: "review",
+  verificationCommands: [" npm test ", "npm test", "git diff --check"],
+}), {
+  verificationCommands: [],
+  withheldVerificationCommands: ["npm test", "git diff --check"],
+  staticOnly: true,
+  reason: "provider_exact_command_grant_unavailable",
+});
+assert.deepEqual(providerVerificationPlanForRequest({
+  provider: "claude",
+  mode: "review",
+  verificationCommands: ["npm test"],
+}).verificationCommands, ["npm test"]);
+assert.deepEqual(providerVerificationPlanForRequest({
+  provider: "antigravity",
+  mode: "review",
+  verificationCommands: ["npm test"],
+}).verificationCommands, ["npm test"]);
+assert.deepEqual(providerVerificationPlanForRequest({
+  provider: "codex",
+  mode: "work",
+  verificationCommands: ["npm test"],
+}).verificationCommands, ["npm test"]);
+assert.deepEqual(providerVerificationPlanForRequest({
+  provider: "misspelled-provider",
+  mode: "review",
+  verificationCommands: ["npm test"],
+}).verificationCommands, ["npm test"]);
 assert.deepEqual(providerPermissionDecisionForRequest({
   provider: "antigravity",
   mode: "review",

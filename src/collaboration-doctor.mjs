@@ -4,6 +4,7 @@ import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 import { probeProviderCapabilities } from "./provider-cli-capabilities.mjs";
 import { resolveGitHubMergeEnforcement } from "./github-merge-enforcement.mjs";
+import { providerVerificationPlanForRequest } from "./verification-allowlist.mjs";
 
 export const POLICY_REPORT_VERSION = 1;
 export const POLICY_PROVIDERS = ["claude", "codex", "antigravity", "docker", "ollama"];
@@ -541,7 +542,12 @@ export function analyzePolicy(snapshot) {
     if (request.requireFallback && observed.modelFallback.state !== "available") blockers.push("fallback");
     const allowlist = observed.allowedCommands;
     const missingCommands = (request.requiredCommands || []).filter((command) => !allowlist?.includes(command));
-    if (missingCommands.length) blockers.push("allowlist");
+    const commandPlan = providerVerificationPlanForRequest({
+      provider,
+      mode: request.mode,
+      verificationCommands: request.requiredCommands || [],
+    });
+    if (missingCommands.length && !commandPlan.staticOnly) blockers.push("allowlist");
     if (request.requireReviewApp && observed.github.reviewer.state !== "available") blockers.push("review-app");
     const missingBuilderOperations = (request.requiredBuilderOperations || []).filter((operation) => (
       !observed.github.builder.operationsVerified || !observed.github.builder.operations.includes(operation)
@@ -554,6 +560,7 @@ export function analyzePolicy(snapshot) {
       read: observed.permissions.read,
       write: observed.permissions.write,
       shell: observed.permissions.shell,
+      reviewExecution: commandPlan.staticOnly ? "static-only" : "command-capable",
       browser: observed.permissions.browser,
       modelFallback: observed.modelFallback.state,
       reviewerApp: observed.github.reviewer.state,
@@ -594,12 +601,18 @@ export function analyzePolicy(snapshot) {
       source: observed.modelFallback.source, impact: `${provider} has no required overload fallback for this request.`,
       remediation: "No action is required unless this workflow must survive provider model-capacity failures.",
     }));
-    if (missingCommands.length) findings.push(policyFinding({
+    if (missingCommands.length && !commandPlan.staticOnly) findings.push(policyFinding({
       code: allowlist ? "provider-allowlist-conflict" : "provider-allowlist-unverifiable",
       severity: requirementSeverity(provider, strictProviders), state: allowlist ? "denied" : "unverifiable", provider, role: request.role,
       source: source("policy:request", `${provider}.allowedCommands`),
       impact: `${provider} cannot be shown to execute: ${missingCommands.map(safeCommand).join(", ")}.`,
       remediation: "Add only the exact missing command through the role's additive allowlist, or assign another eligible provider.",
+    }));
+    if (commandPlan.staticOnly) findings.push(policyFinding({
+      code: "provider-static-review-fallback", severity: "constraint", state: "available", provider, role: request.role,
+      source: source("adapter:provider", `${provider}.verificationCommands`),
+      impact: `${provider} cannot enforce exact command grants. The broker will withhold ${commandPlan.withheldVerificationCommands.length} requested verification command${commandPlan.withheldVerificationCommands.length === 1 ? "" : "s"} and continue the exact-head review as static-only; local and hosted CI remain separate evidence.`,
+      remediation: "No permission expansion is required. Use Claude for an exactly bounded command-running review, Antigravity under its explicit unrestricted review policy, or keep this provider static and rely on separately verified CI evidence.",
     }));
     if (request.requireReviewApp && observed.github.reviewer.state !== "available") findings.push(policyFinding({
       code: observed.github.reviewer.state === "missing" ? "reviewer-app-binding-missing" : "reviewer-app-scope-unverifiable",
@@ -708,7 +721,7 @@ export function renderPolicyReport(report) {
     "Provider matrix:",
   ];
   for (const [provider, row] of Object.entries(report.matrix)) {
-    lines.push(`- ${provider}: ${row.eligible ? "eligible" : "ineligible"}; availability=${row.availability}; write=${row.write}; shell=${row.shell}; browser=${row.browser || "none"}; fallback=${row.modelFallback}; review=${row.reviewerApp}; builder=${row.builderApp}${row.blockers.length ? `; blockers=${row.blockers.join(",")}` : ""}`);
+    lines.push(`- ${provider}: ${row.eligible ? "eligible" : "ineligible"}; availability=${row.availability}; write=${row.write}; shell=${row.shell}; reviewExecution=${row.reviewExecution}; browser=${row.browser || "none"}; fallback=${row.modelFallback}; review=${row.reviewerApp}; builder=${row.builderApp}${row.blockers.length ? `; blockers=${row.blockers.join(",")}` : ""}`);
   }
   lines.push("", `Findings (${report.summary.failures} failures, ${report.summary.constraints} constraints, ${report.summary.notices} notices):`);
   if (!report.findings.length) lines.push("- none");
