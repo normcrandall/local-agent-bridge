@@ -40,6 +40,10 @@ try {
     providerRecoveryState: {
       attempts: 2
     },
+    providerFailoverState: {
+      status: "transferred",
+      lastTransition: { from: "codex", to: "claude", failureClass: "transport" }
+    },
     usage: {
       claude: { costUsd: 0.05, tokens: 12000 }
       // antigravity is missing (absent usage)
@@ -247,6 +251,10 @@ try {
   assert.deepEqual(lane1.recovery.unavailableAgents, { claude: "rate_limit" });
   assert.deepEqual(lane1.recovery.availableAgents, ["antigravity"]);
   assert.deepEqual(lane1.recovery.providerRecoveryState, { attempts: 2 });
+  assert.deepEqual(lane1.recovery.providerFailoverState, {
+    status: "transferred",
+    lastTransition: { from: "codex", to: "claude", failureClass: "transport" },
+  });
 
   // Check budget limit/exceeded
   assert.equal(lane1.budget.limit, 10.00);

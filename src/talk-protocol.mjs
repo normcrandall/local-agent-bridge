@@ -3,6 +3,10 @@ import {
   extractAndSaveCapsuleBeforeObserve,
   redactSecretsAndInjectionFromText,
 } from "./context-capsule.mjs";
+import {
+  providerFailureRecord,
+  providerFailuresSummary,
+} from "./provider-failover.mjs";
 
 const STATUSES = new Set(["CONTINUE", "AGREED", "NEEDS_USER"]);
 export const KNOWN_AGENTS = ["claude", "codex", "antigravity", "docker", "ollama"];
@@ -270,19 +274,31 @@ export async function runConversation({
         await onState(state);
         return { reason: "indeterminate", error: reason, turns, sessions, state };
       }
+      const failure = providerFailureRecord(agent, error);
       unavailableAgents[agent] = reason;
       activeAgents.splice(agentIndex, 1);
       if (agentIndex >= activeAgents.length) agentIndex = 0;
       agreementStreak = 0;
+      const previousWriter = effectiveWriter;
       if (effectiveWriter === agent) {
         effectiveWriter = activeAgents.find((candidate) => WRITER_AGENTS.includes(candidate)) || null;
         if (!effectiveWriter) {
-          await onAgentUnavailable({ agent, reason, availableAgents: [...activeAgents], writer: null });
+          await onAgentUnavailable({
+            ...failure,
+            availableAgents: [...activeAgents],
+            previousWriter,
+            writer: null,
+            nextAgent: activeAgents[agentIndex] || null,
+            rosterExhausted: activeAgents.length === 0,
+            writerExhausted: true,
+          });
           const state = stateSnapshot();
           await onState(state);
           return {
             reason: "failed",
-            error: "No write-capable provider is currently available; remaining participants are review-only.",
+            error: providerFailuresSummary(unavailableAgents, {
+              prefix: "No write-capable provider is currently available",
+            }),
             turns,
             sessions,
             state,
@@ -290,17 +306,20 @@ export async function runConversation({
         }
       }
       await onAgentUnavailable({
-        agent,
-        reason,
+        ...failure,
         availableAgents: [...activeAgents],
+        previousWriter,
         writer: effectiveWriter,
+        nextAgent: activeAgents[agentIndex] || null,
+        rosterExhausted: activeAgents.length === 0,
+        writerExhausted: false,
       });
       const state = stateSnapshot();
       await onState(state);
       if (!activeAgents.length) {
         return {
           reason: "failed",
-          error: "No requested model is currently available.",
+          error: providerFailuresSummary(unavailableAgents),
           turns,
           sessions,
           state,

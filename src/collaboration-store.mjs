@@ -524,7 +524,8 @@ export async function queryControlPlane(stateRoot, options = {}) {
       processAlive: processAlive(cState.workerPid),
       unavailableAgents: cState.runtime?.unavailableAgents || null,
       availableAgents: cState.runtime?.availableAgents || null,
-      providerRecoveryState: cState.providerRecoveryState || null
+      providerRecoveryState: cState.providerRecoveryState || null,
+      providerFailoverState: cState.providerFailoverState || null
     };
 
     const budget = cState.budget ? {

@@ -15,7 +15,7 @@ import {
   readCollaboration,
   updateCollaboration,
 } from "../src/collaboration-store.mjs";
-import { runConversation } from "../src/talk-protocol.mjs";
+import { runConversation, WRITER_AGENTS } from "../src/talk-protocol.mjs";
 import { isTransportLivenessSummary, refreshCi, usageDecision } from "../src/operations.mjs";
 import { clearTerminalRuntime } from "../src/collaboration-cleanup.mjs";
 import { createDecisionReceipt } from "../src/decision-policy.mjs";
@@ -42,6 +42,12 @@ import { createVerificationTimingTracker } from "../src/verification-timing.mjs"
 import { assertRepositoryEvidenceHead, captureRepositoryEvidence } from "../src/repository-evidence.mjs";
 import { createEvidenceStore } from "../src/evidence-store.mjs";
 import { assertObservedVerificationEvidence, persistObservedVerificationResults } from "../src/verification-receipts.mjs";
+import {
+  allProviderFailuresAreTransientCapacity,
+  classifyProviderFailure,
+  providerFailureRecord,
+  providerFailuresSummary,
+} from "../src/provider-failover.mjs";
 
 const runtimeRoot = realpathSync(
   process.env.BRIDGE_RUNTIME_ROOT || process.env.BRIDGE_ROOT || fileURLToPath(new URL("..", import.meta.url)),
@@ -98,14 +104,9 @@ function claimWorkspaceMetadata(state) {
 }
 
 async function scheduleProviderRecovery(error) {
-  if (!/No requested model is currently available/i.test(error?.message || String(error))) return false;
   const current = await readCollaboration(workspaceRoot, id);
-  const unavailableReasons = Object.values(current.runtime?.unavailableAgents || {});
-  const transientModelFailure = (reason) => (
-    /\boverload(?:ed)?\b|\bover[_ -]?capacity\b|\bat capacity\b|\bno capacity\b|\bhigh demand\b|\bmodel\b[^\n]{0,80}\bunavailable\b|\btemporarily unavailable\b|(?:^|\D)(?:503|529)(?:\D|$)/i
-      .test(reason || "")
-  );
-  if (!unavailableReasons.length || unavailableReasons.some((reason) => !transientModelFailure(reason))) {
+  const unavailableAgents = current.runtime?.unavailableAgents || {};
+  if (!allProviderFailuresAreTransientCapacity(unavailableAgents)) {
     return false;
   }
   const policy = current.providerRecovery || { enabled: true, maxAttempts: 3, backoffSeconds: [15, 60, 180] };
@@ -119,6 +120,10 @@ async function scheduleProviderRecovery(error) {
         status: "exhausted",
         exhaustedAt: new Date().toISOString(),
         lastError: error.message,
+      },
+      providerFailoverState: {
+        ...(state.providerFailoverState || {}),
+        status: "exhausted",
       },
     }));
     return false;
@@ -137,6 +142,10 @@ async function scheduleProviderRecovery(error) {
       lastError: error.message,
       scheduledAt: new Date().toISOString(),
       nextRetryAt,
+    },
+    providerFailoverState: {
+      ...(state.providerFailoverState || {}),
+      status: "recovering",
     },
     runtime: {
       ...state.runtime,
@@ -231,6 +240,7 @@ try {
       collaborationId: id,
       phase: "running",
       summary: "Starting provider work.",
+      writer: state.writer,
       ...metadata,
     });
   }
@@ -292,11 +302,13 @@ try {
     probes.filter((probe) => !probe.available).map((probe) => [probe.agent, probe.reason]),
   );
   for (const probe of probes.filter((candidate) => !candidate.available)) {
+    const failure = providerFailureRecord(probe.agent, probe.reason);
     await appendEvent(workspaceRoot, id, {
       type: "agent_unavailable",
       at: new Date().toISOString(),
       agent: probe.agent,
       reason: probe.reason,
+      failureClass: failure.failureClass,
       phase: "preflight",
     });
   }
@@ -310,31 +322,78 @@ try {
     });
   }
   const startAgent = reviewOrder.startAgent;
+  const previousWriter = state.writer;
   const writer = state.mode === "work" && availableAgents.length
-    ? (availableAgents.includes(state.writer) ? state.writer : availableAgents[0])
+    ? (availableAgents.includes(state.writer)
+      ? state.writer
+      : availableAgents.find((agent) => WRITER_AGENTS.includes(agent)) || null)
     : null;
+  const preflightFailover = state.mode === "work" && previousWriter && writer && previousWriter !== writer
+    ? {
+      from: previousWriter,
+      to: writer,
+      failureClass: classifyProviderFailure(unavailableAgents[previousWriter]),
+      reason: unavailableAgents[previousWriter] || "Provider failed preflight.",
+      phase: "preflight",
+      at: new Date().toISOString(),
+    }
+    : null;
+  const conversationStartAgent = state.mode === "work" && !availableAgents.includes(state.startAgent)
+    ? writer
+    : startAgent;
   state = await updateCollaboration(workspaceRoot, id, (current) => ({
     ...current,
     writer,
+    issueClaim: current.issueClaim ? { ...current.issueClaim, writer: writer || current.issueClaim.writer } : current.issueClaim,
+    providerFailoverState: preflightFailover
+      ? {
+        status: "transferred",
+        transitions: [...(current.providerFailoverState?.transitions || []), preflightFailover].slice(-20),
+        lastTransition: preflightFailover,
+      }
+      : !availableAgents.length || (state.mode === "work" && !writer)
+        ? { ...(current.providerFailoverState || {}), status: "exhausted" }
+        : current.providerFailoverState,
     reviewPublication: reviewOrder.publication,
     runtime: {
       ...current.runtime,
       nextAgent: availableAgents.includes(current.runtime?.nextAgent)
         ? current.runtime.nextAgent
-        : startAgent,
+        : conversationStartAgent,
       availableAgents,
       unavailableAgents,
       writer,
     },
   }));
+  if (preflightFailover) {
+    await appendEvent(workspaceRoot, id, { type: "provider_failover", ...preflightFailover });
+    if (claimClient) {
+      const { refreshClaimLease } = await import("../src/github-issue-claims.mjs");
+      await refreshClaimLease({
+        client: claimClient,
+        issueNumber: state.issueClaim.issueNumber,
+        collaborationId: id,
+        phase: "running",
+        writer,
+        writerFailover: preflightFailover,
+        summary: `${previousWriter} failed preflight; writer transferred to ${writer}.`,
+        ...claimWorkspaceMetadata(state),
+      });
+    }
+  }
   if (!availableAgents.length) {
-    throw new Error("No requested model is currently available.");
+    throw new Error(providerFailuresSummary(unavailableAgents));
+  }
+  if (state.mode === "work" && !writer) {
+    throw new Error(providerFailuresSummary(unavailableAgents, {
+      prefix: "No write-capable provider is currently available",
+    }));
   }
   const outcome = await runConversation({
     task: state.task,
     maxTurns: state.run.maxTurns,
     agents: availableAgents,
-    startAgent,
+    startAgent: conversationStartAgent,
     mode: state.mode,
     browser: state.browser,
     writer,
@@ -814,26 +873,87 @@ try {
       }
     },
     onAgentUnavailable: async (failure) => {
+      const writerTransferred = failure.previousWriter === failure.agent && failure.writer;
+      const failoverTarget = writerTransferred ? failure.writer : failure.nextAgent;
+      const failover = failoverTarget
+        ? {
+          from: failure.agent,
+          to: failoverTarget,
+          role: writerTransferred ? "writer" : "turn",
+          failureClass: failure.failureClass,
+          reason: failure.reason,
+          phase: "turn",
+          at: new Date().toISOString(),
+        }
+        : null;
       await appendEvent(workspaceRoot, id, {
-        type: "agent_unavailable",
-        at: new Date().toISOString(),
+        type: failover ? "provider_failover" : "agent_unavailable",
+        at: failover?.at || new Date().toISOString(),
         phase: "turn",
         ...failure,
+        ...(failover || {}),
       });
       await updateCollaboration(workspaceRoot, id, (current) => ({
         ...current,
+        writer: failure.writer,
+        issueClaim: current.issueClaim && failure.writer
+          ? { ...current.issueClaim, writer: failure.writer }
+          : current.issueClaim,
+        providerFailoverState: failover
+          ? {
+            status: "transferred",
+            transitions: [...(current.providerFailoverState?.transitions || []), failover].slice(-20),
+            lastTransition: failover,
+          }
+          : failure.rosterExhausted || failure.writerExhausted
+            ? { ...(current.providerFailoverState || {}), status: "exhausted" }
+            : current.providerFailoverState,
         reviewPublication: recordReviewPublicationResult(current.reviewPublication, {
           agent: failure.agent,
           unavailableReason: failure.reason,
         }),
+        runtime: {
+          ...current.runtime,
+          activeCall: failover
+            ? {
+              agent: failoverTarget,
+              mode: current.mode,
+              status: "failing_over",
+              phase: "provider_failover",
+              startedAt: failover.at,
+              heartbeatAt: failover.at,
+              summary: `${failure.agent} failed (${failure.failureClass}); ${writerTransferred ? "transferring writer" : "advancing the turn"} to ${failoverTarget}.`,
+              summaryAt: failover.at,
+              summarySource: "broker",
+            }
+            : current.runtime?.activeCall || null,
+        },
       }));
+      if (claimClient && writerTransferred) {
+        const { refreshClaimLease } = await import("../src/github-issue-claims.mjs");
+        const metadata = claimWorkspaceMetadata(state);
+        workerHeadSha = metadata.headSha;
+        await refreshClaimLease({
+          client: claimClient,
+          issueNumber: state.issueClaim.issueNumber,
+          collaborationId: id,
+          phase: "running",
+          writer: failure.writer,
+          writerFailover: failover,
+          summary: `${failure.agent} failed (${failure.failureClass}); writer transferred to ${failure.writer}.`,
+          ...metadata,
+        });
+      }
     },
     onState: async (runtime) => {
       const metadata = claimClient ? claimWorkspaceMetadata(state) : null;
       if (metadata) workerHeadSha = metadata.headSha;
       await updateCollaboration(workspaceRoot, id, (current) => ({
         ...current,
-        issueClaim: metadata ? { ...current.issueClaim, ...metadata } : current.issueClaim,
+        writer: runtime.writer,
+        issueClaim: current.issueClaim
+          ? { ...current.issueClaim, ...(metadata || {}), ...(runtime.writer ? { writer: runtime.writer } : {}) }
+          : current.issueClaim,
         runtime: {
           ...runtime,
           activeCall: runtime.activeCall === undefined ? current.runtime?.activeCall || null : runtime.activeCall,
@@ -847,6 +967,7 @@ try {
           collaborationId: id,
           phase: runtime.activeCall?.phase || "running",
           summary: runtime.activeCall?.summary || "Provider work is active.",
+          writer: runtime.writer,
           ...metadata,
         });
       }
@@ -854,8 +975,6 @@ try {
   });
 
   if (!(outcome.reason === "failed" && await scheduleProviderRecovery(new Error(outcome.error)))) {
-    const recoveryExhausted = outcome.reason === "failed"
-      && /No requested model is currently available/i.test(outcome.error || "");
     const finalRuntime = outcome.reason === "indeterminate" ? outcome.state : { ...outcome.state, activeCall: null };
     const finalClaimMetadata = claimClient ? claimWorkspaceMetadata(state) : null;
     if (finalClaimMetadata) workerHeadSha = finalClaimMetadata.headSha;
@@ -863,16 +982,13 @@ try {
       ...current, runtime: finalRuntime, writer: outcome.state.writer,
       issueClaim: finalClaimMetadata ? { ...current.issueClaim, ...finalClaimMetadata } : current.issueClaim,
       cancelRequested: outcome.reason === "cancelled",
-      providerRecoveryState: recoveryExhausted
-        ? {
-          ...(current.providerRecoveryState || {}),
-          status: "exhausted",
-          exhaustedAt: new Date().toISOString(),
-          lastError: outcome.error,
-        }
-        : outcome.reason === "failed"
+      providerRecoveryState: outcome.reason === "failed"
           ? current.providerRecoveryState
           : { ...(current.providerRecoveryState || {}), status: "recovered" },
+      providerFailoverState: outcome.reason !== "failed"
+        && ["recovering", "retrying", "exhausted"].includes(current.providerFailoverState?.status)
+        ? { ...(current.providerFailoverState || {}), status: "recovered" }
+        : current.providerFailoverState,
     }, { status: outcome.reason, error: outcome.error || null }));
     await appendEvent(workspaceRoot, id, {
       type: "run_finished",
@@ -889,6 +1005,7 @@ try {
           collaborationId: id,
           phase: "completed",
           summary: "Provider work completed; the claim remains held through review and merge.",
+          writer: outcome.state.writer,
           ...finalClaimMetadata,
         });
       } else if (["cancelled", "obsolete"].includes(outcome.reason)) {
@@ -907,6 +1024,7 @@ try {
           collaborationId: id,
           phase: outcome.reason,
           summary: outcome.error || `Provider work stopped with ${outcome.reason}; the claim remains held.`,
+          writer: outcome.state.writer,
           ...finalClaimMetadata,
         });
       }
@@ -927,6 +1045,7 @@ try {
           collaborationId: id,
           phase: error?.indeterminate ? "indeterminate" : "failed",
           summary: error.message,
+          writer: state.writer,
           ...metadata,
         });
       } catch (claimErr) {
@@ -940,14 +1059,7 @@ try {
       ? ({ ...current, status: "indeterminate", error: failure.stack || failure.message })
       : clearTerminalRuntime({
         ...current,
-        providerRecoveryState: /No requested model is currently available/i.test(error.message || "")
-          ? {
-            ...(current.providerRecoveryState || {}),
-            status: "exhausted",
-            exhaustedAt: new Date().toISOString(),
-            lastError: error.message,
-          }
-          : current.providerRecoveryState,
+        providerRecoveryState: current.providerRecoveryState,
       }, { status: "failed", error: failure.stack || failure.message })).catch(() => {});
     await appendEvent(workspaceRoot, id, {
       type: "run_failed",

@@ -37,6 +37,10 @@ await updateCollaboration(workspaceRoot, id, (current) => ({
     status: "retrying",
     retriedAt: new Date().toISOString(),
   },
+  providerFailoverState: {
+    ...(current.providerFailoverState || {}),
+    status: "retrying",
+  },
   runtime: {
     ...current.runtime,
     activeCall: null,

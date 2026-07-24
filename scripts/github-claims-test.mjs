@@ -451,6 +451,31 @@ async function runTests() {
     client,
     issueNumber: 42,
     collaborationId: "bridge-33333333-3333-3333-4444-555555555555",
+    phase: "working",
+    writer: "claude",
+    writerFailover: {
+      from: "codex",
+      to: "claude",
+      failureClass: "transport",
+      reason: "Codex transport closed."
+    },
+    summary: "Codex failed; writer transferred to Claude."
+  });
+  const claimsAfterWriterFailover = await parseClaims(client, 42);
+  const stateAfterWriterFailover = claimsAfterWriterFailover.find(c => c.data.collaboration === "bridge-33333333-3333-3333-4444-555555555555").data;
+  assert.equal(stateAfterWriterFailover.writer, "claude");
+  assert.equal(stateAfterWriterFailover.history[0].event, "writer_failover");
+  assert.equal(stateAfterWriterFailover.history[0].previousWriter, "codex");
+  assert.equal(stateAfterWriterFailover.history[0].writer, "claude");
+  assert.equal(stateAfterWriterFailover.history[0].failureClass, "transport");
+  assert.equal(stateAfterWriterFailover.history[0].reason, "Codex transport closed.");
+  assert.match(mock.getComments()[0].body, /Transfer: `codex` → `claude`/);
+  assert.match(mock.getComments()[0].body, /Cause: `transport` — Codex transport closed\./);
+
+  await refreshClaimLease({
+    client,
+    issueNumber: 42,
+    collaborationId: "bridge-33333333-3333-3333-4444-555555555555",
     phase: "claiming"
   });
   const claimsAfterRegress = await parseClaims(client, 42);

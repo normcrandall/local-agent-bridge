@@ -135,6 +135,8 @@ assert.equal(fallbackOutcome.reason, "agreed");
 assert.deepEqual(fallbackOutcome.state.availableAgents, ["claude", "antigravity"]);
 assert.match(fallbackOutcome.state.unavailableAgents.codex, /not installed/);
 assert.equal(skipped[0].agent, "codex");
+assert.equal(skipped[0].failureClass, "configuration");
+assert.equal(skipped[0].nextAgent, "antigravity");
 assert.deepEqual(
   fallbackOutcome.turns.map((turn) => turn.agent),
   ["claude", "antigravity", "claude"],
@@ -148,7 +150,9 @@ const noProviderOutcome = await runConversation({
 });
 assert.equal(noProviderOutcome.reason, "failed");
 assert.equal(noProviderOutcome.state.availableAgents.length, 0);
-assert.match(noProviderOutcome.error, /No requested model/);
+assert.match(noProviderOutcome.error, /All requested providers failed/);
+assert.match(noProviderOutcome.error, /Claude Code \(provider_failure\): claude unavailable/);
+assert.match(noProviderOutcome.error, /Codex \(provider_failure\): codex unavailable/);
 
 const indeterminateError = new Error("MCP request timed out while provider state is unknown");
 indeterminateError.indeterminate = true;
