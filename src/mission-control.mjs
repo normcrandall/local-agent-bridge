@@ -63,17 +63,20 @@ function dateMs(value) {
 }
 
 export function formatLocalDateTime(value) {
-  const ms = dateMs(value);
-  if (!ms) return "unknown";
-  return new Date(ms).toLocaleString([], {
+  const ms = Date.parse(value || "");
+  if (!Number.isFinite(ms)) return "unknown";
+  const parts = new Intl.DateTimeFormat("sv-SE-u-ca-gregory-nu-latn", {
     year: "numeric",
-    month: "short",
+    month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
+    hourCycle: "h23",
     timeZoneName: "short",
-  });
+  }).formatToParts(new Date(ms));
+  const values = Object.fromEntries(parts.map(({ type, value: part }) => [type, part]));
+  return `${values.year}-${values.month}-${values.day} ${values.hour}:${values.minute}:${values.second} ${values.timeZoneName}`;
 }
 
 export function parseRepositoryRemote(remote) {
@@ -558,7 +561,8 @@ export function renderMissionControl(snapshot, {
   }
 
   if (snapshot.mode === "all") {
-    lines.push(truncate("Archive old terminal records: bridge cleanup --older-than-days 7 (preview; add --apply).", usableWidth));
+    lines.push(...wrap("Archive: bridge cleanup --older-than-days 7", usableWidth));
+    lines.push(...wrap("Preview only; add --apply to archive.", usableWidth));
   }
 
   if (interactive) {
