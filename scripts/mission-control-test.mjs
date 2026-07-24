@@ -715,7 +715,7 @@ try {
     activeAgent: "claude",
     writer: "codex",
     mode: "work",
-    task: "Challenge the implementation approach",
+    task: "Review and challenge the implementation approach",
   };
   const peerWork = renderMissionControl({
     ...attention,

@@ -760,8 +760,8 @@ function activeRole(lane) {
   if (lane.type === "native_host") return "host";
   if (lane.mode === "review") return "reviewer";
   if (lane.writer && lane.activeAgent === lane.writer) return "writer";
-  if (/\bre-?review|\breview(?:ing)?\b/i.test(clean(lane.task))) return "reviewer";
   if (lane.mode === "work" && lane.writer) return "peer";
+  if (/\bre-?review|\breview(?:ing)?\b/i.test(clean(lane.task))) return "reviewer";
   return "agent";
 }
 
