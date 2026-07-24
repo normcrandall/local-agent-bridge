@@ -108,6 +108,8 @@ async function callBridgeWithoutModel() {
       `Write(/${resolve(root, ".bridge/test-handoffs/smoke-review.md")})`,
       "mcp__github_review__write_handoff",
       "mcp__github_review__submit_pr_review",
+      "mcp__github_review__read_review_threads",
+      "mcp__github_review__resolve_review_thread",
     ]) {
       if (!allowed.includes(rule)) throw new Error(`Claude review permission is missing: ${rule}`);
     }

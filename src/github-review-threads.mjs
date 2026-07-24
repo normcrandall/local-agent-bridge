@@ -1,0 +1,40 @@
+function normalizeBotLogin(login) {
+  const normalized = (login || "").toLowerCase();
+  return normalized.endsWith("[bot]") ? normalized.slice(0, -5) : normalized;
+}
+
+function requireReviewerApp(client) {
+  if (!client) {
+    throw new Error("Review-thread access requires the configured reviewer GitHub App; PAT fallback is not authorized.");
+  }
+  return client;
+}
+
+export function createReviewerThreadController({ client, expectedLogin, getSubmittedEvent }) {
+  if (!expectedLogin) throw new Error("expectedLogin is required.");
+  if (typeof getSubmittedEvent !== "function") throw new Error("getSubmittedEvent is required.");
+
+  return {
+    async read() {
+      return requireReviewerApp(client).reviewThreads();
+    },
+
+    async resolve({ threadId }) {
+      const appClient = requireReviewerApp(client);
+      if (getSubmittedEvent() !== "APPROVE") {
+        throw new Error("The reviewer must submit its exact-head APPROVE review before resolving satisfied threads.");
+      }
+      const threads = await appClient.reviewThreads();
+      const thread = threads.find((candidate) => candidate.id === threadId);
+      if (!thread) throw new Error("Review thread is not part of the bound pull request.");
+      const originalComment = thread.comments?.nodes?.[0];
+      if (
+        originalComment?.author?.__typename !== "Bot"
+        || normalizeBotLogin(originalComment.author?.login) !== normalizeBotLogin(expectedLogin)
+      ) {
+        throw new Error("The reviewer App may resolve only a thread opened by that same reviewer identity.");
+      }
+      return appClient.resolveReviewThread({ threadId });
+    },
+  };
+}

@@ -8,6 +8,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { submitBoundReview } from "./github-review-client.mjs";
 import { canPublishReviewStatus, GITHUB_LOGIN_PATTERN, resolveReviewToken } from "./github-app-auth.mjs";
+import { createBoundBuilderClient } from "./github-builder-client.mjs";
+import { createReviewerThreadController } from "./github-review-threads.mjs";
 
 const repository = process.env.GITHUB_REVIEW_REPOSITORY;
 const prNumber = Number.parseInt(process.env.GITHUB_REVIEW_PR_NUMBER || "", 10);
@@ -53,10 +55,28 @@ const server = new McpServer(
   { name: "bounded-github-review", version: "0.1.0" },
   {
     instructions:
-      `Submit exactly one formal review to ${repository} PR #${prNumber} at ${headSha} as ${expectedLogin}. Write the durable handoff first.${statusGateEnabled ? ` This reviewer App also publishes the exact-head ${statusContext} status.` : " This repository uses the formal App review as its merge gate; no machine status will be published."} A PAT compatibility credential is comment-only. This server cannot access any other repository, PR, commit, or GitHub mutation.`,
+      `Submit exactly one formal review to ${repository} PR #${prNumber} at ${headSha} as ${expectedLogin}. Write the durable handoff first.${statusGateEnabled ? ` This reviewer App also publishes the exact-head ${statusContext} status.` : " This repository uses the formal App review as its merge gate; no machine status will be published."}${appCredential ? " After an APPROVE review, read the bound review threads and resolve only satisfied threads opened by this reviewer App." : " A PAT compatibility credential is comment-only and cannot read or resolve review threads."} This server cannot access any other repository, PR, commit, or GitHub mutation.`,
   },
 );
 let submittedReview = null;
+let submittedEvent = null;
+const threadClient = appCredential
+  ? createBoundBuilderClient({
+      apiUrl: reviewApiUrl,
+      token,
+      repository,
+      expectedLogin,
+      verifiedLogin,
+      headSha,
+      prNumber,
+      allowedOperations: ["read_review_threads", "resolve_review_thread"],
+    })
+  : null;
+const threadController = createReviewerThreadController({
+  client: threadClient,
+  expectedLogin,
+  getSubmittedEvent: () => submittedEvent,
+});
 
 server.registerTool(
   "write_handoff",
@@ -122,6 +142,7 @@ server.registerTool(
       publishGate: statusGateEnabled,
     });
     submittedReview = result;
+    submittedEvent = event;
     const gateReceipt = result.gate
       ? `gate \`${result.gate.context}\` = \`${result.gate.state}\``
       : appCredential
@@ -138,5 +159,40 @@ server.registerTool(
     };
   },
 );
+
+if (appCredential) {
+  server.registerTool(
+    "read_review_threads",
+    {
+      title: "Read bound pull request review threads",
+      description: "Read review threads only from the pre-bound pull request at the exact authorized head.",
+      inputSchema: {},
+    },
+    async () => {
+      const threads = await threadController.read();
+      const value = { threads, repository, prNumber, headSha };
+      return {
+        content: [{ type: "text", text: JSON.stringify(value) }],
+        structuredContent: value,
+      };
+    },
+  );
+
+  server.registerTool(
+    "resolve_review_thread",
+    {
+      title: "Resolve reviewer-owned pull request thread",
+      description: "After submitting APPROVE, resolve one satisfied thread opened by this same reviewer App on the bound pull request.",
+      inputSchema: { threadId: z.string().min(1) },
+    },
+    async ({ threadId }) => {
+      const result = await threadController.resolve({ threadId });
+      return {
+        content: [{ type: "text", text: JSON.stringify(result) }],
+        structuredContent: result,
+      };
+    },
+  );
+}
 
 await server.connect(new StdioServerTransport());
