@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import process from "node:process";
 import { createAgentPool } from "../src/agent-pool.mjs";
-import { summarizeDeliveryOutcomes } from "../src/builder-operation-store.mjs";
+import { deliverySummaryForHandoff, summarizeDeliveryOutcomes } from "../src/builder-operation-store.mjs";
 import {
   acquireWorkerLock,
   acquireWorkspaceLock,
@@ -742,6 +742,15 @@ try {
         }
         let completion = current.completion || null;
         let handoffs = current.handoffs || [];
+        const observedWorkspaceHead = turn.metadata?.workspaceHeadSha;
+        const adoptWorkspaceHead = current.githubBuilder?.allowWorkspaceHead === true
+          && /^[0-9a-f]{40}$/i.test(observedWorkspaceHead || "");
+        const githubBuilder = adoptWorkspaceHead
+          ? { ...current.githubBuilder, headSha: observedWorkspaceHead }
+          : current.githubBuilder;
+        const issueClaim = adoptWorkspaceHead && current.issueClaim
+          ? { ...current.issueClaim, headSha: observedWorkspaceHead }
+          : current.issueClaim;
         if (turn.handoff) {
           completion = completionAfterHandoff(completion, {
             handoff: turn.handoff,
@@ -752,11 +761,17 @@ try {
           // Carry the durable, provider-neutral delivery outcome structurally
           // into completion so coordinator wakes distinguish succeeded / rejected
           // / indeterminate / reconciled remote verification (not free text).
-          if (current.githubBuilder) {
-            const receiptPath = current.githubBuilder.receiptPath
+          if (githubBuilder) {
+            const receiptPath = githubBuilder.receiptPath
               || resolve(current.workspace, ".bridge", "github-builder-receipts.jsonl");
-            const delivery = summarizeDeliveryOutcomes(receiptPath, { headSha: current.githubBuilder.headSha });
-            if (delivery) completion = { ...completion, delivery: { ...delivery, at: new Date().toISOString() } };
+            const delivery = summarizeDeliveryOutcomes(receiptPath, { headSha: githubBuilder.headSha });
+            const handoffDelivery = deliverySummaryForHandoff({
+              delivery,
+              handoff: turn.handoff,
+              agent: turn.agent,
+              writer: current.writer,
+            });
+            if (handoffDelivery) completion = { ...completion, delivery: handoffDelivery };
           }
         }
         const reviewPublication = turn.metadata?.reviewPublication?.published
@@ -764,7 +779,7 @@ try {
           : current.reviewPublication;
         return {
           ...current, usage, budgetExceeded: decision.exceeded, ci, decisions, decisionEscalation,
-          completion, handoffs, reviewPublication,
+          completion, handoffs, reviewPublication, githubBuilder, issueClaim,
         };
       });
       if (turn.handoff) {

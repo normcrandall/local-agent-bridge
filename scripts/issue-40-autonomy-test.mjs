@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createAgentPool, autonomousWorkProfile } from "../src/agent-pool.mjs";
+import { createAgentPool, autonomousWorkProfile, providerFallbackSlots } from "../src/agent-pool.mjs";
 import { claudeToolRequest, codexToolRequest } from "../src/tool-requests.mjs";
 import { classifyCoordinatorWake, enqueueCoordinatorWake } from "../src/coordinator-wake.mjs";
 import { createCollaboration, updateCollaboration } from "../src/collaboration-store.mjs";
@@ -86,6 +86,11 @@ assert.equal(leakyCodex.arguments.config["sandbox_workspace_write.network_access
 assert.doesNotThrow(() => createAgentPool({ root, workProfile: "implement", workCommands: ["npm test"], autonomous: true }));
 // The explicitly user-selected, non-autonomous legacy deliver lane is preserved.
 assert.doesNotThrow(() => createAgentPool({ root, workProfile: "deliver" }));
+
+// The total MCP timeout reserves one slot for every overload fallback. This
+// includes Antigravity; otherwise its retry can be cut off by the broker.
+assert.equal(providerFallbackSlots("antigravity", { antigravity: ["medium", "low"] }), 2);
+assert.equal(providerFallbackSlots("codex", { codex: ["terra"] }), 1);
 
 // Lifecycle: coordinator wakes distinguish succeeded / rejected / indeterminate
 // / reconciled remote verification from the structural delivery outcome recorded

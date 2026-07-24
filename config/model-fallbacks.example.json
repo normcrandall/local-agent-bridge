@@ -14,9 +14,9 @@
     },
     "antigravity": {
       "fallbackModels": [
-        "Gemini 3.1 Pro (Low)",
-        "Gemini 3.5 Flash (High)",
-        "Gemini 3.5 Flash (Medium)"
+        "gemini-3.6-flash-medium",
+        "gemini-3.6-flash-low",
+        "gemini-3.5-flash-high"
       ]
     },
     "ollama": {

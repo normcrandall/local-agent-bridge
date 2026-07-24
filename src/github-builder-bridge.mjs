@@ -15,6 +15,7 @@ const prNumber = process.env.GITHUB_BUILDER_PR_NUMBER
 const headRef = process.env.GITHUB_BUILDER_HEAD_REF || null;
 const baseRef = process.env.GITHUB_BUILDER_BASE_REF || null;
 const baseSha = process.env.GITHUB_BUILDER_BASE_SHA || null;
+const allowWorkspaceHead = process.env.GITHUB_BUILDER_ALLOW_WORKSPACE_HEAD === "1";
 const apiUrl = process.env.GITHUB_BUILDER_API_URL || "https://api.github.com";
 const allowedOperations = (process.env.GITHUB_BUILDER_ALLOWED_OPERATIONS || "ensure_pull_request,read_review_threads,reply_review_thread,resolve_review_thread,mark_ready")
   .split(",").map((value) => value.trim()).filter(Boolean);
@@ -57,6 +58,7 @@ const client = createBoundBuilderClient({
   headRef,
   baseRef,
   baseSha,
+  allowWorkspaceHead,
   allowedOperations,
   requiredReviewStatusContext: process.env.GITHUB_BUILDER_REVIEW_STATUS_CONTEXT || "agent-review",
   trustedReviewLogins,

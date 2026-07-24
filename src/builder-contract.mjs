@@ -96,9 +96,9 @@ export function builderEnvelopeOperationSchema() {
 }
 
 // The full Antigravity envelope schema: a bounded batch of canonical operations.
-export function builderEnvelopeSchema({ maxOperations = 20 } = {}) {
+export function builderEnvelopeSchema({ maxOperations = 20, allowEmpty = false } = {}) {
   return z
-    .object({ operations: z.array(builderEnvelopeOperationSchema()).min(1).max(maxOperations) })
+    .object({ operations: z.array(builderEnvelopeOperationSchema()).min(allowEmpty ? 0 : 1).max(maxOperations) })
     .strict();
 }
 

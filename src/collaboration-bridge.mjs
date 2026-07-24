@@ -67,6 +67,7 @@ import {
   plannedIssueClaimWorktree,
   resolveClaimedWorktreeHead,
   resolveIssueClaimRevisions,
+  workspaceHeadBuilderBinding,
 } from "./collaboration-start-preflight.mjs";
 import { hydrateClaimedIssueTask } from "./claimed-issue-context.mjs";
 import { startSupervisedWorker } from "./worker-supervisor-client.mjs";
@@ -847,6 +848,11 @@ server.registerTool(
           ? adoptExistingWriterCheckout({ workspace: requestedWorkspace })
           : null;
       const workspace = worktree?.path || requestedWorkspace;
+      const effectiveGithubBuilder = workspaceHeadBuilderBinding({
+        githubBuilder: input.githubBuilder,
+        mode: effectiveMode,
+        worktree,
+      });
       if (input.chair?.workspace && projectDirectory(input.chair.workspace) !== realpathSync(workspace)) {
         throw new Error("Native chair workspace must match the collaboration workspace.");
       }
@@ -885,9 +891,9 @@ server.registerTool(
       repositoryEvidence = await captureRepositoryEvidence({
         workspace,
         store: evidenceStore,
-        repository: input.issueClaim?.repository || input.githubReview?.repository || input.githubBuilder?.repository,
-        headSha: input.githubReview?.headSha || input.githubBuilder?.headSha || undefined,
-        baseSha: input.githubBuilder?.baseSha || resolvedIssueClaim?.baseSha || null,
+        repository: input.issueClaim?.repository || input.githubReview?.repository || effectiveGithubBuilder?.repository,
+        headSha: input.githubReview?.headSha || effectiveGithubBuilder?.headSha || undefined,
+        baseSha: effectiveGithubBuilder?.baseSha || resolvedIssueClaim?.baseSha || null,
         allowMissingHead: !input.issueClaim && !input.githubReview && !input.githubBuilder && !input.worktree,
       });
       const taskBase = resolvedTask;
@@ -927,7 +933,7 @@ server.registerTool(
         requestedPermissionProfile: input.permissionProfile || "standard",
         handoffPath: input.handoffPath || null,
         githubReview: input.githubReview || null,
-        githubBuilder: input.githubBuilder || null,
+        githubBuilder: effectiveGithubBuilder,
         issueClaim: resolvedIssueClaim,
         issueContext,
         evidence: {
@@ -1949,7 +1955,9 @@ server.registerTool(
       || [];
     const continuationStore = createEvidenceStore({ directory: EVIDENCE_ROOT });
     const activeGithubReview = githubReview || current.githubReview || null;
-    const activeGithubBuilder = githubBuilder || current.githubBuilder || null;
+    const activeGithubBuilder = githubBuilder
+      ? workspaceHeadBuilderBinding({ githubBuilder, mode: current.mode, worktree: current.worktree })
+      : current.githubBuilder || null;
     const continuationEvidence = await captureRepositoryEvidence({
       workspace: current.workspace,
       store: continuationStore,
@@ -2018,7 +2026,7 @@ server.registerTool(
         permissionProfile: permissionProfile || previous.permissionProfile || "standard",
         handoffPath: handoffPath || previous.handoffPath || null,
         githubReview: githubReview || previous.githubReview || null,
-        githubBuilder: githubBuilder || previous.githubBuilder || null,
+        githubBuilder: activeGithubBuilder,
         issueClaim: resolvedContinuationIssueClaim,
         budget: budget || previous.budget || {},
         providerRecovery: providerRecovery || previous.providerRecovery || { enabled: true, maxAttempts: 3, backoffSeconds: [15, 60, 180] },

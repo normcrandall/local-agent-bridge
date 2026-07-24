@@ -10,7 +10,7 @@ import {
   BuilderUnsupportedError,
   DELIVERY_OUTCOMES,
 } from "../src/builder-contract.mjs";
-import { loadBranchReconciliationState, summarizeDeliveryOutcomes } from "../src/builder-operation-store.mjs";
+import { deliverySummaryForHandoff, loadBranchReconciliationState, summarizeDeliveryOutcomes } from "../src/builder-operation-store.mjs";
 import { claudeToolRequest, codexToolRequest } from "../src/tool-requests.mjs";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -754,6 +754,81 @@ git(["cat-file", "-e", `${successHeadSha}^{commit}`], { cwd: bareRepoPath });
 assert.ok(authAttempts.length > authAttemptsBefore);
 assert.ok(authAttempts.slice(authAttemptsBefore).every((value) => value === expectedAuth));
 
+// A private writer checkout starts bound to the exact base because its final
+// commit does not exist yet. Workspace-head mode adopts only the checked-out
+// branch's current commit and then delivers that exact descendant.
+git(["checkout", "-b", "feature-dynamic", "main"], { cwd: localRepoPath });
+fs.writeFileSync(path.join(localRepoPath, "dynamic.txt"), "dynamic writer head");
+git(["add", "dynamic.txt"], { cwd: localRepoPath });
+git(["commit", "-m", "Dynamic writer commit"], { cwd: localRepoPath });
+const dynamicHeadSha = gitOut(["rev-parse", "HEAD"], { cwd: localRepoPath });
+const dynamicApi = fakeGitHub({ branchShas: { main: headSha } });
+const dynamicFactory = tokenFactory();
+const dynamicReceiptLogPath = path.join(tmpDir, "dynamic", "receipts.jsonl");
+const dynamicClient = createBoundBuilderClient({
+  apiUrl: "https://github.test",
+  fetchImpl: dynamicApi.fetchImpl,
+  workspace: localRepoPath,
+  repository: "owner/repo",
+  baseRef: "main",
+  baseSha: headSha,
+  headSha,
+  headRef: "refs/heads/feature-dynamic",
+  allowedOperations: ["create_branch"],
+  allowWorkspaceHead: true,
+  getToken: dynamicFactory.getToken,
+  expectedLogin: "builder[bot]",
+  transportUrl,
+  receiptPath: dynamicReceiptLogPath,
+});
+const dynamicResult = await dynamicClient.createBranch({ ref: "refs/heads/feature-dynamic", sha: dynamicHeadSha });
+assert.equal(dynamicResult.requestedSha, dynamicHeadSha);
+assert.equal(dynamicResult.authorizationHeadSha, headSha);
+assert.equal(gitOut(["rev-parse", "refs/heads/feature-dynamic"], { cwd: bareRepoPath }), dynamicHeadSha);
+const dynamicReceipts = fs.readFileSync(dynamicReceiptLogPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+assert.ok(dynamicReceipts.some((receipt) => receipt.operation === "adopt_workspace_head"
+  && receipt.authorizationHeadSha === headSha
+  && receipt.headSha === dynamicHeadSha));
+const dynamicDelivery = summarizeDeliveryOutcomes(dynamicReceiptLogPath, { headSha });
+assert.equal(dynamicDelivery.outcome, "succeeded");
+assert.equal(dynamicDelivery.counts.succeeded, 1);
+git(["checkout", "main"], { cwd: localRepoPath });
+const wrongWorkspaceHeadClient = createBoundBuilderClient({
+  apiUrl: "https://github.test",
+  fetchImpl: dynamicApi.fetchImpl,
+  workspace: localRepoPath,
+  repository: "owner/repo",
+  baseRef: "main",
+  baseSha: headSha,
+  headSha,
+  headRef: "refs/heads/feature-dynamic",
+  allowedOperations: ["create_branch"],
+  allowWorkspaceHead: true,
+  getToken: dynamicFactory.getToken,
+  expectedLogin: "builder[bot]",
+  transportUrl,
+  receiptPath: receiptLogPath,
+});
+await assert.rejects(
+  wrongWorkspaceHeadClient.createBranch({ ref: "refs/heads/feature-dynamic", sha: dynamicHeadSha }),
+  /Workspace HEAD .* does not match requested SHA/,
+);
+
+const missingTerminalDelivery = deliverySummaryForHandoff({
+  delivery: null,
+  handoff: { outcome: "completed" },
+  agent: "antigravity",
+  writer: "antigravity",
+  at: "2026-01-01T00:00:00.000Z",
+});
+assert.equal(missingTerminalDelivery.outcome, "rejected");
+assert.equal(deliverySummaryForHandoff({
+  delivery: null,
+  handoff: { outcome: "continue" },
+  agent: "antigravity",
+  writer: "antigravity",
+}), null);
+
 // A2. createBranch accepts an unchanged binary inherited from its exact base.
 const inheritedBinaryFactory = tokenFactory();
 const inheritedBinaryClient = createBoundBuilderClient({
@@ -1325,6 +1400,12 @@ for (const receipt of receiptLines) {
   assert.match(receipt.operationId, /^[0-9a-f]{64}$/);
   assert.equal(receipt.repository, "owner/repo");
   assert.ok(receipt.recordedAt);
+  if (receipt.operation === "adopt_workspace_head") {
+    assert.match(receipt.authorizationHeadSha, /^[0-9a-f]{40}$/);
+    assert.match(receipt.previousHeadSha, /^[0-9a-f]{40}$/);
+    assert.match(receipt.headSha, /^[0-9a-f]{40}$/);
+    continue;
+  }
   assert.equal(receipt.appIdentity.expectedLogin, "builder[bot]");
   // Every durable receipt carries its provider-neutral lifecycle outcome so a
   // restarted process can inspect succeeded/rejected/indeterminate/reconciled.
@@ -1358,6 +1439,10 @@ const envelope = parseBuilderEnvelope(`done\n---BEGIN BOUND_GITHUB_BUILDER---\n$
   operations: [{ operation: "reply_review_thread", threadId: "thread-1", body: "Fixed" }],
 })}\n---END BOUND_GITHUB_BUILDER---`);
 assert.equal(envelope.operations[0].operation, "reply_review_thread");
+const noOpEnvelope = parseBuilderEnvelope(`still implementing\n---BEGIN BOUND_GITHUB_BUILDER---\n${JSON.stringify({
+  operations: [],
+})}\n---END BOUND_GITHUB_BUILDER---`);
+assert.deepEqual(noOpEnvelope.operations, []);
 assert.throws(() => parseBuilderEnvelope("missing"), /required bound GitHub builder envelope/);
 const branchOpsEnvelope = parseBuilderEnvelope(`done\n---BEGIN BOUND_GITHUB_BUILDER---\n${JSON.stringify({
   operations: [

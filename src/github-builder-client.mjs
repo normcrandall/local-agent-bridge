@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { appendFileSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { appendFileSync, mkdirSync, realpathSync } from "node:fs";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import {
   assertBranchRef,
   pushCommit,
@@ -33,11 +33,33 @@ async function assertLocalAncestry({ gitPath, workspace, ancestor, descendant })
   }
 }
 
-async function validateLocalGitState({ gitPath, workspace, repository, ref, sha, oldSha, requireFastForward = true }) {
+async function validateLocalGitState({
+  gitPath,
+  workspace,
+  repository,
+  ref,
+  sha,
+  oldSha,
+  requireFastForward = true,
+  requireWorkspaceHead = false,
+}) {
   if (!workspace || typeof workspace !== "string") {
     throw new Error("Workspace path GITHUB_BUILDER_WORKSPACE is not set or invalid.");
   }
   const local = (args) => runGit(args, { gitPath, cwd: workspace, env: sanitizedGitEnv() });
+
+  if (requireWorkspaceHead) {
+    const actualWorkspace = realpathSync(resolve(workspace));
+    const gitDirectory = realpathSync(resolve(workspace, (await local(["rev-parse", "--path-format=absolute", "--absolute-git-dir"])).stdout.toString("utf8").trim()));
+    const commonDirectory = realpathSync(resolve(workspace, (await local(["rev-parse", "--path-format=absolute", "--git-common-dir"])).stdout.toString("utf8").trim()));
+    const fromWorkspace = relative(actualWorkspace, gitDirectory);
+    if (gitDirectory !== commonDirectory
+      || fromWorkspace === ".."
+      || fromWorkspace.startsWith(`..${sep}`)
+      || isAbsolute(fromWorkspace)) {
+      throw new Error("Workspace-head delivery requires self-contained Git metadata inside the writer checkout.");
+    }
+  }
 
   // The origin remote must be bound exactly to the authorized GitHub HTTPS repository.
   let remoteUrl;
@@ -89,6 +111,15 @@ async function validateLocalGitState({ gitPath, workspace, repository, ref, sha,
   }
   if (localRefSha && localRefSha !== sha) {
     throw new Error(`Local ref ${ref} points to ${localRefSha}, expected SHA ${sha}.`);
+  }
+  if (requireWorkspaceHead) {
+    if (localRefSha !== sha) {
+      throw new Error(`Local ref ${ref} does not resolve to the requested workspace SHA ${sha}.`);
+    }
+    const currentHead = (await local(["rev-parse", "HEAD"])).stdout.toString("utf8").trim();
+    if (currentHead !== sha) {
+      throw new Error(`Workspace HEAD ${currentHead || "unknown"} does not match requested SHA ${sha}.`);
+    }
   }
 
   if (oldSha !== undefined && requireFastForward) {
@@ -254,9 +285,12 @@ export function createBoundBuilderClient({
   workspace = null,
   transportUrl = null,
   receiptPath = null,
+  allowWorkspaceHead = false,
 }) {
   assertRepository(repository);
   assertSha(headSha);
+  const authorizationHeadSha = headSha;
+  let activeHeadSha = headSha;
   if (baseSha !== null) assertSha(baseSha);
   if (!apiUrl.startsWith("https://")) {
     throw new Error("API URL must use HTTPS.");
@@ -287,7 +321,7 @@ export function createBoundBuilderClient({
   let cachedToken = token || null;
   let cachedVerifiedLogin = verifiedLogin || null;
 
-  const context = { fetchImpl, apiUrl, token: cachedToken, repository, expectedLogin, verifiedLogin: cachedVerifiedLogin, headSha, prNumber, issueNumber };
+  const context = { fetchImpl, apiUrl, token: cachedToken, repository, expectedLogin, verifiedLogin: cachedVerifiedLogin, headSha: activeHeadSha, prNumber, issueNumber };
   const allowed = new Set(allowedOperations);
   const authorize = (operation) => {
     if (!allowed.has(operation)) throw new Error(`GitHub builder operation is not authorized: ${operation}.`);
@@ -329,14 +363,14 @@ export function createBoundBuilderClient({
     const [owner] = repository.split("/");
     const encodedRef = headRef.split("/").map(encodeURIComponent).join("/");
     const ref = await request({ ...context, path: `/repos/${repository}/git/ref/heads/${encodedRef}` });
-    if (ref?.object?.sha !== headSha) {
-      throw new Error(`Head ref changed: authorized ${headSha}, current ${ref?.object?.sha || "unknown"}.`);
+    if (ref?.object?.sha !== activeHeadSha) {
+      throw new Error(`Head ref changed: expected active delivery head ${activeHeadSha}, current ${ref?.object?.sha || "unknown"}.`);
     }
     const existing = await request({
       ...context,
       path: `/repos/${repository}/pulls?state=open&head=${encodeURIComponent(`${owner}:${headRef}`)}&per_page=100`,
     });
-    const existingPull = existing.find((candidate) => candidate.head?.sha === headSha && candidate.base?.ref === baseRef);
+    const existingPull = existing.find((candidate) => candidate.head?.sha === activeHeadSha && candidate.base?.ref === baseRef);
     const pull = await withNonBranchMutation("ensure_pull_request", { headRef, baseRef }, async () => (
       existingPull
         ? request({
@@ -352,10 +386,10 @@ export function createBoundBuilderClient({
             body: { title, body, head: headRef, base: baseRef, draft },
           })
     ));
-    if (pull?.head?.sha !== headSha) throw new Error("GitHub returned a pull request at an unexpected head SHA.");
+    if (pull?.head?.sha !== activeHeadSha) throw new Error("GitHub returned a pull request at an unexpected head SHA.");
     prNumber = pull.number;
     context.prNumber = pull.number;
-    return { operation: "ensure_pull_request", prNumber: pull.number, url: pull.html_url, headSha, login: expectedLogin };
+    return { operation: "ensure_pull_request", prNumber: pull.number, url: pull.html_url, headSha: activeHeadSha, authorizationHeadSha, login: expectedLogin };
   }
 
   async function loadReviewThreads() {
@@ -403,7 +437,7 @@ export function createBoundBuilderClient({
     const threads = await loadReviewThreads();
     const thread = threads.find((candidate) => candidate.id === threadId);
     if (!thread) throw new Error("Review thread is not part of the bound pull request.");
-    const receiptMarker = marker("reply", headSha, `${threadId}:${body}`);
+    const receiptMarker = marker("reply", activeHeadSha, `${threadId}:${body}`);
     const existing = thread.comments?.nodes?.find((comment) => (
       comment.author?.__typename === "Bot"
       && normalizeBotLogin(comment.author?.login) === normalizeBotLogin(expectedLogin)
@@ -412,7 +446,7 @@ export function createBoundBuilderClient({
     const replyKey = { threadId, marker: receiptMarker };
     if (existing) {
       recordNonBranchSettled("reply_review_thread", replyKey);
-      return { operation: "reply_review_thread", threadId, url: existing.url, idempotent: true, login: expectedLogin, headSha };
+      return { operation: "reply_review_thread", threadId, url: existing.url, idempotent: true, login: expectedLogin, headSha: activeHeadSha, authorizationHeadSha };
     }
     const query = `mutation($threadId:ID!,$body:String!){addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:$threadId,body:$body}){comment{id url author{login __typename}}}}`;
     return withNonBranchMutation("reply_review_thread", replyKey, async () => {
@@ -427,7 +461,7 @@ export function createBoundBuilderClient({
       if (comment?.author?.__typename !== "Bot" || normalizeBotLogin(comment?.author?.login) !== normalizeBotLogin(expectedLogin)) {
         throw new Error("GitHub posted the thread reply with an unexpected identity.");
       }
-      return { operation: "reply_review_thread", threadId, url: comment.url, idempotent: false, login: expectedLogin, headSha };
+      return { operation: "reply_review_thread", threadId, url: comment.url, idempotent: false, login: expectedLogin, headSha: activeHeadSha, authorizationHeadSha };
     });
   }
 
@@ -438,14 +472,14 @@ export function createBoundBuilderClient({
     if (!thread) throw new Error("Review thread is not part of the bound pull request.");
     if (thread.isResolved) {
       recordNonBranchSettled("resolve_review_thread", { threadId });
-      return { operation: "resolve_review_thread", threadId, idempotent: true, login: expectedLogin, headSha };
+      return { operation: "resolve_review_thread", threadId, idempotent: true, login: expectedLogin, headSha: activeHeadSha, authorizationHeadSha };
     }
     const query = `mutation($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{id isResolved}}}`;
     return withNonBranchMutation("resolve_review_thread", { threadId }, async () => {
       const result = await request({ ...context, path: "/graphql", method: "POST", body: { query, variables: { threadId } } });
       if (result?.errors?.length) throw new Error(`GitHub review-thread resolution failed: ${result.errors[0].message}`);
       if (!result?.data?.resolveReviewThread?.thread?.isResolved) throw new Error("GitHub did not resolve the review thread.");
-      return { operation: "resolve_review_thread", threadId, idempotent: false, login: expectedLogin, headSha };
+      return { operation: "resolve_review_thread", threadId, idempotent: false, login: expectedLogin, headSha: activeHeadSha, authorizationHeadSha };
     });
   }
 
@@ -455,15 +489,15 @@ export function createBoundBuilderClient({
     const pull = await boundPullRequest(context);
     if (!pull.draft) {
       recordNonBranchSettled("mark_ready", {});
-      return { operation: "mark_ready", prNumber, url: pull.html_url, idempotent: true, login: expectedLogin, headSha };
+      return { operation: "mark_ready", prNumber, url: pull.html_url, idempotent: true, login: expectedLogin, headSha: activeHeadSha, authorizationHeadSha };
     }
     const query = `mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{number url isDraft headRefOid}}}`;
     return withNonBranchMutation("mark_ready", {}, async () => {
       const result = await request({ ...context, path: "/graphql", method: "POST", body: { query, variables: { id: pull.node_id } } });
       if (result?.errors?.length) throw new Error(`GitHub mark-ready failed: ${result.errors[0].message}`);
       const ready = result?.data?.markPullRequestReadyForReview?.pullRequest;
-      if (ready?.headRefOid !== headSha || ready?.isDraft) throw new Error("GitHub returned an invalid mark-ready receipt.");
-      return { operation: "mark_ready", prNumber, url: ready.url, idempotent: false, login: expectedLogin, headSha };
+      if (ready?.headRefOid !== activeHeadSha || ready?.isDraft) throw new Error("GitHub returned an invalid mark-ready receipt.");
+      return { operation: "mark_ready", prNumber, url: ready.url, idempotent: false, login: expectedLogin, headSha: activeHeadSha, authorizationHeadSha };
     });
   }
 
@@ -474,7 +508,7 @@ export function createBoundBuilderClient({
     const pull = await boundPullRequest(context);
     if (pull.merged) {
       recordNonBranchSettled("merge", { method });
-      return { operation: "merge", prNumber, url: pull.html_url, idempotent: true, login: expectedLogin, headSha };
+      return { operation: "merge", prNumber, url: pull.html_url, idempotent: true, login: expectedLogin, headSha: activeHeadSha, authorizationHeadSha };
     }
     if (!trustedReviewLogins.length && !trustedHumanReviewLogins.length) {
       throw new Error("No trusted reviewer App or human reviewer identities are configured for merge authorization.");
@@ -498,7 +532,7 @@ export function createBoundBuilderClient({
       ));
       for (const review of chronological) {
         const login = review.user?.login;
-        if (review.commit_id !== headSha || !trustedLogins.includes(login) || !decisiveStates.has(review.state)) continue;
+        if (review.commit_id !== activeHeadSha || !trustedLogins.includes(login) || !decisiveStates.has(review.state)) continue;
         latestByLogin.set(login, review);
       }
       return [...latestByLogin.values()];
@@ -523,7 +557,7 @@ export function createBoundBuilderClient({
       try {
         const statuses = await requestPages({
           ...context,
-          path: `/repos/${repository}/commits/${headSha}/statuses?per_page=100`,
+          path: `/repos/${repository}/commits/${activeHeadSha}/statuses?per_page=100`,
         });
         if (!Array.isArray(statuses)) throw new Error("GitHub returned an invalid machine-review status history.");
         machineStatus = statuses.find((candidate) => candidate.context === requiredReviewStatusContext);
@@ -559,18 +593,18 @@ export function createBoundBuilderClient({
         const decisions = effectiveAppReviews
           .map((review) => `${review.user.login}:${review.state}`)
           .join(", ");
-        throw new Error(`Configured reviewer App decisions do not authorize merge on exact head ${headSha}: ${decisions}.`);
+        throw new Error(`Configured reviewer App decisions do not authorize merge on exact head ${activeHeadSha}: ${decisions}.`);
       }
       if (!trustedHumanReviewLogins.length && machineStatus?.state !== "success") {
         const statusDetail = machineStatusUnavailableReason
           ? `the optional machine-review status could not be read (${machineStatusUnavailableReason})`
           : `machine-review status ${requiredReviewStatusContext} is not successful`;
-        throw new Error(`No exact-head approval from a configured reviewer App was found, and ${statusDetail} on ${headSha}.`);
+        throw new Error(`No exact-head approval from a configured reviewer App was found, and ${statusDetail} on ${activeHeadSha}.`);
       }
       if (!trustedHumanReviewLogins.length && !trustedReviewLogins.includes(machineStatus?.creator?.login)) {
         throw new Error(`No exact-head approval from a configured reviewer App was found, and machine-review status was not authored by a configured reviewer App: ${machineStatus?.creator?.login || "unknown"}.`);
       }
-      throw new Error(`Merge authorization found neither a trusted machine review nor a trusted human approval on exact head ${headSha}.`);
+      throw new Error(`Merge authorization found neither a trusted machine review nor a trusted human approval on exact head ${activeHeadSha}.`);
     }
     let enforcement = resolveGitHubMergeEnforcement({ configuredMode: mergeEnforcement });
     if (mergeEnforcement !== "broker") {
@@ -611,13 +645,13 @@ export function createBoundBuilderClient({
         ...context,
         path: `/repos/${repository}/pulls/${prNumber}/merge`,
         method: "PUT",
-        body: { sha: headSha, merge_method: method },
+        body: { sha: activeHeadSha, merge_method: method },
       });
       if (!response?.merged) throw new Error(`GitHub did not merge the bound pull request: ${response?.message || "unknown error"}`);
       return response;
     });
     return {
-      operation: "merge", prNumber, sha: merged.sha, idempotent: false, login: expectedLogin, headSha,
+      operation: "merge", prNumber, sha: merged.sha, idempotent: false, login: expectedLogin, headSha: activeHeadSha, authorizationHeadSha,
       reviewGate, mergeEnforcement: enforcement,
     };
   }
@@ -625,8 +659,8 @@ export function createBoundBuilderClient({
   function assertBranchOperationInput({ ref, sha, oldSha }) {
     const branchName = assertBranchRef(ref);
     assertSha(sha);
-    if (sha !== headSha) {
-      throw new Error(`SHA mismatch: expected ${headSha}, received ${sha}.`);
+    if (!allowWorkspaceHead && sha !== authorizationHeadSha) {
+      throw new Error(`SHA mismatch: expected ${authorizationHeadSha}, received ${sha}.`);
     }
     const expectedRef = headRef ? (headRef.startsWith("refs/heads/") ? headRef : `refs/heads/${headRef}`) : null;
     if (expectedRef && ref !== expectedRef) {
@@ -637,6 +671,25 @@ export function createBoundBuilderClient({
       throw new Error(`Cannot modify a protected or default branch: ${branchName}.`);
     }
     return branchName;
+  }
+
+  function adoptWorkspaceHead(sha) {
+    if (!allowWorkspaceHead || sha === activeHeadSha) return;
+    const previousHeadSha = activeHeadSha;
+    persistReceipt({
+      operationId: createHash("sha256")
+        .update(JSON.stringify({ operation: "adopt_workspace_head", repository, authorizationHeadSha, previousHeadSha, headSha: sha }))
+        .digest("hex"),
+      operation: "adopt_workspace_head",
+      repository,
+      authorizationHeadSha,
+      previousHeadSha,
+      headSha: sha,
+      reason: "validated self-contained workspace HEAD",
+      recordedAt: new Date().toISOString(),
+    });
+    activeHeadSha = sha;
+    context.headSha = sha;
   }
 
   async function assertRemoteBranchMutable({ branchName, encodedBranch, activeToken }) {
@@ -697,6 +750,7 @@ export function createBoundBuilderClient({
       operationId: branchOperationId({ operation, ref, requestedSha, expectedOldSha }),
       operation,
       repository,
+      authorizationHeadSha,
       ref,
       requestedSha,
       expectedOldSha,
@@ -721,6 +775,7 @@ export function createBoundBuilderClient({
       operationId: branchOperationId({ operation, ref, requestedSha, expectedOldSha }),
       operation,
       repository,
+      authorizationHeadSha,
       ref,
       requestedSha,
       expectedOldSha,
@@ -745,7 +800,7 @@ export function createBoundBuilderClient({
 
   function nonBranchOperationId(operation, key) {
     return createHash("sha256")
-      .update(JSON.stringify({ operation, repository, headSha, ...key }))
+      .update(JSON.stringify({ operation, repository, headSha: activeHeadSha, ...key }))
       .digest("hex");
   }
 
@@ -754,7 +809,8 @@ export function createBoundBuilderClient({
       operationId: nonBranchOperationId(operation, key),
       operation,
       repository,
-      headSha,
+      headSha: activeHeadSha,
+      authorizationHeadSha,
       prNumber: prNumber ?? null,
       issueNumber: issueNumber ?? null,
       request: { operation, ...key },
@@ -942,7 +998,9 @@ export function createBoundBuilderClient({
     await validateLocalGitState({
       gitPath, workspace, repository, ref, sha,
       ...(baseSha === null ? {} : { oldSha: baseSha }),
+      requireWorkspaceHead: allowWorkspaceHead,
     });
+    adoptWorkspaceHead(sha);
 
     // 2. Token issuance and identity verification after validation.
     const credential = await ensureToken();
@@ -997,7 +1055,11 @@ export function createBoundBuilderClient({
     // fallback so unchanged inherited blobs never expand the payload to the
     // full tree.
     const gitPath = resolveGitBinary();
-    await validateLocalGitState({ gitPath, workspace, repository, ref, sha, oldSha: authorizedOldSha });
+    await validateLocalGitState({
+      gitPath, workspace, repository, ref, sha, oldSha: authorizedOldSha,
+      requireWorkspaceHead: allowWorkspaceHead,
+    });
+    adoptWorkspaceHead(sha);
 
     // 2. Token issuance and identity verification after validation.
     const credential = await ensureToken();
@@ -1052,7 +1114,9 @@ export function createBoundBuilderClient({
     const gitPath = resolveGitBinary();
     await validateLocalGitState({
       gitPath, workspace, repository, ref, sha, oldSha, requireFastForward: false,
+      requireWorkspaceHead: allowWorkspaceHead,
     });
+    adoptWorkspaceHead(sha);
 
     const credential = await ensureToken();
     const activeToken = credential.token;

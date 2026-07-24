@@ -153,7 +153,10 @@ export function summarizeDeliveryOutcomes(receiptPath, { headSha = null } = {}) 
       throw new Error(`Durable builder receipt log has a corrupt record at line ${index + 1}; refusing to summarize delivery fail-closed: ${error.message}`);
     }
     if (!receipt || typeof receipt.outcome !== "string") continue;
-    if (headSha && receipt.headSha !== headSha && receipt.requestedSha !== headSha) continue;
+    if (headSha
+      && receipt.headSha !== headSha
+      && receipt.requestedSha !== headSha
+      && receipt.authorizationHeadSha !== headSha) continue;
     // Stable identity: the content-addressed operationId (present on every branch
     // and non-branch receipt), falling back to operation+ref for older records.
     const identity = typeof receipt.operationId === "string" && receipt.operationId
@@ -172,4 +175,15 @@ export function summarizeDeliveryOutcomes(receiptPath, { headSha = null } = {}) 
   const counts = {};
   for (const value of latest.values()) counts[value] = (counts[value] || 0) + 1;
   return { outcome: aggregateDeliveryOutcome([...latest.values()]), counts };
+}
+
+export function deliverySummaryForHandoff({ delivery, handoff, agent, writer, at = new Date().toISOString() }) {
+  if (delivery) return { ...delivery, at };
+  if (agent !== writer || !["completed", "needs_review"].includes(handoff?.outcome)) return null;
+  return {
+    outcome: "rejected",
+    counts: { rejected: 1 },
+    detail: "Writer completed a bound-delivery handoff without a remotely verified builder receipt.",
+    at,
+  };
 }

@@ -61,7 +61,7 @@ function tomlValue(value) {
 }
 
 function isModelOverload(message) {
-  return /(?:^|[^a-z0-9])overloaded(?:[^a-z0-9]|$)|\bmodel[_ -]?overload(?:ed)?\b|\bover[_ -]?capacity\b|\bmodel\b[^\n]{0,80}\bat capacity\b|\bno capacity\b[^\n]{0,80}\bmodel\b|\bmodel\b[^\n]{0,80}\bhigh demand\b|\bhigh demand\b[^\n]{0,80}\bmodel\b|\bexperiencing high demand\b/i.test(message);
+  return /\bno requested model is currently available\b|(?:^|[^a-z0-9])overloaded(?:[^a-z0-9]|$)|\bmodel[_ -]?overload(?:ed)?\b|\bover[_ -]?capacity\b|\bmodel\b[^\n]{0,80}\bat capacity\b|\bno capacity\b[^\n]{0,80}\bmodel\b|\bmodel\b[^\n]{0,80}\bhigh demand\b|\bhigh demand\b[^\n]{0,80}\bmodel\b|\bexperiencing high demand\b/i.test(message);
 }
 
 function eventErrorText(event) {

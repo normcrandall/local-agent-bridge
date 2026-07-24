@@ -2,7 +2,11 @@ import { builderEnvelopeSchema } from "./builder-contract.mjs";
 
 // The Antigravity envelope schema is derived from the single canonical builder
 // contract so it can never drift from the Claude/Codex MCP tool schemas.
-const envelope = builderEnvelopeSchema();
+// Work-mode Antigravity conversations can legitimately have intermediate
+// turns with no GitHub mutation. Keep the canonical operation schema strict,
+// but permit an explicit empty batch so those turns are not misclassified as
+// provider failures.
+const envelope = builderEnvelopeSchema({ allowEmpty: true });
 const START = "---BEGIN BOUND_GITHUB_BUILDER---";
 const END = "---END BOUND_GITHUB_BUILDER---";
 
@@ -14,7 +18,7 @@ Bound Antigravity builder contract:
 - Allowed operations: ${(githubBuilder.allowedOperations || []).join(", ")}.
 - Do not use gh, general GitHub access, or another agent.
 - Current bound review threads: ${JSON.stringify(threads)}
-- End with exactly this validated envelope. The broker will publish it unchanged through bound builder credentials:
+- End with exactly this validated envelope. Use {"operations":[]} when this turn has no GitHub mutation. The broker will publish non-empty operations unchanged through bound builder credentials:
 ${START}
 {"operations":[{"operation":"reply_review_thread","threadId":"exact thread id","body":"reply"}]}
 ${END}`;

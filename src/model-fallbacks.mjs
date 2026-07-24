@@ -7,6 +7,34 @@ export const DEFAULT_MODEL_FALLBACKS_CONFIG = resolve(
   ".config/local-agent-bridge/model-fallbacks.json",
 );
 
+export function configuredModelFallbacksPath() {
+  return process.env.AGENT_BRIDGE_MODEL_FALLBACKS_CONFIG || DEFAULT_MODEL_FALLBACKS_CONFIG;
+}
+
+export const RECOMMENDED_WRITER_FALLBACKS = Object.freeze({
+  codex: Object.freeze(["gpt-5.6-terra"]),
+  antigravity: Object.freeze([
+    "gemini-3.6-flash-medium",
+    "gemini-3.6-flash-low",
+    "gemini-3.5-flash-high",
+  ]),
+});
+
+// Preserve every user-authored provider entry, including an explicit empty
+// array (the machine-wide opt-out), and fill only missing writer providers.
+export function mergeRecommendedWriterFallbacks(config = {}) {
+  if (config.version !== undefined && config.version !== 1) {
+    throw new Error("Unsupported model fallback config version.");
+  }
+  const providers = { ...(config.providers || {}) };
+  for (const [provider, fallbackModels] of Object.entries(RECOMMENDED_WRITER_FALLBACKS)) {
+    if (!Object.hasOwn(providers, provider)) {
+      providers[provider] = { fallbackModels: [...fallbackModels] };
+    }
+  }
+  return { ...config, version: 1, providers };
+}
+
 export function normalizeFallbackModels(values, source = "fallbackModels") {
   if (!Array.isArray(values)) throw new Error(`${source} must be an array of model names.`);
   if (values.length > 5) throw new Error(`${source} supports at most five fallback models.`);
@@ -20,7 +48,7 @@ export function normalizeFallbackModels(values, source = "fallbackModels") {
 }
 
 export function loadConfiguredFallbackModels(provider, {
-  configPath = process.env.AGENT_BRIDGE_MODEL_FALLBACKS_CONFIG || DEFAULT_MODEL_FALLBACKS_CONFIG,
+  configPath = configuredModelFallbacksPath(),
 } = {}) {
   if (!existsSync(configPath)) return [];
   let config;

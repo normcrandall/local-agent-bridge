@@ -34,3 +34,12 @@ export function plannedIssueClaimWorktree({ workspace, worktree, mode = "review"
 export function resolveClaimedWorktreeHead(workspace) {
   return revParse(workspace, "HEAD", "Unable to resolve the claimed worktree HEAD.");
 }
+
+export function workspaceHeadBuilderBinding({ githubBuilder, mode, worktree }) {
+  if (!githubBuilder) return null;
+  return {
+    ...githubBuilder,
+    // This is a broker-derived capability, never an additive caller override.
+    allowWorkspaceHead: mode === "work" && worktree?.strategy === "self-contained",
+  };
+}

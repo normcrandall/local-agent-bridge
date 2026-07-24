@@ -13,6 +13,10 @@ import {
 import { exportSkills } from "./skill-portability.mjs";
 import { deployRuntime } from "../src/runtime-deployment.mjs";
 import { refreshSupervisor } from "../src/worker-supervisor-client.mjs";
+import {
+  configuredModelFallbacksPath,
+  mergeRecommendedWriterFallbacks,
+} from "../src/model-fallbacks.mjs";
 
 const sourceRoot = resolve(import.meta.dirname, "..");
 const installRoot = resolve(homedir(), ".local/share/agent-bridge");
@@ -236,6 +240,10 @@ async function writeTextAtomic(path, content) {
     await rm(temporary, { force: true });
   }
 }
+
+const modelFallbacksPath = configuredModelFallbacksPath();
+const modelFallbacks = mergeRecommendedWriterFallbacks(await readJson(modelFallbacksPath));
+await writeJson(modelFallbacksPath, modelFallbacks);
 
 const hookLauncher = resolve(binRoot, "agent-bridge-coordinator-hook");
 const hostActivityHookLauncher = resolve(binRoot, "agent-bridge-host-activity-hook");
