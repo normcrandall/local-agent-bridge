@@ -84,10 +84,13 @@ if (oneShot) {
     const selected = (current.operatorLanes || current.lanes)[0];
     const timeline = selected ? await loadTimeline(stateRoot, selected.id) : [];
     const parsedWidth = Number.parseInt(process.env.COLUMNS || "120", 10);
+    const parsedHeight = Number.parseInt(process.env.LINES || "60", 10);
     output = `${renderSnapshot(current, {
       selectedIndex: 0,
       timeline,
       width: Number.isFinite(parsedWidth) ? parsedWidth : 120,
+      height: Number.isFinite(parsedHeight) ? Math.max(20, parsedHeight) : 60,
+      detailExpanded: true,
     })}\n`;
   }
   await new Promise((resolveWrite) => process.stdout.write(output, resolveWrite));
@@ -106,6 +109,7 @@ let actionMessage = null;
 let pendingConfirmation = null;
 let activePane = 1;
 let detailExpanded = false;
+let detailOffset = 0;
 const seenAttentionKeys = new Set();
 let resolveExit;
 const exitRequested = new Promise((resolvePromise) => { resolveExit = resolvePromise; });
@@ -233,6 +237,7 @@ async function draw() {
       actionMessage,
       activePane,
       detailExpanded,
+      detailOffset,
     });
     if (stopped) return;
     process.stdout.write(`\x1b[H\x1b[2J${output}`);
@@ -259,15 +264,25 @@ async function handleKey(key) {
     selectedId = null;
     actionMessage = null;
     pendingConfirmation = null;
+    detailOffset = 0;
   }
   else if (key === "\t") {
-    activePane = (activePane + 1) % 3;
+    activePane = activePane === 1 ? 2 : 1;
     actionMessage = null;
   }
   else if (key === "\r" || key === "\n") {
     detailExpanded = !detailExpanded;
     activePane = 2;
+    detailOffset = 0;
     actionMessage = null;
+  }
+  else if (activePane === 2 && ["j", "k", "\x1b[B", "\x1b[A", "g", "G"].includes(key)) {
+    if (key === "j" || key === "\x1b[B") detailOffset += 1;
+    else if (key === "k" || key === "\x1b[A") detailOffset = Math.max(0, detailOffset - 1);
+    else if (key === "g") detailOffset = 0;
+    else detailOffset = Number.MAX_SAFE_INTEGER;
+    actionMessage = null;
+    pendingConfirmation = null;
   }
   else if (key === "s") {
     if (view !== "attention") view = "attention";
@@ -276,6 +291,7 @@ async function handleKey(key) {
     selectedId = null;
     actionMessage = null;
     pendingConfirmation = null;
+    detailOffset = 0;
   }
   else if (["o", "y", "c", "x", "A", "w"].includes(key)) {
     const lane = resolveMissionControlSelection(lastSnapshot?.operatorLanes || lastSnapshot?.lanes, selectedId, selectedIndex);
@@ -304,7 +320,10 @@ async function handleKey(key) {
       const confirmation = missionControlConfirmation(pendingConfirmation, { key, lane });
       pendingConfirmation = confirmation.pending;
       if (!confirmation.confirmed) {
-        actionMessage = `Press ${key} again within 5 seconds to confirm ${action}.`;
+        const related = lane.relatedLaneCount > 1
+          ? ` This targets ${lane.alias || lane.id} only; ${lane.relatedLaneCount - 1} related lane${lane.relatedLaneCount === 2 ? " remains" : "s remain"}.`
+          : "";
+        actionMessage = `Press ${key} again within 5 seconds to confirm ${action}.${related}`;
       } else {
         const armedLane = confirmation.lane;
         try {
@@ -328,6 +347,7 @@ async function handleKey(key) {
       actionMessage = null;
       pendingConfirmation = null;
       detailExpanded = false;
+      detailOffset = 0;
     }
   }
   await draw();

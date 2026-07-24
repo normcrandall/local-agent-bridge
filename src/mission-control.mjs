@@ -27,6 +27,7 @@ const DEFAULT_LIVE_HEARTBEAT_AFTER_MS = 60_000;
 const DEFAULT_RECENT_ACTIVITY_AFTER_MS = 5 * 60 * 1000;
 
 const ANSI_PATTERN = /\x1b\[[0-9;]*m/g;
+const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 export const stripAnsi = (value) => String(value || "").replace(ANSI_PATTERN, "");
 
 export function navigationIntent(key, selectedIndex) {
@@ -380,8 +381,12 @@ export async function loadMissionControlSnapshot({
     if (!provider) continue;
     providerActivity[provider] = (providerActivity[provider] || 0) + 1;
   }
-  const operatorSource = matching.filter((lane) => includeStale || !isStaleLane(lane, now, staleAfterMs));
-  const operatorLanes = deduplicateOperatorLanes(operatorSource, { now, includeHistory: mode === "all" });
+  const operatorSource = (mode === "attention" ? selected : matching)
+    .filter((lane) => includeStale || !isStaleLane(lane, now, staleAfterMs));
+  const operatorLanes = deduplicateOperatorLanes(operatorSource, {
+    now,
+    includeHistory: mode === "all" || (mode === "attention" && includeStale),
+  });
   const operatorCounts = { active: 0, needs_user: 0, waiting: 0, failed: 0, history: 0 };
   for (const lane of operatorLanes) operatorCounts[lane.operatorCategory] = (operatorCounts[lane.operatorCategory] || 0) + 1;
   return {
@@ -495,17 +500,23 @@ function characterWidth(character) {
 }
 
 export function displayWidth(value) {
-  return [...stripAnsi(value)].reduce((total, character) => total + characterWidth(character), 0);
+  let total = 0;
+  for (const { segment } of graphemeSegmenter.segment(stripAnsi(value))) {
+    if (/\p{Extended_Pictographic}|\p{Regional_Indicator}|\u20e3/u.test(segment)) total += 2;
+    else total += Math.max(0, ...[...segment].map(characterWidth));
+  }
+  return total;
 }
 
-function sliceDisplay(value, width) {
+function sliceDisplay(value, width, { cleanValue = true } = {}) {
   if (width <= 0) return "";
   let output = "";
   let used = 0;
-  for (const character of [...clean(value)]) {
-    const next = characterWidth(character);
+  const input = cleanValue ? clean(value) : String(value ?? "").replace(/[\r\n\t]+/g, " ");
+  for (const { segment } of graphemeSegmenter.segment(input)) {
+    const next = displayWidth(segment);
     if (used + next > width) break;
-    output += character;
+    output += segment;
     used += next;
   }
   return output;
@@ -520,7 +531,10 @@ function truncate(value, width) {
 }
 
 function pad(value, width) {
-  const text = truncate(value, width);
+  const raw = String(value ?? "").replace(/[\r\n\t]+/g, " ");
+  const text = displayWidth(raw) <= width
+    ? raw
+    : width === 1 ? "…" : `${sliceDisplay(raw, width - 1, { cleanValue: false })}…`;
   return `${text}${" ".repeat(Math.max(0, width - displayWidth(text)))}`;
 }
 
@@ -587,15 +601,16 @@ function friendlyPhase(lane) {
 function meaningfulNarrative(lane) {
   const summary = clean(lane.narrative?.summary);
   if (!summary || lane.narrative?.isPlaceholder) return "";
-  if (/\busing an MCP tool\b/i.test(summary)) return "";
+  if (/\busing an MCP tool\b/i.test(summary)) return "Provider tool activity observed";
   return summary;
 }
 
 export function coalesceTimeline(events, limit = 5) {
   const output = [];
   for (const event of events || []) {
-    const summary = clean(event.summary);
-    if (!summary || /\busing an MCP tool\b/i.test(summary)) continue;
+    const rawSummary = clean(event.summary);
+    if (!rawSummary) continue;
+    const summary = /\busing an MCP tool\b/i.test(rawSummary) ? "Provider tool activity" : rawSummary;
     const key = `${clean(event.type)}\0${clean(event.agent)}\0${summary}`;
     const previous = output.at(-1);
     if (previous?.key === key) {
@@ -609,7 +624,7 @@ export function coalesceTimeline(events, limit = 5) {
 }
 
 function paneLine(text = "", code = null, meta = {}) {
-  return { text: clean(text), code, ...meta };
+  return { text: String(text ?? "").replace(/[\r\n\t]+/g, " ").trim(), code, ...meta };
 }
 
 function paneSection(label, count, category) {
@@ -636,6 +651,8 @@ function repositoryPane(snapshot, lanes) {
   rows.push(paneSection("NEEDS YOU", snapshot.operatorCounts?.needs_user || 0, "needs_user"));
   rows.push(paneSection("WAITING", snapshot.operatorCounts?.waiting || 0, "waiting"));
   rows.push(paneSection("FAILED", snapshot.operatorCounts?.failed || 0, "failed"));
+  if (snapshot.historicalNeedsUserCount) rows.push(paneLine(`HISTORICAL INPUT ${snapshot.historicalNeedsUserCount}`, "90"));
+  if (snapshot.collapsedStale?.total) rows.push(paneLine(`STALE HIDDEN ${snapshot.collapsedStale.total} · press s`, "90"));
   return rows;
 }
 
@@ -749,30 +766,47 @@ function renderGrid({ titles, panes, widths, contentRows, color, activePane = 0 
   return lines;
 }
 
-function windowPane(rows, contentRows, centerSelection = false) {
+export function windowPane(rows, contentRows, centerSelection = false, offset = null) {
   if (rows.length <= contentRows) return rows;
-  let start = 0;
-  if (centerSelection) {
-    const selected = rows.findIndex((row) => row.selected);
-    if (selected >= 0) start = Math.max(0, Math.min(selected - Math.floor(contentRows / 2), rows.length - contentRows));
+  const selected = centerSelection ? rows.findIndex((row) => row.selected) : -1;
+  let start = Number.isFinite(offset) ? Math.max(0, Math.floor(offset)) : 0;
+  for (let pass = 0; pass < 3; pass += 1) {
+    const topIndicator = start > 0 ? 1 : 0;
+    const provisionalCapacity = Math.max(1, contentRows - topIndicator - 1);
+    if (selected >= 0 && !Number.isFinite(offset)) start = Math.max(0, selected - Math.floor(provisionalCapacity / 2));
+    const bottomIndicator = start + Math.max(1, contentRows - (start > 0 ? 1 : 0)) < rows.length ? 1 : 0;
+    const capacity = Math.max(1, contentRows - (start > 0 ? 1 : 0) - bottomIndicator);
+    start = Math.min(start, Math.max(0, rows.length - capacity));
   }
-  const visible = rows.slice(start, start + contentRows);
-  if (start > 0) visible[0] = paneLine(`↑ ${start} earlier`, "90");
-  const remaining = rows.length - (start + contentRows);
-  if (remaining > 0) visible[visible.length - 1] = paneLine(`↓ ${remaining} more`, "90");
+  const topIndicator = start > 0 ? 1 : 0;
+  let capacity = Math.max(1, contentRows - topIndicator);
+  let bottomIndicator = start + capacity < rows.length ? 1 : 0;
+  capacity = Math.max(1, contentRows - topIndicator - bottomIndicator);
+  const visible = rows.slice(start, start + capacity);
+  if (topIndicator) visible.unshift(paneLine(`↑ ${start} earlier`, "90"));
+  const remaining = rows.length - (start + capacity);
+  if (remaining > 0) visible.push(paneLine(`↓ ${remaining} more`, "90"));
   return visible;
 }
 
-function gridLayout(width, activePane, titles, panes, contentRows, color) {
+function gridMeasurements(width, activePane) {
   if (width >= 84) {
     const interior = width - 4;
     const repositoryWidth = Math.max(18, Math.min(28, Math.floor(interior * 0.22)));
     const workWidth = Math.max(32, Math.min(52, Math.floor(interior * 0.38)));
     const detailWidth = interior - repositoryWidth - workWidth;
-    return renderGrid({ titles, panes, widths: [repositoryWidth, workWidth, detailWidth], contentRows, color, activePane });
+    return { paneIndex: null, widths: [repositoryWidth, workWidth, detailWidth] };
   }
   const paneIndex = Math.min(Math.max(0, activePane), 2);
-  return renderGrid({ titles: [titles[paneIndex]], panes: [panes[paneIndex]], widths: [Math.max(1, width - 2)], contentRows, color, activePane: 0 });
+  return { paneIndex, widths: [Math.max(1, width - 2)] };
+}
+
+function gridLayout(measurements, activePane, titles, panes, contentRows, color) {
+  if (measurements.paneIndex === null) {
+    return renderGrid({ titles, panes, widths: measurements.widths, contentRows, color, activePane });
+  }
+  const paneIndex = measurements.paneIndex;
+  return renderGrid({ titles: [titles[paneIndex]], panes: [panes[paneIndex]], widths: measurements.widths, contentRows, color, activePane: 0 });
 }
 
 export function renderMissionControl(snapshot, {
@@ -785,6 +819,7 @@ export function renderMissionControl(snapshot, {
   actionMessage = null,
   activePane = 1,
   detailExpanded = false,
+  detailOffset = 0,
   now = Date.now(),
 } = {}) {
   const usableWidth = Math.max(30, width);
@@ -799,15 +834,19 @@ export function renderMissionControl(snapshot, {
   const footerRows = interactive ? (actionMessage ? 2 : 1) : snapshot.mode === "all" ? 1 : 0;
   const contentRows = Math.max(4, height - lines.length - footerRows - 4);
   const titles = ["REPOSITORIES", "WORK", "SELECTED LANE"];
+  const measurements = gridMeasurements(usableWidth, activePane);
+  const detailWidth = measurements.paneIndex === null
+    ? measurements.widths[2] - 2
+    : measurements.paneIndex === 2 ? measurements.widths[0] - 2 : Math.max(20, Math.floor(usableWidth * 0.35));
   const panes = [
     windowPane(repositoryPane(snapshot, lanes), contentRows),
     windowPane(workPane(lanes, selectedIndex, now), contentRows, true),
-    windowPane(detailPane(selected, timeline, Math.max(20, Math.floor(usableWidth * 0.35)), now, snapshot, detailExpanded), contentRows),
+    windowPane(detailPane(selected, timeline, Math.max(1, detailWidth), now, snapshot, detailExpanded), contentRows, false, detailOffset),
   ];
-  lines.push(...gridLayout(usableWidth, activePane, titles, panes, contentRows, color));
+  lines.push(...gridLayout(measurements, activePane, titles, panes, contentRows, color));
   if (interactive) {
     if (actionMessage) lines.push(truncateAnsi(paint(` ${actionMessage}`, actionMessage.toLowerCase().includes("failed") ? "31;1" : "33", color), usableWidth));
-    lines.push(truncate(" Tab pane  Enter expand  j/k move  l live  a attention  h history  o PR  c continue  x cancel  q quit", usableWidth));
+    lines.push(sliceDisplay(" Tab pane  Enter expand  j/k move  l live  a attention  h history  o PR  c continue  x cancel  q quit", usableWidth, { cleanValue: false }));
   } else if (snapshot.mode === "all") {
     lines.push(truncate("Archive preview: bridge cleanup --older-than-days 7", usableWidth));
   }

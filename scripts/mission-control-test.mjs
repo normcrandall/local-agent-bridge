@@ -24,6 +24,7 @@ import {
   readFileRange,
   statusRank,
   stripAnsi,
+  windowPane,
 } from "../src/mission-control.mjs";
 import {
   HOST_ACTIVITY_LIVE_MS,
@@ -71,7 +72,15 @@ assert.deepEqual(coalesceTimeline([
   { type: "progress", agent: "codex", at: "2026-07-23T12:00:00.000Z", summary: "Codex is using an MCP tool." },
   { type: "progress", agent: "codex", at: "2026-07-23T12:00:01.000Z", summary: "Publishing the pull request" },
   { type: "progress", agent: "codex", at: "2026-07-23T12:00:02.000Z", summary: "Publishing the pull request" },
-]), [{ type: "progress", agent: "codex", at: "2026-07-23T12:00:02.000Z", summary: "Publishing the pull request", count: 2 }]);
+]), [
+  { type: "progress", agent: "codex", at: "2026-07-23T12:00:00.000Z", summary: "Provider tool activity", count: 1 },
+  { type: "progress", agent: "codex", at: "2026-07-23T12:00:02.000Z", summary: "Publishing the pull request", count: 2 },
+]);
+assert.equal(displayWidth("🇺🇸"), 2);
+assert.equal(displayWidth("👨‍👩‍👧‍👦"), 2);
+assert.deepEqual(windowPane(Array.from({ length: 10 }, (_, index) => ({ text: `row ${index}` })), 5).map(({ text }) => text), [
+  "row 0", "row 1", "row 2", "row 3", "↓ 6 more",
+]);
 for (const status of PORTFOLIO_STATUSES) {
   const expected = !PORTFOLIO_STATUS_GROUPS.terminal.includes(status);
   assert.equal(isAttentionLane({ lifecyclePhase: status, updatedAt: "2026-07-23T11:59:00.000Z" }, Date.parse("2026-07-23T12:00:00.000Z")), expected, `${status} classification drifted`);
@@ -255,6 +264,15 @@ try {
   const historicalOutput = renderSnapshot(historicalNeedsUser, { width: 100, now });
   assert.doesNotMatch(historicalOutput, /!!! USER INPUT REQUIRED/);
   assert.match(historicalOutput, /1 historical input request[\s\S]*No alert will be sent/);
+  const busyHistoricalOutput = renderSnapshot({
+    ...historicalNeedsUser,
+    operatorLanes: live.operatorLanes,
+    operatorCounts: live.operatorCounts,
+  }, { width: 120, now });
+  assert.match(busyHistoricalOutput, /HISTORICAL INPUT 1/, "historical requests must remain visible while other work is active");
+  const revealedHistorical = await loadMissionControlSnapshot({ stateRoot: historicalRoot, view: "attention", includeStale: true, now });
+  assert.ok(revealedHistorical.operatorLanes.some((lane) => lane.id === needsUserId && lane.operatorCategory === "history"));
+  assert.match(renderSnapshot(revealedHistorical, { width: 120, now }), /PR #42/);
   await writeFile(join(historicalRoot, "portfolios", "helm-55555555-5555-4555-8555-555555555555.json"), JSON.stringify({
     id: "helm-55555555-5555-4555-8555-555555555555",
     workspace,
@@ -305,6 +323,7 @@ try {
   assert.equal(collapsed.visibleLanes, 1);
   assert.equal(collapsed.collapsedStale.total, 2);
   assert.equal(collapsed.collapsedStale.portfolioItems, 1);
+  assert.match(renderSnapshot(collapsed, { width: 120, now }), /STALE HIDDEN 2.*press s/);
   const revealed = await loadMissionControlSnapshot({ stateRoot: root, view: "attention", staleAfterMs: 60_000, includeStale: true, now });
   assert.equal(revealed.visibleLanes, 3);
 
@@ -381,7 +400,9 @@ try {
     operatorCategory: "waiting",
   }));
   const manyLanes = { ...attention, operatorLanes: manyOperatorLanes, operatorCounts: { active: 0, needs_user: 0, waiting: 55, failed: 0 }, visibleLanes: 55, totalLanes: 55 };
-  assert.match(renderSnapshot(manyLanes, { width: 120, height: 20 }), /more/);
+  const manyRendered = renderSnapshot(manyLanes, { width: 120, height: 20 });
+  assert.match(manyRendered, /more/);
+  assert.match(manyRendered, /↓ \d+ more/);
   const renderedHistory = renderSnapshot(all, { width: 88, now });
   assert.match(renderedHistory, /bridge cleanup --older-than-days 7/);
   assert.ok(renderedHistory.split("\n").every((line) => displayWidth(line) <= 88));
@@ -394,6 +415,7 @@ try {
   assert.equal(duplicate.length, 1);
   assert.equal(duplicate[0].relatedLaneCount, 2);
   assert.equal(duplicate[0].id, "two", "the live collaboration must represent a duplicated issue");
+  assert.match(missionControlCopyText(duplicate[0]), /related: one,two|related: two,one/);
 
   const colored = renderMissionControl(attention, { selectedIndex, timeline, width: 120, height: 28, now, color: true, interactive: true });
   assert.match(colored, /\x1b\[/);
@@ -412,14 +434,21 @@ try {
   assert.ok(verticalRows.every((line) => assert.deepEqual(dividerColumns(line), dividerColumns(verticalRows[0])) === undefined), "vertical dividers must never shift");
   const noColor = renderMissionControl(attention, { selectedIndex, timeline, width: 120, height: 28, now, color: false, interactive: true });
   assert.doesNotMatch(noColor, /\x1b\[/);
+  assert.match(noColor, /│ REPOSITORIES/);
+  assert.match(noColor, / Tab pane  Enter expand  j\/k move/);
   const narrow = renderMissionControl(attention, { selectedIndex, timeline, width: 60, height: 20, now, color: false, interactive: true, activePane: 2 });
   const narrowGrid = narrow.split("\n").filter((line) => /^[┌├│└]/.test(line));
   assert.ok(narrowGrid.every((line) => displayWidth(line) === 60));
+  const scrolledDetail = renderMissionControl(attention, { selectedIndex, timeline, width: 60, height: 12, now, color: false, interactive: true, activePane: 2, detailExpanded: true, detailOffset: Number.MAX_SAFE_INTEGER });
+  assert.match(scrolledDetail, /RECENT ACTIVITY|Rendering repository views/);
 
   const cli = execFileSync(process.execPath, [resolve(import.meta.dirname, "mission-control.mjs"), "--snapshot", "--attention", "--stale-after-hours", "72", "--state-root", root, "--repo", "norm/example"], { encoding: "utf8" });
   assert.match(cli, /norm\/example/);
   assert.match(cli, /historical input request/);
   assert.doesNotMatch(cli, /Old completed lane/);
+  const staleCli = execFileSync(process.execPath, [resolve(import.meta.dirname, "mission-control.mjs"), "--snapshot", "--attention", "--include-stale", "--stale-after-hours", "72", "--state-root", root, "--repo", "norm/example"], { encoding: "utf8" });
+  assert.match(staleCli, /PR #42/);
+  assert.match(staleCli, /ID  bridge-33333333/);
   const invalidColumnsCli = execFileSync(process.execPath, [resolve(import.meta.dirname, "mission-control.mjs"), "--snapshot", "--attention", "--stale-after-hours", "72", "--state-root", root, "--repo", "norm/example"], {
     encoding: "utf8",
     env: { ...process.env, COLUMNS: "not-a-number" },
