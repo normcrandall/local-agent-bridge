@@ -39,6 +39,7 @@ if (!Number.isInteger(prNumber) || prNumber < 1) throw new Error("GITHUB_REVIEW_
 if (!/^[0-9a-f]{40}$/i.test(headSha || "")) throw new Error("GITHUB_REVIEW_HEAD_SHA must be a full commit SHA.");
 if (!GITHUB_LOGIN_PATTERN.test(expectedLogin || "")) throw new Error("GITHUB_REVIEW_EXPECTED_LOGIN is invalid.");
 if (!handoffPath) throw new Error("GITHUB_REVIEW_HANDOFF_PATH is required.");
+const authorizingReviewerLogin = expectedLogin;
 
 const credential = await resolveReviewToken({ repository, tokenFile, expectedLogin });
 if (credential.expectedLogin && credential.expectedLogin !== expectedLogin) {
@@ -61,14 +62,10 @@ if (appCredential) {
       repository,
       configPath: appConfigPath,
     });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (
-      !message.startsWith("GitHub App role is not configured: builder")
-      && !message.startsWith("No builder GitHub App installation is configured for ")
-    ) {
-      throw error;
-    }
+  } catch {
+    // Thread resolution is optional. A missing or malformed builder role must
+    // degrade to read-only threads rather than taking down formal review.
+    builderRole = null;
   }
 }
 
@@ -119,7 +116,12 @@ const threadResolverClient = appCredential && builderRole
       headSha,
       prNumber,
       allowedOperations: ["resolve_review_thread"],
-      receiptPath: reviewThreadReceiptPath({ repository, prNumber, headSha, expectedLogin }),
+      receiptPath: reviewThreadReceiptPath({
+        repository,
+        prNumber,
+        headSha,
+        expectedLogin: authorizingReviewerLogin,
+      }),
     })
   : null;
 const threadController = createReviewerThreadController({

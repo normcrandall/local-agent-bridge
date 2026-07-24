@@ -142,19 +142,35 @@ await assert.rejects(
   missingExecutorController.resolve({ threadId: ownedThread.id }),
   /requires the configured builder GitHub App executor/i,
 );
-const narrowedReviewerClient = createBoundBuilderClient({
+const narrowedReaderClient = createBoundBuilderClient({
   token: "ghs_test",
   repository: "example/repo",
   expectedLogin: "example-reviewer[bot]",
   verifiedLogin: "example-reviewer[bot]",
   headSha: "0".repeat(40),
   prNumber: 1,
-  allowedOperations: ["read_review_threads", "resolve_review_thread"],
+  allowedOperations: ["read_review_threads"],
+});
+await assert.rejects(
+  narrowedReaderClient.resolveReviewThread({ threadId: "x" }),
+  /not authorized/,
+);
+const narrowedExecutorClient = createBoundBuilderClient({
+  token: "ghs_test",
+  repository: "example/repo",
+  expectedLogin: "example-builder[bot]",
+  verifiedLogin: "example-builder[bot]",
+  headSha: "0".repeat(40),
+  prNumber: 1,
+  allowedOperations: ["resolve_review_thread"],
 });
 for (const denied of [
-  () => narrowedReviewerClient.merge({}),
-  () => narrowedReviewerClient.replyReviewThread({ threadId: "x", body: "y" }),
-  () => narrowedReviewerClient.ensurePullRequest({ title: "t", body: "b" }),
+  () => narrowedExecutorClient.merge({}),
+  () => narrowedExecutorClient.pushBranch({ ref: "refs/heads/x", sha: "0".repeat(40) }),
+  () => narrowedExecutorClient.replaceBranch({ ref: "refs/heads/x", sha: "0".repeat(40) }),
+  () => narrowedExecutorClient.reviewThreads(),
+  () => narrowedExecutorClient.replyReviewThread({ threadId: "x", body: "y" }),
+  () => narrowedExecutorClient.ensurePullRequest({ title: "t", body: "b" }),
 ]) {
   await assert.rejects(denied(), /not authorized/);
 }
