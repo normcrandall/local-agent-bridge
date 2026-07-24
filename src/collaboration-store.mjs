@@ -555,6 +555,7 @@ export async function queryControlPlane(stateRoot, options = {}) {
       participants,
       writer,
       activeAgent: activeCall?.agent || cState.runtime?.previousAgent || null,
+      providerPhase: activeCall?.phase || activeCall?.status || null,
       lifecyclePhase: cState.status || "unknown",
       createdAt: cState.createdAt || null,
       updatedAt: cState.updatedAt || null,

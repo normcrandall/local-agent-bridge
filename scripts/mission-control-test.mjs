@@ -594,6 +594,10 @@ try {
   assert.match(rendered, /AGENT BRIDGE MISSION CONTROL/);
   assert.match(rendered, /NEEDS YOU 1/);
   assert.match(rendered, /control-plane/);
+  assert.match(rendered, /ITEM\s+AGENT\s+ROLE\s+UPDATED/);
+  assert.match(rendered, /PR #?\d+|11111111/);
+  assert.match(rendered, /codex\s+writer\s+2m/);
+  assert.match(rendered, /control-plane · Rendering the repository/);
   assert.match(rendered, /WORKSPACE/);
   assert.match(rendered, /CREATED.*2026/);
   assert.match(rendered, /UPDATED.*2026/);
@@ -652,6 +656,7 @@ try {
   assert.match(noColor, /│ REPOSITORIES/);
   assert.match(noColor, /│ DETAILS/);
   assert.doesNotMatch(noColor, /SELECTED LANE/);
+  assert.match(noColor, /ITEM\s+AGENT\s+ROLE\s+UPDATED/);
   assert.match(noColor, /WORK · j\/k choose lane · Enter details/);
 
   const secondRepositoryLane = {
@@ -696,6 +701,28 @@ try {
   const narrow = renderMissionControl(attention, { selectedIndex, timeline, width: 60, height: 20, now, color: false, interactive: true, activePane: 2 });
   const narrowGrid = narrow.split("\n").filter((line) => /^[┌├│└]/.test(line));
   assert.ok(narrowGrid.every((line) => displayWidth(line) === 60));
+  const compactWork = renderMissionControl(attention, { selectedIndex, timeline, width: 43, height: 20, now, color: false, interactive: true, activePane: 1 });
+  assert.match(compactWork, /ITEM\s+AGENT\s+ROLE\s+AGE/);
+  assert.match(compactWork, /codex\s+writer\s+2m/);
+  const commonThreePaneWork = renderMissionControl(attention, { selectedIndex, timeline, width: 84, height: 20, now, color: false, interactive: true, activePane: 1 });
+  assert.match(commonThreePaneWork, /ITEM\s+AGENT\s+ROLE\s+AGE/);
+  assert.match(commonThreePaneWork, /codex\s+writer\s+2m/);
+  const peerLane = {
+    ...attention.operatorLanes[selectedIndex],
+    id: "active-peer-lane",
+    operatorId: "active-peer-lane",
+    issueNumber: 999,
+    activeAgent: "claude",
+    writer: "codex",
+    mode: "work",
+    task: "Review and challenge the implementation approach",
+  };
+  const peerWork = renderMissionControl({
+    ...attention,
+    operatorLanes: [peerLane],
+    operatorCounts: { active: 1, needs_user: 0, waiting: 0, stopped: 0 },
+  }, { selectedIndex: 0, width: 120, height: 20, now, color: false, interactive: true, activePane: 1 });
+  assert.match(peerWork, /claude\s+peer\s+2m/);
   const viewportState = {};
   const scrolledDetail = renderMissionControl(attention, { selectedIndex, timeline, width: 60, height: 12, now, color: false, interactive: true, activePane: 2, detailExpanded: true, detailOffset: Number.MAX_SAFE_INTEGER, viewportState });
   assert.match(scrolledDetail, /RECENT ACTIVITY|Rendering repository views/);
