@@ -115,7 +115,13 @@ assert.equal(isLiveLane({ type: "native_host", lifecyclePhase: "working", hostAc
 assert.equal(isLiveLane({ type: "native_host", lifecyclePhase: "working", hostActivity: { live: false } }), false);
 assert.equal(isStaleLane({ type: "portfolio_lane", lifecyclePhase: "blocked", updatedAt: "2026-07-22T10:00:00.000Z" }, Date.parse("2026-07-23T12:00:00.000Z")), true);
 assert.equal(isStaleLane({ type: "portfolio_lane", lifecyclePhase: "integrating", updatedAt: "2026-07-22T10:00:00.000Z" }, Date.parse("2026-07-23T12:00:00.000Z")), false);
-assert.equal(operatorLaneCategory({ type: "collaboration", lifecyclePhase: "turn_limit", updatedAt: "2026-07-23T11:59:00.000Z" }, classificationNow), "waiting");
+assert.equal(operatorLaneCategory({ type: "collaboration", lifecyclePhase: "turn_limit", updatedAt: "2026-07-23T11:59:00.000Z" }, classificationNow), null);
+assert.equal(operatorLaneCategory({
+  type: "collaboration",
+  lifecyclePhase: "agreed",
+  updatedAt: "2026-07-23T11:59:00.000Z",
+  handoff: { acknowledged: false },
+}, classificationNow), null);
 assert.equal(operatorLaneCategory({ type: "collaboration", lifecyclePhase: "budget", updatedAt: "2026-07-23T11:59:00.000Z" }, classificationNow), "stopped");
 for (const status of PORTFOLIO_STATUS_GROUPS.integration) assert.ok(statusRank(status) < statusRank("ready"));
 const shortReadSource = Buffer.from("incremental-ledger-data");
@@ -213,6 +219,53 @@ try {
   assert.equal(live.needsUserCount, 1);
   assert.match(live.needsUserSignature, new RegExp(needsUserId));
   assert.deepEqual(live.needsUserRequests.map(({ repository, summary }) => ({ repository, summary })), [{ repository: "norm/example", summary: "Authorization required" }]);
+
+  const ledgerNoiseRoot = join(root, "ledger-noise-test");
+  await mkdir(ledgerNoiseRoot);
+  await mkdir(join(ledgerNoiseRoot, "portfolios"));
+  const liveLaneId = "bridge-dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  await writeFile(join(ledgerNoiseRoot, `${liveLaneId}.json`), JSON.stringify({
+    ...base,
+    id: liveLaneId,
+    status: "running",
+    updatedAt: "2026-07-23T11:59:59.000Z",
+    githubBuilder: { repository: "veliqon/control-plane" },
+    runtime: { activeCall: { agent: "codex", phase: "working", heartbeatAt: "2026-07-23T11:59:59.000Z" } },
+  }));
+  for (const [index, status] of ["turn_limit", "agreed", "cancelled", "failed", "budget"].entries()) {
+    const id = `bridge-eeeeeeee-eeee-4eee-8eee-${String(index).padStart(12, "0")}`;
+    await writeFile(join(ledgerNoiseRoot, `${id}.json`), JSON.stringify({
+      ...base,
+      id,
+      status,
+      updatedAt: "2026-07-23T11:59:30.000Z",
+      githubReview: { repository: "norm/historical-noise", prNumber: 100 + index },
+      completion: { sequence: 1, acknowledged: false, nextAction: "chair_verify", lastHandoff: { outcome: "completed" } },
+    }));
+  }
+  const currentWaitId = "bridge-ffffffff-ffff-4fff-8fff-ffffffffffff";
+  await writeFile(join(ledgerNoiseRoot, `${currentWaitId}.json`), JSON.stringify({
+    ...base,
+    id: currentWaitId,
+    status: "turn_limit",
+    updatedAt: "2026-07-23T11:59:45.000Z",
+    githubReview: { repository: "veliqon/control-plane", prNumber: 684 },
+    completion: { sequence: 1, acknowledged: false, nextAction: "writer_fix", lastHandoff: { outcome: "needs_review" } },
+  }));
+  await writeFile(join(ledgerNoiseRoot, "portfolios", "helm-ffffffff-ffff-4fff-8fff-ffffffffffff.json"), JSON.stringify({
+    id: "helm-ffffffff-ffff-4fff-8fff-ffffffffffff",
+    workspace,
+    repository: "veliqon/control-plane",
+    createdAt: "2026-07-23T11:00:00.000Z",
+    updatedAt: "2026-07-23T11:59:45.000Z",
+    items: [{ id: "issue-683", issueNumber: 683, prNumber: 684, status: "reviewing", collaborationId: currentWaitId }],
+  }));
+  const ledgerNoise = await loadMissionControlSnapshot({ stateRoot: ledgerNoiseRoot, now });
+  assert.equal(ledgerNoise.operatorCounts.active, 1);
+  assert.equal(ledgerNoise.operatorCounts.waiting, 1, "the open portfolio handoff remains a genuine current wait");
+  assert.equal(ledgerNoise.operatorCounts.stopped, 0, "stopped attempts from inactive repositories must not inflate the live view");
+  assert.deepEqual(ledgerNoise.operatorLanes.map((lane) => lane.repository), ["veliqon/control-plane", "veliqon/control-plane"]);
+  assert.ok(ledgerNoise.operatorLanes.some((lane) => lane.prNumber === 684 && lane.operatorCategory === "waiting"));
   await writeFile(join(root, `${needsUserId}.json`), JSON.stringify({
     ...needsUserState,
     coordinatorWake: { sequence: 1, kind: "needs_user", status: "acknowledged", nextAction: "needs_user", summary: "Authorization required" },

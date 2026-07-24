@@ -273,6 +273,13 @@ export function operatorLaneCategory(lane, now = Date.now()) {
   }
   if (isLiveLane(lane, now)) return "active";
   if (PORTFOLIO_STATUS_GROUPS.terminal.includes(status)) return null;
+  const openPortfolio = lane.portfolio
+    && !PORTFOLIO_STATUS_GROUPS.terminal.includes(String(lane.portfolio.status || "").toLowerCase());
+  // A terminal collaboration receipt is history unless it still represents
+  // an open portfolio item. This keeps completed prior-wave attempts from
+  // masquerading as queued capacity while preserving a current lane whose
+  // provider turn ended and is waiting for its coordinator.
+  if (!openPortfolio && TERMINAL_STATUSES.has(status)) return null;
   if (["failed", "indeterminate", "budget"].includes(status)) {
     return now - dateMs(lane.updatedAt) <= 86_400_000 || status === "indeterminate" ? "stopped" : null;
   }
@@ -477,7 +484,16 @@ export async function loadMissionControlSnapshot({
   // plane. Terminal portfolio evidence may not itself be an attention lane,
   // and may be older than the stale cutoff, but it must still supersede a
   // newer stopped attempt for the same PR.
-  const modeSource = mode === "attention" ? attention : matching;
+  const liveRepositories = new Set(matching
+    .filter((lane) => isLiveLane(lane, now))
+    .map((lane) => lane.repository));
+  const liveOperatorSource = matching.filter((lane) => {
+    const category = operatorLaneCategory(lane, now);
+    if (!category) return false;
+    if (["active", "needs_user"].includes(category)) return true;
+    return liveRepositories.size === 0 || liveRepositories.has(lane.repository);
+  });
+  const modeSource = mode === "all" ? matching : mode === "attention" ? attention : liveOperatorSource;
   const operatorSource = [...new Set([
     ...modeSource.filter((lane) => includeStale || !isStaleLane(lane, now, staleAfterMs)),
     ...matching.filter((lane) => portfolioTerminalStatus(lane)),
