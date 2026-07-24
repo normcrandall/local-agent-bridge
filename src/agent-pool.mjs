@@ -12,6 +12,7 @@ import {
   admitProviderCommands,
   assertProviderVerificationCapability,
   providerPermissionDecisionForRequest,
+  providerVerificationPlanForRequest,
 } from "./verification-allowlist.mjs";
 import { resolve } from "node:path";
 
@@ -60,6 +61,17 @@ export function localReviewEnvelopePolicy(agent, authoredEnvelope) {
   };
 }
 
+export function staticReviewBoundary({ agent, prompt, verificationPlan }) {
+  if (!verificationPlan?.staticOnly) return { prompt, progress: null };
+  const count = verificationPlan.withheldVerificationCommands.length;
+  const commandLabel = `verification command${count === 1 ? "" : "s"}`;
+  const summary = `${agent} cannot enforce exact command grants; continuing as a static review with ${count} ${commandLabel} withheld. Local and hosted CI remain separate evidence.`;
+  return {
+    prompt: `${prompt}\n\nStatic-review boundary:\n- The coordinator requested ${count} ${commandLabel}, but this provider cannot enforce an exact command grant.\n- Those commands were withheld. Do not run or claim them.\n- Perform the exact-head static review and treat local/full CI and hosted CI only as separately reported evidence.`,
+    progress: { progress: null, total: null, summary },
+  };
+}
+
 // A raw-delivery shell command that must never be granted to an autonomous
 // provider; delivery must flow through the bound builder canonical operations.
 const RAW_DELIVERY_COMMAND = /(^|\s|&|;|\|)(git\s+push|gh\s+pr\s+(create|edit|merge|ready|close|reopen|review|comment)|gh\s+api)\b/;
@@ -83,6 +95,10 @@ export function createAgentPool({
   autonomous = false,
   writableRoots = [],
   onTiming = async () => {},
+  // Test-only injection points. Production callers must use the default MCP
+  // client and stdio transport so provider dispatch cannot bypass its boundary.
+  clientFactory = ({ name, version }) => new Client({ name, version }),
+  transportFactory = (options) => new StdioClientTransport(options),
 }) {
   const emitTiming = async (event) => {
     await Promise.resolve(onTiming(event)).catch(() => {});
@@ -238,13 +254,13 @@ export function createAgentPool({
     };
     const timingKey = `provider_startup:${agent}`;
     await emitTiming({ action: "start", name: "provider_startup", key: timingKey, at: new Date().toISOString(), metadata: { agent } });
-    const client = new Client({ name: `agent-bridge-worker-${agent}`, version: "0.2.0" });
-    const transport = new StdioClientTransport({
+    const client = clientFactory({ name: `agent-bridge-worker-${agent}`, version: "0.2.0", agent });
+    const transport = transportFactory({
       command: "/bin/zsh",
       args: [resolve(root, scripts[agent])],
       cwd: root,
       env: { ...process.env, BRIDGE_DELEGATED_SESSION: "1" },
-    });
+    }, agent);
     try {
       await client.connect(transport, { timeout: 5_000 });
       clients[agent] = client;
@@ -295,14 +311,19 @@ export function createAgentPool({
       }
     },
     async send({ agent, prompt, sessionId, mode, browser }, onProgress = () => {}) {
-      // Issue #55: fail-closed provider capability boundary. This checks the effective
-      // commands that will actually be dispatched. Exact-head receipts intentionally
-      // remove completed gates before this boundary, allowing a provider to perform a
-      // static review without ever receiving those commands.
-      assertProviderVerificationCapability({ provider: agent, mode, verificationCommands });
-      const runnableVerificationCommands = agent === "claude" && mode === "review"
+      const requestedProviderCommands = agent === "claude" && mode === "review"
         ? [...new Set([...verificationCommands, ...reusableVerificationCommands])]
         : verificationCommands;
+      // Issue #55: fail closed on command authority without failing the review itself.
+      // Providers that cannot enforce exact grants receive zero commands and continue
+      // as static reviewers; local/hosted verification remains separate evidence.
+      const verificationPlan = providerVerificationPlanForRequest({
+        provider: agent,
+        mode,
+        verificationCommands: requestedProviderCommands,
+      });
+      const runnableVerificationCommands = verificationPlan.verificationCommands;
+      assertProviderVerificationCapability({ provider: agent, mode, verificationCommands: runnableVerificationCommands });
       // Enforce the coordinator command allowlist on every provider request path before
       // dispatch. Review calls may run only the verification gates; work calls also cover
       // the coordinator work commands. Any command outside the allowlist fails here.
@@ -311,7 +332,7 @@ export function createAgentPool({
       const permissionDecision = providerPermissionDecisionForRequest({
         provider: agent,
         mode,
-        verificationCommands,
+        verificationCommands: runnableVerificationCommands,
         permissionProfile,
       });
       const effectivePermissionProfile = permissionDecision.permissionProfile;
@@ -320,9 +341,14 @@ export function createAgentPool({
       const effectiveWorkProfile = autonomousWorkProfile({ autonomous, githubBuilder, mode, workProfile });
       const publication = mode === "review" ? await reviewPublicationFor(agent) : { available: true, binding: null, reason: null };
       const effectiveGithubReview = publication.available ? publication.binding : null;
-      const effectivePrompt = mode === "review" && githubReview && !publication.available
+      let effectivePrompt = mode === "review" && githubReview && !publication.available
         ? localReviewPrompt(prompt, publication.reason)
         : prompt;
+      const staticBoundary = staticReviewBoundary({ agent, prompt: effectivePrompt, verificationPlan });
+      effectivePrompt = staticBoundary.prompt;
+      if (staticBoundary.progress) {
+        onProgress({ at: new Date().toISOString(), ...staticBoundary.progress });
+      }
       let request;
       if (agent === "claude") {
         request = claudeToolRequest({
