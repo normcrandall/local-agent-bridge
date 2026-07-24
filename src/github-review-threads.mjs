@@ -18,10 +18,26 @@ export function approvedSubmissionEvent(reviewState) {
 }
 
 export function reviewThreadReceiptPath({ repository, prNumber, headSha, expectedLogin, stateRoot }) {
+  const repositoryParts = String(repository || "").split("/");
+  if (
+    !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository || "")
+    || repositoryParts.some((part) => part === "." || part === "..")
+  ) {
+    throw new Error("reviewThreadReceiptPath requires an owner/name repository.");
+  }
+  if (!Number.isInteger(prNumber) || prNumber < 1) {
+    throw new Error("reviewThreadReceiptPath requires a positive PR number.");
+  }
+  if (!/^[0-9a-f]{40}$/i.test(headSha || "")) {
+    throw new Error("reviewThreadReceiptPath requires a full commit SHA.");
+  }
+  if (!/^[A-Za-z0-9-]+(?:\[bot\])?$/.test(expectedLogin || "")) {
+    throw new Error("reviewThreadReceiptPath requires a valid reviewer login.");
+  }
   const root = stateRoot || resolve(homedir(), ".local/share/agent-bridge/review-receipts");
   return resolve(
     root,
-    `${repository.replace("/", "__")}--${prNumber}--${headSha}--${expectedLogin}.jsonl`,
+    `${repository.replaceAll("/", "__")}--${prNumber}--${headSha}--${expectedLogin}.jsonl`,
   );
 }
 

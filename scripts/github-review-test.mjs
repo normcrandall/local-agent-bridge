@@ -59,6 +59,15 @@ assert.equal(
   }),
   `/bridge-state/owner__repo--42--${"a".repeat(40)}--reviewer[bot].jsonl`,
 );
+for (const invalid of [
+  { repository: "owner/repo/extra", prNumber: 42, headSha: "a".repeat(40), expectedLogin: "reviewer[bot]" },
+  { repository: "../repo", prNumber: 42, headSha: "a".repeat(40), expectedLogin: "reviewer[bot]" },
+  { repository: "owner/repo", prNumber: 0, headSha: "a".repeat(40), expectedLogin: "reviewer[bot]" },
+  { repository: "owner/repo", prNumber: 42, headSha: "short", expectedLogin: "reviewer[bot]" },
+  { repository: "owner/repo", prNumber: 42, headSha: "a".repeat(40), expectedLogin: "../reviewer" },
+]) {
+  assert.throws(() => reviewThreadReceiptPath({ ...invalid, stateRoot: "/bridge-state" }));
+}
 
 const ownedThread = {
   id: "PRRT_owned",
