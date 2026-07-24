@@ -81,7 +81,7 @@ if (oneShot) {
   if (args.includes("--json")) {
     output = `${JSON.stringify(current, null, 2)}\n`;
   } else {
-    const selected = current.lanes[0];
+    const selected = (current.operatorLanes || current.lanes)[0];
     const timeline = selected ? await loadTimeline(stateRoot, selected.id) : [];
     const parsedWidth = Number.parseInt(process.env.COLUMNS || "120", 10);
     output = `${renderSnapshot(current, {
@@ -104,6 +104,8 @@ let terminalRestored = false;
 let lastSnapshot = null;
 let actionMessage = null;
 let pendingConfirmation = null;
+let activePane = 1;
+let detailExpanded = false;
 const seenAttentionKeys = new Set();
 let resolveExit;
 const exitRequested = new Promise((resolvePromise) => { resolveExit = resolvePromise; });
@@ -163,17 +165,19 @@ async function promptLine(label) {
   }
 }
 
-function openExternalUrl(url) {
+function openExternalUrl(url, laneId) {
   const candidates = missionControlPlatformCommands().open;
   const attempt = (index) => {
     const candidate = candidates[index];
     if (!candidate) {
+      if (selectedId !== laneId) return;
       actionMessage = `Open failed: no supported URL opener is installed. Copy the PR URL with y instead.`;
       void draw();
       return;
     }
     execFile(candidate.command, [...candidate.args, url], (error) => {
       if (error?.code === "ENOENT") return attempt(index + 1);
+      if (selectedId !== laneId) return;
       actionMessage = error ? `Open failed: ${error.message}` : `Opened ${url}`;
       void draw();
     });
@@ -210,12 +214,13 @@ async function draw() {
       process.stdout.write("\x07");
     }
     for (const key of current.needsUserKeys || []) seenAttentionKeys.add(key);
+    const operatorLanes = current.operatorLanes || current.lanes;
     if (selectedId) {
-      const preserved = current.lanes.findIndex((lane) => lane.id === selectedId);
+      const preserved = operatorLanes.findIndex((lane) => lane.id === selectedId);
       if (preserved >= 0) selectedIndex = preserved;
     }
-    selectedIndex = Math.min(Math.max(0, selectedIndex), Math.max(0, current.lanes.length - 1));
-    selectedId = current.lanes[selectedIndex]?.id || null;
+    selectedIndex = Math.min(Math.max(0, selectedIndex), Math.max(0, operatorLanes.length - 1));
+    selectedId = operatorLanes[selectedIndex]?.id || null;
     const timeline = selectedId ? await loadTimeline(stateRoot, selectedId) : [];
     if (stopped) return;
     const output = renderMissionControl(current, {
@@ -226,6 +231,8 @@ async function draw() {
       color,
       interactive: true,
       actionMessage,
+      activePane,
+      detailExpanded,
     });
     if (stopped) return;
     process.stdout.write(`\x1b[H\x1b[2J${output}`);
@@ -250,15 +257,28 @@ async function handleKey(key) {
     view = key === "l" ? "live" : key === "a" ? "attention" : "all";
     selectedIndex = 0;
     selectedId = null;
+    actionMessage = null;
+    pendingConfirmation = null;
+  }
+  else if (key === "\t") {
+    activePane = (activePane + 1) % 3;
+    actionMessage = null;
+  }
+  else if (key === "\r" || key === "\n") {
+    detailExpanded = !detailExpanded;
+    activePane = 2;
+    actionMessage = null;
   }
   else if (key === "s") {
     if (view !== "attention") view = "attention";
     includeStale = !includeStale;
     selectedIndex = 0;
     selectedId = null;
+    actionMessage = null;
+    pendingConfirmation = null;
   }
   else if (["o", "y", "c", "x", "A", "w"].includes(key)) {
-    const lane = resolveMissionControlSelection(lastSnapshot?.lanes, selectedId, selectedIndex);
+    const lane = resolveMissionControlSelection(lastSnapshot?.operatorLanes || lastSnapshot?.lanes, selectedId, selectedIndex);
     const available = missionControlActionAvailability(lane);
     const actionByKey = { o: "openPr", y: "copy", c: "continue", x: "cancel", A: "archive", w: "acknowledgeWake" };
     const action = actionByKey[key];
@@ -266,7 +286,7 @@ async function handleKey(key) {
       actionMessage = `Action ${action} is unavailable for the selected lane.`;
     } else if (key === "o") {
       const url = missionControlPrUrl(lane);
-      openExternalUrl(url);
+      openExternalUrl(url, lane.id);
     } else if (key === "y") {
       actionMessage = copySelection(lane) ? `Copied ${lane.alias || lane.id}.` : "Clipboard copy failed: no supported clipboard command is available.";
     } else if (key === "c") {
@@ -301,8 +321,14 @@ async function handleKey(key) {
   else if (key === "r") clearRepositoryCache();
   else {
     const intent = navigationIntent(key, selectedIndex);
+    const changedSelection = intent.selectedIndex !== selectedIndex || !intent.preserveSelectedId;
     selectedIndex = intent.selectedIndex;
     if (!intent.preserveSelectedId) selectedId = null;
+    if (changedSelection) {
+      actionMessage = null;
+      pendingConfirmation = null;
+      detailExpanded = false;
+    }
   }
   await draw();
 }

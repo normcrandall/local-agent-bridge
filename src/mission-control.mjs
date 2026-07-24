@@ -230,6 +230,83 @@ export function statusRank(status) {
   return 4;
 }
 
+export function operatorLaneCategory(lane, now = Date.now()) {
+  const status = String(lane.lifecyclePhase || "unknown").toLowerCase();
+  if (laneNeedsUser(lane) && attentionRequestIsFresh(lane, now)) return "needs_user";
+  if (status === "needs_user") {
+    const heartbeatAt = dateMs(lane.heartbeat?.heartbeatAt);
+    return lane.recovery?.processAlive === true || (heartbeatAt > 0 && now - heartbeatAt <= DEFAULT_LIVE_HEARTBEAT_AFTER_MS)
+      ? "active"
+      : null;
+  }
+  if (isLiveLane(lane, now)) return "active";
+  if (["failed", "indeterminate", "budget"].includes(status)) {
+    return now - dateMs(lane.updatedAt) <= 86_400_000 || status === "indeterminate" ? "failed" : null;
+  }
+  if ([
+    "queued", "waiting_capacity", "blocked", "validating", "turn_limit",
+    ...PORTFOLIO_STATUS_GROUPS.ready,
+    ...PORTFOLIO_STATUS_GROUPS.active,
+    ...PORTFOLIO_STATUS_GROUPS.integration,
+  ].includes(status)) return now - dateMs(lane.updatedAt) <= DEFAULT_STALE_AFTER_MS ? "waiting" : null;
+  if (lane.handoff && !lane.handoff.acknowledged) return now - dateMs(lane.updatedAt) <= DEFAULT_STALE_AFTER_MS ? "waiting" : null;
+  return null;
+}
+
+function operatorLaneIdentity(lane) {
+  const repository = lane.repository || "unknown/local";
+  if (lane.issueNumber) return `${repository}:issue:${lane.issueNumber}`;
+  if (lane.prNumber) return `${repository}:pr:${lane.prNumber}`;
+  if (lane.portfolio?.itemId) return `${repository}:item:${lane.portfolio.itemId}`;
+  if (lane.alias) return `${repository}:alias:${lane.alias}`;
+  return `${repository}:lane:${lane.id}`;
+}
+
+const OPERATOR_CATEGORY_RANK = { needs_user: 0, active: 1, failed: 2, waiting: 3, history: 4 };
+
+function operatorRepresentativeRank(lane, now) {
+  const category = operatorLaneCategory(lane, now) || "history";
+  const typeRank = lane.type === "collaboration" || lane.type === "combined" ? 0 : lane.type === "native_host" ? 1 : 2;
+  return [OPERATOR_CATEGORY_RANK[category] ?? 9, typeRank, -dateMs(lane.updatedAt)];
+}
+
+function compareRank(left, right) {
+  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+    const delta = (left[index] || 0) - (right[index] || 0);
+    if (delta) return delta;
+  }
+  return 0;
+}
+
+export function deduplicateOperatorLanes(lanes, { now = Date.now(), includeHistory = false } = {}) {
+  const groups = new Map();
+  for (const lane of lanes || []) {
+    const category = operatorLaneCategory(lane, now);
+    if (!category && !includeHistory) continue;
+    const identity = operatorLaneIdentity(lane);
+    const group = groups.get(identity) || [];
+    group.push(lane);
+    groups.set(identity, group);
+  }
+  return [...groups.entries()].map(([operatorId, group]) => {
+    const sorted = [...group].sort((left, right) => compareRank(operatorRepresentativeRank(left, now), operatorRepresentativeRank(right, now)));
+    const representative = sorted[0];
+    const providers = [...new Set(group.map((lane) => lane.activeAgent || lane.writer).filter(Boolean))];
+    const categories = [...new Set(group.map((lane) => operatorLaneCategory(lane, now) || "history"))]
+      .sort((left, right) => (OPERATOR_CATEGORY_RANK[left] ?? 9) - (OPERATOR_CATEGORY_RANK[right] ?? 9));
+    return {
+      ...representative,
+      operatorId,
+      operatorCategory: categories[0] || "history",
+      relatedLaneCount: group.length,
+      relatedLaneIds: group.map((lane) => lane.id),
+      providers,
+    };
+  }).sort((left, right) => (OPERATOR_CATEGORY_RANK[left.operatorCategory] ?? 9) - (OPERATOR_CATEGORY_RANK[right.operatorCategory] ?? 9)
+    || left.repository.localeCompare(right.repository)
+    || dateMs(right.updatedAt) - dateMs(left.updatedAt));
+}
+
 export async function loadMissionControlSnapshot({
   stateRoot,
   includeArchived = false,
@@ -303,6 +380,10 @@ export async function loadMissionControlSnapshot({
     if (!provider) continue;
     providerActivity[provider] = (providerActivity[provider] || 0) + 1;
   }
+  const operatorSource = matching.filter((lane) => includeStale || !isStaleLane(lane, now, staleAfterMs));
+  const operatorLanes = deduplicateOperatorLanes(operatorSource, { now, includeHistory: mode === "all" });
+  const operatorCounts = { active: 0, needs_user: 0, waiting: 0, failed: 0, history: 0 };
+  for (const lane of operatorLanes) operatorCounts[lane.operatorCategory] = (operatorCounts[lane.operatorCategory] || 0) + 1;
   return {
     version: 1,
     generatedAt: new Date(now).toISOString(),
@@ -315,6 +396,8 @@ export async function loadMissionControlSnapshot({
     staleAfterMs,
     includeStale,
     providerActivity,
+    operatorCounts,
+    operatorLanes,
     needsUserCount: needsUser.length,
     historicalNeedsUserCount: allNeedsUser.length - needsUser.length,
     needsUserRequests: needsUser.map((lane) => ({
@@ -392,23 +475,64 @@ export async function loadTimeline(stateRoot, id, limit = 8) {
   return events.slice(-limit);
 }
 
+function characterWidth(character) {
+  const point = character.codePointAt(0);
+  if (point === 0 || point < 32 || (point >= 0x7f && point < 0xa0)) return 0;
+  if (/\p{Mark}/u.test(character)) return 0;
+  if (point >= 0x1100 && (
+    point <= 0x115f || point === 0x2329 || point === 0x232a
+    || (point >= 0x2e80 && point <= 0xa4cf && point !== 0x303f)
+    || (point >= 0xac00 && point <= 0xd7a3)
+    || (point >= 0xf900 && point <= 0xfaff)
+    || (point >= 0xfe10 && point <= 0xfe19)
+    || (point >= 0xfe30 && point <= 0xfe6f)
+    || (point >= 0xff00 && point <= 0xff60)
+    || (point >= 0xffe0 && point <= 0xffe6)
+    || (point >= 0x1f300 && point <= 0x1faff)
+    || (point >= 0x20000 && point <= 0x3fffd)
+  )) return 2;
+  return 1;
+}
+
+export function displayWidth(value) {
+  return [...stripAnsi(value)].reduce((total, character) => total + characterWidth(character), 0);
+}
+
+function sliceDisplay(value, width) {
+  if (width <= 0) return "";
+  let output = "";
+  let used = 0;
+  for (const character of [...clean(value)]) {
+    const next = characterWidth(character);
+    if (used + next > width) break;
+    output += character;
+    used += next;
+  }
+  return output;
+}
+
 function truncate(value, width) {
   const text = clean(value);
   if (width <= 0) return "";
-  if (text.length <= width) return text;
+  if (displayWidth(text) <= width) return text;
   if (width === 1) return "…";
-  return `${text.slice(0, width - 1)}…`;
+  return `${sliceDisplay(text, width - 1)}…`;
+}
+
+function pad(value, width) {
+  const text = truncate(value, width);
+  return `${text}${" ".repeat(Math.max(0, width - displayWidth(text)))}`;
 }
 
 function wrap(value, width, prefix = "") {
   const words = clean(value).split(" ").filter(Boolean);
-  if (!words.length) return [];
-  const contentWidth = Math.max(8, width - prefix.length);
+  if (!words.length || width <= 0) return [];
+  const contentWidth = Math.max(1, width - displayWidth(prefix));
   const lines = [];
   let current = "";
   for (const word of words) {
     if (!current) current = word;
-    else if (`${current} ${word}`.length <= contentWidth) current += ` ${word}`;
+    else if (displayWidth(`${current} ${word}`) <= contentWidth) current += ` ${word}`;
     else { lines.push(prefix + truncate(current, contentWidth)); current = word; }
   }
   if (current) lines.push(prefix + truncate(current, contentWidth));
@@ -433,29 +557,222 @@ function performanceLine(summary) {
   return `Timing: active ${active}s | dead ${dead}s${latest ? ` | latest ${latest}` : ""}`;
 }
 
-function statusSymbol(status) {
-  const value = String(status || "unknown").toLowerCase();
-  if (ATTENTION_STATUSES.has(value)) return "!";
-  if (ACTIVE_STATUSES.has(value)) return "*";
-  if (["agreed", "completed", "merged"].includes(value)) return "+";
-  if (value === "cancelled") return "-";
-  return ".";
-}
-
 function paint(text, code, enabled) {
   return enabled ? `\x1b[${code}m${text}\x1b[0m` : text;
 }
 
-function statusText(status, enabled) {
-  const value = String(status || "unknown");
-  const lower = value.toLowerCase();
-  const code = ATTENTION_STATUSES.has(lower) ? "31;1" : ACTIVE_STATUSES.has(lower) ? "36;1" : ["agreed", "completed", "merged"].includes(lower) ? "32" : "90";
-  return paint(value, code, enabled);
+const CATEGORY_STYLE = {
+  active: "36;1",
+  needs_user: "33;1",
+  waiting: "90",
+  failed: "31;1",
+  history: "90",
+};
+
+function categoryLabel(category) {
+  return { active: "ACTIVE", needs_user: "NEEDS YOU", waiting: "WAITING", failed: "FAILED", history: "HISTORY" }[category] || "OTHER";
 }
 
-function field(label, value, width) {
-  if (value === null || value === undefined || value === "") return [];
-  return wrap(`${label}: ${typeof value === "string" ? value : JSON.stringify(value)}`, width);
+function laneLabel(lane) {
+  if (lane.prNumber) return `PR #${lane.prNumber}`;
+  if (lane.issueNumber) return `#${lane.issueNumber}`;
+  return lane.alias || String(lane.id || "lane").replace(/^bridge-/, "").slice(0, 8);
+}
+
+function friendlyPhase(lane) {
+  const raw = clean(lane.nextAction && lane.nextAction !== "none" ? lane.nextAction : lane.lifecyclePhase || "unknown");
+  return raw.replace(/_/g, " ");
+}
+
+function meaningfulNarrative(lane) {
+  const summary = clean(lane.narrative?.summary);
+  if (!summary || lane.narrative?.isPlaceholder) return "";
+  if (/\busing an MCP tool\b/i.test(summary)) return "";
+  return summary;
+}
+
+export function coalesceTimeline(events, limit = 5) {
+  const output = [];
+  for (const event of events || []) {
+    const summary = clean(event.summary);
+    if (!summary || /\busing an MCP tool\b/i.test(summary)) continue;
+    const key = `${clean(event.type)}\0${clean(event.agent)}\0${summary}`;
+    const previous = output.at(-1);
+    if (previous?.key === key) {
+      previous.count += 1;
+      previous.at = event.at || previous.at;
+    } else {
+      output.push({ ...event, summary, key, count: 1 });
+    }
+  }
+  return output.slice(-limit).map(({ key, ...event }) => event);
+}
+
+function paneLine(text = "", code = null, meta = {}) {
+  return { text: clean(text), code, ...meta };
+}
+
+function paneSection(label, count, category) {
+  return paneLine(`${label}${Number.isFinite(count) ? ` ${count}` : ""}`, CATEGORY_STYLE[category] || "1");
+}
+
+function repositoryPane(snapshot, lanes) {
+  const summaries = new Map();
+  for (const lane of lanes) {
+    const summary = summaries.get(lane.repository) || { active: 0, needs_user: 0, waiting: 0, failed: 0 };
+    summary[lane.operatorCategory] = (summary[lane.operatorCategory] || 0) + 1;
+    summaries.set(lane.repository, summary);
+  }
+  const rows = [];
+  for (const [repository, counts] of summaries) {
+    const active = counts.active || 0;
+    const needs = counts.needs_user || 0;
+    const failed = counts.failed || 0;
+    const badge = needs ? `!${needs}` : failed ? `x${failed}` : String(active);
+    rows.push(paneLine(`${repository.split("/").at(-1)}  ${badge}`, needs ? CATEGORY_STYLE.needs_user : failed ? CATEGORY_STYLE.failed : active ? CATEGORY_STYLE.active : null));
+  }
+  if (!rows.length) rows.push(paneLine("No active repositories", "90"));
+  rows.push(paneLine(""));
+  rows.push(paneSection("NEEDS YOU", snapshot.operatorCounts?.needs_user || 0, "needs_user"));
+  rows.push(paneSection("WAITING", snapshot.operatorCounts?.waiting || 0, "waiting"));
+  rows.push(paneSection("FAILED", snapshot.operatorCounts?.failed || 0, "failed"));
+  return rows;
+}
+
+function workPane(lanes, selectedIndex, now) {
+  if (!lanes.length) return [paneLine("No work is running", "90"), paneLine("Press a for attention or h for history", "90")];
+  const rows = [];
+  let category = null;
+  lanes.forEach((lane, index) => {
+    if (lane.operatorCategory !== category) {
+      if (rows.length) rows.push(paneLine(""));
+      category = lane.operatorCategory;
+      const count = lanes.filter((candidate) => candidate.operatorCategory === category).length;
+      rows.push(paneSection(categoryLabel(category), count, category));
+    }
+    const provider = lane.providers?.join("+") || lane.activeAgent || lane.writer || "unassigned";
+    const related = lane.relatedLaneCount > 1 ? ` +${lane.relatedLaneCount - 1}` : "";
+    const marker = index === selectedIndex ? "▶" : " ";
+    const text = `${marker} ${laneLabel(lane)}  ${provider}  ${friendlyPhase(lane)}  ${age(lane.updatedAt, now)}${related}`;
+    rows.push(paneLine(text, index === selectedIndex ? "7" : CATEGORY_STYLE[category], { selected: index === selectedIndex }));
+  });
+  return rows;
+}
+
+function detailPane(lane, timeline, width, now, snapshot, expanded = false) {
+  if (!lane) {
+    const rows = [paneLine("No lane selected", "90")];
+    if (snapshot.recentActivity?.length) {
+      rows.push(paneLine(""), paneLine("RECENT ACTIVITY", "1"), paneLine("Coordinator may be between lanes", "90"));
+      for (const recent of snapshot.recentActivity.slice(0, 4)) {
+        rows.push(paneLine(`${recent.repository.split("/").at(-1)} · ${recent.lifecyclePhase} · ${age(recent.updatedAt, now)} ago`, "90"));
+      }
+    }
+    if (snapshot.historicalNeedsUserCount) {
+      rows.push(
+        paneLine(""),
+        paneLine(`${snapshot.historicalNeedsUserCount} historical input request${snapshot.historicalNeedsUserCount === 1 ? "" : "s"}`, "90"),
+        paneLine("No alert will be sent", "90"),
+      );
+    }
+    return rows;
+  }
+  const category = lane.operatorCategory || operatorLaneCategory(lane, now) || "history";
+  const provider = lane.providers?.join(", ") || lane.activeAgent || lane.writer || "unassigned";
+  const rows = [
+    paneLine(`${laneLabel(lane)} · ${provider}`, "1"),
+    paneLine(`${categoryLabel(category)} · ${friendlyPhase(lane)} · ${age(lane.updatedAt, now)} ago`, CATEGORY_STYLE[category]),
+  ];
+  const objective = lane.task || lane.narrative?.summary;
+  if (objective) {
+    rows.push(paneLine(""), paneLine("OBJECTIVE", "1"));
+    rows.push(...wrap(objective, width).slice(0, expanded ? 10 : 3).map((line) => paneLine(line)));
+  }
+  const narrative = meaningfulNarrative(lane);
+  if (narrative && narrative !== clean(objective)) {
+    rows.push(paneLine(""), paneLine("NOW", "36;1"));
+    rows.push(...wrap(narrative, width).slice(0, 3).map((line) => paneLine(line)));
+  }
+  const summaryIsStale = lane.heartbeat?.heartbeatAt && lane.narrative?.updatedAt
+    && dateMs(lane.narrative.updatedAt) < dateMs(lane.heartbeat.heartbeatAt) - 60_000;
+  if (summaryIsStale) rows.push(paneLine("SUMMARY STALE · process heartbeat remains live", "33;1"));
+  const github = [lane.issueNumber && `issue #${lane.issueNumber}`, lane.prNumber && `PR #${lane.prNumber}`, lane.branch, lane.headSha && lane.headSha.slice(0, 10)].filter(Boolean).join(" · ");
+  if (github) rows.push(paneLine(""), paneLine(`GITHUB  ${github}`, "35"));
+  if (lane.nextAction && lane.nextAction !== "none") rows.push(paneLine(`NEXT  ${friendlyPhase(lane)}`, "33"));
+  const blocker = lane.blocker?.error || lane.blocker?.pendingDecision?.question || lane.blocker?.decisionEscalation?.question;
+  if (blocker) rows.push(...wrap(`BLOCKED  ${blocker}`, width).slice(0, 2).map((line) => paneLine(line, "31;1")));
+  if (lane.portfolio?.blockedBy?.length) rows.push(paneLine(`WAITING ON  ${lane.portfolio.blockedBy.join(", ")}`, "33"));
+  if (expanded) {
+    rows.push(paneLine(""), paneLine("DETAILS", "1"));
+    rows.push(paneLine(`ID  ${lane.id}`, "90"));
+    if (lane.workspace) rows.push(paneLine(`WORKSPACE  ${lane.workspace}`, "90"));
+    if (lane.model) rows.push(paneLine(`MODEL  ${lane.model}`, "90"));
+    rows.push(paneLine(`CREATED  ${formatLocalDateTime(lane.createdAt)}`, "90"));
+    rows.push(paneLine(`UPDATED  ${formatLocalDateTime(lane.updatedAt)}`, "90"));
+    const timing = performanceLine(lane.performanceSummary);
+    if (timing) rows.push(paneLine(timing, "90"));
+    const activity = lane.type === "native_host" ? lane.hostActivity?.activity : lane.activity;
+    if (activity) {
+      const count = activity.progressEventCount ?? activity.toolEventCount ?? 0;
+      const lastActivityAt = activity.lastOutputAt || activity.lastToolAt || activity.lastProgressAt;
+      rows.push(paneLine(`ACTIVITY  ${count} events · ${Number(activity.outputBytes || 0)} bytes${lastActivityAt ? ` · ${age(lastActivityAt, now)} ago` : ""}`, "90"));
+    }
+  }
+  const events = coalesceTimeline(timeline, 4);
+  if (events.length) {
+    rows.push(paneLine(""), paneLine("RECENT ACTIVITY", "1"));
+    for (const event of events) {
+      const repeated = event.count > 1 ? ` ×${event.count}` : "";
+      rows.push(paneLine(`${formatLocalDateTime(event.at).slice(11, 19)}  ${event.summary}${repeated}`, "90"));
+    }
+  }
+  return rows;
+}
+
+function borderLine(widths, left, join, right, color) {
+  return paint(`${left}${widths.map((width) => "─".repeat(width)).join(join)}${right}`, "90", color);
+}
+
+function renderGrid({ titles, panes, widths, contentRows, color, activePane = 0 }) {
+  const lines = [borderLine(widths, "┌", "┬", "┐", color)];
+  lines.push(`${paint("│", "90", color)}${titles.map((title, index) => paint(pad(` ${title}`, widths[index]), index === activePane ? "1;36" : "1", color)).join(paint("│", "90", color))}${paint("│", "90", color)}`);
+  lines.push(borderLine(widths, "├", "┼", "┤", color));
+  for (let row = 0; row < contentRows; row += 1) {
+    const cells = panes.map((pane, index) => {
+      const entry = pane[row] || paneLine("");
+      const fitted = pad(` ${entry.text}`, widths[index]);
+      return entry.code ? paint(fitted, entry.code, color) : fitted;
+    });
+    lines.push(`${paint("│", "90", color)}${cells.join(paint("│", "90", color))}${paint("│", "90", color)}`);
+  }
+  lines.push(borderLine(widths, "└", "┴", "┘", color));
+  return lines;
+}
+
+function windowPane(rows, contentRows, centerSelection = false) {
+  if (rows.length <= contentRows) return rows;
+  let start = 0;
+  if (centerSelection) {
+    const selected = rows.findIndex((row) => row.selected);
+    if (selected >= 0) start = Math.max(0, Math.min(selected - Math.floor(contentRows / 2), rows.length - contentRows));
+  }
+  const visible = rows.slice(start, start + contentRows);
+  if (start > 0) visible[0] = paneLine(`↑ ${start} earlier`, "90");
+  const remaining = rows.length - (start + contentRows);
+  if (remaining > 0) visible[visible.length - 1] = paneLine(`↓ ${remaining} more`, "90");
+  return visible;
+}
+
+function gridLayout(width, activePane, titles, panes, contentRows, color) {
+  if (width >= 84) {
+    const interior = width - 4;
+    const repositoryWidth = Math.max(18, Math.min(28, Math.floor(interior * 0.22)));
+    const workWidth = Math.max(32, Math.min(52, Math.floor(interior * 0.38)));
+    const detailWidth = interior - repositoryWidth - workWidth;
+    return renderGrid({ titles, panes, widths: [repositoryWidth, workWidth, detailWidth], contentRows, color, activePane });
+  }
+  const paneIndex = Math.min(Math.max(0, activePane), 2);
+  return renderGrid({ titles: [titles[paneIndex]], panes: [panes[paneIndex]], widths: [Math.max(1, width - 2)], contentRows, color, activePane: 0 });
 }
 
 export function renderMissionControl(snapshot, {
@@ -466,147 +783,44 @@ export function renderMissionControl(snapshot, {
   color = true,
   interactive = true,
   actionMessage = null,
+  activePane = 1,
+  detailExpanded = false,
   now = Date.now(),
 } = {}) {
   const usableWidth = Math.max(30, width);
-  const lanes = snapshot.lanes;
+  const lanes = snapshot.operatorLanes || snapshot.lanes.map((lane) => ({ ...lane, operatorCategory: operatorLaneCategory(lane, now) || "history", providers: [lane.activeAgent || lane.writer].filter(Boolean), relatedLaneCount: 1 }));
   const selected = lanes[Math.min(Math.max(0, selectedIndex), Math.max(0, lanes.length - 1))] || null;
   const lines = [];
-  const providerLine = Object.entries(snapshot.providerActivity).map(([provider, count]) => `${provider}:${count}`).join("  ") || "idle";
-  lines.push(paint("AGENT BRIDGE MISSION CONTROL", "1;34", color));
-  lines.push(truncate(`Mode: ${snapshot.mode} | repos ${snapshot.visibleRepositories ?? snapshot.repositories.length} | lanes ${snapshot.visibleLanes}/${snapshot.totalLanes} | providers ${providerLine}`, usableWidth));
-  lines.push(truncate(`As of: ${formatLocalDateTime(snapshot.generatedAt)}`, usableWidth));
-  if (snapshot.needsUserCount > 0) {
-    lines.push(paint(`!!! USER INPUT REQUIRED: ${snapshot.needsUserCount} collaboration${snapshot.needsUserCount === 1 ? "" : "s"}. Press a to inspect.`, "31;1", color));
-    for (const request of (snapshot.needsUserRequests || []).slice(0, 3)) {
-      const bridge = String(request.id || "unknown").replace(/^bridge-/, "").slice(0, 8);
-      lines.push(truncate(`  ${request.repository} · ${bridge} · ${request.summary}`, usableWidth));
-    }
-    if ((snapshot.needsUserRequests || []).length > 3) {
-      lines.push(`  … ${(snapshot.needsUserRequests || []).length - 3} more; press a to inspect.`);
-    }
-  }
-  if (snapshot.historicalNeedsUserCount > 0) {
-    lines.push(truncate(`${snapshot.historicalNeedsUserCount} historical input request${snapshot.historicalNeedsUserCount === 1 ? " remains" : "s remain"} inspectable but will not alert. Press a to inspect; press s if stale records are hidden.`, usableWidth));
-  }
-  lines.push(paint("─".repeat(usableWidth), "90", color));
-
-  if (!lanes.length) {
-    lines.push("No collaboration lanes match this view.");
-    if (snapshot.mode === "live") {
-      lines.push("No providers are currently running.");
-      if (snapshot.recentActivity?.length) {
-        lines.push("Recent activity (the coordinator may be between lanes):");
-        for (const recent of snapshot.recentActivity) {
-          const provider = recent.activeAgent ? ` · ${recent.activeAgent}` : "";
-          const next = recent.nextAction && recent.nextAction !== "none" ? ` · next ${recent.nextAction}` : "";
-          const blocked = recent.lifecyclePhase === "blocked" && recent.blockedBy?.length
-            ? ` · waiting on ${recent.blockedBy.join(", ")}`
-            : "";
-          lines.push(truncate(`  ${recent.repository} · ${recent.lifecyclePhase}${provider} · ${formatLocalDateTime(recent.updatedAt)} (${age(recent.updatedAt, now)} ago)${blocked}${next}`, usableWidth));
-          if (recent.summary) lines.push(truncate(`    ${recent.summary}`, usableWidth));
-        }
-      }
-      lines.push("Press a for attention items or h for history.");
-    } else {
-      lines.push("Try a different view or --repo filter.");
-    }
-  } else {
-    const listBudget = interactive
-      ? Math.max(4, Math.min(12, Math.floor(height * 0.3)))
-      : Math.min(50, lanes.length);
-    const start = interactive
-      ? Math.max(0, Math.min(selectedIndex - Math.floor(listBudget / 2), lanes.length - listBudget))
-      : 0;
-    let lastRepository = null;
-    for (let index = start; index < Math.min(lanes.length, start + listBudget); index += 1) {
-      const lane = lanes[index];
-      if (lane.repository !== lastRepository) {
-        const repo = snapshot.repositories.find((entry) => entry.repository === lane.repository);
-        lines.push(paint(`[${lane.repository}] ${repo?.live || 0} live / ${repo?.attention || 0} attention / ${repo?.total || 0} total`, "1;35", color));
-        lastRepository = lane.repository;
-      }
-      const cursor = index === selectedIndex ? ">" : " ";
-      const provider = lane.activeAgent || lane.writer || "unassigned";
-      const label = lane.issueNumber ? `#${lane.issueNumber}` : lane.alias || lane.id.replace(/^bridge-/, "").slice(0, 8);
-      const raw = `${cursor} ${statusSymbol(lane.lifecyclePhase)} ${label} ${lane.lifecyclePhase} ${provider} - ${lane.task || lane.narrative?.summary || "untitled lane"}`;
-      lines.push(index === selectedIndex ? paint(truncate(raw, usableWidth), "7", color) : truncate(raw, usableWidth));
-    }
-    if (!interactive && lanes.length > listBudget) {
-      lines.push(`… ${lanes.length - listBudget} more lanes; use --json for complete records`);
-    }
-  }
-
-  if (snapshot.collapsedStale?.total) {
-    const collapsed = snapshot.collapsedStale;
-    lines.push(paint("─".repeat(usableWidth), "90", color));
-    lines.push(truncate(`Collapsed ${collapsed.total} stale attention items (${collapsed.portfolioItems} portfolio items across ${collapsed.portfolios} portfolios). Press s or use --include-stale to inspect them.`, usableWidth));
-  }
-
-  if (selected) {
-    lines.push(paint("─".repeat(usableWidth), "90", color));
-    lines.push(`${statusText(selected.lifecyclePhase, color)}  ${paint(selected.repository, "1", color)}  ${selected.id}`);
-    lines.push(...field("Alias", selected.alias, usableWidth));
-    lines.push(...field("Workspace", selected.workspace, usableWidth));
-    lines.push(...field("Task", selected.task, usableWidth));
-    lines.push(...field("Created", formatLocalDateTime(selected.createdAt), usableWidth));
-    lines.push(...field("Updated", formatLocalDateTime(selected.updatedAt), usableWidth));
-    const role = [selected.type === "native_host" && "native host", selected.activeAgent && `active ${selected.activeAgent}`, selected.writer && `writer ${selected.writer}`, selected.model && `model ${selected.model}`].filter(Boolean).join(" | ");
-    lines.push(...field("Agent", role, usableWidth));
-    if (selected.narrative?.summary) {
-      const stale = selected.heartbeat?.heartbeatAt && selected.narrative.updatedAt && dateMs(selected.narrative.updatedAt) < dateMs(selected.heartbeat.heartbeatAt) - 60_000;
-      const source = selected.narrative.isPlaceholder ? "broker placeholder" : selected.narrative.source || "provider";
-      lines.push(...wrap(`Narrative (${source}, ${formatLocalDateTime(selected.narrative.updatedAt)}; ${age(selected.narrative.updatedAt, now)} old${stale ? ", stale while heartbeat remains live" : ""}): ${selected.narrative.summary}`, usableWidth));
-    }
-    if (selected.heartbeat?.heartbeatAt) lines.push(`Heartbeat: ${formatLocalDateTime(selected.heartbeat.heartbeatAt)} (${age(selected.heartbeat.heartbeatAt, now)} ago)`);
-    const activity = selected.type === "native_host" ? selected.hostActivity?.activity : selected.activity;
-    if (activity) {
-      const count = activity.progressEventCount ?? activity.toolEventCount ?? 0;
-      const lastActivityAt = activity.lastOutputAt || activity.lastToolAt || activity.lastProgressAt;
-      const quiet = lastActivityAt ? `last observed ${age(lastActivityAt, now)} ago` : "no observed provider output yet";
-      lines.push(...field("Activity", `${count} event${count === 1 ? "" : "s"} | ${Number(activity.outputBytes || 0)} bytes | ${quiet}`, usableWidth));
-    }
-    const github = [selected.issueNumber && `issue #${selected.issueNumber}`, selected.prNumber && `PR #${selected.prNumber}`, selected.branch, selected.headSha && selected.headSha.slice(0, 12)].filter(Boolean).join(" | ");
-    lines.push(...field("GitHub", github, usableWidth));
-    if (selected.portfolio) {
-      const portfolio = `${selected.portfolio.portfolioId} / ${selected.portfolio.itemId}${selected.portfolio.blockedBy?.length ? ` | blocked by ${selected.portfolio.blockedBy.join(", ")}` : ""}`;
-      lines.push(...field("Portfolio", portfolio, usableWidth));
-    }
-    const blocker = selected.blocker?.error || selected.blocker?.pendingDecision?.question || selected.blocker?.decisionEscalation?.question;
-    lines.push(...field("Blocker", blocker, usableWidth));
-    if (selected.handoff) lines.push(...field("Handoff", `${selected.handoff.outcome || "recorded"} | ${selected.handoff.acknowledged ? "acknowledged" : "awaiting coordinator"} | next ${selected.handoff.nextAction || selected.nextAction}`, usableWidth));
-    lines.push(...field("Next", selected.nextAction, usableWidth));
-    const timing = performanceLine(selected.performanceSummary);
-    if (timing) lines.push(truncate(timing, usableWidth));
-    if (timeline.length) {
-      lines.push(paint("Timeline", "1;34", color));
-      for (const event of timeline.slice(-5)) {
-        const at = formatLocalDateTime(event.at);
-        lines.push(truncate(`  ${at} ${event.type}${event.agent ? ` (${event.agent})` : ""}${event.summary ? ` - ${event.summary}` : ""}`, usableWidth));
-      }
-    }
-  }
-
-  if (snapshot.mode === "all") {
-    lines.push(...wrap("Archive: bridge cleanup --older-than-days 7", usableWidth));
-    lines.push(...wrap("Preview only; add --apply to archive.", usableWidth));
-  }
-
+  const counts = snapshot.operatorCounts || { active: lanes.filter((lane) => lane.operatorCategory === "active").length, needs_user: snapshot.needsUserCount || 0, waiting: 0, failed: 0 };
+  const repositoryCount = new Set(lanes.map((lane) => lane.repository)).size;
+  const headline = `${paint("AGENT BRIDGE MISSION CONTROL", "1;34", color)}  ${paint(`ACTIVE ${counts.active || 0}`, "36;1", color)}  ${paint(`NEEDS YOU ${counts.needs_user || 0}`, counts.needs_user ? "33;1" : "90", color)}  ${paint(`WAITING ${counts.waiting || 0}`, "90", color)}  ${paint(`FAILED ${counts.failed || 0}`, counts.failed ? "31;1" : "90", color)}`;
+  lines.push(truncateAnsi(headline, usableWidth));
+  lines.push(truncate(`${formatLocalDateTime(snapshot.generatedAt)} · ${snapshot.mode} · ${repositoryCount} repo${repositoryCount === 1 ? "" : "s"}${snapshot.filter ? ` · ${snapshot.filter}` : ""}`, usableWidth));
+  const footerRows = interactive ? (actionMessage ? 2 : 1) : snapshot.mode === "all" ? 1 : 0;
+  const contentRows = Math.max(4, height - lines.length - footerRows - 4);
+  const titles = ["REPOSITORIES", "WORK", "SELECTED LANE"];
+  const panes = [
+    windowPane(repositoryPane(snapshot, lanes), contentRows),
+    windowPane(workPane(lanes, selectedIndex, now), contentRows, true),
+    windowPane(detailPane(selected, timeline, Math.max(20, Math.floor(usableWidth * 0.35)), now, snapshot, detailExpanded), contentRows),
+  ];
+  lines.push(...gridLayout(usableWidth, activePane, titles, panes, contentRows, color));
   if (interactive) {
-    lines.push(paint("─".repeat(usableWidth), "90", color));
-    if (actionMessage) lines.push(truncate(`Action: ${actionMessage}`, usableWidth));
-    lines.push("j/k move | l live | a attention | h history | o PR | y copy | c continue | x cancel | A archive | w ack | q quit");
+    if (actionMessage) lines.push(truncateAnsi(paint(` ${actionMessage}`, actionMessage.toLowerCase().includes("failed") ? "31;1" : "33", color), usableWidth));
+    lines.push(truncate(" Tab pane  Enter expand  j/k move  l live  a attention  h history  o PR  c continue  x cancel  q quit", usableWidth));
+  } else if (snapshot.mode === "all") {
+    lines.push(truncate("Archive preview: bridge cleanup --older-than-days 7", usableWidth));
   }
   return lines.slice(0, Math.max(1, height)).map((line) => truncateAnsi(line, usableWidth)).join("\n");
 }
 
 function truncateAnsi(value, width) {
-  if (stripAnsi(value).length <= width) return value;
+  if (displayWidth(value) <= width) return value;
   if (!value.includes("\x1b[")) return truncate(value, width);
   const plain = stripAnsi(value);
   return truncate(plain, width);
 }
 
 export function renderSnapshot(snapshot, options = {}) {
-  return renderMissionControl(snapshot, { ...options, color: false, interactive: false, height: options.height || 200 });
+  return renderMissionControl(snapshot, { ...options, color: false, interactive: false, height: options.height || 40 });
 }

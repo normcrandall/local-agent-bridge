@@ -6,6 +6,9 @@ import { appendFile, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeF
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
+  coalesceTimeline,
+  deduplicateOperatorLanes,
+  displayWidth,
   isAttentionLane,
   isLiveLane,
   isStaleLane,
@@ -14,8 +17,10 @@ import {
   loadTimeline,
   navigationIntent,
   newlyObservedAttentionKeys,
+  operatorLaneCategory,
   parseRepositoryRemote,
   renderSnapshot,
+  renderMissionControl,
   readFileRange,
   statusRank,
   stripAnsi,
@@ -62,6 +67,11 @@ assert.equal(missionControlPlatformCommands("win32").copy[0].command, "clip.exe"
 assert.deepEqual(newlyObservedAttentionKeys(new Set(["lane-a:1"]), ["lane-a:1"]), []);
 assert.deepEqual(newlyObservedAttentionKeys(new Set(["lane-a:1", "lane-b:1"]), ["lane-a:1"]), [], "removing a request must not ring again");
 assert.deepEqual(newlyObservedAttentionKeys(new Set(["lane-a:1"]), ["lane-a:1", "lane-b:1"]), ["lane-b:1"]);
+assert.deepEqual(coalesceTimeline([
+  { type: "progress", agent: "codex", at: "2026-07-23T12:00:00.000Z", summary: "Codex is using an MCP tool." },
+  { type: "progress", agent: "codex", at: "2026-07-23T12:00:01.000Z", summary: "Publishing the pull request" },
+  { type: "progress", agent: "codex", at: "2026-07-23T12:00:02.000Z", summary: "Publishing the pull request" },
+]), [{ type: "progress", agent: "codex", at: "2026-07-23T12:00:02.000Z", summary: "Publishing the pull request", count: 2 }]);
 for (const status of PORTFOLIO_STATUSES) {
   const expected = !PORTFOLIO_STATUS_GROUPS.terminal.includes(status);
   assert.equal(isAttentionLane({ lifecyclePhase: status, updatedAt: "2026-07-23T11:59:00.000Z" }, Date.parse("2026-07-23T12:00:00.000Z")), expected, `${status} classification drifted`);
@@ -78,6 +88,7 @@ assert.equal(isLiveLane({ type: "native_host", lifecyclePhase: "working", hostAc
 assert.equal(isLiveLane({ type: "native_host", lifecyclePhase: "working", hostActivity: { live: false } }), false);
 assert.equal(isStaleLane({ type: "portfolio_lane", lifecyclePhase: "blocked", updatedAt: "2026-07-22T10:00:00.000Z" }, Date.parse("2026-07-23T12:00:00.000Z")), true);
 assert.equal(isStaleLane({ type: "portfolio_lane", lifecyclePhase: "integrating", updatedAt: "2026-07-22T10:00:00.000Z" }, Date.parse("2026-07-23T12:00:00.000Z")), false);
+assert.equal(operatorLaneCategory({ type: "collaboration", lifecyclePhase: "turn_limit", updatedAt: "2026-07-23T11:59:00.000Z" }, classificationNow), "waiting");
 for (const status of PORTFOLIO_STATUS_GROUPS.integration) assert.ok(statusRank(status) < statusRank("ready"));
 const shortReadSource = Buffer.from("incremental-ledger-data");
 const shortRead = await readFileRange({
@@ -222,7 +233,7 @@ try {
   assert.equal(hostStopped.visibleLanes, 0);
   assert.equal(hostStopped.providerActivity.codex, undefined);
   assert.equal(hostStopped.recentActivity[0].repository, "veliqon/control-plane");
-  assert.match(renderSnapshot(hostStopped, { width: 88, now: now + 1_000 }), /Recent activity \(the coordinator may be between lanes\)/);
+  assert.match(renderSnapshot(hostStopped, { width: 88, now: now + 1_000 }), /Coordinator may be between lanes/);
 
   const historicalRoot = join(root, "historical-test");
   await mkdir(historicalRoot);
@@ -243,7 +254,7 @@ try {
   assert.equal(historicalNeedsUser.recentActivity.length, 0, "notification receipt writes must not make an old request recent");
   const historicalOutput = renderSnapshot(historicalNeedsUser, { width: 100, now });
   assert.doesNotMatch(historicalOutput, /!!! USER INPUT REQUIRED/);
-  assert.match(historicalOutput, /1 historical input request remains inspectable but will not alert/);
+  assert.match(historicalOutput, /1 historical input request[\s\S]*No alert will be sent/);
   await writeFile(join(historicalRoot, "portfolios", "helm-55555555-5555-4555-8555-555555555555.json"), JSON.stringify({
     id: "helm-55555555-5555-4555-8555-555555555555",
     workspace,
@@ -265,7 +276,7 @@ try {
   assert.equal(freshPortfolioRequest.historicalNeedsUserCount, 1);
   const freshPortfolioOutput = renderSnapshot(freshPortfolioRequest, { width: 100, now });
   assert.doesNotMatch(freshPortfolioOutput, /!!! USER INPUT REQUIRED/);
-  assert.match(freshPortfolioOutput, /blocked.*waiting on issue-401/);
+  assert.match(freshPortfolioOutput, /WAITING ON.*issue-401/);
   const expiredHostLane = hostActivityLane({
     ...hostState,
     expiresAt: new Date(now + HOST_ACTIVITY_LIVE_MS).toISOString(),
@@ -344,37 +355,70 @@ try {
   const oversizedDeltaTimeline = await loadTimeline(root, runningId, 100);
   assert.equal(oversizedDeltaTimeline.at(-1).summary, "after oversized delta");
   assert.ok(oversizedDeltaTimeline.every((event) => event.summary.length <= 240));
-  const selectedIndex = attention.lanes.findIndex((lane) => lane.id === runningId);
-  const rendered = renderSnapshot(attention, { selectedIndex, timeline, width: 88, height: 100, now });
+  const selectedIndex = attention.operatorLanes.findIndex((lane) => lane.id === runningId);
+  const rendered = renderSnapshot(attention, { selectedIndex, timeline, width: 120, height: 40, now, detailExpanded: true });
   assert.match(rendered, /AGENT BRIDGE MISSION CONTROL/);
-  assert.match(rendered, /USER INPUT REQUIRED: 1 collaboration/);
-  assert.match(rendered, /norm\/example · 33333333 · Authorization required/);
-  assert.match(rendered, /veliqon\/control-plane/);
-  assert.match(rendered, /Workspace:/);
-  assert.match(rendered, /Created: .*2026/);
-  assert.match(rendered, /Updated: .*2026/);
-  assert.match(rendered, /Narrative[\s\S]*stale while\s+heartbeat\s+remains live/);
-  assert.match(rendered, /Heartbeat: .*2026.*ago/);
-  assert.match(rendered, /Activity: 3 events \| 412 bytes \| last observed/);
+  assert.match(rendered, /NEEDS YOU 1/);
+  assert.match(rendered, /control-plane/);
+  assert.match(rendered, /WORKSPACE/);
+  assert.match(rendered, /CREATED.*2026/);
+  assert.match(rendered, /UPDATED.*2026/);
+  assert.match(rendered, /SUMMARY STALE.*heartbeat remains live/);
+  assert.match(rendered, /ACTIVITY.*3 events.*412 bytes/);
   const selectedLane = attention.lanes[selectedIndex];
   assert.deepEqual(missionControlActionAvailability(selectedLane), { openPr: false, copy: true, continue: false, cancel: true, archive: false, acknowledgeWake: false });
   const needsUserLane = attention.lanes.find((lane) => lane.id === needsUserId);
   assert.equal(missionControlPrUrl(needsUserLane), "https://github.com/norm/example/pull/42");
   assert.match(missionControlCopyText(needsUserLane), /norm\/example/);
-  assert.match(rendered, /Timeline\n.*2026.*collaboration_started/);
+  assert.match(rendered, /RECENT ACTIVITY[\s\S]*Rendering repository views/);
   assert.match(rendered, /Timing: active 12s \| dead 3s/);
-  assert.ok(rendered.split("\n").every((line) => stripAnsi(line).length <= 88));
-  const manyLanes = { ...attention, lanes: Array.from({ length: 55 }, (_, index) => ({ ...attention.lanes[0], id: `lane-${index}` })), visibleLanes: 55, totalLanes: 55 };
-  assert.match(renderSnapshot(manyLanes, { width: 88 }), /… 5 more lanes; use --json for complete records/);
+  assert.ok(rendered.split("\n").every((line) => displayWidth(line) <= 120));
+  const manyOperatorLanes = Array.from({ length: 55 }, (_, index) => ({
+    ...attention.operatorLanes[0],
+    id: `lane-${index}`,
+    operatorId: `lane-${index}`,
+    issueNumber: 1_000 + index,
+    operatorCategory: "waiting",
+  }));
+  const manyLanes = { ...attention, operatorLanes: manyOperatorLanes, operatorCounts: { active: 0, needs_user: 0, waiting: 55, failed: 0 }, visibleLanes: 55, totalLanes: 55 };
+  assert.match(renderSnapshot(manyLanes, { width: 120, height: 20 }), /more/);
   const renderedHistory = renderSnapshot(all, { width: 88, now });
   assert.match(renderedHistory, /bridge cleanup --older-than-days 7/);
-  assert.match(renderedHistory, /Preview only; add --apply to archive/);
-  assert.ok(renderedHistory.split("\n").every((line) => stripAnsi(line).length <= 88));
-  assert.match(renderSnapshot(all, { width: 30, now }), /--older-than-days 7/);
+  assert.ok(renderedHistory.split("\n").every((line) => displayWidth(line) <= 88));
+  assert.ok(renderSnapshot(all, { width: 30, now }).split("\n").every((line) => displayWidth(line) <= 30));
+
+  const duplicate = deduplicateOperatorLanes([
+    { ...attention.operatorLanes[0], id: "one", issueNumber: 99, repository: "veliqon/control-plane", lifecyclePhase: "ready", updatedAt: new Date(now - 1_000).toISOString() },
+    { ...attention.operatorLanes[0], id: "two", issueNumber: 99, repository: "veliqon/control-plane", lifecyclePhase: "running", recovery: { processAlive: true }, updatedAt: new Date(now).toISOString() },
+  ], { now });
+  assert.equal(duplicate.length, 1);
+  assert.equal(duplicate[0].relatedLaneCount, 2);
+  assert.equal(duplicate[0].id, "two", "the live collaboration must represent a duplicated issue");
+
+  const colored = renderMissionControl(attention, { selectedIndex, timeline, width: 120, height: 28, now, color: true, interactive: true });
+  assert.match(colored, /\x1b\[/);
+  const gridRows = colored.split("\n").map(stripAnsi).filter((line) => /^[┌├│└]/.test(line));
+  assert.ok(gridRows.every((line) => displayWidth(line) === 120), "every grid row must fill the terminal width");
+  const dividerColumns = (line) => {
+    let column = 0;
+    const result = [];
+    for (const character of line) {
+      if ("│┌┬┐├┼┤└┴┘".includes(character)) result.push(column);
+      column += displayWidth(character);
+    }
+    return result;
+  };
+  const verticalRows = gridRows.filter((line) => line.startsWith("│"));
+  assert.ok(verticalRows.every((line) => assert.deepEqual(dividerColumns(line), dividerColumns(verticalRows[0])) === undefined), "vertical dividers must never shift");
+  const noColor = renderMissionControl(attention, { selectedIndex, timeline, width: 120, height: 28, now, color: false, interactive: true });
+  assert.doesNotMatch(noColor, /\x1b\[/);
+  const narrow = renderMissionControl(attention, { selectedIndex, timeline, width: 60, height: 20, now, color: false, interactive: true, activePane: 2 });
+  const narrowGrid = narrow.split("\n").filter((line) => /^[┌├│└]/.test(line));
+  assert.ok(narrowGrid.every((line) => displayWidth(line) === 60));
 
   const cli = execFileSync(process.execPath, [resolve(import.meta.dirname, "mission-control.mjs"), "--snapshot", "--attention", "--stale-after-hours", "72", "--state-root", root, "--repo", "norm/example"], { encoding: "utf8" });
   assert.match(cli, /norm\/example/);
-  assert.match(cli, /PR #42/);
+  assert.match(cli, /historical input request/);
   assert.doesNotMatch(cli, /Old completed lane/);
   const invalidColumnsCli = execFileSync(process.execPath, [resolve(import.meta.dirname, "mission-control.mjs"), "--snapshot", "--attention", "--stale-after-hours", "72", "--state-root", root, "--repo", "norm/example"], {
     encoding: "utf8",
