@@ -8,7 +8,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { existsSync, realpathSync, symlinkSync } from "node:fs";
 import { reviewGateState, reviewMarker, submitBoundReview } from "../src/github-review-client.mjs";
-import { createReviewerThreadController } from "../src/github-review-threads.mjs";
+import { createBoundBuilderClient } from "../src/github-builder-client.mjs";
+import { approvedSubmissionEvent, createReviewerThreadController } from "../src/github-review-threads.mjs";
 import { parseReviewEnvelope, reviewEnvelopeInstructions } from "../src/review-envelope.mjs";
 import { ensureContainedHandoffPath, resolveContainedHandoffPath } from "../src/handoff-path.mjs";
 
@@ -39,6 +40,11 @@ const envelope = parseReviewEnvelope(`Independent review complete.\n---BEGIN BOU
 assert.equal(envelope.event, "APPROVE");
 assert.match(envelope.handoff, /Antigravity review/);
 await assert.rejects(async () => parseReviewEnvelope("no envelope"), /required bound GitHub review envelope/);
+assert.equal(approvedSubmissionEvent("APPROVED"), "APPROVE");
+assert.equal(approvedSubmissionEvent("approved"), "APPROVE");
+assert.equal(approvedSubmissionEvent("COMMENTED"), null);
+assert.equal(approvedSubmissionEvent("PENDING"), null);
+assert.equal(approvedSubmissionEvent(undefined), null);
 
 const ownedThread = {
   id: "PRRT_owned",
@@ -50,11 +56,16 @@ const foreignThread = {
   isResolved: false,
   comments: { nodes: [{ author: { login: "other-reviewer", __typename: "Bot" } }] },
 };
+const humanThreadWithMatchingLogin = {
+  id: "PRRT_human",
+  isResolved: false,
+  comments: { nodes: [{ author: { login: "example-reviewer", __typename: "User" } }] },
+};
 let submittedEvent = null;
 const resolvedThreadIds = [];
 const reviewerThreadController = createReviewerThreadController({
   client: {
-    reviewThreads: async () => [ownedThread, foreignThread],
+    reviewThreads: async () => [ownedThread, foreignThread, humanThreadWithMatchingLogin],
     resolveReviewThread: async ({ threadId }) => {
       resolvedThreadIds.push(threadId);
       return { operation: "resolve_review_thread", threadId };
@@ -63,7 +74,7 @@ const reviewerThreadController = createReviewerThreadController({
   expectedLogin: "example-reviewer[bot]",
   getSubmittedEvent: () => submittedEvent,
 });
-assert.deepEqual(await reviewerThreadController.read(), [ownedThread, foreignThread]);
+assert.deepEqual(await reviewerThreadController.read(), [ownedThread, foreignThread, humanThreadWithMatchingLogin]);
 await assert.rejects(
   reviewerThreadController.resolve({ threadId: ownedThread.id }),
   /must submit.*APPROVE/i,
@@ -71,6 +82,10 @@ await assert.rejects(
 submittedEvent = "APPROVE";
 await assert.rejects(
   reviewerThreadController.resolve({ threadId: foreignThread.id }),
+  /only a thread opened by that same reviewer/i,
+);
+await assert.rejects(
+  reviewerThreadController.resolve({ threadId: humanThreadWithMatchingLogin.id }),
   /only a thread opened by that same reviewer/i,
 );
 assert.deepEqual(await reviewerThreadController.resolve({ threadId: ownedThread.id }), {
@@ -88,6 +103,22 @@ await assert.rejects(
   patThreadController.resolve({ threadId: ownedThread.id }),
   /requires the configured reviewer GitHub App/i,
 );
+const narrowedReviewerClient = createBoundBuilderClient({
+  token: "ghs_test",
+  repository: "example/repo",
+  expectedLogin: "example-reviewer[bot]",
+  verifiedLogin: "example-reviewer[bot]",
+  headSha: "0".repeat(40),
+  prNumber: 1,
+  allowedOperations: ["read_review_threads", "resolve_review_thread"],
+});
+for (const denied of [
+  () => narrowedReviewerClient.merge({}),
+  () => narrowedReviewerClient.replyReviewThread({ threadId: "x", body: "y" }),
+  () => narrowedReviewerClient.ensurePullRequest({ title: "t", body: "b" }),
+]) {
+  await assert.rejects(denied(), /not authorized/);
+}
 
 // Shared handoff-path containment + recursive parent creation (used by Claude,
 // Codex, and Antigravity handoff writes). Parent directories are created only

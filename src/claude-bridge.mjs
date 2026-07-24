@@ -316,7 +316,7 @@ Review permission contract:
 - You may run only these exact verification commands: ${verificationCommands.length ? verificationCommands.map((command) => `\`${command}\``).join(", ") : "none"}.
 ${actualHandoffPath ? `- Write the final handoff to exactly \`${actualHandoffPath}\`. This is the only file you may create or edit.` : "- Return the handoff in your response; no file write was authorized."}
 ${githubReview ? `- After writing the handoff, submit one formal PR review to \`${githubReview.repository}\` PR #${githubReview.prNumber} at \`${githubReview.headSha}\` using \`github_review.submit_pr_review\`. Include a general verdict and inline comments for actionable line-specific findings. The tool is pre-bound to \`${githubReview.expectedLogin}\` and this exact PR head${githubReview.publishStatusGate ? "; it also publishes the exact-head agent-review status" : "; the formal App review is the configured review gate"}.
-- After an APPROVE, use \`github_review.read_review_threads\` and resolve each satisfied thread opened by this same reviewer through \`github_review.resolve_review_thread\`. Leave unresolved any thread that is not satisfied or was opened by another reviewer.` : "- Do not post comments or send messages."}
+- If \`github_review.read_review_threads\` is available, use it after an APPROVE and resolve each satisfied thread opened by this same reviewer through \`github_review.resolve_review_thread\`. Leave unresolved any thread that is not satisfied or was opened by another reviewer.` : "- Do not post comments or send messages."}
 - Do not push, commit, deploy, or perform any other external mutation.`
     : `
 

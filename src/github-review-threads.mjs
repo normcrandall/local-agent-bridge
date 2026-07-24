@@ -10,6 +10,10 @@ function requireReviewerApp(client) {
   return client;
 }
 
+export function approvedSubmissionEvent(reviewState) {
+  return String(reviewState || "").toUpperCase() === "APPROVED" ? "APPROVE" : null;
+}
+
 export function createReviewerThreadController({ client, expectedLogin, getSubmittedEvent }) {
   if (!expectedLogin) throw new Error("expectedLogin is required.");
   if (typeof getSubmittedEvent !== "function") throw new Error("getSubmittedEvent is required.");
