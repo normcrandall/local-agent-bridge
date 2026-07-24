@@ -231,8 +231,9 @@ try {
     items: [{
       id: "issue-13",
       title: "A newly blocked portfolio lane",
-      status: "needs_user",
+      status: "blocked",
       writer: "claude",
+      blockedBy: ["issue-401"],
       needsUserAt: new Date(now - 30_000).toISOString(),
       updatedAt: new Date(now - 30_000).toISOString(),
     }],
@@ -240,7 +241,9 @@ try {
   const freshPortfolioRequest = await loadMissionControlSnapshot({ stateRoot: historicalRoot, now });
   assert.equal(freshPortfolioRequest.needsUserCount, 0, "a portfolio status without a stopped provider wake must not alert");
   assert.equal(freshPortfolioRequest.historicalNeedsUserCount, 1);
-  assert.doesNotMatch(renderSnapshot(freshPortfolioRequest, { width: 100, now }), /!!! USER INPUT REQUIRED/);
+  const freshPortfolioOutput = renderSnapshot(freshPortfolioRequest, { width: 100, now });
+  assert.doesNotMatch(freshPortfolioOutput, /!!! USER INPUT REQUIRED/);
+  assert.match(freshPortfolioOutput, /blocked.*waiting on issue-401/);
   const expiredHostLane = hostActivityLane({
     ...hostState,
     expiresAt: new Date(now + HOST_ACTIVITY_LIVE_MS).toISOString(),

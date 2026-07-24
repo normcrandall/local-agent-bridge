@@ -285,6 +285,7 @@ export async function loadMissionControlSnapshot({
       summary: lane.narrative?.summary || lane.task || null,
       updatedAt: activityAt,
       nextAction: lane.nextAction || null,
+      blockedBy: lane.portfolio?.blockedBy || [],
     }));
 
   const repositories = new Map();
@@ -478,7 +479,7 @@ export function renderMissionControl(snapshot, {
     lines.push(paint(`!!! USER INPUT REQUIRED: ${snapshot.needsUserCount} collaboration${snapshot.needsUserCount === 1 ? "" : "s"}. Press a to inspect.`, "31;1", color));
     for (const request of (snapshot.needsUserRequests || []).slice(0, 3)) {
       const bridge = String(request.id || "unknown").replace(/^bridge-/, "").slice(0, 8);
-      lines.push(...wrap(`  ${request.repository} · ${bridge} · ${request.summary}`, usableWidth));
+      lines.push(truncate(`  ${request.repository} · ${bridge} · ${request.summary}`, usableWidth));
     }
     if ((snapshot.needsUserRequests || []).length > 3) {
       lines.push(`  … ${(snapshot.needsUserRequests || []).length - 3} more; press a to inspect.`);
@@ -498,7 +499,10 @@ export function renderMissionControl(snapshot, {
         for (const recent of snapshot.recentActivity) {
           const provider = recent.activeAgent ? ` · ${recent.activeAgent}` : "";
           const next = recent.nextAction && recent.nextAction !== "none" ? ` · next ${recent.nextAction}` : "";
-          lines.push(truncate(`  ${recent.repository} · ${recent.lifecyclePhase}${provider} · ${formatLocalDateTime(recent.updatedAt)} (${age(recent.updatedAt, now)} ago)${next}`, usableWidth));
+          const blocked = recent.lifecyclePhase === "blocked" && recent.blockedBy?.length
+            ? ` · waiting on ${recent.blockedBy.join(", ")}`
+            : "";
+          lines.push(truncate(`  ${recent.repository} · ${recent.lifecyclePhase}${provider} · ${formatLocalDateTime(recent.updatedAt)} (${age(recent.updatedAt, now)} ago)${blocked}${next}`, usableWidth));
           if (recent.summary) lines.push(truncate(`    ${recent.summary}`, usableWidth));
         }
       }

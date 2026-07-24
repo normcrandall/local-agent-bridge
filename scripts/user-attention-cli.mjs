@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 import { listCollaborations, readCollaboration } from "../src/collaboration-store.mjs";
 import { attentionRequestIsFresh } from "../src/attention-state.mjs";
 import { repositoryForLane } from "../src/mission-control.mjs";
-import { attentionMessage, attentionNeedsUser, createAttentionAction, deliverAttentionNotification, scanPendingUserAttention } from "../src/user-attention.mjs";
+import { attentionMessage, attentionNeedsUser, attentionRepository, createAttentionAction, deliverAttentionNotification, scanPendingUserAttention } from "../src/user-attention.mjs";
 
 const args = process.argv.slice(2);
 const command = args[0] || "list";
@@ -39,27 +39,32 @@ if (command === "notify") {
 }
 
 if (command !== "list") {
-  process.stderr.write("Usage: bridge attention [list|notify|test] [--state-root PATH] [--repo OWNER/REPO]\n");
+  process.stderr.write("Usage: bridge attention list [--state-root PATH] [--repo OWNER/REPO]\n       bridge attention notify [--state-root PATH]\n       bridge attention test [--state-root PATH] [--repo OWNER/REPO]\n");
   process.exit(2);
 }
 
 const summaries = await listCollaborations(process.cwd(), { limit: 10_000 });
 const pending = [];
+const historical = [];
+const repositoryIndex = args.indexOf("--repo");
+const repositoryFilter = repositoryIndex >= 0 ? args[repositoryIndex + 1] : null;
 for (const summary of summaries) {
   if (summary.status !== "needs_user" || summary.coordinatorWake?.kind !== "needs_user") continue;
   const state = await readCollaboration(process.cwd(), summary.id).catch(() => null);
-  if (!state || !attentionNeedsUser(state) || !attentionRequestIsFresh(state)) continue;
+  if (!state || !attentionNeedsUser(state)) continue;
   const repository = await repositoryForLane({
-    repository: state.issueClaim?.repository || state.githubReview?.repository || state.githubBuilder?.repository || null,
+    repository: attentionRepository(state),
     workspace: state.workspace,
   });
-  pending.push({
+  if (repositoryFilter && repository !== repositoryFilter) continue;
+  const entry = {
     collaborationId: state.id,
     repository,
     status: state.status,
     workspace: state.workspace,
     summary: state.coordinatorWake?.summary || state.error || state.task,
-    attention: state.coordinatorWake?.userAttention || state.userAttention || null,
-  });
+    attention: state.coordinatorWake?.userAttention || null,
+  };
+  (attentionRequestIsFresh(state) ? pending : historical).push(entry);
 }
-process.stdout.write(`${JSON.stringify({ stateRoot, pending }, null, 2)}\n`);
+process.stdout.write(`${JSON.stringify({ stateRoot, pending, historical }, null, 2)}\n`);

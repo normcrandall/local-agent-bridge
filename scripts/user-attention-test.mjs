@@ -74,6 +74,37 @@ try {
   assert.equal(afterAcknowledgement.reason, "not_due_or_not_needed");
   assert.equal(calls.length, 1);
 
+  const repeatRequest = await createCollaboration(root, {
+    task: "Alert again for a genuinely new immutable request",
+    workspace: root,
+    agents: ["claude"],
+    participants: ["codex", "claude"],
+    chair: { provider: "codex", source: "native-chair" },
+    status: "needs_user",
+    githubReview: { repository: "veliqon/example", prNumber: 45, headSha: "d".repeat(40) },
+    userAttention: {
+      status: "delivered",
+      requestedAt: new Date(now - 60_000).toISOString(),
+      lastDeliveredAt: new Date(now - 60_000).toISOString(),
+    },
+    coordinatorWake: {
+      sequence: 2,
+      provider: "codex",
+      kind: "needs_user",
+      nextAction: "needs_user",
+      summary: "A different protected decision is pending.",
+      status: "pending",
+      createdAt: new Date(now + 1_000).toISOString(),
+    },
+  });
+  const callsBeforeRepeatRequest = calls.length;
+  const repeatResults = await scanPendingUserAttention(root, { now: now + 2_000, platform: "darwin", run });
+  assert.ok(repeatResults.some((result) => result.collaborationId === repeatRequest.id && result.delivered));
+  assert.equal(calls.length, callsBeforeRepeatRequest + 1, "a new wake must not be silenced by a legacy top-level delivered receipt");
+  state = await readCollaboration(root, repeatRequest.id);
+  assert.equal(state.coordinatorWake.userAttention.requestedAt, state.createdAt);
+  assert.notEqual(state.coordinatorWake.userAttention.requestedAt, state.userAttention.requestedAt);
+
   const chairless = await createCollaboration(root, {
     task: "Wait for input without a native chair",
     workspace: root,
@@ -121,6 +152,24 @@ try {
   state = await readCollaboration(root, historical.id);
   assert.equal(state.userAttention, undefined);
   assert.equal(calls.length, callsBeforeHistoricalScan, "historical requests must remain durable without generating desktop alerts");
+
+  const oldBlocking = await createCollaboration(root, {
+    task: "Keep an old stopped-provider request inspectable",
+    workspace: root,
+    agents: ["claude"],
+    participants: ["codex", "claude"],
+    status: "needs_user",
+    createdAt: new Date(now - 8 * 60 * 60_000).toISOString(),
+    coordinatorWake: {
+      sequence: 1,
+      provider: "codex",
+      kind: "needs_user",
+      nextAction: "needs_user",
+      summary: "An old protected decision remains unresolved.",
+      status: "pending",
+      createdAt: new Date(now - 8 * 60 * 60_000).toISOString(),
+    },
+  });
 
   const recentEscalation = await createCollaboration(root, {
     task: "Raise a new protected decision in an old collaboration",
@@ -217,6 +266,12 @@ try {
   const repositoryMessage = attentionMessage({ id: "bridge-example", githubReview: { repository: "veliqon/example" }, workspace: "/private/client-secret" });
   assert.equal(repositoryMessage.subtitle, "veliqon/example · bridge-example");
   assert.match(repositoryMessage.body, /bridge mc --attention --repo veliqon\/example/);
+  const genericMessage = attentionMessage(
+    { id: "bridge-example", githubReview: { repository: "veliqon/example" }, workspace: "/private/client-secret" },
+    { environment: { AGENT_BRIDGE_ATTENTION_DETAIL: "generic" } },
+  );
+  assert.equal(genericMessage.subtitle, "Protected decision");
+  assert.doesNotMatch(genericMessage.body, /veliqon\/example|bridge-example|client-secret/);
 
   const linuxCalls = [];
   await deliverAttentionNotification(fallbackMessage, {
@@ -236,6 +291,18 @@ try {
   assert.equal(cli.stateRoot, process.env.BRIDGE_COLLABORATION_DIR);
   assert.ok(cli.pending.some((entry) => entry.collaborationId === disabled.id), "CLI must read the explicit machine state root, not cwd");
   assert.ok(cli.pending.some((entry) => entry.collaborationId === disabled.id && entry.repository === "veliqon/example" && entry.status === "needs_user"));
+  assert.ok(cli.historical.some((entry) => entry.collaborationId === oldBlocking.id), "old unresolved requests must remain inspectable without alerting");
+
+  const filteredCli = JSON.parse(execFileSync(process.execPath, [
+    resolve(import.meta.dirname, "user-attention-cli.mjs"),
+    "list",
+    "--state-root",
+    process.env.BRIDGE_COLLABORATION_DIR,
+    "--repo",
+    "veliqon/example",
+  ], { cwd: tmpdir(), encoding: "utf8", env: { ...process.env, BRIDGE_COLLABORATION_DIR: "" } }));
+  assert.ok(filteredCli.pending.length > 0);
+  assert.ok([...filteredCli.pending, ...filteredCli.historical].every((entry) => entry.repository === "veliqon/example"));
 
   await updateCollaboration(root, failed.id, (current) => ({ ...current, status: "agreed" }));
   console.log("User attention tests passed: stopped-provider gating, one-shot delivery, repository identity, fresh-request filtering, bounded failure recovery, disabled-policy stability, and acknowledgement stop are verified.");
