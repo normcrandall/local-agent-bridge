@@ -332,6 +332,21 @@ try {
   assert.match(flattenedPortfolioOutput, /BLOCKED BECAUSE Waiting for issue #401 \(An unresolved dependency\) to complete\./);
   const missingPortfolioReason = freshPortfolioRequest.operatorLanes.find((lane) => lane.portfolio?.itemId === "issue-14");
   assert.equal(blockedReason(missingPortfolioReason), "No blocking reason was recorded by the coordinator.");
+  const terminalDependencyLane = {
+    ...freshPortfolioRequest.operatorLanes.find((lane) => lane.portfolio?.itemId === "issue-13"),
+    lifecyclePhase: "agreed",
+    operatorCategory: "history",
+    portfolio: {
+      ...freshPortfolioRequest.operatorLanes.find((lane) => lane.portfolio?.itemId === "issue-13").portfolio,
+      status: "merged",
+      blockingDependencies: [],
+    },
+  };
+  const terminalDependencyOutput = renderSnapshot({ ...freshPortfolioRequest, operatorLanes: [terminalDependencyLane] }, { width: 100, now });
+  assert.doesNotMatch(terminalDependencyOutput, /BLOCKED BECAUSE/, "terminal work must not inherit declared dependencies as live blockers");
+  const narrowBlockedOutput = renderMissionControl(freshPortfolioRequest, { width: 60, height: 20, now, selectedIndex: blockedDependencyIndex, activePane: 2, color: false, interactive: true });
+  assert.match(narrowBlockedOutput, /BLOCKED BECAUSE/);
+  assert.ok(narrowBlockedOutput.split("\n").every((line) => displayWidth(line) <= 60), "a wrapped blocked reason must preserve the narrow grid");
   const expiredHostLane = hostActivityLane({
     ...hostState,
     expiresAt: new Date(now + HOST_ACTIVITY_LIVE_MS).toISOString(),
