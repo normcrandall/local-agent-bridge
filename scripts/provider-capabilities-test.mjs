@@ -22,15 +22,17 @@ assert.equal(oldClaude.fallbackModel, false);
 assert.equal(oldClaude.strictMcpConfig, false);
 
 const modernAntigravity = parseProviderHelp("antigravity", {
-  mainHelp: "--print --print-timeout --mode --model --sandbox --dangerously-skip-permissions --conversation --log-file --add-dir",
+  mainHelp: "--print --print-timeout --mode --model --effort --sandbox --dangerously-skip-permissions --conversation --log-file --add-dir",
 });
 assert.equal(modernAntigravity.conversation, true);
 assert.equal(modernAntigravity.yolo, true);
 assert.equal(modernAntigravity.logFile, true);
 assert.equal(modernAntigravity.addDir, true);
+assert.equal(modernAntigravity.effort, true);
 const oldAntigravity = parseProviderHelp("antigravity", { mainHelp: "--print --print-timeout --mode --sandbox" });
 assert.equal(oldAntigravity.model, false);
 assert.equal(oldAntigravity.conversation, false);
 assert.equal(oldAntigravity.addDir, false);
+assert.equal(oldAntigravity.effort, false);
 
 console.log("Provider capability matrix tests passed for modern and legacy Codex, Claude, and Antigravity CLIs.");

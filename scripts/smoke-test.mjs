@@ -362,6 +362,20 @@ async function callAntigravityWithoutModel() {
     if ((serialized.match(/--add-dir/g) || []).length < 2) {
       throw new Error("Antigravity Git metadata directories were not added explicitly");
     }
+    const bareGemini = await client.callTool({
+      name: "ask_antigravity",
+      arguments: { prompt: "bare Gemini model smoke test", model: "gemini-3.6-flash", mode: "review" },
+    });
+    const bareGeminiSerialized = JSON.stringify(bareGemini.content);
+    if (!bareGeminiSerialized.includes("--model")
+      || !bareGeminiSerialized.includes("gemini-3.6-flash")
+      || !bareGeminiSerialized.includes("--effort")
+      || !bareGeminiSerialized.includes("high")) {
+      throw new Error("Bare Antigravity Gemini model did not receive an explicit default effort");
+    }
+    if (bareGemini.structuredContent?.modelRouting?.effort !== "high") {
+      throw new Error("Antigravity model routing did not report the inferred effort");
+    }
     const fallback = await client.callTool({
       name: "ask_antigravity",
       arguments: {

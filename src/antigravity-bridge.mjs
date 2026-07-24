@@ -94,6 +94,18 @@ function isModelOverload(error) {
     .test(error?.message || String(error));
 }
 
+function antigravityModelSelection(model) {
+  const requested = typeof model === "string" ? model.trim() : "";
+  if (!requested) return { model: null, effort: null };
+  const suffixed = requested.match(/^(.*)-(low|medium|high)$/i);
+  if (suffixed) return { model: suffixed[1], effort: suffixed[2].toLowerCase() };
+  if (/^gemini-\d+(?:\.\d+)*-(?:flash|pro)$/i.test(requested)
+    || /^gpt-oss-\d+b$/i.test(requested)) {
+    return { model: requested, effort: "high" };
+  }
+  return { model: requested, effort: null };
+}
+
 function runAntigravityAttempt({ prompt, cwd, mode, model, timeoutSeconds, permissionProfile = "standard", verificationCommands = [], writableRoots = [], conversationId, onProgress = () => {} }) {
   if (process.env.ANTIGRAVITY_BRIDGE_ACTIVE === "1") {
     throw new Error("Nested Antigravity bridge invocation blocked to prevent an agent loop.");
@@ -108,7 +120,9 @@ function runAntigravityAttempt({ prompt, cwd, mode, model, timeoutSeconds, permi
   for (const [feature, supported] of [
     ["--print", AGY_CAPABILITIES.print], ["--print-timeout", AGY_CAPABILITIES.printTimeout], ["--mode", AGY_CAPABILITIES.mode],
   ]) if (!supported) throw new Error(`Installed Antigravity ${AGY_CAPABILITIES.version} lacks required ${feature} support.`);
-  if (model && !AGY_CAPABILITIES.model) throw new Error(`Installed Antigravity ${AGY_CAPABILITIES.version} cannot select a model.`);
+  const modelSelection = antigravityModelSelection(model);
+  if (modelSelection.model && !AGY_CAPABILITIES.model) throw new Error(`Installed Antigravity ${AGY_CAPABILITIES.version} cannot select a model.`);
+  if (modelSelection.effort && !AGY_CAPABILITIES.effort) throw new Error(`Installed Antigravity ${AGY_CAPABILITIES.version} cannot select model effort.`);
   if (conversationId && !AGY_CAPABILITIES.conversation) throw new Error(`Installed Antigravity ${AGY_CAPABILITIES.version} cannot resume a conversation.`);
   if (!AGY_CAPABILITIES.addDir) {
     throw new Error(`Installed Antigravity ${AGY_CAPABILITIES.version} lacks required --add-dir support for delegated workspace binding.`);
@@ -139,7 +153,8 @@ function runAntigravityAttempt({ prompt, cwd, mode, model, timeoutSeconds, permi
     if (!AGY_CAPABILITIES.yolo) throw new Error(`Installed Antigravity ${AGY_CAPABILITIES.version} cannot enable YOLO mode.`);
     args.push("--dangerously-skip-permissions");
   } else if (AGY_CAPABILITIES.sandbox) args.push("--sandbox");
-  if (model) args.push("--model", model);
+  if (modelSelection.model) args.push("--model", modelSelection.model);
+  if (modelSelection.effort) args.push("--effort", modelSelection.effort);
   if (conversationId) args.push("--conversation", conversationId);
 
   return new Promise((resolvePromise, rejectPromise) => {
@@ -190,6 +205,7 @@ function runAntigravityAttempt({ prompt, cwd, mode, model, timeoutSeconds, permi
         conversationId: resolvedConversation,
         conversationSource: conversationId ? "caller" : fromLog ? "log-file" : "cwd-cache",
         resumeReliability: fromLog || conversationId ? "session-bound" : "best-effort-cwd-cache",
+        modelSelection,
         isError: false,
       });
     });
@@ -232,6 +248,8 @@ async function runAntigravity(input) {
         modelRouting: {
           requestedModel: input.model || null,
           model,
+          invocationModel: result.modelSelection?.model || model,
+          effort: result.modelSelection?.effort || null,
           fallbackUsed: machineModelPolicy.source === "fallback" || index > 0,
           attemptedModels,
           fallbackModels,
