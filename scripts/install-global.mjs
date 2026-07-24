@@ -336,8 +336,10 @@ if (legacyCodexHookPath && legacyCodexHookPath !== codexHookPath) {
 codexHooks = addCommandHook(codexHooks, "Stop", `${hookLauncher} codex stop`);
 codexHooks = addCommandHook(codexHooks, "SessionStart", `${hookLauncher} codex session_start`);
 codexHooks = addCommandHook(codexHooks, "UserPromptSubmit", `${hostActivityHookLauncher} codex start`);
+codexHooks = addCommandHook(codexHooks, "SubagentStart", `${hostActivityHookLauncher} codex start`);
 codexHooks = addCommandHook(codexHooks, "PreToolUse", `${hostActivityHookLauncher} codex heartbeat`);
 codexHooks = addCommandHook(codexHooks, "PostToolUse", `${hostActivityHookLauncher} codex heartbeat`);
+codexHooks = addCommandHook(codexHooks, "SubagentStop", `${hostActivityHookLauncher} codex stop`);
 codexHooks = addCommandHook(codexHooks, "Stop", `${hostActivityHookLauncher} codex stop`);
 codexHooks = addCommandHook(codexHooks, "SessionEnd", `${hostActivityHookLauncher} codex stop`);
 await writeJson(codexHookPath, codexHooks);

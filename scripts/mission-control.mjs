@@ -3,6 +3,8 @@
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { writeSync } from "node:fs";
+import { execFile, spawnSync } from "node:child_process";
+import { createInterface } from "node:readline/promises";
 import {
   clearRepositoryCache,
   loadMissionControlSnapshot,
@@ -12,6 +14,15 @@ import {
   renderMissionControl,
   renderSnapshot,
 } from "../src/mission-control.mjs";
+import {
+  missionControlActionAvailability,
+  missionControlConfirmation,
+  missionControlCopyText,
+  missionControlPlatformCommands,
+  missionControlPrUrl,
+  resolveMissionControlSelection,
+} from "../src/mission-control-actions.mjs";
+import { callMissionControlAction } from "../src/mission-control-client.mjs";
 
 process.stdout.on("error", (error) => {
   if (error.code === "EPIPE") process.exit(0);
@@ -90,6 +101,9 @@ let stopped = false;
 let timer = null;
 let restorePromise = null;
 let terminalRestored = false;
+let lastSnapshot = null;
+let actionMessage = null;
+let pendingConfirmation = null;
 const seenAttentionKeys = new Set();
 let resolveExit;
 const exitRequested = new Promise((resolvePromise) => { resolveExit = resolvePromise; });
@@ -99,6 +113,7 @@ function restore() {
   if (restorePromise) return restorePromise;
   stopped = true;
   if (timer) clearInterval(timer);
+  timer = null;
   process.stdout.off("resize", draw);
   process.stdin.setRawMode?.(false);
   process.stdin.pause();
@@ -118,6 +133,64 @@ function restoreSynchronously() {
   terminalRestored = true;
 }
 
+function startRefreshTimer() {
+  if (stopped || timer) return;
+  timer = setInterval(draw, refreshMs);
+  timer.unref();
+}
+
+function pauseRefreshTimer() {
+  const shouldResume = Boolean(timer) && !stopped;
+  if (timer) clearInterval(timer);
+  timer = null;
+  return shouldResume;
+}
+
+async function promptLine(label) {
+  const shouldResumeRefresh = pauseRefreshTimer();
+  process.stdin.off("data", handleKey);
+  process.stdin.setRawMode(false);
+  process.stdout.write(`\x1b[?25h\x1b[H\x1b[2J${label}\n`);
+  const readline = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return (await readline.question("> ")).trim();
+  } finally {
+    readline.close();
+    process.stdin.setRawMode(true);
+    process.stdin.on("data", handleKey);
+    process.stdout.write("\x1b[?25l");
+    if (shouldResumeRefresh) startRefreshTimer();
+  }
+}
+
+function openExternalUrl(url) {
+  const candidates = missionControlPlatformCommands().open;
+  const attempt = (index) => {
+    const candidate = candidates[index];
+    if (!candidate) {
+      actionMessage = `Open failed: no supported URL opener is installed. Copy the PR URL with y instead.`;
+      void draw();
+      return;
+    }
+    execFile(candidate.command, [...candidate.args, url], (error) => {
+      if (error?.code === "ENOENT") return attempt(index + 1);
+      actionMessage = error ? `Open failed: ${error.message}` : `Opened ${url}`;
+      void draw();
+    });
+  };
+  attempt(0);
+}
+
+function copySelection(lane) {
+  const input = missionControlCopyText(lane);
+  for (const candidate of missionControlPlatformCommands().copy) {
+    const copied = spawnSync(candidate.command, candidate.args, { input, encoding: "utf8" });
+    if (copied.status === 0) return true;
+    if (copied.error?.code !== "ENOENT") return false;
+  }
+  return false;
+}
+
 async function shutdown(code) {
   if (stopped) return;
   await restore();
@@ -130,6 +203,7 @@ async function draw() {
   drawing = true;
   try {
     const current = await snapshot();
+    lastSnapshot = current;
     if (stopped) return;
     const newlyObserved = newlyObservedAttentionKeys(seenAttentionKeys, current.needsUserKeys);
     if (newlyObserved.length) {
@@ -151,6 +225,7 @@ async function draw() {
       height: process.stdout.rows || 40,
       color,
       interactive: true,
+      actionMessage,
     });
     if (stopped) return;
     process.stdout.write(`\x1b[H\x1b[2J${output}`);
@@ -166,7 +241,7 @@ process.stdout.write("\x1b[?1049h\x1b[?25l");
 process.stdin.setRawMode(true);
 process.stdin.resume();
 process.stdin.setEncoding("utf8");
-process.stdin.on("data", async (key) => {
+async function handleKey(key) {
   if (key === "q" || key === "\u0003") {
     await shutdown(0);
     return;
@@ -182,6 +257,47 @@ process.stdin.on("data", async (key) => {
     selectedIndex = 0;
     selectedId = null;
   }
+  else if (["o", "y", "c", "x", "A", "w"].includes(key)) {
+    const lane = resolveMissionControlSelection(lastSnapshot?.lanes, selectedId, selectedIndex);
+    const available = missionControlActionAvailability(lane);
+    const actionByKey = { o: "openPr", y: "copy", c: "continue", x: "cancel", A: "archive", w: "acknowledgeWake" };
+    const action = actionByKey[key];
+    if (!available[action]) {
+      actionMessage = `Action ${action} is unavailable for the selected lane.`;
+    } else if (key === "o") {
+      const url = missionControlPrUrl(lane);
+      openExternalUrl(url);
+    } else if (key === "y") {
+      actionMessage = copySelection(lane) ? `Copied ${lane.alias || lane.id}.` : "Clipboard copy failed: no supported clipboard command is available.";
+    } else if (key === "c") {
+      const message = await promptLine(`Continue ${lane.alias || lane.id}. Enter the next instruction; blank cancels.`);
+      if (!message) actionMessage = "Continue cancelled.";
+      else {
+        try {
+          await callMissionControlAction({ runtimeRoot: resolve(import.meta.dirname, ".."), stateRoot, name: "continue_collaboration", arguments: { collaborationId: lane.id, message, additionalTurns: 6, expectedUpdatedAt: lane.updatedAt } });
+          actionMessage = `Continuation queued for ${lane.alias || lane.id}.`;
+        } catch (error) {
+          actionMessage = `Continue failed: ${error.message}`;
+        }
+      }
+    } else {
+      const confirmation = missionControlConfirmation(pendingConfirmation, { key, lane });
+      pendingConfirmation = confirmation.pending;
+      if (!confirmation.confirmed) {
+        actionMessage = `Press ${key} again within 5 seconds to confirm ${action}.`;
+      } else {
+        const armedLane = confirmation.lane;
+        try {
+          if (key === "x") await callMissionControlAction({ runtimeRoot: resolve(import.meta.dirname, ".."), stateRoot, name: "cancel_collaboration", arguments: { collaborationId: armedLane.id, expectedUpdatedAt: armedLane.updatedAt } });
+          if (key === "A") await callMissionControlAction({ runtimeRoot: resolve(import.meta.dirname, ".."), stateRoot, name: "archive_collaboration", arguments: { collaborationId: armedLane.id, expectedUpdatedAt: armedLane.updatedAt } });
+          if (key === "w") await callMissionControlAction({ runtimeRoot: resolve(import.meta.dirname, ".."), stateRoot, name: "acknowledge_coordinator_wake", arguments: { collaborationId: armedLane.id, sequence: armedLane.coordinatorWake.sequence, provider: armedLane.coordinatorWake.provider, summary: "User acknowledged the processed wake from Mission Control.", action: "processed" } });
+          actionMessage = `${action} completed for ${armedLane.alias || armedLane.id}.`;
+        } catch (error) {
+          actionMessage = `${action} failed: ${error.message}`;
+        }
+      }
+    }
+  }
   else if (key === "r") clearRepositoryCache();
   else {
     const intent = navigationIntent(key, selectedIndex);
@@ -189,13 +305,13 @@ process.stdin.on("data", async (key) => {
     if (!intent.preserveSelectedId) selectedId = null;
   }
   await draw();
-});
+}
+process.stdin.on("data", handleKey);
 process.on("SIGINT", () => { void shutdown(130); });
 process.on("SIGTERM", () => { void shutdown(143); });
 process.on("exit", restoreSynchronously);
 process.stdout.on("resize", draw);
 
-timer = setInterval(draw, refreshMs);
-timer.unref();
+startRefreshTimer();
 await draw();
 await exitRequested;

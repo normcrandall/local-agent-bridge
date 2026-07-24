@@ -27,6 +27,14 @@ import {
   recordHostActivity,
 } from "../src/host-activity-store.mjs";
 import { PORTFOLIO_STATUSES, PORTFOLIO_STATUS_GROUPS } from "../src/portfolio-status.mjs";
+import {
+  missionControlActionAvailability,
+  missionControlConfirmation,
+  missionControlCopyText,
+  missionControlPlatformCommands,
+  missionControlPrUrl,
+  resolveMissionControlSelection,
+} from "../src/mission-control-actions.mjs";
 
 assert.equal(parseRepositoryRemote("https://token@example.com/owner/repo.git"), "owner/repo");
 assert.equal(parseRepositoryRemote("git@github.com:owner/repo.git"), "owner/repo");
@@ -38,6 +46,19 @@ assert.match(formatLocalDateTime("1970-01-01T00:00:00.000Z"), /^19(?:69|70)-/);
 assert.deepEqual(navigationIntent("j", 1), { selectedIndex: 2, preserveSelectedId: false });
 assert.deepEqual(navigationIntent("k", 1), { selectedIndex: 0, preserveSelectedId: false });
 assert.deepEqual(navigationIntent("r", 1), { selectedIndex: 1, preserveSelectedId: true });
+const selectionFixture = [{ id: "first", updatedAt: "one" }, { id: "last", updatedAt: "two" }];
+assert.equal(resolveMissionControlSelection(selectionFixture, null, Number.MAX_SAFE_INTEGER).id, "last");
+assert.equal(resolveMissionControlSelection(selectionFixture, "first", 1).id, "first");
+const armed = missionControlConfirmation(null, { key: "x", lane: selectionFixture[0], now: 100 });
+selectionFixture[0].updatedAt = "changed";
+const confirmed = missionControlConfirmation(armed.pending, { key: "x", lane: selectionFixture[0], now: 101 });
+assert.equal(confirmed.confirmed, true);
+assert.equal(confirmed.lane.updatedAt, "one", "confirmation must retain the rendered revision fence");
+assert.equal(missionControlActionAvailability({ type: "collaboration", coordinatorWake: { sequence: 1, status: "pending", actionable: true } }).acknowledgeWake, false);
+assert.equal(missionControlActionAvailability({ type: "collaboration", coordinatorWake: { sequence: 1, status: "pending", actionable: false } }).acknowledgeWake, true);
+assert.equal(missionControlPlatformCommands("darwin").open[0].command, "open");
+assert.equal(missionControlPlatformCommands("linux").copy[0].command, "wl-copy");
+assert.equal(missionControlPlatformCommands("win32").copy[0].command, "clip.exe");
 assert.deepEqual(newlyObservedAttentionKeys(new Set(["lane-a:1"]), ["lane-a:1"]), []);
 assert.deepEqual(newlyObservedAttentionKeys(new Set(["lane-a:1", "lane-b:1"]), ["lane-a:1"]), [], "removing a request must not ring again");
 assert.deepEqual(newlyObservedAttentionKeys(new Set(["lane-a:1"]), ["lane-a:1", "lane-b:1"]), ["lane-b:1"]);
@@ -99,6 +120,7 @@ try {
         summaryAt: "2026-07-23T11:58:00.000Z",
         summarySource: "provider_or_adapter",
         heartbeatAt: "2026-07-23T11:59:58.000Z",
+        activity: { progressEventCount: 3, outputBytes: 412, lastOutputAt: "2026-07-23T11:59:00.000Z", lastProgressAt: "2026-07-23T11:59:00.000Z" },
       },
     },
     performanceSummary: { activeTimeMs: 12_000, deadTimeMs: 3_000, latestMilestone: { name: "first_progress" } },
@@ -333,6 +355,12 @@ try {
   assert.match(rendered, /Updated: .*2026/);
   assert.match(rendered, /Narrative[\s\S]*stale while\s+heartbeat\s+remains live/);
   assert.match(rendered, /Heartbeat: .*2026.*ago/);
+  assert.match(rendered, /Activity: 3 events \| 412 bytes \| last observed/);
+  const selectedLane = attention.lanes[selectedIndex];
+  assert.deepEqual(missionControlActionAvailability(selectedLane), { openPr: false, copy: true, continue: false, cancel: true, archive: false, acknowledgeWake: false });
+  const needsUserLane = attention.lanes.find((lane) => lane.id === needsUserId);
+  assert.equal(missionControlPrUrl(needsUserLane), "https://github.com/norm/example/pull/42");
+  assert.match(missionControlCopyText(needsUserLane), /norm\/example/);
   assert.match(rendered, /Timeline\n.*2026.*collaboration_started/);
   assert.match(rendered, /Timing: active 12s \| dead 3s/);
   assert.ok(rendered.split("\n").every((line) => stripAnsi(line).length <= 88));
@@ -344,11 +372,11 @@ try {
   assert.ok(renderedHistory.split("\n").every((line) => stripAnsi(line).length <= 88));
   assert.match(renderSnapshot(all, { width: 30, now }), /--older-than-days 7/);
 
-  const cli = execFileSync(process.execPath, [resolve(import.meta.dirname, "mission-control.mjs"), "--snapshot", "--attention", "--state-root", root, "--repo", "norm/example"], { encoding: "utf8" });
+  const cli = execFileSync(process.execPath, [resolve(import.meta.dirname, "mission-control.mjs"), "--snapshot", "--attention", "--stale-after-hours", "72", "--state-root", root, "--repo", "norm/example"], { encoding: "utf8" });
   assert.match(cli, /norm\/example/);
   assert.match(cli, /PR #42/);
   assert.doesNotMatch(cli, /Old completed lane/);
-  const invalidColumnsCli = execFileSync(process.execPath, [resolve(import.meta.dirname, "mission-control.mjs"), "--snapshot", "--attention", "--state-root", root, "--repo", "norm/example"], {
+  const invalidColumnsCli = execFileSync(process.execPath, [resolve(import.meta.dirname, "mission-control.mjs"), "--snapshot", "--attention", "--stale-after-hours", "72", "--state-root", root, "--repo", "norm/example"], {
     encoding: "utf8",
     env: { ...process.env, COLUMNS: "not-a-number" },
   });

@@ -23,6 +23,11 @@ export function hostActivityId({ provider, sessionId }) {
   return `host-${provider}-${digest}`;
 }
 
+function hostRunKey({ provider, sessionId, runId }) {
+  const identity = clean(runId, 500) || "root";
+  return createHash("sha256").update(`${provider}:${sessionId}:${identity}`).digest("hex").slice(0, 24);
+}
+
 function paths(root, id) {
   const directory = hostActivityDirectory(root);
   return {
@@ -96,6 +101,12 @@ export async function recordHostActivity(stateRoot, {
   task = null,
   summary = null,
   sourceEvent = null,
+  runId = null,
+  authoritativeStart = null,
+  authoritativeStop = null,
+  nestedEvent = false,
+  toolEvent = false,
+  outputBytesDelta = 0,
   hostPid = null,
   lockAttempts = 100,
   now = Date.now(),
@@ -113,11 +124,32 @@ export async function recordHostActivity(stateRoot, {
   try {
     const current = await readOptional(target.state);
     if (action === "heartbeat" && !current?.active) return current;
-    if (action === "stop" && !current) return null;
+    if ((action === "stop" || nestedEvent) && !current) return null;
     const at = new Date(now).toISOString();
-    const active = action !== "stop";
+    const runKey = hostRunKey({ provider, sessionId, runId });
+    const legacyRuns = current?.active ? ["legacy"] : [];
+    const activeRuns = new Set(Array.isArray(current?.activeRuns) ? current.activeRuns : legacyRuns);
+    if (nestedEvent && !runId) {
+      // Some Codex builds omit child IDs from SubagentStart/SubagentStop. In that
+      // case the parent run is the only reliable liveness owner, so leave the set
+      // unchanged instead of aliasing the child to "root" and clearing the parent.
+    } else if (action === "start") {
+      if (authoritativeStart === true || (authoritativeStart == null && !runId)) activeRuns.clear();
+      activeRuns.add(runKey);
+    } else if (action === "stop") {
+      if (authoritativeStop === true || (authoritativeStop == null && !runId)) activeRuns.clear();
+      else activeRuns.delete(runKey);
+    }
+    const active = action === "heartbeat" ? current?.active === true : activeRuns.size > 0;
+    const activity = {
+      toolEventCount: Number(current?.activity?.toolEventCount || 0) + (toolEvent ? 1 : 0),
+      outputBytes: Number(current?.activity?.outputBytes || 0) + Math.max(0, Number(outputBytesDelta) || 0),
+      lastToolAt: toolEvent ? at : current?.activity?.lastToolAt || null,
+      lastOutputAt: Number(outputBytesDelta) > 0 ? at : current?.activity?.lastOutputAt || null,
+      lastProgressAt: (toolEvent || clean(summary)) ? at : current?.activity?.lastProgressAt || null,
+    };
     next = {
-      version: 1,
+      version: 2,
       id,
       type: "native_host",
       provider,
@@ -125,15 +157,18 @@ export async function recordHostActivity(stateRoot, {
       model: clean(model, 120) || current?.model || null,
       hostPid: Number.isInteger(hostPid) && hostPid > 1 ? hostPid : current?.hostPid || null,
       active,
+      activeRuns: [...activeRuns].sort(),
+      activeRunCount: activeRuns.size,
       phase: active ? "working" : "idle",
       task: clean(task) || current?.task || `Native ${provider} host turn`,
-      summary: clean(summary) || (active ? `Native ${provider} host turn is active.` : `Native ${provider} host turn completed.`),
+      summary: clean(summary) || (active ? current?.summary || `Native ${provider} host turn is active.` : `Native ${provider} host turn completed.`),
       startedAt: active ? (current?.active ? current.startedAt : at) : current.startedAt,
       heartbeatAt: active ? at : current.heartbeatAt,
       expiresAt: active ? new Date(now + HOST_ACTIVITY_LIVE_MS).toISOString() : at,
       endedAt: active ? null : at,
       updatedAt: at,
       sourceEvent: clean(sourceEvent, 80) || action,
+      activity,
     };
     await atomicWrite(target.state, next);
   } finally {
@@ -268,6 +303,14 @@ export function hostActivityLane(state, now = Date.now()) {
       recentReceipt,
       livenessProof: hostProcessAlive ? "process" : recentReceipt ? "recent_receipt" : "none",
       live,
+      activeRunCount: Number(state.activeRunCount ?? state.activeRuns?.length ?? (state.active ? 1 : 0)),
+      activity: state.activity || {
+        toolEventCount: 0,
+        outputBytes: 0,
+        lastToolAt: null,
+        lastOutputAt: null,
+        lastProgressAt: null,
+      },
     },
     updatedAt: state.updatedAt,
     createdAt: state.startedAt,
