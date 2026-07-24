@@ -660,14 +660,14 @@ try {
   assert.match(narrowRepositories, /REPOSITORIES/);
   assert.match(narrowRepositories, /HISTORICAL INPUT|STALE HIDDEN/);
 
-  const cli = execFileSync(process.execPath, [resolve(import.meta.dirname, "mission-control.mjs"), "--snapshot", "--attention", "--stale-after-hours", "72", "--state-root", root, "--repo", "norm/example"], { encoding: "utf8" });
+  const cli = execFileSync(process.execPath, [resolve(import.meta.dirname, "mission-control.mjs"), "--snapshot", "--no-quota", "--attention", "--stale-after-hours", "72", "--state-root", root, "--repo", "norm/example"], { encoding: "utf8" });
   assert.match(cli, /norm\/example/);
   assert.match(cli, /historical input request/);
   assert.doesNotMatch(cli, /Old completed lane/);
-  const staleCli = execFileSync(process.execPath, [resolve(import.meta.dirname, "mission-control.mjs"), "--snapshot", "--attention", "--include-stale", "--stale-after-hours", "72", "--state-root", root, "--repo", "norm/example"], { encoding: "utf8" });
+  const staleCli = execFileSync(process.execPath, [resolve(import.meta.dirname, "mission-control.mjs"), "--snapshot", "--no-quota", "--attention", "--include-stale", "--stale-after-hours", "72", "--state-root", root, "--repo", "norm/example"], { encoding: "utf8" });
   assert.match(staleCli, /PR #42/);
   assert.match(staleCli, /ID  bridge-33333333/);
-  const invalidColumnsCli = execFileSync(process.execPath, [resolve(import.meta.dirname, "mission-control.mjs"), "--snapshot", "--attention", "--stale-after-hours", "72", "--state-root", root, "--repo", "norm/example"], {
+  const invalidColumnsCli = execFileSync(process.execPath, [resolve(import.meta.dirname, "mission-control.mjs"), "--snapshot", "--no-quota", "--attention", "--stale-after-hours", "72", "--state-root", root, "--repo", "norm/example"], {
     encoding: "utf8",
     env: { ...process.env, COLUMNS: "not-a-number" },
   });

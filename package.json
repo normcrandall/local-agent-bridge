@@ -49,7 +49,7 @@
     "test:codex-isolation": "node scripts/codex-isolation-test.mjs",
     "test:codex-progress": "node scripts/codex-progress-test.mjs",
     "test:operations": "node scripts/operations-test.mjs",
-    "test:mission-control": "node scripts/mission-control-test.mjs",
+    "test:mission-control": "node scripts/mission-control-test.mjs && node scripts/provider-quota-test.mjs",
     "test:host-activity": "node scripts/host-activity-hook-test.mjs",
     "test:control-plane-coordination": "node scripts/control-plane-coordination-test.mjs",
     "test:workspace-operations": "node scripts/workspace-operations-test.mjs",
