@@ -764,6 +764,7 @@ git(["commit", "-m", "Dynamic writer commit"], { cwd: localRepoPath });
 const dynamicHeadSha = gitOut(["rev-parse", "HEAD"], { cwd: localRepoPath });
 const dynamicApi = fakeGitHub({ branchShas: { main: headSha } });
 const dynamicFactory = tokenFactory();
+const dynamicReceiptLogPath = path.join(tmpDir, "dynamic", "receipts.jsonl");
 const dynamicClient = createBoundBuilderClient({
   apiUrl: "https://github.test",
   fetchImpl: dynamicApi.fetchImpl,
@@ -778,16 +779,19 @@ const dynamicClient = createBoundBuilderClient({
   getToken: dynamicFactory.getToken,
   expectedLogin: "builder[bot]",
   transportUrl,
-  receiptPath: receiptLogPath,
+  receiptPath: dynamicReceiptLogPath,
 });
 const dynamicResult = await dynamicClient.createBranch({ ref: "refs/heads/feature-dynamic", sha: dynamicHeadSha });
 assert.equal(dynamicResult.requestedSha, dynamicHeadSha);
 assert.equal(dynamicResult.authorizationHeadSha, headSha);
 assert.equal(gitOut(["rev-parse", "refs/heads/feature-dynamic"], { cwd: bareRepoPath }), dynamicHeadSha);
-const dynamicReceipts = fs.readFileSync(receiptLogPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+const dynamicReceipts = fs.readFileSync(dynamicReceiptLogPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
 assert.ok(dynamicReceipts.some((receipt) => receipt.operation === "adopt_workspace_head"
   && receipt.authorizationHeadSha === headSha
   && receipt.headSha === dynamicHeadSha));
+const dynamicDelivery = summarizeDeliveryOutcomes(dynamicReceiptLogPath, { headSha });
+assert.equal(dynamicDelivery.outcome, "succeeded");
+assert.equal(dynamicDelivery.counts.succeeded, 1);
 git(["checkout", "main"], { cwd: localRepoPath });
 const wrongWorkspaceHeadClient = createBoundBuilderClient({
   apiUrl: "https://github.test",
