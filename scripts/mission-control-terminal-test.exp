@@ -12,6 +12,7 @@ proc fail {stateRoot} {
 spawn /bin/zsh -f
 send -- "cd '$project'; before=\$(stty -g); node scripts/mission-control.mjs --state-root '$stateRoot' --refresh-ms 250; result=\$?; after=\$(stty -g); if \[\[ \"\$before\" == \"\$after\" \]\]; then echo TERMINAL_OK:\$result; else echo TERMINAL_BAD:\$result; fi; echo INPUT_OK\r"
 expect "AGENT BRIDGE MISSION CONTROL"
+expect "QUOTA 1m"
 after 100
 send -- "q"
 expect {

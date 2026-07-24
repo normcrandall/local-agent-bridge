@@ -53,6 +53,7 @@ function usage() {
   process.stdout.write(`  --refresh-ms N      Interactive refresh interval (default: 1000)\n`);
   process.stdout.write(`  --state-root PATH   Read a different bridge state directory\n`);
   process.stdout.write(`  --no-color          Disable ANSI colors\n`);
+  process.stdout.write(`  --quota             Include a synchronous quota reading in one-shot output\n`);
   process.stdout.write(`  --no-quota          Disable provider quota probes and footer\n`);
 }
 
@@ -69,7 +70,9 @@ let includeStale = args.includes("--include-stale");
 const staleAfterHours = Math.max(1, Number.parseInt(value("--stale-after-hours", "24"), 10) || 24);
 const color = !args.includes("--no-color") && process.env.NO_COLOR === undefined;
 const oneShot = args.includes("--snapshot") || args.includes("--json") || !process.stdin.isTTY || !process.stdout.isTTY;
-const quotaEnabled = !args.includes("--no-quota") && process.env.AGENT_BRIDGE_PROVIDER_QUOTA !== "off";
+const quotaEnabled = !args.includes("--no-quota")
+  && process.env.AGENT_BRIDGE_PROVIDER_QUOTA !== "off"
+  && (!oneShot || args.includes("--quota"));
 const providerQuotaMonitor = createProviderQuotaMonitor();
 
 async function snapshot() {

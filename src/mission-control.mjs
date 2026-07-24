@@ -686,12 +686,13 @@ export function renderProviderQuotaFooter(providerQuota, { width = 120, color = 
   const codexWeek = quotaValue(providers.codex, "week", color);
   const claude5h = quotaValue(providers.claude, "fiveHour", color);
   const claudeWeek = quotaValue(providers.claude, "week", color);
-  const antigravity = providers.antigravity?.status === "stale" ? paint("~—", "33;1", color) : paint("—", "90", color);
+  const antigravity = paint("—", "90", color);
+  // Local is a provider category, not an installed/running health assertion.
   const local = (label) => paint(label, "36", color);
   const updated = quotaObservedTime(providerQuota.updatedAt);
   let line;
   if (width >= 132) {
-    line = ` ${paint("QUOTA REMAINING", "1;34", color)} · refresh 1m  Codex 5h ${codex5h} · wk ${codexWeek}  |  Claude 5h ${claude5h} · wk ${claudeWeek}  |  Antigravity ${antigravity}  |  Docker ${local("local")}  |  Ollama ${local("local")}  |  @${updated}`;
+    line = ` ${paint("QUOTA REMAINING", "1;34", color)} · refresh 1m  Codex 5h ${codex5h} · wk ${codexWeek}  |  Claude 5h ${claude5h} · wk ${claudeWeek}  |  Antigravity ${antigravity}  |  Docker ${local("local")}  |  Ollama ${local("local")}  |  checked @${updated}`;
   } else if (width >= 60) {
     line = ` ${paint("QUOTA 1m", "1;34", color)}  C 5h${codex5h}/wk${codexWeek} · Cl 5h${claude5h}/wk${claudeWeek} · AG${antigravity} · D ${local("local")} · O ${local("local")} · @${updated}`;
   } else {

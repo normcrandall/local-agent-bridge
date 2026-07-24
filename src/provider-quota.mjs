@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 
 export const PROVIDER_QUOTA_REFRESH_MS = 60_000;
+export const PROVIDER_QUOTA_MAX_STALE_MS = 5 * 60_000;
 const DEFAULT_TIMEOUT_MS = 5_000;
 
 const hostedProvider = (provider) => ({
@@ -95,7 +96,7 @@ function commandJsonLines(command, args, {
         try { message = JSON.parse(line); } catch { continue; }
         try {
           const result = accept?.(message, child);
-          if (result !== undefined) return finish(null, result);
+          if (result?.done === true) return finish(null, result.value);
         } catch (error) {
           return finish(error);
         }
@@ -121,6 +122,7 @@ export async function collectCodexQuota({
     signal,
     onStart(child) {
       child.stdin.write(`${JSON.stringify({
+        jsonrpc: "2.0",
         id: 1,
         method: "initialize",
         params: {
@@ -130,12 +132,13 @@ export async function collectCodexQuota({
       })}\n`);
     },
     accept(message, child) {
-      if (message.id === 1) {
-        child.stdin.write(`${JSON.stringify({ method: "initialized" })}\n`);
-        child.stdin.write(`${JSON.stringify({ id: 2, method: "account/rateLimits/read", params: null })}\n`);
+      const isResponse = Object.hasOwn(message, "result") || Object.hasOwn(message, "error");
+      if (message.id === 1 && isResponse) {
+        child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "initialized" })}\n`);
+        child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "account/rateLimits/read" })}\n`);
       }
       if (message.id === 2 && message.error) throw new Error(message.error.message || "Codex rate-limit request failed");
-      if (message.id === 2) return message.result;
+      if (message.id === 2 && isResponse) return { done: true, value: message.result };
       return undefined;
     },
   });
@@ -146,17 +149,24 @@ export function parseCodexRateLimits(result, now = Date.now()) {
   const limits = result?.rateLimits || {};
   const windows = [limits.primary, limits.secondary].filter(Boolean);
   const findWindow = (minutes) => windows.find((window) => Number(window.windowDurationMins) === minutes);
+  const parseWindow = (window) => window ? quotaWindow({
+    usedPercent: window.usedPercent,
+    windowMinutes: window.windowDurationMins,
+    resetsAt: window.resetsAt,
+  }) : null;
+  const fiveHour = parseWindow(findWindow(300));
+  const week = parseWindow(findWindow(10_080));
   const observedAt = new Date(now).toISOString();
   return {
     provider: "codex",
-    status: windows.length ? "available" : "unavailable",
+    status: fiveHour || week ? "available" : "unavailable",
     source: "codex_app_server",
     observedAt,
     lastAttemptAt: observedAt,
     plan: limits.planType || null,
     windows: {
-      fiveHour: quotaWindow(findWindow(300)),
-      week: quotaWindow(findWindow(10_080)),
+      fiveHour,
+      week,
     },
   };
 }
@@ -184,10 +194,15 @@ export async function collectClaudeQuota({
     timeoutMs,
     signal,
     accept(message) {
-      if (message.type === "result" || typeof message.result === "string") return message;
+      if (message.type === "result" || typeof message.result === "string") return { done: true, value: message };
       return undefined;
     },
   });
+  if (result?.num_turns !== 0) {
+    const error = new Error("Claude /usage did not return a zero-turn result; automatic quota probing was disabled");
+    error.permanent = true;
+    throw error;
+  }
   const windows = parseClaudeUsage(result?.result);
   const observedAt = new Date(now).toISOString();
   return {
@@ -206,6 +221,7 @@ function safeError(error) {
 
 export function createProviderQuotaMonitor({
   refreshMs = PROVIDER_QUOTA_REFRESH_MS,
+  maxStaleMs = PROVIDER_QUOTA_MAX_STALE_MS,
   now = () => Date.now(),
   collectors = {
     codex: collectCodexQuota,
@@ -216,16 +232,25 @@ export function createProviderQuotaMonitor({
   current.refreshMs = refreshMs;
   let refreshPromise = null;
   let activeController = null;
+  const disabledProviders = new Set();
 
   const refresh = async () => {
     if (refreshPromise) return refreshPromise;
     const startedAt = now();
     activeController = new AbortController();
     refreshPromise = (async () => {
+      const entries = Object.entries(collectors);
       const nextProviders = { ...current.providers };
-      const results = await Promise.allSettled(Object.entries(collectors).map(async ([provider, collector]) => [provider, await collector({ now: startedAt, signal: activeController.signal })]));
+      const results = await Promise.allSettled(entries.map(async ([provider, collector]) => {
+        if (disabledProviders.has(provider)) {
+          const error = new Error(`${provider} quota probing is disabled after an unsafe response`);
+          error.permanent = true;
+          throw error;
+        }
+        return [provider, await collector({ now: startedAt, signal: activeController.signal })];
+      }));
       for (let index = 0; index < results.length; index += 1) {
-        const provider = Object.keys(collectors)[index];
+        const provider = entries[index][0];
         const result = results[index];
         if (result.status === "fulfilled") {
           const [, observation] = result.value;
@@ -233,9 +258,17 @@ export function createProviderQuotaMonitor({
           continue;
         }
         const previous = current.providers[provider] || hostedProvider(provider);
+        if (result.reason?.permanent) disabledProviders.add(provider);
+        const observedAt = Date.parse(previous.observedAt || "");
+        const retainStale = !result.reason?.permanent
+          && (previous.status === "available" || previous.status === "stale")
+          && Number.isFinite(observedAt)
+          && startedAt - observedAt <= maxStaleMs;
         nextProviders[provider] = {
           ...previous,
-          status: previous.status === "available" || previous.status === "stale" ? "stale" : "unavailable",
+          status: retainStale ? "stale" : "unavailable",
+          observedAt: retainStale ? previous.observedAt : null,
+          windows: retainStale ? previous.windows : { fiveHour: null, week: null },
           lastAttemptAt: new Date(startedAt).toISOString(),
           error: safeError(result.reason),
         };
