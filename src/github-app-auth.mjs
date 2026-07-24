@@ -20,10 +20,14 @@ export function assertGitHubAppPermissions(role, permissions = {}) {
   const permissionRole = role.startsWith("reviewer") ? "reviewer" : role;
   const required = GITHUB_APP_ROLE_PERMISSIONS[permissionRole];
   if (!required) throw new Error(`Unknown GitHub App role: ${role}`);
+  return assertPermissionFloor(required, permissions, `${role} GitHub App`);
+}
+
+function assertPermissionFloor(required, permissions, label) {
   const rank = { read: 1, write: 2 };
   const missing = Object.entries(required).filter(([name, level]) => (rank[permissions[name]] || 0) < rank[level]);
   if (missing.length) {
-    throw new Error(`${role} GitHub App lacks required permissions: ${missing.map(([name, level]) => `${name}:${level}`).join(", ")}.`);
+    throw new Error(`${label} lacks required permissions: ${missing.map(([name, level]) => `${name}:${level}`).join(", ")}.`);
   }
   return true;
 }
@@ -256,6 +260,7 @@ export async function createInstallationToken({
   repository,
   reviewerProvider,
   expectedLogin,
+  tokenPermissions,
   configPath = DEFAULT_GITHUB_APPS_CONFIG,
   apiUrl = "https://api.github.com",
   fetchImpl = fetch,
@@ -271,11 +276,18 @@ export async function createInstallationToken({
   const result = await githubJson(`${apiUrl}/app/installations/${selected.installationId}/access_tokens`, {
     token: jwt,
     method: "POST",
-    body: { repositories: [repository.split("/")[1]] },
+    body: {
+      repositories: [repository.split("/")[1]],
+      ...(tokenPermissions ? { permissions: tokenPermissions } : {}),
+    },
     fetchImpl,
   });
   if (!result.token) throw new Error("GitHub did not return an installation token.");
-  assertGitHubAppPermissions(role, result.permissions || {});
+  if (tokenPermissions) {
+    assertPermissionFloor(tokenPermissions, result.permissions || {}, "GitHub App installation token");
+  } else {
+    assertGitHubAppPermissions(role, result.permissions || {});
+  }
   return {
     token: result.token,
     expiresAt: result.expires_at,
