@@ -149,6 +149,7 @@ export async function auditBridgeCleanup(options = {}) {
   const verifyRetirement = async (state) => {
     const binding = collaborationRetirementBinding(state);
     const retirementKey = JSON.stringify([
+      state.id,
       binding.repository, binding.prNumber, binding.issueNumber, binding.expectedHeadSha, binding.branch,
       binding.workspace, binding.workspaceProofRequired,
     ]);
@@ -301,7 +302,7 @@ export function formatCleanupReport(report, { applied = report.applied === true,
     lines.push(...candidates.slice(0, limit).map((entry) => `  ${entry}`));
     if (candidates.length > limit) lines.push(`  … ${candidates.length - limit} more; use --json for the complete audit`);
   }
-  const preserved = report.protectedCollaborations
+  const preserved = (report.protectedCollaborations || [])
     .filter((entry) => entry.reasons?.length)
     .map((entry) => `${entry.id} ${entry.reasons.join(", ")}`);
   if (preserved.length) {

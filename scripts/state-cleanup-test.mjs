@@ -33,6 +33,7 @@ const ids = {
   dirtyWork: "bridge-cccccccc-cccc-4ccc-8ccc-cccccccccccc",
   unpublishedWork: "bridge-dddddddd-dddd-4ddd-8ddd-dddddddddddd",
   unavailableGitHub: "bridge-eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+  missingBinding: "bridge-12121212-1212-4212-8212-121212121212",
 };
 
 async function writeCollaboration(id, state) {
@@ -85,6 +86,7 @@ try {
     status: "completed",
     githubReview: { repository: "norm/example", prNumber: 6, headSha: "6".repeat(40) },
   });
+  await writeCollaboration(ids.missingBinding, { status: "completed" });
   const oldHostSession = "expired-native-host-session";
   await recordHostActivity(stateRoot, {
     provider: "codex",
@@ -122,6 +124,7 @@ try {
   })}\n`);
 
   const verifyGithubOutcome = async (state) => {
+    if (state.id === ids.missingBinding) return { safe: false, reason: "github_binding_missing" };
     if (state.id === ids.unavailableGitHub) throw new Error("GitHub is unavailable");
     if (state.id === ids.openPr) return { safe: false, reason: "pull_request_open", outcome: "open" };
     const headSha = state.githubReview?.headSha || null;
@@ -142,12 +145,14 @@ try {
   assert.ok(audit.protectedCollaborations.some((entry) => entry.id === ids.dirtyWork && entry.reasons.includes("workspace_dirty")));
   assert.ok(audit.protectedCollaborations.some((entry) => entry.id === ids.unpublishedWork && entry.reasons.includes("workspace_head_unpublished")));
   assert.ok(audit.protectedCollaborations.some((entry) => entry.id === ids.unavailableGitHub && entry.reasons.includes("github_outcome_unavailable")));
+  assert.ok(audit.protectedCollaborations.some((entry) => entry.id === ids.missingBinding && entry.reasons.includes("github_binding_missing")));
   assert.deepEqual(audit.stalePortfolios.map((entry) => entry.id), [blockedPortfolio]);
   assert.equal(audit.hostActivityCleanupCandidates.length, 1);
   assert.equal(audit.hostActivityCleanupCandidates[0].type, "state");
   assert.match(formatCleanupReport(audit), /dry-run/);
   assert.match(formatCleanupReport(audit), /never auto-cancelled/);
   assert.match(formatCleanupReport(audit), /pull_request_open/);
+  assert.doesNotThrow(() => formatCleanupReport({ ...audit, protectedCollaborations: undefined }));
 
   const applied = await applyBridgeCleanup(options);
   assert.equal(applied.archivedCollaborations.length, 2);
@@ -170,6 +175,13 @@ try {
     githubReview: { headSha: unpublishedWorkspace.headSha },
   }, { outcome: "closed", githubHeadSha: unpublishedWorkspace.headSha, remoteHeadSha: unpublishedWorkspace.headSha });
   assert.equal(directRemote.reason, "workspace_head_remote");
+  const nestedWorkspace = join(mergedWorkspace.path, "nested");
+  await mkdir(nestedWorkspace);
+  const wrongRepository = await inspectCollaborationWorkspace({
+    mode: "work", writer: "codex", writerCheckout: { path: nestedWorkspace },
+    githubReview: { headSha: mergedWorkspace.headSha },
+  }, { outcome: "merged", githubHeadSha: mergedWorkspace.headSha, remoteHeadSha: null });
+  assert.equal(wrongRepository.reason, "workspace_repository_mismatch");
 
   const apiHead = "8".repeat(40);
   const fakeFetch = async (url) => {
@@ -183,21 +195,39 @@ try {
     if (path === "/repos/norm/example/pulls/9") {
       return new Response(JSON.stringify({ state: "open", head: { sha: "9".repeat(40) } }), { status: 200 });
     }
+    if (path === "/repos/norm/example/pulls/10") {
+      return new Response(JSON.stringify({
+        state: "closed", merged: false,
+        head: { sha: "a".repeat(40), ref: "codex/gone", repo: { full_name: "norm/example" } },
+      }), { status: 200 });
+    }
     if (path === "/repos/norm/example/git/ref/heads/codex/cleanup") {
       return new Response(JSON.stringify({ object: { sha: apiHead } }), { status: 200 });
     }
     return new Response(JSON.stringify({ message: "not found" }), { status: 404 });
   };
-  const fakeToken = async () => ({ token: "ghs_cleanup_test" });
+  const tokenRequests = [];
+  const fakeToken = async (request) => {
+    tokenRequests.push(request);
+    return { token: "ghs_cleanup_test" };
+  };
   const verifiedMerged = await verifyCollaborationGitHubOutcome({
     githubReview: { repository: "norm/example", prNumber: 8, headSha: apiHead },
   }, { fetchImpl: fakeFetch, getInstallationToken: fakeToken });
   assert.equal(verifiedMerged.reason, "pull_request_merged");
   assert.equal(verifiedMerged.remoteHeadSha, apiHead);
+  assert.deepEqual(tokenRequests[0].tokenPermissions, {
+    contents: "read", issues: "read", metadata: "read", pull_requests: "read",
+  });
   const verifiedOpen = await verifyCollaborationGitHubOutcome({
     githubReview: { repository: "norm/example", prNumber: 9, headSha: "9".repeat(40) },
   }, { fetchImpl: fakeFetch, getInstallationToken: fakeToken });
   assert.equal(verifiedOpen.reason, "pull_request_open");
+  const verifiedClosedUnrecoverable = await verifyCollaborationGitHubOutcome({
+    githubReview: { repository: "norm/example", prNumber: 10, headSha: "a".repeat(40) },
+  }, { fetchImpl: fakeFetch, getInstallationToken: fakeToken });
+  assert.equal(verifiedClosedUnrecoverable.safe, false);
+  assert.equal(verifiedClosedUnrecoverable.reason, "pull_request_closed_head_unrecoverable");
 
   const changedOutcomeId = "bridge-fafafafa-fafa-4afa-8afa-fafafafafafa";
   await writeCollaboration(changedOutcomeId, {

@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { stat } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import { promisify } from "node:util";
 import { createInstallationToken } from "./github-app-auth.mjs";
 
@@ -109,6 +109,12 @@ export async function verifyCollaborationGitHubOutcome(state, {
   const credential = await getInstallationToken({
     role: "builder",
     repository: binding.repository,
+    tokenPermissions: {
+      contents: "read",
+      issues: "read",
+      metadata: "read",
+      pull_requests: "read",
+    },
     ...(configPath ? { configPath } : {}),
     apiUrl,
     fetchImpl,
@@ -132,9 +138,13 @@ export async function verifyCollaborationGitHubOutcome(state, {
     if (headRepository === binding.repository && headBranch) {
       remoteHeadSha = await remoteBranchHead({ apiUrl, fetchImpl, token, repository: headRepository, branch: headBranch });
     }
+    const closedHeadRecoverable = merged
+      || (SHA_PATTERN.test(binding.expectedHeadSha || "") && remoteHeadSha === binding.expectedHeadSha);
     return {
-      safe: true,
-      reason: merged ? "pull_request_merged" : "pull_request_closed",
+      safe: closedHeadRecoverable,
+      reason: merged
+        ? "pull_request_merged"
+        : (closedHeadRecoverable ? "pull_request_closed" : "pull_request_closed_head_unrecoverable"),
       outcome: merged ? "merged" : "closed",
       githubHeadSha,
       remoteHeadSha,
@@ -199,11 +209,25 @@ export async function inspectCollaborationWorkspace(state, githubOutcome) {
 
   let status;
   let headSha;
+  let topLevel;
   try {
-    [status, headSha] = await Promise.all([
+    [status, headSha, topLevel] = await Promise.all([
       runGit(binding.workspace, ["status", "--porcelain=v1", "--untracked-files=all"]),
       runGit(binding.workspace, ["rev-parse", "HEAD"]),
+      runGit(binding.workspace, ["rev-parse", "--show-toplevel"]),
     ]);
+    const [recordedRoot, discoveredRoot] = await Promise.all([
+      realpath(binding.workspace),
+      realpath(topLevel),
+    ]);
+    if (recordedRoot !== discoveredRoot) {
+      return {
+        safe: false,
+        reason: "workspace_repository_mismatch",
+        workspace: binding.workspace,
+        repositoryRoot: topLevel,
+      };
+    }
   } catch (error) {
     return { safe: false, reason: "workspace_uninspectable", workspace: binding.workspace, error: error.message };
   }

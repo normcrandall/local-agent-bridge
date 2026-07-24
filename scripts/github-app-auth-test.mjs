@@ -84,7 +84,14 @@ try {
     }
     if (url.endsWith("/app/installations/222/access_tokens")) {
       assert.equal(options.method, "POST");
-      assert.deepEqual(JSON.parse(options.body), { repositories: ["repo"] });
+      const request = JSON.parse(options.body);
+      assert.deepEqual(request.repositories, ["repo"]);
+      if (request.permissions) {
+        assert.deepEqual(request.permissions, {
+          contents: "read", issues: "read", metadata: "read", pull_requests: "read",
+        });
+        return json({ token: "builder-read-token", expires_at: "2026-07-14T20:00:00Z", permissions: request.permissions }, 201);
+      }
       return json({ token: "builder-installation-token", expires_at: "2026-07-14T20:00:00Z", permissions: { contents: "write", pull_requests: "write", issues: "write", metadata: "read" } }, 201);
     }
     if (/\/app\/installations\/(333|444|555)\/access_tokens$/.test(url)) {
@@ -114,6 +121,15 @@ try {
   });
   assert.equal(builder.token, "builder-installation-token");
   assert.equal(builder.expectedLogin, "example-builder[bot]");
+  const readOnlyBuilder = await createInstallationToken({
+    role: "builder",
+    repository: "exampleorg/repo",
+    tokenPermissions: { contents: "read", issues: "read", metadata: "read", pull_requests: "read" },
+    configPath,
+    apiUrl: "https://github.test",
+    fetchImpl,
+  });
+  assert.equal(readOnlyBuilder.token, "builder-read-token");
   await assert.rejects(
     createInstallationToken({ role: "builder", repository: "UnknownOwner/repo", configPath, apiUrl: "https://github.test", fetchImpl }),
     /No builder GitHub App installation is configured for UnknownOwner/,
