@@ -379,10 +379,11 @@ try {
   assert.equal(mergedHistory.operatorLanes.length, 1, "PR identity must reconcile portfolio, writer, and review attempts");
   assert.equal(mergedHistory.operatorLanes[0].portfolio.status, "merged");
   assert.equal(mergedHistory.operatorLanes[0].relatedLaneCount, 2);
+  assert.deepEqual(mergedHistory.operatorLanes[0].relatedAttempts.map((attempt) => attempt.lifecyclePhase).sort(), ["budget", "failed"]);
   assert.equal(mergedHistory.operatorLanes[0].operatorCategory, "history");
   const mergedHistoryOutput = renderSnapshot(mergedHistory, { width: 120, height: 30, now, detailExpanded: true });
   assert.match(mergedHistoryOutput, /DELIVERY\s+PR #674 merged/);
-  assert.match(mergedHistoryOutput, /ATTEMPT\s+stopped · budget reached/);
+  assert.match(mergedHistoryOutput, /ATTEMPT\s+stopped ·/);
   assert.doesNotMatch(mergedHistoryOutput, /FAILED/);
   assert.doesNotMatch(mergedHistoryOutput, /NEXT\s+continue/);
 
@@ -402,6 +403,84 @@ try {
   assert.equal(stoppedAttempt.operatorCounts.failed, 1, "legacy JSON consumers retain the failed count alias");
   assert.match(renderSnapshot(stoppedAttempt, { width: 120, now }), /STOPPED 1/);
   assert.match(renderSnapshot(stoppedAttempt, { width: 120, now }), /budget reached/);
+
+  const edgeRoot = join(root, "outcome-edge-test");
+  await mkdir(edgeRoot);
+  await mkdir(join(edgeRoot, "portfolios"));
+  const terminalNeedsUserId = "bridge-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  await writeFile(join(edgeRoot, `${terminalNeedsUserId}.json`), JSON.stringify({
+    ...base,
+    id: terminalNeedsUserId,
+    status: "needs_user",
+    updatedAt: "2026-07-23T11:59:00.000Z",
+    task: "Finish coordinator acknowledgement after delivery",
+    issueClaim: { repository: "veliqon/control-plane", issueNumber: 700 },
+    coordinatorWake: {
+      sequence: 1,
+      kind: "needs_user",
+      nextAction: "needs_user",
+      status: "pending",
+      summary: "A real owner decision remains.",
+      createdAt: "2026-07-23T11:59:00.000Z",
+    },
+  }));
+  const queuedId = "bridge-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  await writeFile(join(edgeRoot, `${queuedId}.json`), JSON.stringify({
+    ...base,
+    id: queuedId,
+    status: "queued",
+    updatedAt: "2026-07-23T11:59:30.000Z",
+    task: "Ordinary queued work",
+    issueClaim: { repository: "veliqon/control-plane", issueNumber: 702 },
+  }));
+  const priorAttemptId = "bridge-cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  await writeFile(join(edgeRoot, `${priorAttemptId}.json`), JSON.stringify({
+    ...base,
+    id: priorAttemptId,
+    status: "failed",
+    updatedAt: "2026-07-23T11:58:00.000Z",
+    task: "Earlier issue-only attempt",
+    issueClaim: { repository: "veliqon/control-plane", issueNumber: 701 },
+    error: "Provider transport failed.",
+  }));
+  await writeFile(join(edgeRoot, "portfolios", "helm-dddddddd-dddd-4ddd-8ddd-dddddddddddd.json"), JSON.stringify({
+    id: "helm-dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+    workspace,
+    repository: "veliqon/control-plane",
+    createdAt: "2026-07-23T08:00:00.000Z",
+    updatedAt: "2026-07-23T08:00:00.000Z",
+    items: [{
+      id: "issue-700",
+      issueNumber: 700,
+      prNumber: 700,
+      status: "merged",
+      collaborationId: terminalNeedsUserId,
+      summary: "PR #700 merged, with a real user boundary still open.",
+      headSha: "e".repeat(40),
+    }, {
+      id: "issue-701",
+      issueNumber: 701,
+      prNumber: 701,
+      status: "merged",
+      summary: "PR #701 merged after a prior provider attempt stopped.",
+      headSha: "f".repeat(40),
+    }],
+  }));
+  const edgeAttention = await loadMissionControlSnapshot({ stateRoot: edgeRoot, view: "attention", now });
+  assert.equal(edgeAttention.operatorCounts.needs_user, 1, "a terminal delivery must not hide a real user boundary");
+  assert.equal(edgeAttention.operatorCounts.waiting, 1, "queued work remains part of the existing attention contract");
+  assert.ok(edgeAttention.operatorLanes.some((lane) => lane.prNumber === 700 && lane.operatorCategory === "needs_user"));
+  assert.ok(edgeAttention.operatorLanes.some((lane) => lane.issueNumber === 702));
+  const edgeHistory = await loadMissionControlSnapshot({ stateRoot: edgeRoot, showAll: true, now });
+  const mergedPriorAttempt = edgeHistory.operatorLanes.find((lane) => lane.prNumber === 701);
+  assert.equal(mergedPriorAttempt.operatorCategory, "history");
+  assert.equal(mergedPriorAttempt.relatedLaneCount, 2, "an issue-only prior attempt must join its eventual PR delivery");
+  assert.deepEqual(mergedPriorAttempt.relatedAttempts.map((attempt) => attempt.lifecyclePhase), ["failed"]);
+  const mergedPriorIndex = edgeHistory.operatorLanes.findIndex((lane) => lane.prNumber === 701);
+  const edgeHistoryOutput = renderMissionControl(edgeHistory, { width: 120, height: 30, now, selectedIndex: mergedPriorIndex, detailExpanded: true });
+  assert.match(edgeHistoryOutput, /DELIVERY\s+PR #701 merged/);
+  assert.match(edgeHistoryOutput, /ATTEMPT\s+stopped · provider failed/);
+  assert.equal(stoppedAttempt.operatorLanes.find((lane) => lane.prNumber === 675).legacyOperatorCategory, "failed");
 
   const attention = await loadMissionControlSnapshot({ stateRoot: root, view: "attention", now });
   assert.equal(attention.mode, "attention");

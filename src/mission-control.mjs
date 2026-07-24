@@ -169,10 +169,14 @@ async function mapLimit(values, concurrency, mapper) {
 }
 
 export function isAttentionLane(lane, now = Date.now()) {
-  const status = effectiveLaneStatus(lane);
-  if (TERMINAL_STATUSES.has(status)) return false;
+  const status = String(lane.lifecyclePhase || "unknown").toLowerCase();
+  // Delivery completion does not make a live process or an unresolved human
+  // boundary disappear. Those remain operable until the attempt itself stops.
   if (ACTIVE_STATUSES.has(status)) return true;
   if (["needs_user", "indeterminate", "blocked"].includes(status)) return true;
+  const delivered = portfolioTerminalStatus(lane);
+  if (delivered) return false;
+  if (TERMINAL_STATUSES.has(status)) return false;
   if (["failed", "budget"].includes(status)) return now - dateMs(lane.updatedAt) <= 86_400_000;
   if (lane.handoff && !lane.handoff.acknowledged) return true;
   if (lane.coordinatorWake && !lane.coordinatorWake.acknowledged) return true;
@@ -180,7 +184,9 @@ export function isAttentionLane(lane, now = Date.now()) {
 }
 
 export function isLiveLane(lane, now = Date.now(), heartbeatAfterMs = DEFAULT_LIVE_HEARTBEAT_AFTER_MS) {
-  const status = effectiveLaneStatus(lane);
+  // Liveness describes the provider process, not the delivery artifact. A
+  // merge can land while a final provider turn is still winding down.
+  const status = String(lane.lifecyclePhase || "unknown").toLowerCase();
   if (lane.type === "native_host") return status === "working" && lane.hostActivity?.live === true;
   if (!["collaboration", "combined"].includes(lane.type)) return false;
   if (!LIVE_COLLABORATION_STATUSES.has(status)) return false;
@@ -200,10 +206,10 @@ export function laneNeedsUser(lane) {
 }
 
 export function isStaleLane(lane, now = Date.now(), staleAfterMs = DEFAULT_STALE_AFTER_MS) {
-  if (isLiveLane(lane, now) || String(lane.lifecyclePhase || "").toLowerCase() === "indeterminate") return false;
+  const status = effectiveLaneStatus(lane);
+  if (isLiveLane(lane, now) || status === "indeterminate") return false;
   const updatedAt = dateMs(laneNeedsUser(lane) ? attentionRequestAt(lane) : lane.updatedAt);
   if (!updatedAt || now - updatedAt < staleAfterMs) return false;
-  const status = effectiveLaneStatus(lane);
   if (lane.type === "portfolio_lane") return !PORTFOLIO_STATUS_GROUPS.integration.includes(status);
   return ["needs_user", "blocked", "failed", "budget", "ready"].includes(status);
 }
@@ -257,15 +263,16 @@ function stoppedReason(lane) {
 
 export function operatorLaneCategory(lane, now = Date.now()) {
   const status = effectiveLaneStatus(lane);
-  if (PORTFOLIO_STATUS_GROUPS.terminal.includes(status)) return null;
   if (laneNeedsUser(lane) && attentionRequestIsFresh(lane, now)) return "needs_user";
-  if (status === "needs_user") {
+  const attemptStatus = String(lane.lifecyclePhase || "unknown").toLowerCase();
+  if (attemptStatus === "needs_user") {
     const heartbeatAt = dateMs(lane.heartbeat?.heartbeatAt);
     return lane.recovery?.processAlive === true || (heartbeatAt > 0 && now - heartbeatAt <= DEFAULT_LIVE_HEARTBEAT_AFTER_MS)
       ? "active"
       : null;
   }
   if (isLiveLane(lane, now)) return "active";
+  if (PORTFOLIO_STATUS_GROUPS.terminal.includes(status)) return null;
   if (["failed", "indeterminate", "budget"].includes(status)) {
     return now - dateMs(lane.updatedAt) <= 86_400_000 || status === "indeterminate" ? "stopped" : null;
   }
@@ -279,13 +286,15 @@ export function operatorLaneCategory(lane, now = Date.now()) {
   return null;
 }
 
-function operatorLaneIdentity(lane) {
+function operatorLaneIdentity(lane, issueToPr = new Map()) {
   const repository = lane.repository || "unknown/local";
   // Once a pull request exists it is the delivery source of truth. Review,
   // writer, and portfolio lanes do not consistently carry the issue number,
   // but they do share the PR number. Prefer it so a terminal PR outcome can
   // supersede every stopped attempt associated with that delivery.
   if (lane.prNumber) return `${repository}:pr:${lane.prNumber}`;
+  const mappedPr = lane.issueNumber ? issueToPr.get(`${repository}:issue:${lane.issueNumber}`) : null;
+  if (mappedPr) return `${repository}:pr:${mappedPr}`;
   if (lane.issueNumber) return `${repository}:issue:${lane.issueNumber}`;
   if (lane.portfolio?.itemId) return `${repository}:item:${lane.portfolio.itemId}`;
   if (lane.alias) return `${repository}:alias:${lane.alias}`;
@@ -309,30 +318,57 @@ function compareRank(left, right) {
 }
 
 export function deduplicateOperatorLanes(lanes, { now = Date.now(), includeHistory = false } = {}) {
+  const issueToPrCandidates = new Map();
+  for (const lane of lanes || []) {
+    if (!lane.issueNumber || !lane.prNumber) continue;
+    const key = `${lane.repository || "unknown/local"}:issue:${lane.issueNumber}`;
+    const candidate = {
+      prNumber: lane.prNumber,
+      terminal: portfolioTerminalStatus(lane) ? 1 : 0,
+      updatedAt: dateMs(lane.updatedAt),
+    };
+    const previous = issueToPrCandidates.get(key);
+    if (!previous || candidate.terminal > previous.terminal
+      || (candidate.terminal === previous.terminal && candidate.updatedAt > previous.updatedAt)) {
+      issueToPrCandidates.set(key, candidate);
+    }
+  }
+  const issueToPr = new Map([...issueToPrCandidates].map(([key, value]) => [key, value.prNumber]));
   const groups = new Map();
   for (const lane of lanes || []) {
-    const identity = operatorLaneIdentity(lane);
+    const identity = operatorLaneIdentity(lane, issueToPr);
     const group = groups.get(identity) || [];
     group.push(lane);
     groups.set(identity, group);
   }
   return [...groups.entries()].flatMap(([operatorId, group]) => {
     const terminalEvidence = group.filter((lane) => portfolioTerminalStatus(lane));
-    if (terminalEvidence.length && !includeHistory) return [];
     const actionable = group.filter((lane) => operatorLaneCategory(lane, now));
+    const urgent = actionable.filter((lane) => ["active", "needs_user"].includes(operatorLaneCategory(lane, now)));
+    if (terminalEvidence.length && !includeHistory && !urgent.length) return [];
     if (!terminalEvidence.length && !actionable.length && !includeHistory) return [];
-    const candidates = terminalEvidence.length ? terminalEvidence : actionable.length ? actionable : group;
+    const candidates = urgent.length ? urgent : terminalEvidence.length ? terminalEvidence : actionable.length ? actionable : group;
     const sorted = [...candidates].sort((left, right) => compareRank(operatorRepresentativeRank(left, now), operatorRepresentativeRank(right, now)));
     const representative = sorted[0];
     const providers = [...new Set(group.map((lane) => lane.activeAgent || lane.writer).filter(Boolean))];
     const categories = [...new Set(candidates.map((lane) => operatorLaneCategory(lane, now) || "history"))]
       .sort((left, right) => (OPERATOR_CATEGORY_RANK[left] ?? 9) - (OPERATOR_CATEGORY_RANK[right] ?? 9));
+    const relatedAttempts = group
+      .map((lane) => ({
+        id: lane.id,
+        lifecyclePhase: String(lane.lifecyclePhase || "unknown").toLowerCase(),
+        reason: stoppedReason(lane),
+      }))
+      .filter((attempt) => ["failed", "indeterminate", "budget", "cancelled"].includes(attempt.lifecyclePhase));
+    const operatorCategory = categories[0] || "history";
     return [{
       ...representative,
       operatorId,
-      operatorCategory: categories[0] || "history",
+      operatorCategory,
+      legacyOperatorCategory: operatorCategory === "stopped" ? "failed" : operatorCategory,
       relatedLaneCount: group.length,
       relatedLaneIds: group.map((lane) => lane.id),
+      relatedAttempts,
       providers,
     }];
   }).sort((left, right) => (OPERATOR_CATEGORY_RANK[left.operatorCategory] ?? 9) - (OPERATOR_CATEGORY_RANK[right.operatorCategory] ?? 9)
@@ -417,8 +453,11 @@ export async function loadMissionControlSnapshot({
   // plane. Terminal portfolio evidence may not itself be an attention lane,
   // and may be older than the stale cutoff, but it must still supersede a
   // newer stopped attempt for the same PR.
-  const operatorSource = matching
-    .filter((lane) => portfolioTerminalStatus(lane) || includeStale || !isStaleLane(lane, now, staleAfterMs));
+  const modeSource = mode === "attention" ? attention : matching;
+  const operatorSource = [...new Set([
+    ...modeSource.filter((lane) => includeStale || !isStaleLane(lane, now, staleAfterMs)),
+    ...matching.filter((lane) => portfolioTerminalStatus(lane)),
+  ])];
   const operatorLanes = deduplicateOperatorLanes(operatorSource, {
     now,
     includeHistory: mode === "all" || (mode === "attention" && includeStale),
@@ -774,9 +813,9 @@ function detailPane(lane, timeline, width, now, snapshot, expanded = false) {
   ];
   if (deliveryStatus) {
     rows.push(paneLine(""), paneLine(`DELIVERY  ${lane.prNumber ? `PR #${lane.prNumber} ` : ""}${deliveryStatus}`, "32;1"));
-    const attemptStatus = String(lane.lifecyclePhase || "unknown").toLowerCase();
-    if (["failed", "indeterminate", "budget", "cancelled"].includes(attemptStatus)) {
-      rows.push(paneLine(`ATTEMPT  stopped · ${stoppedReason(lane)}`, "90"));
+    const attemptReasons = [...new Set((lane.relatedAttempts || []).map((attempt) => attempt.reason).filter(Boolean))];
+    if (attemptReasons.length) {
+      rows.push(paneLine(`ATTEMPT  stopped · ${attemptReasons.join(", ")}`, "90"));
     }
   }
   const objective = deliveryStatus ? lane.portfolio?.summary || lane.task || lane.narrative?.summary : lane.task || lane.narrative?.summary;
