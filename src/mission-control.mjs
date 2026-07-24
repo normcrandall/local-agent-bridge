@@ -170,9 +170,13 @@ async function mapLimit(values, concurrency, mapper) {
 
 export function isAttentionLane(lane, now = Date.now()) {
   const status = String(lane.lifecyclePhase || "unknown").toLowerCase();
-  if (TERMINAL_STATUSES.has(status)) return false;
+  // Delivery completion does not make a live process or an unresolved human
+  // boundary disappear. Those remain operable until the attempt itself stops.
   if (ACTIVE_STATUSES.has(status)) return true;
   if (["needs_user", "indeterminate", "blocked"].includes(status)) return true;
+  const delivered = portfolioTerminalStatus(lane);
+  if (delivered) return false;
+  if (TERMINAL_STATUSES.has(status)) return false;
   if (["failed", "budget"].includes(status)) return now - dateMs(lane.updatedAt) <= 86_400_000;
   if (lane.handoff && !lane.handoff.acknowledged) return true;
   if (lane.coordinatorWake && !lane.coordinatorWake.acknowledged) return true;
@@ -180,6 +184,8 @@ export function isAttentionLane(lane, now = Date.now()) {
 }
 
 export function isLiveLane(lane, now = Date.now(), heartbeatAfterMs = DEFAULT_LIVE_HEARTBEAT_AFTER_MS) {
+  // Liveness describes the provider process, not the delivery artifact. A
+  // merge can land while a final provider turn is still winding down.
   const status = String(lane.lifecyclePhase || "unknown").toLowerCase();
   if (lane.type === "native_host") return status === "working" && lane.hostActivity?.live === true;
   if (!["collaboration", "combined"].includes(lane.type)) return false;
@@ -200,10 +206,10 @@ export function laneNeedsUser(lane) {
 }
 
 export function isStaleLane(lane, now = Date.now(), staleAfterMs = DEFAULT_STALE_AFTER_MS) {
-  if (isLiveLane(lane, now) || String(lane.lifecyclePhase || "").toLowerCase() === "indeterminate") return false;
+  const status = effectiveLaneStatus(lane);
+  if (isLiveLane(lane, now) || status === "indeterminate") return false;
   const updatedAt = dateMs(laneNeedsUser(lane) ? attentionRequestAt(lane) : lane.updatedAt);
   if (!updatedAt || now - updatedAt < staleAfterMs) return false;
-  const status = String(lane.lifecyclePhase || "unknown").toLowerCase();
   if (lane.type === "portfolio_lane") return !PORTFOLIO_STATUS_GROUPS.integration.includes(status);
   return ["needs_user", "blocked", "failed", "budget", "ready"].includes(status);
 }
@@ -237,18 +243,38 @@ export function statusRank(status) {
   return 4;
 }
 
-export function operatorLaneCategory(lane, now = Date.now()) {
+function portfolioTerminalStatus(lane) {
+  const status = String(lane.portfolio?.status || "").toLowerCase();
+  return PORTFOLIO_STATUS_GROUPS.terminal.includes(status) ? status : null;
+}
+
+function effectiveLaneStatus(lane) {
+  return portfolioTerminalStatus(lane) || String(lane.lifecyclePhase || "unknown").toLowerCase();
+}
+
+function stoppedReason(lane) {
   const status = String(lane.lifecyclePhase || "unknown").toLowerCase();
+  if (status === "budget") return "budget reached";
+  if (status === "indeterminate") return "ownership uncertain";
+  if (status === "failed") return "provider failed";
+  if (status === "cancelled") return "cancelled";
+  return clean(status).replace(/_/g, " ");
+}
+
+export function operatorLaneCategory(lane, now = Date.now()) {
+  const status = effectiveLaneStatus(lane);
   if (laneNeedsUser(lane) && attentionRequestIsFresh(lane, now)) return "needs_user";
-  if (status === "needs_user") {
+  const attemptStatus = String(lane.lifecyclePhase || "unknown").toLowerCase();
+  if (attemptStatus === "needs_user") {
     const heartbeatAt = dateMs(lane.heartbeat?.heartbeatAt);
     return lane.recovery?.processAlive === true || (heartbeatAt > 0 && now - heartbeatAt <= DEFAULT_LIVE_HEARTBEAT_AFTER_MS)
       ? "active"
       : null;
   }
   if (isLiveLane(lane, now)) return "active";
+  if (PORTFOLIO_STATUS_GROUPS.terminal.includes(status)) return null;
   if (["failed", "indeterminate", "budget"].includes(status)) {
-    return now - dateMs(lane.updatedAt) <= 86_400_000 || status === "indeterminate" ? "failed" : null;
+    return now - dateMs(lane.updatedAt) <= 86_400_000 || status === "indeterminate" ? "stopped" : null;
   }
   if ([
     "queued", "waiting_capacity", "blocked", "validating", "turn_limit",
@@ -260,16 +286,22 @@ export function operatorLaneCategory(lane, now = Date.now()) {
   return null;
 }
 
-function operatorLaneIdentity(lane) {
+function operatorLaneIdentity(lane, issueToPr = new Map()) {
   const repository = lane.repository || "unknown/local";
-  if (lane.issueNumber) return `${repository}:issue:${lane.issueNumber}`;
+  // Once a pull request exists it is the delivery source of truth. Review,
+  // writer, and portfolio lanes do not consistently carry the issue number,
+  // but they do share the PR number. Prefer it so a terminal PR outcome can
+  // supersede every stopped attempt associated with that delivery.
   if (lane.prNumber) return `${repository}:pr:${lane.prNumber}`;
+  const mappedPr = lane.issueNumber ? issueToPr.get(`${repository}:issue:${lane.issueNumber}`) : null;
+  if (mappedPr) return `${repository}:pr:${mappedPr}`;
+  if (lane.issueNumber) return `${repository}:issue:${lane.issueNumber}`;
   if (lane.portfolio?.itemId) return `${repository}:item:${lane.portfolio.itemId}`;
   if (lane.alias) return `${repository}:alias:${lane.alias}`;
   return `${repository}:lane:${lane.id}`;
 }
 
-const OPERATOR_CATEGORY_RANK = { needs_user: 0, active: 1, failed: 2, waiting: 3, history: 4 };
+const OPERATOR_CATEGORY_RANK = { needs_user: 0, active: 1, stopped: 2, waiting: 3, history: 4 };
 
 function operatorRepresentativeRank(lane, now) {
   const category = operatorLaneCategory(lane, now) || "history";
@@ -286,29 +318,59 @@ function compareRank(left, right) {
 }
 
 export function deduplicateOperatorLanes(lanes, { now = Date.now(), includeHistory = false } = {}) {
+  const issueToPrCandidates = new Map();
+  for (const lane of lanes || []) {
+    if (!lane.issueNumber || !lane.prNumber) continue;
+    const key = `${lane.repository || "unknown/local"}:issue:${lane.issueNumber}`;
+    const candidate = {
+      prNumber: lane.prNumber,
+      terminal: portfolioTerminalStatus(lane) ? 1 : 0,
+      updatedAt: dateMs(lane.updatedAt),
+    };
+    const previous = issueToPrCandidates.get(key);
+    if (!previous || candidate.terminal > previous.terminal
+      || (candidate.terminal === previous.terminal && candidate.updatedAt > previous.updatedAt)) {
+      issueToPrCandidates.set(key, candidate);
+    }
+  }
+  const issueToPr = new Map([...issueToPrCandidates].map(([key, value]) => [key, value.prNumber]));
   const groups = new Map();
   for (const lane of lanes || []) {
-    const category = operatorLaneCategory(lane, now);
-    if (!category && !includeHistory) continue;
-    const identity = operatorLaneIdentity(lane);
+    const identity = operatorLaneIdentity(lane, issueToPr);
     const group = groups.get(identity) || [];
     group.push(lane);
     groups.set(identity, group);
   }
-  return [...groups.entries()].map(([operatorId, group]) => {
-    const sorted = [...group].sort((left, right) => compareRank(operatorRepresentativeRank(left, now), operatorRepresentativeRank(right, now)));
+  return [...groups.entries()].flatMap(([operatorId, group]) => {
+    const terminalEvidence = group.filter((lane) => portfolioTerminalStatus(lane));
+    const actionable = group.filter((lane) => operatorLaneCategory(lane, now));
+    const urgent = actionable.filter((lane) => ["active", "needs_user"].includes(operatorLaneCategory(lane, now)));
+    if (terminalEvidence.length && !includeHistory && !urgent.length) return [];
+    if (!terminalEvidence.length && !actionable.length && !includeHistory) return [];
+    const candidates = urgent.length ? urgent : terminalEvidence.length ? terminalEvidence : actionable.length ? actionable : group;
+    const sorted = [...candidates].sort((left, right) => compareRank(operatorRepresentativeRank(left, now), operatorRepresentativeRank(right, now)));
     const representative = sorted[0];
     const providers = [...new Set(group.map((lane) => lane.activeAgent || lane.writer).filter(Boolean))];
-    const categories = [...new Set(group.map((lane) => operatorLaneCategory(lane, now) || "history"))]
+    const categories = [...new Set(candidates.map((lane) => operatorLaneCategory(lane, now) || "history"))]
       .sort((left, right) => (OPERATOR_CATEGORY_RANK[left] ?? 9) - (OPERATOR_CATEGORY_RANK[right] ?? 9));
-    return {
+    const relatedAttempts = group
+      .map((lane) => ({
+        id: lane.id,
+        lifecyclePhase: String(lane.lifecyclePhase || "unknown").toLowerCase(),
+        reason: stoppedReason(lane),
+      }))
+      .filter((attempt) => ["failed", "indeterminate", "budget", "cancelled"].includes(attempt.lifecyclePhase));
+    const operatorCategory = categories[0] || "history";
+    return [{
       ...representative,
       operatorId,
-      operatorCategory: categories[0] || "history",
+      operatorCategory,
+      legacyOperatorCategory: operatorCategory === "stopped" ? "failed" : operatorCategory,
       relatedLaneCount: group.length,
       relatedLaneIds: group.map((lane) => lane.id),
+      relatedAttempts,
       providers,
-    };
+    }];
   }).sort((left, right) => (OPERATOR_CATEGORY_RANK[left.operatorCategory] ?? 9) - (OPERATOR_CATEGORY_RANK[right.operatorCategory] ?? 9)
     || left.repository.localeCompare(right.repository)
     || dateMs(right.updatedAt) - dateMs(left.updatedAt));
@@ -387,14 +449,24 @@ export async function loadMissionControlSnapshot({
     if (!provider) continue;
     providerActivity[provider] = (providerActivity[provider] || 0) + 1;
   }
-  const operatorSource = (mode === "attention" ? selected : matching)
-    .filter((lane) => includeStale || !isStaleLane(lane, now, staleAfterMs));
+  // Always reconcile operator identities against the complete local control
+  // plane. Terminal portfolio evidence may not itself be an attention lane,
+  // and may be older than the stale cutoff, but it must still supersede a
+  // newer stopped attempt for the same PR.
+  const modeSource = mode === "attention" ? attention : matching;
+  const operatorSource = [...new Set([
+    ...modeSource.filter((lane) => includeStale || !isStaleLane(lane, now, staleAfterMs)),
+    ...matching.filter((lane) => portfolioTerminalStatus(lane)),
+  ])];
   const operatorLanes = deduplicateOperatorLanes(operatorSource, {
     now,
     includeHistory: mode === "all" || (mode === "attention" && includeStale),
   });
-  const operatorCounts = { active: 0, needs_user: 0, waiting: 0, failed: 0, history: 0 };
+  const operatorCounts = { active: 0, needs_user: 0, waiting: 0, stopped: 0, failed: 0, history: 0 };
   for (const lane of operatorLanes) operatorCounts[lane.operatorCategory] = (operatorCounts[lane.operatorCategory] || 0) + 1;
+  // Compatibility alias for JSON consumers written before the operator-facing
+  // distinction between a stopped attempt and a failed objective.
+  operatorCounts.failed = operatorCounts.stopped;
   return {
     version: 1,
     generatedAt: new Date(now).toISOString(),
@@ -591,12 +663,12 @@ const CATEGORY_STYLE = {
   active: "36;1",
   needs_user: "33;1",
   waiting: "90",
-  failed: "31;1",
+  stopped: "31;1",
   history: "90",
 };
 
 function categoryLabel(category) {
-  return { active: "ACTIVE", needs_user: "NEEDS YOU", waiting: "WAITING", failed: "FAILED", history: "HISTORY" }[category] || "OTHER";
+  return { active: "ACTIVE", needs_user: "NEEDS YOU", waiting: "WAITING", stopped: "STOPPED", history: "HISTORY" }[category] || "OTHER";
 }
 
 function laneLabel(lane) {
@@ -606,6 +678,11 @@ function laneLabel(lane) {
 }
 
 function friendlyPhase(lane) {
+  const delivered = portfolioTerminalStatus(lane);
+  if (delivered) return delivered;
+  if (["failed", "indeterminate", "budget", "cancelled"].includes(String(lane.lifecyclePhase || "").toLowerCase())) {
+    return stoppedReason(lane);
+  }
   const raw = clean(lane.nextAction && lane.nextAction !== "none" ? lane.nextAction : lane.lifecyclePhase || "unknown");
   return raw.replace(/_/g, " ");
 }
@@ -660,7 +737,7 @@ export function missionControlVisibleLanes(snapshot, selectedRepository = null) 
 function repositoryPane(snapshot, lanes, repositories, selectedRepository) {
   const summaries = new Map();
   for (const lane of lanes) {
-    const summary = summaries.get(lane.repository) || { active: 0, needs_user: 0, waiting: 0, failed: 0 };
+    const summary = summaries.get(lane.repository) || { active: 0, needs_user: 0, waiting: 0, stopped: 0 };
     summary[lane.operatorCategory] = (summary[lane.operatorCategory] || 0) + 1;
     summaries.set(lane.repository, summary);
   }
@@ -674,16 +751,16 @@ function repositoryPane(snapshot, lanes, repositories, selectedRepository) {
     const counts = summaries.get(repository) || {};
     const active = counts.active || 0;
     const needs = counts.needs_user || 0;
-    const failed = counts.failed || 0;
-    const badge = needs ? `!${needs}` : failed ? `x${failed}` : String(active);
+    const stopped = counts.stopped || 0;
+    const badge = needs ? `!${needs}` : stopped ? `■${stopped}` : String(active);
     const selected = repository === selectedRepository;
-    rows.push(paneLine(`${selected ? "▶" : " "} ${repository.split("/").at(-1)}  ${badge}`, selected ? "7" : needs ? CATEGORY_STYLE.needs_user : failed ? CATEGORY_STYLE.failed : active ? CATEGORY_STYLE.active : null, { selected }));
+    rows.push(paneLine(`${selected ? "▶" : " "} ${repository.split("/").at(-1)}  ${badge}`, selected ? "7" : needs ? CATEGORY_STYLE.needs_user : stopped ? CATEGORY_STYLE.stopped : active ? CATEGORY_STYLE.active : null, { selected }));
   }
   if (!rows.length) rows.push(paneLine("No active repositories", "90"));
   rows.push(paneLine(""));
   rows.push(paneSection("NEEDS YOU", snapshot.operatorCounts?.needs_user || 0, "needs_user"));
   rows.push(paneSection("WAITING", snapshot.operatorCounts?.waiting || 0, "waiting"));
-  rows.push(paneSection("FAILED", snapshot.operatorCounts?.failed || 0, "failed"));
+  rows.push(paneSection("STOPPED", snapshot.operatorCounts?.stopped ?? snapshot.operatorCounts?.failed ?? 0, "stopped"));
   if (snapshot.historicalNeedsUserCount) rows.push(paneLine(`HISTORICAL INPUT ${snapshot.historicalNeedsUserCount}`, "90"));
   if (snapshot.collapsedStale?.total) rows.push(paneLine(`STALE HIDDEN ${snapshot.collapsedStale.total} · press s`, "90"));
   return rows;
@@ -729,11 +806,19 @@ function detailPane(lane, timeline, width, now, snapshot, expanded = false) {
   }
   const category = lane.operatorCategory || operatorLaneCategory(lane, now) || "history";
   const provider = lane.providers?.join(", ") || lane.activeAgent || lane.writer || "unassigned";
+  const deliveryStatus = portfolioTerminalStatus(lane);
   const rows = [
     paneLine(`${laneLabel(lane)} · ${provider}`, "1"),
     paneLine(`${categoryLabel(category)} · ${friendlyPhase(lane)} · ${age(lane.updatedAt, now)} ago`, CATEGORY_STYLE[category]),
   ];
-  const objective = lane.task || lane.narrative?.summary;
+  if (deliveryStatus) {
+    rows.push(paneLine(""), paneLine(`DELIVERY  ${lane.prNumber ? `PR #${lane.prNumber} ` : ""}${deliveryStatus}`, "32;1"));
+    const attemptReasons = [...new Set((lane.relatedAttempts || []).map((attempt) => attempt.reason).filter(Boolean))];
+    if (attemptReasons.length) {
+      rows.push(paneLine(`ATTEMPT  stopped · ${attemptReasons.join(", ")}`, "90"));
+    }
+  }
+  const objective = deliveryStatus ? lane.portfolio?.summary || lane.task || lane.narrative?.summary : lane.task || lane.narrative?.summary;
   if (objective) {
     rows.push(paneLine(""), paneLine("OBJECTIVE", "1"));
     rows.push(...wrap(objective, width).slice(0, expanded ? 10 : 3).map((line) => paneLine(line)));
@@ -748,7 +833,7 @@ function detailPane(lane, timeline, width, now, snapshot, expanded = false) {
   if (summaryIsStale) rows.push(paneLine("SUMMARY STALE · process heartbeat remains live", "33;1"));
   const github = [lane.issueNumber && `issue #${lane.issueNumber}`, lane.prNumber && `PR #${lane.prNumber}`, lane.branch, lane.headSha && lane.headSha.slice(0, 10)].filter(Boolean).join(" · ");
   if (github) rows.push(paneLine(""), paneLine(`GITHUB  ${github}`, "35"));
-  if (lane.nextAction && lane.nextAction !== "none") rows.push(paneLine(`NEXT  ${friendlyPhase(lane)}`, "33"));
+  if (!deliveryStatus && lane.nextAction && lane.nextAction !== "none") rows.push(paneLine(`NEXT  ${friendlyPhase(lane)}`, "33"));
   const blocker = lane.blocker?.error || lane.blocker?.pendingDecision?.question || lane.blocker?.decisionEscalation?.question;
   if (blocker) rows.push(...wrap(`BLOCKED  ${blocker}`, width).slice(0, 2).map((line) => paneLine(line, "31;1")));
   if (lane.portfolio?.blockedBy?.length) rows.push(paneLine(`WAITING ON  ${lane.portfolio.blockedBy.join(", ")}`, "33"));
@@ -879,9 +964,10 @@ export function renderMissionControl(snapshot, {
   const effectiveSelectedIndex = Math.min(Math.max(0, selectedIndex), Math.max(0, lanes.length - 1));
   const selected = lanes[effectiveSelectedIndex] || null;
   const lines = [];
-  const counts = snapshot.operatorCounts || { active: lanes.filter((lane) => lane.operatorCategory === "active").length, needs_user: snapshot.needsUserCount || 0, waiting: 0, failed: 0 };
+  const counts = snapshot.operatorCounts || { active: lanes.filter((lane) => lane.operatorCategory === "active").length, needs_user: snapshot.needsUserCount || 0, waiting: 0, stopped: 0, failed: 0 };
+  const stoppedCount = counts.stopped ?? counts.failed ?? 0;
   const repositoryCount = new Set(allLanes.map((lane) => lane.repository)).size;
-  const headline = `${paint("AGENT BRIDGE MISSION CONTROL", "1;34", color)}  ${paint(`ACTIVE ${counts.active || 0}`, "36;1", color)}  ${paint(`NEEDS YOU ${counts.needs_user || 0}`, counts.needs_user ? "33;1" : "90", color)}  ${paint(`WAITING ${counts.waiting || 0}`, "90", color)}  ${paint(`FAILED ${counts.failed || 0}`, counts.failed ? "31;1" : "90", color)}`;
+  const headline = `${paint("AGENT BRIDGE MISSION CONTROL", "1;34", color)}  ${paint(`ACTIVE ${counts.active || 0}`, "36;1", color)}  ${paint(`NEEDS YOU ${counts.needs_user || 0}`, counts.needs_user ? "33;1" : "90", color)}  ${paint(`WAITING ${counts.waiting || 0}`, "90", color)}  ${paint(`STOPPED ${stoppedCount}`, stoppedCount ? "31;1" : "90", color)}`;
   lines.push(truncateAnsi(headline, usableWidth));
   lines.push(truncate(`${formatLocalDateTime(snapshot.generatedAt)} · ${snapshot.mode} · ${repositoryCount} repo${repositoryCount === 1 ? "" : "s"}${snapshot.filter ? ` · ${snapshot.filter}` : ""}`, usableWidth));
   const footerRows = interactive ? (actionMessage ? 2 : 1) : snapshot.mode === "all" ? 1 : 0;

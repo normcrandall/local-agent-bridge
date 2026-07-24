@@ -14,6 +14,7 @@ import {
 import { resolve } from "node:path";
 import { CLAIMED_ISSUE_CONTEXT_MARKER } from "./claimed-issue-context.mjs";
 import { collaborationAlias } from "./collaboration-identity.mjs";
+import { PORTFOLIO_STATUS_GROUPS } from "./portfolio-status.mjs";
 
 const LOCK_STALE_MS = 30_000;
 
@@ -607,6 +608,9 @@ export async function queryControlPlane(stateRoot, options = {}) {
       const portfolioInfo = {
         portfolioId: p.id,
         itemId: item.id,
+        status: item.status || "unknown",
+        summary: item.summary || null,
+        updatedAt: item.updatedAt || p.updatedAt || null,
         priority: item.priority !== undefined ? item.priority : null,
         blockedBy: item.blockedBy || [],
         conflictsWith: item.conflictsWith || [],
@@ -623,6 +627,16 @@ export async function queryControlPlane(stateRoot, options = {}) {
         const colLane = buildCollaborationLane(matched.state, matched.archived);
         colLane.type = "combined";
         colLane.portfolio = portfolioInfo;
+        // A writer collaboration often predates PR creation, so its persisted
+        // state may only know the issue. Hydrate delivery identity from the
+        // portfolio once the PR exists; review attempts already use that PR.
+        colLane.prNumber = colLane.prNumber || item.prNumber || mtEntry?.prNumber || null;
+        colLane.headSha = colLane.headSha || item.headSha || mtEntry?.headSha || null;
+        colLane.branch = colLane.branch || item.branch || null;
+        if (PORTFOLIO_STATUS_GROUPS.terminal.includes(portfolioInfo.status)) {
+          colLane.updatedAt = portfolioInfo.updatedAt || colLane.updatedAt;
+          colLane.nextAction = "none";
+        }
         lanes.push(colLane);
       } else {
         const participants = item.writer ? [item.writer] : [];
