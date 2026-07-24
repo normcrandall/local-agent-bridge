@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { parseProviderHelp } from "../src/provider-cli-capabilities.mjs";
+import { parseAntigravityModels, parseProviderHelp } from "../src/provider-cli-capabilities.mjs";
 
 const modernCodex = parseProviderHelp("codex", {
   version: "1", newHelp: "--json --model --sandbox --cd --skip-git-repo-check --config",
@@ -34,5 +34,11 @@ assert.equal(oldAntigravity.model, false);
 assert.equal(oldAntigravity.conversation, false);
 assert.equal(oldAntigravity.addDir, false);
 assert.equal(oldAntigravity.effort, false);
+
+assert.deepEqual(parseAntigravityModels(`Available models:\n  * gemini-3.6-flash-high (default)\n  - gemini-3.6-flash-medium\nclaude-sonnet-4-6\n`), [
+  "gemini-3.6-flash-high",
+  "gemini-3.6-flash-medium",
+  "claude-sonnet-4-6",
+]);
 
 console.log("Provider capability matrix tests passed for modern and legacy Codex, Claude, and Antigravity CLIs.");

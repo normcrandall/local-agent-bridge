@@ -95,7 +95,7 @@ function isModelOverload(error) {
     .test(error?.message || String(error));
 }
 
-function runAntigravityAttempt({ prompt, cwd, mode, model, timeoutSeconds, permissionProfile = "standard", verificationCommands = [], writableRoots = [], conversationId, onProgress = () => {} }) {
+function runAntigravityAttempt({ prompt, cwd, mode, model, timeoutSeconds, permissionProfile = "standard", verificationCommands = [], writableRoots = [], conversationId, requireAdvertisedRoute = false, onProgress = () => {} }) {
   if (process.env.ANTIGRAVITY_BRIDGE_ACTIVE === "1") {
     throw new Error("Nested Antigravity bridge invocation blocked to prevent an agent loop.");
   }
@@ -113,6 +113,7 @@ function runAntigravityAttempt({ prompt, cwd, mode, model, timeoutSeconds, permi
     model,
     advertisedModels: AGY_CAPABILITIES.models,
     effortSupported: AGY_CAPABILITIES.effort,
+    requireAdvertisedRoute,
   });
   if (modelSelection.model && !AGY_CAPABILITIES.model) throw new Error(`Installed Antigravity ${AGY_CAPABILITIES.version} cannot select a model.`);
   if (conversationId && !AGY_CAPABILITIES.conversation) throw new Error(`Installed Antigravity ${AGY_CAPABILITIES.version} cannot resume a conversation.`);
@@ -234,7 +235,8 @@ async function runAntigravity(input) {
     const label = model || "provider-configured model";
     attemptedModels.push(label);
     try {
-      const result = await runAntigravityAttempt({ ...input, prompt, model });
+      const requireAdvertisedRoute = machineModelPolicy.source === "fallback" || index > 0;
+      const result = await runAntigravityAttempt({ ...input, prompt, model, requireAdvertisedRoute });
       return {
         ...result,
         modelRouting: {
@@ -251,15 +253,21 @@ async function runAntigravity(input) {
         },
       };
     } catch (error) {
-      if (!isModelOverload(error) || index === candidates.length - 1) {
-        if (isModelOverload(error) && candidates.length > 1) {
+      const overloaded = isModelOverload(error);
+      const routeUnavailable = error?.code === "ANTIGRAVITY_MODEL_ROUTE_UNAVAILABLE";
+      if ((!overloaded && !routeUnavailable) || index === candidates.length - 1) {
+        if ((overloaded || routeUnavailable) && candidates.length > 1) {
           error.message = `Antigravity model fallback chain exhausted: ${attemptedModels.join(" -> ")}. ${error.message}`;
         }
         throw error;
       }
       const nextLabel = candidates[index + 1] || "provider-configured model";
-      input.onProgress?.(`Antigravity model ${label} is overloaded; retrying with ${nextLabel}.`);
-      prompt = `A previous model attempt failed because that model was overloaded. Inspect the workspace before acting so you preserve any completed work, then complete this original request:\n\n${input.prompt}`;
+      if (routeUnavailable) {
+        input.onProgress?.(`Antigravity model ${label} is not advertised by the installed CLI; trying ${nextLabel}.`);
+      } else {
+        input.onProgress?.(`Antigravity model ${label} is overloaded; retrying with ${nextLabel}.`);
+        prompt = `A previous model attempt failed because that model was overloaded. Inspect the workspace before acting so you preserve any completed work, then complete this original request:\n\n${input.prompt}`;
+      }
     }
   }
   throw new Error("Antigravity model fallback chain produced no attempt.");

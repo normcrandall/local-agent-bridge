@@ -411,6 +411,20 @@ async function callAntigravityWithoutModel() {
       || fallback.structuredContent?.modelRouting?.fallbackUsed !== true) {
       throw new Error("Antigravity bridge did not apply its overload fallback chain");
     }
+    const unavailableFallback = await client.callTool({
+      name: "ask_antigravity",
+      arguments: {
+        prompt: "bridge unavailable-route fallback smoke test",
+        model: "overloaded-antigravity-model",
+        fallbackModels: ["gemini-3.5-flash-high", "available-antigravity-model"],
+        mode: "review",
+      },
+    });
+    if (unavailableFallback.isError
+      || unavailableFallback.structuredContent?.modelRouting?.model !== "available-antigravity-model"
+      || unavailableFallback.structuredContent?.modelRouting?.attemptedModels?.length !== 3) {
+      throw new Error("Antigravity bridge did not skip an unadvertised fallback route");
+    }
     const configuredDefault = await client.callTool({
       name: "ask_antigravity",
       arguments: { prompt: "configured model smoke test" },

@@ -49,6 +49,27 @@ assert.throws(() => resolveAntigravityModelSelection({
   advertisedModels,
   effortSupported: false,
 }), /cannot select the explicit medium model effort/i);
+assert.throws(() => resolveAntigravityModelSelection({
+  model: "gemini-3.6-flash-medium",
+  advertisedModels: null,
+  effortSupported: true,
+}), (error) => error.code === "ANTIGRAVITY_MODEL_CATALOG_UNAVAILABLE");
+assert.throws(() => resolveAntigravityModelSelection({
+  model: "gemini-3.6-flash",
+  advertisedModels: null,
+  effortSupported: true,
+}), (error) => error.code === "ANTIGRAVITY_MODEL_CATALOG_UNAVAILABLE");
+assert.throws(() => resolveAntigravityModelSelection({
+  model: "gemini-3.6-flash-medium",
+  advertisedModels: null,
+  effortSupported: false,
+}), /cannot select the explicit medium model effort/i);
+assert.throws(() => resolveAntigravityModelSelection({
+  model: "gemini-3.5-flash-high",
+  advertisedModels,
+  effortSupported: true,
+  requireAdvertisedRoute: true,
+}), (error) => error.code === "ANTIGRAVITY_MODEL_ROUTE_UNAVAILABLE");
 assert.deepEqual(resolveAntigravityModelSelection({
   model: "-high",
   advertisedModels: ["-high"],
@@ -59,4 +80,4 @@ assert.deepEqual(resolveAntigravityModelSelection({
   effortSource: null,
 });
 
-console.log("Antigravity model selection tests passed for advertised routes, inferred effort, legacy CLIs, and unrelated model names.");
+console.log("Antigravity model selection tests passed for advertised routes, inferred effort, catalog failures, unavailable fallbacks, legacy CLIs, and unrelated model names.");
