@@ -357,6 +357,8 @@ try {
   assert.equal(recentDeadHostLane.hostActivity.processAlive, false);
   assert.equal(recentDeadHostLane.hostActivity.livenessProof, "recent_receipt");
   assert.equal(isLiveLane(recentDeadHostLane, now + 1), true);
+  const hostWithoutStart = hostActivityLane({ ...hostState, startedAt: null }, now + 1);
+  assert.equal(hostWithoutStart.createdAt, hostState.updatedAt, "legacy host activity must retain a stable creation fallback");
   const staleDeadHostLane = hostActivityLane({ ...hostState, hostPid: 99_999_999 }, now + HOST_ACTIVITY_HEARTBEAT_GRACE_MS + 1);
   assert.equal(staleDeadHostLane.hostActivity.livenessProof, "none");
   assert.equal(isLiveLane(staleDeadHostLane, now + HOST_ACTIVITY_HEARTBEAT_GRACE_MS + 1), false);

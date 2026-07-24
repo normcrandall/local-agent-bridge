@@ -314,7 +314,6 @@ export function hostActivityLane(state, now = Date.now()) {
       },
     },
     updatedAt: state.updatedAt,
-    createdAt: state.startedAt,
     nextAction: live ? "continue" : "none",
   };
 }
