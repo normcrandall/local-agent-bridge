@@ -827,7 +827,7 @@ The default is six read-only turns. Additional modes are explicit:
 
 `--work` lets the selected agents edit sequentially inside the workspace. `--browser` supplies isolated browser access where the selected CLI supports it. The hard 20-turn maximum prevents unbounded agent loops and surprise usage.
 
-Antigravity model labels are passed through unchanged. If `--antigravity-model` is omitted, `agy` uses the model from the user's Antigravity settings. The same omit-by-default rule applies to Claude and Codex.
+Antigravity model labels are preserved as routes. The adapter reads `agy models`: an advertised suffix such as `-low`, `-medium`, or `-high` is emitted as the matching `--effort`, while a bare route with advertised effort variants receives the highest advertised effort. Inferred effort is dropped for older CLI builds that lack `--effort`; an explicitly suffixed route fails clearly when the catalog cannot be read. A fallback route that the installed CLI does not advertise is skipped so the remaining fallback chain can continue. If `--antigravity-model` is omitted, `agy` uses the model from the user's Antigravity settings. The same omit-by-default rule applies to Claude and Codex.
 
 Validate model strings and options without invoking either provider. Omitting both flags reports `default`, meaning provider-configured rather than bridge-selected:
 

@@ -362,6 +362,41 @@ async function callAntigravityWithoutModel() {
     if ((serialized.match(/--add-dir/g) || []).length < 2) {
       throw new Error("Antigravity Git metadata directories were not added explicitly");
     }
+    const bareGemini = await client.callTool({
+      name: "ask_antigravity",
+      arguments: { prompt: "bare Gemini model smoke test", model: "gemini-3.6-flash", mode: "review" },
+    });
+    const bareGeminiSerialized = JSON.stringify(bareGemini.content);
+    if (!bareGeminiSerialized.includes("--model")
+      || !bareGeminiSerialized.includes("gemini-3.6-flash")
+      || !bareGeminiSerialized.includes("--effort")
+      || !bareGeminiSerialized.includes("high")) {
+      throw new Error("Bare Antigravity Gemini model did not receive an explicit default effort");
+    }
+    if (bareGemini.structuredContent?.modelRouting?.effort !== "high") {
+      throw new Error("Antigravity model routing did not report the inferred effort");
+    }
+    if (bareGemini.structuredContent?.modelRouting?.effortSource !== "inferred_from_advertised_route") {
+      throw new Error("Antigravity model routing did not report inferred-effort provenance");
+    }
+    const mediumGemini = await client.callTool({
+      name: "ask_antigravity",
+      arguments: { prompt: "medium Gemini model smoke test", model: "gemini-3.6-flash-medium", mode: "review" },
+    });
+    const mediumGeminiSerialized = JSON.stringify(mediumGemini.content);
+    if (!mediumGeminiSerialized.includes("gemini-3.6-flash")
+      || !mediumGeminiSerialized.includes("--effort")
+      || !mediumGeminiSerialized.includes("medium")) {
+      throw new Error("Suffixed Antigravity model route did not preserve its explicit effort");
+    }
+    const unrelatedHigh = await client.callTool({
+      name: "ask_antigravity",
+      arguments: { prompt: "unrelated model smoke test", model: "custom-model-high", mode: "review" },
+    });
+    const unrelatedSerialized = JSON.stringify(unrelatedHigh.content);
+    if (!unrelatedSerialized.includes("custom-model-high") || unrelatedSerialized.includes("--effort")) {
+      throw new Error("Unadvertised Antigravity model name was incorrectly split into an effort route");
+    }
     const fallback = await client.callTool({
       name: "ask_antigravity",
       arguments: {
@@ -375,6 +410,20 @@ async function callAntigravityWithoutModel() {
     if (fallback.structuredContent?.modelRouting?.model !== "available-antigravity-model"
       || fallback.structuredContent?.modelRouting?.fallbackUsed !== true) {
       throw new Error("Antigravity bridge did not apply its overload fallback chain");
+    }
+    const unavailableFallback = await client.callTool({
+      name: "ask_antigravity",
+      arguments: {
+        prompt: "bridge unavailable-route fallback smoke test",
+        model: "overloaded-antigravity-model",
+        fallbackModels: ["gemini-3.5-flash-high", "available-antigravity-model"],
+        mode: "review",
+      },
+    });
+    if (unavailableFallback.isError
+      || unavailableFallback.structuredContent?.modelRouting?.model !== "available-antigravity-model"
+      || unavailableFallback.structuredContent?.modelRouting?.attemptedModels?.length !== 3) {
+      throw new Error("Antigravity bridge did not skip an unadvertised fallback route");
     }
     const configuredDefault = await client.callTool({
       name: "ask_antigravity",

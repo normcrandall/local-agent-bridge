@@ -6,7 +6,11 @@ if (args.includes("--version")) {
   process.exit(0);
 }
 if (args.includes("--help")) {
-  process.stdout.write("--print --print-timeout --mode --model --sandbox --dangerously-skip-permissions --conversation --log-file --add-dir\n");
+  process.stdout.write("--print --print-timeout --mode --model --effort --sandbox --dangerously-skip-permissions --conversation --log-file --add-dir\n");
+  process.exit(0);
+}
+if (args[0] === "models") {
+  process.stdout.write("gemini-3.6-flash-high\ngemini-3.6-flash-medium\ngemini-3.6-flash-low\n");
   process.exit(0);
 }
 const modelIndex = args.indexOf("--model");

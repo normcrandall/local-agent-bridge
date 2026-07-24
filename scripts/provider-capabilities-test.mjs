@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { parseProviderHelp } from "../src/provider-cli-capabilities.mjs";
+import { parseAntigravityModels, parseProviderHelp } from "../src/provider-cli-capabilities.mjs";
 
 const modernCodex = parseProviderHelp("codex", {
   version: "1", newHelp: "--json --model --sandbox --cd --skip-git-repo-check --config",
@@ -22,15 +22,23 @@ assert.equal(oldClaude.fallbackModel, false);
 assert.equal(oldClaude.strictMcpConfig, false);
 
 const modernAntigravity = parseProviderHelp("antigravity", {
-  mainHelp: "--print --print-timeout --mode --model --sandbox --dangerously-skip-permissions --conversation --log-file --add-dir",
+  mainHelp: "--print --print-timeout --mode --model --effort --sandbox --dangerously-skip-permissions --conversation --log-file --add-dir",
 });
 assert.equal(modernAntigravity.conversation, true);
 assert.equal(modernAntigravity.yolo, true);
 assert.equal(modernAntigravity.logFile, true);
 assert.equal(modernAntigravity.addDir, true);
+assert.equal(modernAntigravity.effort, true);
 const oldAntigravity = parseProviderHelp("antigravity", { mainHelp: "--print --print-timeout --mode --sandbox" });
 assert.equal(oldAntigravity.model, false);
 assert.equal(oldAntigravity.conversation, false);
 assert.equal(oldAntigravity.addDir, false);
+assert.equal(oldAntigravity.effort, false);
+
+assert.deepEqual(parseAntigravityModels(`Available models:\n  * gemini-3.6-flash-high (default)\n  - gemini-3.6-flash-medium\nclaude-sonnet-4-6\n`), [
+  "gemini-3.6-flash-high",
+  "gemini-3.6-flash-medium",
+  "claude-sonnet-4-6",
+]);
 
 console.log("Provider capability matrix tests passed for modern and legacy Codex, Claude, and Antigravity CLIs.");

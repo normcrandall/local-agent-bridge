@@ -42,7 +42,7 @@
     "test:skills": "node scripts/skill-test.mjs",
     "test:skills:installed": "AGENT_BRIDGE_VERIFY_INSTALLED_SKILLS=1 node scripts/skill-test.mjs",
     "test:statusline": "node scripts/statusline-test.mjs",
-    "test:models": "node scripts/model-routing-test.mjs",
+    "test:models": "node scripts/model-routing-test.mjs && node scripts/antigravity-model-selection-test.mjs",
     "test:model-policy": "node scripts/model-policy-test.mjs",
     "test:model-policy:adapters": "node scripts/model-policy-adapter-test.mjs",
     "test:native-chair": "node scripts/native-chair-test.mjs",

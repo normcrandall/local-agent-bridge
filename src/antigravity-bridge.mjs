@@ -8,6 +8,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { negotiateProviderCapabilities } from "./provider-cli-capabilities.mjs";
+import { resolveAntigravityModelSelection } from "./antigravity-model-selection.mjs";
 import { loadConfiguredFallbackModels, normalizeFallbackModels } from "./model-fallbacks.mjs";
 import { resolveModelRoute } from "./model-policy.mjs";
 import { loadConfiguredAntigravityModel } from "./provider-model-settings.mjs";
@@ -94,7 +95,7 @@ function isModelOverload(error) {
     .test(error?.message || String(error));
 }
 
-function runAntigravityAttempt({ prompt, cwd, mode, model, timeoutSeconds, permissionProfile = "standard", verificationCommands = [], writableRoots = [], conversationId, onProgress = () => {} }) {
+function runAntigravityAttempt({ prompt, cwd, mode, model, timeoutSeconds, permissionProfile = "standard", verificationCommands = [], writableRoots = [], conversationId, requireAdvertisedRoute = false, onProgress = () => {} }) {
   if (process.env.ANTIGRAVITY_BRIDGE_ACTIVE === "1") {
     throw new Error("Nested Antigravity bridge invocation blocked to prevent an agent loop.");
   }
@@ -108,7 +109,13 @@ function runAntigravityAttempt({ prompt, cwd, mode, model, timeoutSeconds, permi
   for (const [feature, supported] of [
     ["--print", AGY_CAPABILITIES.print], ["--print-timeout", AGY_CAPABILITIES.printTimeout], ["--mode", AGY_CAPABILITIES.mode],
   ]) if (!supported) throw new Error(`Installed Antigravity ${AGY_CAPABILITIES.version} lacks required ${feature} support.`);
-  if (model && !AGY_CAPABILITIES.model) throw new Error(`Installed Antigravity ${AGY_CAPABILITIES.version} cannot select a model.`);
+  const modelSelection = resolveAntigravityModelSelection({
+    model,
+    advertisedModels: AGY_CAPABILITIES.models,
+    effortSupported: AGY_CAPABILITIES.effort,
+    requireAdvertisedRoute,
+  });
+  if (modelSelection.model && !AGY_CAPABILITIES.model) throw new Error(`Installed Antigravity ${AGY_CAPABILITIES.version} cannot select a model.`);
   if (conversationId && !AGY_CAPABILITIES.conversation) throw new Error(`Installed Antigravity ${AGY_CAPABILITIES.version} cannot resume a conversation.`);
   if (!AGY_CAPABILITIES.addDir) {
     throw new Error(`Installed Antigravity ${AGY_CAPABILITIES.version} lacks required --add-dir support for delegated workspace binding.`);
@@ -139,7 +146,8 @@ function runAntigravityAttempt({ prompt, cwd, mode, model, timeoutSeconds, permi
     if (!AGY_CAPABILITIES.yolo) throw new Error(`Installed Antigravity ${AGY_CAPABILITIES.version} cannot enable YOLO mode.`);
     args.push("--dangerously-skip-permissions");
   } else if (AGY_CAPABILITIES.sandbox) args.push("--sandbox");
-  if (model) args.push("--model", model);
+  if (modelSelection.model) args.push("--model", modelSelection.model);
+  if (modelSelection.effort) args.push("--effort", modelSelection.effort);
   if (conversationId) args.push("--conversation", conversationId);
 
   return new Promise((resolvePromise, rejectPromise) => {
@@ -190,6 +198,7 @@ function runAntigravityAttempt({ prompt, cwd, mode, model, timeoutSeconds, permi
         conversationId: resolvedConversation,
         conversationSource: conversationId ? "caller" : fromLog ? "log-file" : "cwd-cache",
         resumeReliability: fromLog || conversationId ? "session-bound" : "best-effort-cwd-cache",
+        modelSelection,
         isError: false,
       });
     });
@@ -226,12 +235,16 @@ async function runAntigravity(input) {
     const label = model || "provider-configured model";
     attemptedModels.push(label);
     try {
-      const result = await runAntigravityAttempt({ ...input, prompt, model });
+      const requireAdvertisedRoute = machineModelPolicy.source === "fallback" || index > 0;
+      const result = await runAntigravityAttempt({ ...input, prompt, model, requireAdvertisedRoute });
       return {
         ...result,
         modelRouting: {
           requestedModel: input.model || null,
           model,
+          invocationModel: result.modelSelection?.model || model,
+          effort: result.modelSelection?.effort || null,
+          effortSource: result.modelSelection?.effortSource || null,
           fallbackUsed: machineModelPolicy.source === "fallback" || index > 0,
           attemptedModels,
           fallbackModels,
@@ -240,15 +253,21 @@ async function runAntigravity(input) {
         },
       };
     } catch (error) {
-      if (!isModelOverload(error) || index === candidates.length - 1) {
-        if (isModelOverload(error) && candidates.length > 1) {
+      const overloaded = isModelOverload(error);
+      const routeUnavailable = error?.code === "ANTIGRAVITY_MODEL_ROUTE_UNAVAILABLE";
+      if ((!overloaded && !routeUnavailable) || index === candidates.length - 1) {
+        if ((overloaded || routeUnavailable) && candidates.length > 1) {
           error.message = `Antigravity model fallback chain exhausted: ${attemptedModels.join(" -> ")}. ${error.message}`;
         }
         throw error;
       }
       const nextLabel = candidates[index + 1] || "provider-configured model";
-      input.onProgress?.(`Antigravity model ${label} is overloaded; retrying with ${nextLabel}.`);
-      prompt = `A previous model attempt failed because that model was overloaded. Inspect the workspace before acting so you preserve any completed work, then complete this original request:\n\n${input.prompt}`;
+      if (routeUnavailable) {
+        input.onProgress?.(`Antigravity model ${label} is not advertised by the installed CLI; trying ${nextLabel}.`);
+      } else {
+        input.onProgress?.(`Antigravity model ${label} is overloaded; retrying with ${nextLabel}.`);
+        prompt = `A previous model attempt failed because that model was overloaded. Inspect the workspace before acting so you preserve any completed work, then complete this original request:\n\n${input.prompt}`;
+      }
     }
   }
   throw new Error("Antigravity model fallback chain produced no attempt.");
