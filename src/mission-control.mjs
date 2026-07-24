@@ -62,6 +62,20 @@ function dateMs(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+export function formatLocalDateTime(value) {
+  const ms = dateMs(value);
+  if (!ms) return "unknown";
+  return new Date(ms).toLocaleString([], {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    timeZoneName: "short",
+  });
+}
+
 export function parseRepositoryRemote(remote) {
   const value = clean(remote);
   if (!value) return null;
@@ -449,6 +463,7 @@ export function renderMissionControl(snapshot, {
   const providerLine = Object.entries(snapshot.providerActivity).map(([provider, count]) => `${provider}:${count}`).join("  ") || "idle";
   lines.push(paint("AGENT BRIDGE MISSION CONTROL", "1;34", color));
   lines.push(truncate(`Mode: ${snapshot.mode} | repos ${snapshot.visibleRepositories ?? snapshot.repositories.length} | lanes ${snapshot.visibleLanes}/${snapshot.totalLanes} | providers ${providerLine}`, usableWidth));
+  lines.push(truncate(`As of: ${formatLocalDateTime(snapshot.generatedAt)}`, usableWidth));
   if (snapshot.needsUserCount > 0) {
     lines.push(paint(`!!! USER INPUT REQUIRED: ${snapshot.needsUserCount} collaboration${snapshot.needsUserCount === 1 ? "" : "s"}. Press a to inspect.`, "31;1", color));
   }
@@ -466,7 +481,7 @@ export function renderMissionControl(snapshot, {
         for (const recent of snapshot.recentActivity) {
           const provider = recent.activeAgent ? ` · ${recent.activeAgent}` : "";
           const next = recent.nextAction && recent.nextAction !== "none" ? ` · next ${recent.nextAction}` : "";
-          lines.push(truncate(`  ${recent.repository} · ${recent.lifecyclePhase}${provider} · ${age(recent.updatedAt, now)} ago${next}`, usableWidth));
+          lines.push(truncate(`  ${recent.repository} · ${recent.lifecyclePhase}${provider} · ${formatLocalDateTime(recent.updatedAt)} (${age(recent.updatedAt, now)} ago)${next}`, usableWidth));
           if (recent.summary) lines.push(truncate(`    ${recent.summary}`, usableWidth));
         }
       }
@@ -511,14 +526,16 @@ export function renderMissionControl(snapshot, {
     lines.push(`${statusText(selected.lifecyclePhase, color)}  ${paint(selected.repository, "1", color)}  ${selected.id}`);
     lines.push(...field("Workspace", selected.workspace, usableWidth));
     lines.push(...field("Task", selected.task, usableWidth));
+    lines.push(...field("Created", formatLocalDateTime(selected.createdAt), usableWidth));
+    lines.push(...field("Updated", formatLocalDateTime(selected.updatedAt), usableWidth));
     const role = [selected.type === "native_host" && "native host", selected.activeAgent && `active ${selected.activeAgent}`, selected.writer && `writer ${selected.writer}`, selected.model && `model ${selected.model}`].filter(Boolean).join(" | ");
     lines.push(...field("Agent", role, usableWidth));
     if (selected.narrative?.summary) {
       const stale = selected.heartbeat?.heartbeatAt && selected.narrative.updatedAt && dateMs(selected.narrative.updatedAt) < dateMs(selected.heartbeat.heartbeatAt) - 60_000;
       const source = selected.narrative.isPlaceholder ? "broker placeholder" : selected.narrative.source || "provider";
-      lines.push(...wrap(`Narrative (${source}, ${age(selected.narrative.updatedAt, now)} old${stale ? ", stale while heartbeat remains live" : ""}): ${selected.narrative.summary}`, usableWidth));
+      lines.push(...wrap(`Narrative (${source}, ${formatLocalDateTime(selected.narrative.updatedAt)}; ${age(selected.narrative.updatedAt, now)} old${stale ? ", stale while heartbeat remains live" : ""}): ${selected.narrative.summary}`, usableWidth));
     }
-    if (selected.heartbeat?.heartbeatAt) lines.push(`Heartbeat: ${age(selected.heartbeat.heartbeatAt, now)} ago`);
+    if (selected.heartbeat?.heartbeatAt) lines.push(`Heartbeat: ${formatLocalDateTime(selected.heartbeat.heartbeatAt)} (${age(selected.heartbeat.heartbeatAt, now)} ago)`);
     const github = [selected.issueNumber && `issue #${selected.issueNumber}`, selected.prNumber && `PR #${selected.prNumber}`, selected.branch, selected.headSha && selected.headSha.slice(0, 12)].filter(Boolean).join(" | ");
     lines.push(...field("GitHub", github, usableWidth));
     if (selected.portfolio) {
@@ -534,10 +551,14 @@ export function renderMissionControl(snapshot, {
     if (timeline.length) {
       lines.push(paint("Timeline", "1;34", color));
       for (const event of timeline.slice(-5)) {
-        const at = event.at ? new Date(event.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "--:--:--";
+        const at = formatLocalDateTime(event.at);
         lines.push(truncate(`  ${at} ${event.type}${event.agent ? ` (${event.agent})` : ""}${event.summary ? ` - ${event.summary}` : ""}`, usableWidth));
       }
     }
+  }
+
+  if (snapshot.mode === "all") {
+    lines.push(truncate("Archive old terminal records: bridge cleanup --older-than-days 7 (preview; add --apply).", usableWidth));
   }
 
   if (interactive) {

@@ -9,6 +9,7 @@ import {
   isAttentionLane,
   isLiveLane,
   isStaleLane,
+  formatLocalDateTime,
   loadMissionControlSnapshot,
   loadTimeline,
   navigationIntent,
@@ -31,6 +32,8 @@ assert.equal(parseRepositoryRemote("https://token@example.com/owner/repo.git"), 
 assert.equal(parseRepositoryRemote("git@github.com:owner/repo.git"), "owner/repo");
 assert.equal(parseRepositoryRemote("ssh://git@github.com/owner/repo.git"), "owner/repo");
 assert.equal(parseRepositoryRemote("not-a-remote"), null);
+assert.equal(formatLocalDateTime("not-a-date"), "unknown");
+assert.match(formatLocalDateTime("2026-07-23T12:00:00.000Z"), /2026/);
 assert.deepEqual(navigationIntent("j", 1), { selectedIndex: 2, preserveSelectedId: false });
 assert.deepEqual(navigationIntent("k", 1), { selectedIndex: 0, preserveSelectedId: false });
 assert.deepEqual(navigationIntent("r", 1), { selectedIndex: 1, preserveSelectedId: true });
@@ -308,11 +311,16 @@ try {
   assert.match(rendered, /USER INPUT REQUIRED: 1 collaboration/);
   assert.match(rendered, /veliqon\/control-plane/);
   assert.match(rendered, /Workspace:/);
-  assert.match(rendered, /Narrative .*stale while heartbeat remains live/);
+  assert.match(rendered, /Created: .*2026/);
+  assert.match(rendered, /Updated: .*2026/);
+  assert.match(rendered, /Narrative[\s\S]*stale while\s+heartbeat remains live/);
+  assert.match(rendered, /Heartbeat: .*2026.*ago/);
+  assert.match(rendered, /Timeline\n.*2026.*collaboration_started/);
   assert.match(rendered, /Timing: active 12s \| dead 3s/);
   assert.ok(rendered.split("\n").every((line) => stripAnsi(line).length <= 88));
   const manyLanes = { ...attention, lanes: Array.from({ length: 55 }, (_, index) => ({ ...attention.lanes[0], id: `lane-${index}` })), visibleLanes: 55, totalLanes: 55 };
   assert.match(renderSnapshot(manyLanes, { width: 88 }), /… 5 more lanes; use --json for complete records/);
+  assert.match(renderSnapshot(all, { width: 120, now }), /bridge cleanup --older-than-days 7 \(preview; add --apply\)/);
 
   const cli = execFileSync(process.execPath, [resolve(import.meta.dirname, "mission-control.mjs"), "--snapshot", "--attention", "--state-root", root, "--repo", "norm/example"], { encoding: "utf8" });
   assert.match(cli, /norm\/example/);
