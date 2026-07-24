@@ -254,6 +254,7 @@ function runClaude({
         GITHUB_BUILDER_BASE_REF: githubBuilder.baseRef || null,
         GITHUB_BUILDER_ALLOWED_OPERATIONS: githubBuilder.allowedOperations?.join(",") || null,
         GITHUB_BUILDER_WORKSPACE: actualCwd,
+        GITHUB_BUILDER_ALLOW_WORKSPACE_HEAD: githubBuilder.allowWorkspaceHead ? "1" : null,
       }).filter(([, value]) => value)),
     };
   }
@@ -600,6 +601,7 @@ const sharedInput = {
     baseRef: z.string().min(1).optional(),
     allowedOperations: z.array(z.enum(["ensure_pull_request", "read_review_threads", "reply_review_thread", "resolve_review_thread", "mark_ready", "merge", "create_branch", "push_branch", "replace_branch"])).min(1).max(9)
       .default(["ensure_pull_request", "read_review_threads", "reply_review_thread", "resolve_review_thread", "mark_ready"]),
+    allowWorkspaceHead: z.boolean().optional().default(false),
   }).strict().superRefine((value, ctx) => {
     if (value.allowedOperations.includes("create_branch") && !value.baseSha) {
       ctx.addIssue({ code: "custom", path: ["baseSha"], message: "create_branch requires an exact baseSha authorization" });

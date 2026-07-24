@@ -15,6 +15,7 @@ import {
   providerVerificationPlanForRequest,
 } from "./verification-allowlist.mjs";
 import { resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 
 function textFrom(result) {
   const structured = result.structuredContent || {};
@@ -29,6 +30,27 @@ function sessionFrom(agent, result) {
   if (agent === "claude") return structured.sessionId || null;
   if (agent === "codex") return structured.threadId || null;
   return structured.conversationId || null;
+}
+
+function workspaceHead(workspace) {
+  const result = spawnSync("git", ["rev-parse", "HEAD"], {
+    cwd: workspace,
+    encoding: "utf8",
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+  });
+  const sha = result.status === 0 ? result.stdout.trim() : "";
+  return /^[0-9a-f]{40}$/i.test(sha) ? sha : null;
+}
+
+export function providerFallbackSlots(agent, modelFallbacks = {}) {
+  if (!["claude", "codex", "antigravity", "ollama", "docker"].includes(agent)) return 0;
+  if (Array.isArray(modelFallbacks[agent])) return modelFallbacks[agent].length;
+  try {
+    return loadConfiguredFallbackModels(agent).length;
+  } catch {
+    // The provider adapter emits the visible warning and fails open.
+    return 0;
+  }
 }
 
 // In an autonomous work turn with a bound builder, downgrade the delegated
@@ -216,11 +238,13 @@ export function createAgentPool({
       mergeEnforcement: appRoles.github?.mergeEnforcement || "broker",
       workspace: githubBuilder.workspace || workspace,
       receiptPath: githubBuilder.receiptPath || resolve(workspace, ".bridge", "github-builder-receipts.jsonl"),
+      allowWorkspaceHead: githubBuilder.allowWorkspaceHead === true,
     });
   }
 
   async function publishAntigravityBuilder(message) {
     const envelope = parseBuilderEnvelope(message);
+    if (envelope.operations.length === 0) return [];
     const builder = await boundBuilderClient();
     const receipts = [];
     const timingKey = `publication:antigravity-builder:${Date.now()}`;
@@ -441,19 +465,7 @@ export function createAgentPool({
         throw new Error(`Unsupported provider: ${agent}`);
       }
       request._meta = { progressToken: `${agent}-${Date.now()}` };
-      let fallbackSlots = 0;
-      if (["claude", "codex", "ollama", "docker"].includes(agent)) {
-        if (Array.isArray(modelFallbacks[agent])) {
-          fallbackSlots = modelFallbacks[agent].length;
-        } else {
-          try {
-            fallbackSlots = loadConfiguredFallbackModels(agent).length;
-          } catch {
-            // The provider adapter emits the visible warning and fails open.
-            fallbackSlots = 0;
-          }
-        }
-      }
+      const fallbackSlots = providerFallbackSlots(agent, modelFallbacks);
       const maxTotalTimeoutMs = requestTimeoutMs * (1 + fallbackSlots);
       let result;
       try {
@@ -486,6 +498,7 @@ export function createAgentPool({
         message = `${message}\n\nBound builder operations published: ${JSON.stringify(receipts)}`;
       }
       const structured = result.structuredContent || {};
+      const routing = structured.modelRouting || structured;
       return {
         message,
         sessionId: sessionFrom(agent, result),
@@ -496,14 +509,17 @@ export function createAgentPool({
           verificationResults: structured.verificationResults || [],
           permissionProfile: effectivePermissionProfile,
           permissionReason: permissionDecision.permissionReason,
-          modelRouting: ["claude", "codex", "ollama", "docker"].includes(agent) ? {
-            requestedModel: structured.requestedModel ?? null,
-            model: structured.model ?? null,
-            fallbackUsed: structured.fallbackUsed ?? null,
-            attemptedModels: structured.attemptedModels || structured.modelsUsed || [],
-            fallbackModels: structured.modelFallbacks || modelFallbacks[agent] || [],
-            fallbackManagedBy: structured.fallbackManagedBy ?? null,
+          modelRouting: ["claude", "codex", "antigravity", "ollama", "docker"].includes(agent) ? {
+            requestedModel: routing.requestedModel ?? null,
+            model: routing.model ?? null,
+            fallbackUsed: routing.fallbackUsed ?? null,
+            attemptedModels: routing.attemptedModels || routing.modelsUsed || [],
+            fallbackModels: routing.modelFallbacks || routing.fallbackModels || modelFallbacks[agent] || [],
+            fallbackManagedBy: routing.fallbackManagedBy ?? null,
           } : null,
+          workspaceHeadSha: mode === "work" && githubBuilder?.allowWorkspaceHead
+            ? workspaceHead(workspace)
+            : null,
           reviewPublication: mode === "review" && githubReview ? {
             available: publication.available,
             published: Boolean(publishedReviewReceipt) || structured.reviewPublished === true,

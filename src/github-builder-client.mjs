@@ -33,7 +33,16 @@ async function assertLocalAncestry({ gitPath, workspace, ancestor, descendant })
   }
 }
 
-async function validateLocalGitState({ gitPath, workspace, repository, ref, sha, oldSha, requireFastForward = true }) {
+async function validateLocalGitState({
+  gitPath,
+  workspace,
+  repository,
+  ref,
+  sha,
+  oldSha,
+  requireFastForward = true,
+  requireWorkspaceHead = false,
+}) {
   if (!workspace || typeof workspace !== "string") {
     throw new Error("Workspace path GITHUB_BUILDER_WORKSPACE is not set or invalid.");
   }
@@ -89,6 +98,15 @@ async function validateLocalGitState({ gitPath, workspace, repository, ref, sha,
   }
   if (localRefSha && localRefSha !== sha) {
     throw new Error(`Local ref ${ref} points to ${localRefSha}, expected SHA ${sha}.`);
+  }
+  if (requireWorkspaceHead) {
+    if (localRefSha !== sha) {
+      throw new Error(`Local ref ${ref} does not resolve to the requested workspace SHA ${sha}.`);
+    }
+    const currentHead = (await local(["rev-parse", "HEAD"])).stdout.toString("utf8").trim();
+    if (currentHead !== sha) {
+      throw new Error(`Workspace HEAD ${currentHead || "unknown"} does not match requested SHA ${sha}.`);
+    }
   }
 
   if (oldSha !== undefined && requireFastForward) {
@@ -254,6 +272,7 @@ export function createBoundBuilderClient({
   workspace = null,
   transportUrl = null,
   receiptPath = null,
+  allowWorkspaceHead = false,
 }) {
   assertRepository(repository);
   assertSha(headSha);
@@ -625,7 +644,7 @@ export function createBoundBuilderClient({
   function assertBranchOperationInput({ ref, sha, oldSha }) {
     const branchName = assertBranchRef(ref);
     assertSha(sha);
-    if (sha !== headSha) {
+    if (!allowWorkspaceHead && sha !== headSha) {
       throw new Error(`SHA mismatch: expected ${headSha}, received ${sha}.`);
     }
     const expectedRef = headRef ? (headRef.startsWith("refs/heads/") ? headRef : `refs/heads/${headRef}`) : null;
@@ -637,6 +656,12 @@ export function createBoundBuilderClient({
       throw new Error(`Cannot modify a protected or default branch: ${branchName}.`);
     }
     return branchName;
+  }
+
+  function adoptWorkspaceHead(sha) {
+    if (!allowWorkspaceHead || sha === headSha) return;
+    headSha = sha;
+    context.headSha = sha;
   }
 
   async function assertRemoteBranchMutable({ branchName, encodedBranch, activeToken }) {
@@ -942,7 +967,9 @@ export function createBoundBuilderClient({
     await validateLocalGitState({
       gitPath, workspace, repository, ref, sha,
       ...(baseSha === null ? {} : { oldSha: baseSha }),
+      requireWorkspaceHead: allowWorkspaceHead,
     });
+    adoptWorkspaceHead(sha);
 
     // 2. Token issuance and identity verification after validation.
     const credential = await ensureToken();
@@ -997,7 +1024,11 @@ export function createBoundBuilderClient({
     // fallback so unchanged inherited blobs never expand the payload to the
     // full tree.
     const gitPath = resolveGitBinary();
-    await validateLocalGitState({ gitPath, workspace, repository, ref, sha, oldSha: authorizedOldSha });
+    await validateLocalGitState({
+      gitPath, workspace, repository, ref, sha, oldSha: authorizedOldSha,
+      requireWorkspaceHead: allowWorkspaceHead,
+    });
+    adoptWorkspaceHead(sha);
 
     // 2. Token issuance and identity verification after validation.
     const credential = await ensureToken();
@@ -1052,7 +1083,9 @@ export function createBoundBuilderClient({
     const gitPath = resolveGitBinary();
     await validateLocalGitState({
       gitPath, workspace, repository, ref, sha, oldSha, requireFastForward: false,
+      requireWorkspaceHead: allowWorkspaceHead,
     });
+    adoptWorkspaceHead(sha);
 
     const credential = await ensureToken();
     const activeToken = credential.token;

@@ -10,6 +10,17 @@ import {
   loadConfiguredClaudeModel,
   resolveClaudeModelPolicy,
 } from "../src/claude-model-policy.mjs";
+import { mergeRecommendedWriterFallbacks } from "../src/model-fallbacks.mjs";
+
+const mergedWriterFallbacks = mergeRecommendedWriterFallbacks({
+  version: 1,
+  providers: { docker: { fallbackModels: ["custom-docker"] }, codex: { fallbackModels: [] } },
+});
+assert.deepEqual(mergedWriterFallbacks.providers.codex.fallbackModels, [], "explicit empty writer fallback is an opt-out");
+assert.deepEqual(mergedWriterFallbacks.providers.docker.fallbackModels, ["custom-docker"], "unrelated user policy is preserved");
+assert.deepEqual(mergedWriterFallbacks.providers.antigravity.fallbackModels, [
+  "gemini-3.6-flash-medium", "gemini-3.6-flash-low", "gemini-3.5-flash-high",
+]);
 
 const claudeDefault = claudeToolRequest({ prompt: "test" });
 assert.equal(claudeDefault.name, "ask_claude");
@@ -141,6 +152,26 @@ const codexDeliver = codexToolRequest({
 });
 assert.equal(codexDeliver.arguments.config["sandbox_workspace_write.network_access"], true);
 assert.match(codexDeliver.arguments.prompt, /push and pull-request creation/);
+const codexWorkspaceHeadBuilder = codexToolRequest({
+  prompt: "deliver a newly committed writer head",
+  cwd: "/workspace",
+  mode: "work",
+  githubBuilder: {
+    repository: "owner/repo",
+    expectedLogin: "builder[bot]",
+    baseSha: "a".repeat(40),
+    headSha: "a".repeat(40),
+    headRef: "codex/feature",
+    baseRef: "main",
+    allowedOperations: ["create_branch"],
+    allowWorkspaceHead: true,
+  },
+  githubBuilderBridgePath: "/runtime/src/github-builder-bridge.mjs",
+});
+assert.equal(
+  codexWorkspaceHeadBuilder.arguments.config["mcp_servers.github_builder.env.GITHUB_BUILDER_ALLOW_WORKSPACE_HEAD"],
+  "1",
+);
 const codexYolo = codexToolRequest({ prompt: "go", cwd: "/workspace", mode: "work", permissionProfile: "yolo" });
 assert.equal(codexYolo.arguments.sandbox, "danger-full-access");
 assert.equal(codexYolo.arguments["approval-policy"], "never");

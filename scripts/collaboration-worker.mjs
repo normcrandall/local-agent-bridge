@@ -742,6 +742,15 @@ try {
         }
         let completion = current.completion || null;
         let handoffs = current.handoffs || [];
+        const observedWorkspaceHead = turn.metadata?.workspaceHeadSha;
+        const adoptWorkspaceHead = current.githubBuilder?.allowWorkspaceHead === true
+          && /^[0-9a-f]{40}$/i.test(observedWorkspaceHead || "");
+        const githubBuilder = adoptWorkspaceHead
+          ? { ...current.githubBuilder, headSha: observedWorkspaceHead }
+          : current.githubBuilder;
+        const issueClaim = adoptWorkspaceHead && current.issueClaim
+          ? { ...current.issueClaim, headSha: observedWorkspaceHead }
+          : current.issueClaim;
         if (turn.handoff) {
           completion = completionAfterHandoff(completion, {
             handoff: turn.handoff,
@@ -752,10 +761,10 @@ try {
           // Carry the durable, provider-neutral delivery outcome structurally
           // into completion so coordinator wakes distinguish succeeded / rejected
           // / indeterminate / reconciled remote verification (not free text).
-          if (current.githubBuilder) {
-            const receiptPath = current.githubBuilder.receiptPath
+          if (githubBuilder) {
+            const receiptPath = githubBuilder.receiptPath
               || resolve(current.workspace, ".bridge", "github-builder-receipts.jsonl");
-            const delivery = summarizeDeliveryOutcomes(receiptPath, { headSha: current.githubBuilder.headSha });
+            const delivery = summarizeDeliveryOutcomes(receiptPath, { headSha: githubBuilder.headSha });
             if (delivery) completion = { ...completion, delivery: { ...delivery, at: new Date().toISOString() } };
           }
         }
@@ -764,7 +773,7 @@ try {
           : current.reviewPublication;
         return {
           ...current, usage, budgetExceeded: decision.exceeded, ci, decisions, decisionEscalation,
-          completion, handoffs, reviewPublication,
+          completion, handoffs, reviewPublication, githubBuilder, issueClaim,
         };
       });
       if (turn.handoff) {
