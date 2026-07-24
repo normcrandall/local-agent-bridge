@@ -65,7 +65,7 @@ assert.equal(blockedReason({ lifecyclePhase: "blocked", blocker: { error: "Revie
 assert.equal(blockedReason({ lifecyclePhase: "blocked" }), "No blocking reason was recorded by the coordinator.");
 assert.equal(blockedReason({ lifecyclePhase: "working", portfolio: { status: "blocked", blockedBy: [] } }), "No blocking reason was recorded by the coordinator.");
 assert.equal(blockedReason({ lifecyclePhase: "working", portfolio: { status: "merged", blockedBy: ["issue-672"], blockingDependencies: [] } }), "");
-assert.equal(blockedReason({ lifecyclePhase: "blocked", portfolio: { status: "blocked", blockedBy: ["issue-672"], blockingDependencies: [{ id: "issue-672", title: "Publish the contract", status: "repairing" }] }, blocker: { error: "Writer provider is unavailable." } }), "Waiting for issue #672 (Publish the contract) to complete. Writer provider is unavailable.");
+assert.equal(blockedReason({ lifecyclePhase: "blocked", portfolio: { status: "blocked", blockedBy: ["issue-672"], blockingDependencies: [{ id: "issue-672", title: "Publish the contract", status: "repairing" }] }, blocker: { error: "Writer provider is unavailable." } }), "Writer provider is unavailable. Waiting for issue #672 (Publish the contract) to complete.");
 assert.equal(blockedReason({ lifecyclePhase: "working" }), "");
 assert.equal(blockedReason({ lifecyclePhase: "agreed", handoff: { summary: "Review completed." } }), "");
 const selectionFixture = [{ id: "first", updatedAt: "one" }, { id: "last", updatedAt: "two" }];
@@ -339,7 +339,7 @@ try {
     portfolio: {
       ...freshPortfolioRequest.operatorLanes.find((lane) => lane.portfolio?.itemId === "issue-13").portfolio,
       status: "merged",
-      blockingDependencies: [],
+      blockingDependencies: [{ id: "external-release", title: null, status: "unknown" }],
     },
   };
   const terminalDependencyOutput = renderSnapshot({ ...freshPortfolioRequest, operatorLanes: [terminalDependencyLane] }, { width: 100, now });

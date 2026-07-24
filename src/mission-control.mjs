@@ -765,7 +765,7 @@ export function blockedReason(lane) {
     blocked ? lane.recovery?.recommendation : null,
   ].map(clean).filter(Boolean);
   const specific = candidates.find((candidate) => !/^(?:blocked|waiting|failed|stopped)$/i.test(candidate));
-  if (dependencyReason && specific) return `${dependencyReason} ${specific}`;
+  if (dependencyReason && specific) return `${specific} ${dependencyReason}`;
   if (dependencyReason) return dependencyReason;
   if (specific) return specific;
   return blocked ? "No blocking reason was recorded by the coordinator." : "";
@@ -911,7 +911,7 @@ function detailPane(lane, timeline, width, now, snapshot, expanded = false) {
   const github = [lane.issueNumber && `issue #${lane.issueNumber}`, lane.prNumber && `PR #${lane.prNumber}`, lane.branch, lane.headSha && lane.headSha.slice(0, 10)].filter(Boolean).join(" · ");
   if (github) rows.push(paneLine(""), paneLine(`GITHUB  ${github}`, "35"));
   if (!deliveryStatus && lane.nextAction && lane.nextAction !== "none") rows.push(paneLine(`NEXT  ${friendlyPhase(lane)}`, "33"));
-  const blockingReason = blockedReason(lane);
+  const blockingReason = deliveryStatus ? "" : blockedReason(lane);
   if (blockingReason) {
     rows.push(paneLine(""), paneLine("BLOCKED BECAUSE", "31;1"));
     const reasonLines = wrap(blockingReason, width);
