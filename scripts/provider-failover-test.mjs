@@ -3,7 +3,9 @@ import {
   allProviderFailuresAreTransientCapacity,
   classifyProviderFailure,
   providerFailuresSummary,
+  providerExhaustionError,
   resolveProviderFailoverRoster,
+  shouldRecoverProviderExhaustion,
 } from "../src/provider-failover.mjs";
 
 assert.equal(classifyProviderFailure("Model is overloaded (529)."), "transient_capacity");
@@ -24,6 +26,19 @@ assert.equal(allProviderFailuresAreTransientCapacity({
   codex: "The model is overloaded.",
   antigravity: "--effort is required",
 }), false);
+assert.equal(
+  shouldRecoverProviderExhaustion(new Error("verification evidence mismatch"), {
+    antigravity: "The model is overloaded.",
+  }),
+  false,
+  "an unrelated post-conversation error must never enter provider recovery",
+);
+assert.equal(
+  shouldRecoverProviderExhaustion(providerExhaustionError("All requested providers failed."), {
+    antigravity: "The model is overloaded.",
+  }),
+  true,
+);
 
 assert.equal(
   providerFailuresSummary({
@@ -39,6 +54,8 @@ const automatic = resolveProviderFailoverRoster({
   issueClaim: { repository: "owner/repo", issueNumber: 143 },
 });
 assert.deepEqual(automatic.agents, ["antigravity", "claude", "codex"]);
+assert.deepEqual(automatic.requestedAgents, ["antigravity"]);
+assert.deepEqual(automatic.standbyAgents, ["claude", "codex"]);
 assert.equal(automatic.policy.enabled, true);
 
 const strict = resolveProviderFailoverRoster({
@@ -48,6 +65,7 @@ const strict = resolveProviderFailoverRoster({
   providerFailover: { enabled: false },
 });
 assert.deepEqual(strict.agents, ["antigravity"]);
+assert.deepEqual(strict.standbyAgents, []);
 
 const unclaimed = resolveProviderFailoverRoster({
   agents: ["antigravity"],
@@ -55,5 +73,6 @@ const unclaimed = resolveProviderFailoverRoster({
   issueClaim: null,
 });
 assert.deepEqual(unclaimed.agents, ["antigravity"]);
+assert.deepEqual(unclaimed.standbyAgents, []);
 
 console.log("Provider failover tests passed.");

@@ -169,6 +169,7 @@ export async function runConversation({
   task,
   maxTurns = 6,
   agents = ["claude", "codex"],
+  standbyAgents = [],
   startAgent = agents[0],
   mode = "review",
   browser = false,
@@ -187,14 +188,18 @@ export async function runConversation({
     throw new Error("maxTurns must be an integer from 1 to 20.");
   }
   validateAgents(agents, startAgent);
+  for (const agent of standbyAgents) {
+    if (!KNOWN_AGENTS.includes(agent)) throw new Error(`Unknown standby agent: ${agent}`);
+  }
   if (!["review", "work"].includes(mode)) throw new Error("mode must be review or work.");
   if (writer && !agents.includes(writer)) throw new Error("writer must be included in agents.");
   if (writer && !WRITER_AGENTS.includes(writer)) throw new Error(`${agentName(writer)} is review-only and cannot be selected as writer.`);
 
   const activeAgents = [...agents];
+  const remainingStandbyAgents = [...new Set(standbyAgents.filter((agent) => !activeAgents.includes(agent)))];
   const unavailableAgents = { ...(initialState?.unavailableAgents || {}) };
   const sessions = {
-    ...Object.fromEntries(agents.map((agent) => [agent, null])),
+    ...Object.fromEntries([...agents, ...remainingStandbyAgents].map((agent) => [agent, null])),
     ...(initialState?.sessions || {}),
   };
   const requestedNextAgent = initialState?.nextAgent || startAgent;
@@ -221,6 +226,7 @@ export async function runConversation({
     sessions: { ...sessions },
     nextAgent: activeAgents.length ? activeAgents[agentIndex] : null,
     availableAgents: [...activeAgents],
+    standbyAgents: [...remainingStandbyAgents],
     unavailableAgents: { ...unavailableAgents },
     writer: effectiveWriter,
     previousMessage,
@@ -282,6 +288,13 @@ export async function runConversation({
       const previousWriter = effectiveWriter;
       if (effectiveWriter === agent) {
         effectiveWriter = activeAgents.find((candidate) => WRITER_AGENTS.includes(candidate)) || null;
+        if (!effectiveWriter) {
+          const standbyWriterIndex = remainingStandbyAgents.findIndex((candidate) => WRITER_AGENTS.includes(candidate));
+          if (standbyWriterIndex >= 0) {
+            effectiveWriter = remainingStandbyAgents.splice(standbyWriterIndex, 1)[0];
+            activeAgents.splice(agentIndex, 0, effectiveWriter);
+          }
+        }
         if (!effectiveWriter) {
           await onAgentUnavailable({
             ...failure,

@@ -142,6 +142,30 @@ assert.deepEqual(
   ["claude", "antigravity", "claude"],
 );
 
+const standbyCalls = [];
+const standbyFailures = [];
+const standbyOutcome = await runConversation({
+  task: "Transfer a failed writer without spending turns on standby providers",
+  agents: ["codex"],
+  standbyAgents: ["claude", "antigravity"],
+  startAgent: "codex",
+  writer: "codex",
+  mode: "work",
+  maxTurns: 1,
+  send: async ({ agent }) => {
+    standbyCalls.push(agent);
+    if (agent === "codex") throw new Error("Codex transport closed");
+    return { message: `${agent} completed the work.\nSTATUS: AGREED`, sessionId: `${agent}-standby` };
+  },
+  onAgentUnavailable: async (failure) => standbyFailures.push(failure),
+});
+assert.deepEqual(standbyCalls, ["codex", "claude"]);
+assert.deepEqual(standbyOutcome.turns.map((turn) => turn.agent), ["claude"]);
+assert.equal(standbyOutcome.state.writer, "claude");
+assert.deepEqual(standbyOutcome.state.standbyAgents, ["antigravity"]);
+assert.equal(standbyFailures[0].previousWriter, "codex");
+assert.equal(standbyFailures[0].writer, "claude");
+
 const noProviderOutcome = await runConversation({
   task: "Fail clearly only when nobody is available",
   agents: ["claude", "codex"],

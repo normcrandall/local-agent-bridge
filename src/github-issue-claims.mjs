@@ -433,7 +433,7 @@ export async function refreshClaimLease({ client, issueNumber, collaborationId, 
       ...(ours.data.history || [])
     ].slice(0, 10);
   }
-  if (writer && ours.data.writer !== writer) {
+  if (writer && ours.data.writer !== writer && writerFailover) {
     ours.data.history = [
       {
         event: "writer_failover",

@@ -43,10 +43,11 @@ import { assertRepositoryEvidenceHead, captureRepositoryEvidence } from "../src/
 import { createEvidenceStore } from "../src/evidence-store.mjs";
 import { assertObservedVerificationEvidence, persistObservedVerificationResults } from "../src/verification-receipts.mjs";
 import {
-  allProviderFailuresAreTransientCapacity,
   classifyProviderFailure,
+  providerExhaustionError,
   providerFailureRecord,
   providerFailuresSummary,
+  shouldRecoverProviderExhaustion,
 } from "../src/provider-failover.mjs";
 
 const runtimeRoot = realpathSync(
@@ -106,7 +107,7 @@ function claimWorkspaceMetadata(state) {
 async function scheduleProviderRecovery(error) {
   const current = await readCollaboration(workspaceRoot, id);
   const unavailableAgents = current.runtime?.unavailableAgents || {};
-  if (!allProviderFailuresAreTransientCapacity(unavailableAgents)) {
+  if (!shouldRecoverProviderExhaustion(error, unavailableAgents)) {
     return false;
   }
   const policy = current.providerRecovery || { enabled: true, maxAttempts: 3, backoffSeconds: [15, 60, 180] };
@@ -322,12 +323,20 @@ try {
     });
   }
   const startAgent = reviewOrder.startAgent;
+  const requestedAgents = state.requestedAgents?.length ? state.requestedAgents : state.agents;
+  const requestedAvailableAgents = requestedAgents.filter((agent) => availableAgents.includes(agent));
   const previousWriter = state.writer;
   const writer = state.mode === "work" && availableAgents.length
     ? (availableAgents.includes(state.writer)
       ? state.writer
       : availableAgents.find((agent) => WRITER_AGENTS.includes(agent)) || null)
     : null;
+  const conversationAgents = state.mode === "work" && state.issueClaim && state.providerFailover?.enabled !== false
+    ? [...new Set([...requestedAvailableAgents, ...(writer ? [writer] : [])])]
+    : availableAgents;
+  const standbyAgents = state.mode === "work"
+    ? availableAgents.filter((agent) => !conversationAgents.includes(agent) && WRITER_AGENTS.includes(agent))
+    : [];
   const preflightFailover = state.mode === "work" && previousWriter && writer && previousWriter !== writer
     ? {
       from: previousWriter,
@@ -338,9 +347,9 @@ try {
       at: new Date().toISOString(),
     }
     : null;
-  const conversationStartAgent = state.mode === "work" && !availableAgents.includes(state.startAgent)
+  const conversationStartAgent = state.mode === "work" && !conversationAgents.includes(state.startAgent)
     ? writer
-    : startAgent;
+    : (conversationAgents.includes(startAgent) ? startAgent : conversationAgents[0]);
   state = await updateCollaboration(workspaceRoot, id, (current) => ({
     ...current,
     writer,
@@ -357,10 +366,11 @@ try {
     reviewPublication: reviewOrder.publication,
     runtime: {
       ...current.runtime,
-      nextAgent: availableAgents.includes(current.runtime?.nextAgent)
+      nextAgent: conversationAgents.includes(current.runtime?.nextAgent)
         ? current.runtime.nextAgent
         : conversationStartAgent,
-      availableAgents,
+      availableAgents: conversationAgents,
+      standbyAgents,
       unavailableAgents,
       writer,
     },
@@ -382,17 +392,18 @@ try {
     }
   }
   if (!availableAgents.length) {
-    throw new Error(providerFailuresSummary(unavailableAgents));
+    throw providerExhaustionError(providerFailuresSummary(unavailableAgents));
   }
   if (state.mode === "work" && !writer) {
-    throw new Error(providerFailuresSummary(unavailableAgents, {
+    throw providerExhaustionError(providerFailuresSummary(unavailableAgents, {
       prefix: "No write-capable provider is currently available",
     }));
   }
   const outcome = await runConversation({
     task: state.task,
     maxTurns: state.run.maxTurns,
-    agents: availableAgents,
+    agents: conversationAgents,
+    standbyAgents,
     startAgent: conversationStartAgent,
     mode: state.mode,
     browser: state.browser,
@@ -875,7 +886,7 @@ try {
     onAgentUnavailable: async (failure) => {
       const writerTransferred = failure.previousWriter === failure.agent && failure.writer;
       const failoverTarget = writerTransferred ? failure.writer : failure.nextAgent;
-      const failover = failoverTarget
+      const failover = writerTransferred && failoverTarget
         ? {
           from: failure.agent,
           to: failoverTarget,
@@ -974,7 +985,8 @@ try {
     },
   });
 
-  if (!(outcome.reason === "failed" && await scheduleProviderRecovery(new Error(outcome.error)))) {
+  const outcomeError = outcome.reason === "failed" ? providerExhaustionError(outcome.error) : null;
+  if (!(outcome.reason === "failed" && await scheduleProviderRecovery(outcomeError))) {
     const finalRuntime = outcome.reason === "indeterminate" ? outcome.state : { ...outcome.state, activeCall: null };
     const finalClaimMetadata = claimClient ? claimWorkspaceMetadata(state) : null;
     if (finalClaimMetadata) workerHeadSha = finalClaimMetadata.headSha;

@@ -31,7 +31,7 @@ export function classifyProviderFailure(errorOrReason) {
 
   // Classify deterministic failures before capacity language. Adapter errors such
   // as "model unavailable: --effort is required" must not enter a capacity loop.
-  if (matches(reason, /permission denied|operation not permitted|not allowed|allowlist|sandbox|forbidden|(?:^|\D)403(?:\D|$)/i)) {
+  if (matches(reason, /permission denied|operation not permitted|command (?:is )?not allowed|denied by (?:the )?allowlist|allowlist (?:denied|rejected)|sandbox (?:denied|violation|rejected)|forbidden|(?:http|status|response)[^\n]{0,20}\b403\b/i)) {
     return PROVIDER_FAILURE_CLASSES.PERMISSION;
   }
   if (matches(reason, /policy (?:denied|rejected|violation)|blocked by policy|not authorized by policy/i)) {
@@ -88,6 +88,19 @@ export function allProviderFailuresAreTransientCapacity(unavailableAgents) {
   });
 }
 
+export function providerExhaustionError(errorOrReason) {
+  const error = errorOrReason instanceof Error
+    ? errorOrReason
+    : new Error(String(errorOrReason || "All requested providers failed."));
+  error.providerExhaustion = true;
+  return error;
+}
+
+export function shouldRecoverProviderExhaustion(error, unavailableAgents) {
+  return error?.providerExhaustion === true
+    && allProviderFailuresAreTransientCapacity(unavailableAgents);
+}
+
 export function normalizeProviderFailoverPolicy(policy) {
   return {
     enabled: policy?.enabled !== false,
@@ -99,10 +112,13 @@ export function resolveProviderFailoverRoster({ agents, mode, issueClaim, provid
   const requested = [...agents];
   const policy = normalizeProviderFailoverPolicy(providerFailover);
   if (mode !== "work" || !issueClaim || !policy.enabled) {
-    return { agents: requested, policy };
+    return { agents: requested, requestedAgents: requested, standbyAgents: [], policy };
   }
+  const expanded = [...new Set([...requested, ...policy.agents])];
   return {
-    agents: [...new Set([...requested, ...policy.agents])],
+    agents: expanded,
+    requestedAgents: requested,
+    standbyAgents: expanded.filter((agent) => !requested.includes(agent)),
     policy,
   };
 }

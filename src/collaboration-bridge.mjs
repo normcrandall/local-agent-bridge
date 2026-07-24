@@ -597,7 +597,7 @@ const providerFailoverSchema = z.object({
   enabled: z.boolean().default(true),
   agents: z.array(z.enum(WRITER_AGENTS)).min(1).max(WRITER_AGENTS.length).optional(),
 }).strict().optional().describe(
-  "Automatically append eligible writer providers to claimed work so a confirmed provider-local failure transfers in the same checkout. Set enabled false only for an intentionally strict single-provider lane.",
+  "Preflight eligible writer providers for claimed work but keep appended providers on standby until a confirmed provider-local failure transfers the same checkout. Set enabled false only for an intentionally strict single-provider lane.",
 );
 const ciTrackingSchema = z.object({
   prNumber: z.number().int().positive(),
@@ -716,16 +716,18 @@ server.registerTool(
   },
   async (input) => {
     blockNestedCollaboration();
-    const failoverRoster = resolveProviderFailoverRoster({
-      agents: input.agents,
-      mode: input.mode,
-      issueClaim: input.issueClaim,
-      providerFailover: input.providerFailover,
-    });
     const participantRotation = input.taskNumber === undefined ? null : selectRoles({
       taskNumber: input.taskNumber, agents: input.agents, offset: input.rotationOffset,
     });
     const requestedWriter = input.mode === "work" ? (input.writer || participantRotation?.writer || input.startAgent || input.agents[0]) : null;
+    const failoverRoster = resolveProviderFailoverRoster({
+      agents: input.agents,
+      mode: input.mode,
+      // A native chair that owns the requested writer role must not silently
+      // gain delegated peers merely because the lane also carries an issue claim.
+      issueClaim: input.chair?.provider === requestedWriter ? null : input.issueClaim,
+      providerFailover: input.providerFailover,
+    });
     if (requestedWriter && !WRITER_AGENTS.includes(requestedWriter)) {
       throw new Error(`Provider ${requestedWriter} is review-only and cannot be selected as writer.`);
     }
@@ -1010,6 +1012,8 @@ server.registerTool(
         providerRecovery: input.providerRecovery || { enabled: true, maxAttempts: 3, backoffSeconds: [15, 60, 180] },
         providerRecoveryState: { attempts: 0, status: "idle" },
         providerFailover: failoverRoster.policy,
+        requestedAgents: failoverRoster.requestedAgents,
+        standbyAgents: failoverRoster.standbyAgents,
         providerFailoverState: { transitions: [], status: "idle" },
         usage: {},
         ciTracking: input.ciTracking || null,

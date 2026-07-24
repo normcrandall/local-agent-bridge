@@ -447,30 +447,48 @@ async function runTests() {
   const stateWorking = claimsAfterRefresh.find(c => c.data.collaboration === "bridge-33333333-3333-3333-4444-555555555555").data;
   assert.equal(stateWorking.phase, "working");
 
+  const failoverHistoryBeforeWriterChange = stateWorking.history.filter((entry) => entry.event === "writer_failover").length;
   await refreshClaimLease({
     client,
     issueNumber: 42,
     collaborationId: "bridge-33333333-3333-3333-4444-555555555555",
     phase: "working",
     writer: "claude",
+    summary: "Writer metadata refreshed after an ordinary continuation.",
+  });
+  const claimsAfterWriterChange = await parseClaims(client, 42);
+  const stateAfterWriterChange = claimsAfterWriterChange.find(c => c.data.collaboration === "bridge-33333333-3333-3333-4444-555555555555").data;
+  assert.equal(stateAfterWriterChange.writer, "claude");
+  assert.equal(
+    stateAfterWriterChange.history.filter((entry) => entry.event === "writer_failover").length,
+    failoverHistoryBeforeWriterChange,
+    "a bare writer refresh must not fabricate a provider failover",
+  );
+
+  await refreshClaimLease({
+    client,
+    issueNumber: 42,
+    collaborationId: "bridge-33333333-3333-3333-4444-555555555555",
+    phase: "working",
+    writer: "codex",
     writerFailover: {
-      from: "codex",
-      to: "claude",
+      from: "claude",
+      to: "codex",
       failureClass: "transport",
-      reason: "Codex transport closed."
+      reason: "Claude transport closed."
     },
-    summary: "Codex failed; writer transferred to Claude."
+    summary: "Claude failed; writer transferred to Codex."
   });
   const claimsAfterWriterFailover = await parseClaims(client, 42);
   const stateAfterWriterFailover = claimsAfterWriterFailover.find(c => c.data.collaboration === "bridge-33333333-3333-3333-4444-555555555555").data;
-  assert.equal(stateAfterWriterFailover.writer, "claude");
+  assert.equal(stateAfterWriterFailover.writer, "codex");
   assert.equal(stateAfterWriterFailover.history[0].event, "writer_failover");
-  assert.equal(stateAfterWriterFailover.history[0].previousWriter, "codex");
-  assert.equal(stateAfterWriterFailover.history[0].writer, "claude");
+  assert.equal(stateAfterWriterFailover.history[0].previousWriter, "claude");
+  assert.equal(stateAfterWriterFailover.history[0].writer, "codex");
   assert.equal(stateAfterWriterFailover.history[0].failureClass, "transport");
-  assert.equal(stateAfterWriterFailover.history[0].reason, "Codex transport closed.");
-  assert.match(mock.getComments()[0].body, /Transfer: `codex` → `claude`/);
-  assert.match(mock.getComments()[0].body, /Cause: `transport` — Codex transport closed\./);
+  assert.equal(stateAfterWriterFailover.history[0].reason, "Claude transport closed.");
+  assert.match(mock.getComments()[0].body, /Transfer: `claude` → `codex`/);
+  assert.match(mock.getComments()[0].body, /Cause: `transport` — Claude transport closed\./);
 
   await refreshClaimLease({
     client,
