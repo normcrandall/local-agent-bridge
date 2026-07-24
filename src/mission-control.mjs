@@ -249,19 +249,23 @@ export async function loadMissionControlSnapshot({
   });
   const recentActivity = matching
     .filter((lane) => !isLiveLane(lane, now))
-    .filter((lane) => {
-      const updatedAt = dateMs(laneNeedsUser(lane) ? attentionRequestAt(lane) : lane.updatedAt);
-      return updatedAt > 0 && now - updatedAt <= DEFAULT_RECENT_ACTIVITY_AFTER_MS;
-    })
-    .sort((left, right) => dateMs(right.updatedAt) - dateMs(left.updatedAt))
-    .slice(0, 3)
     .map((lane) => ({
+      lane,
+      activityAt: laneNeedsUser(lane) ? attentionRequestAt(lane) : lane.updatedAt,
+    }))
+    .filter(({ activityAt }) => {
+      const activityMs = dateMs(activityAt);
+      return activityMs > 0 && now - activityMs <= DEFAULT_RECENT_ACTIVITY_AFTER_MS;
+    })
+    .sort((left, right) => dateMs(right.activityAt) - dateMs(left.activityAt))
+    .slice(0, 3)
+    .map(({ lane, activityAt }) => ({
       id: lane.id,
       repository: lane.repository,
       lifecyclePhase: lane.lifecyclePhase,
       activeAgent: lane.activeAgent || lane.writer || null,
       summary: lane.narrative?.summary || lane.task || null,
-      updatedAt: laneNeedsUser(lane) ? attentionRequestAt(lane) : lane.updatedAt,
+      updatedAt: activityAt,
       nextAction: lane.nextAction || null,
     }));
 
@@ -449,7 +453,7 @@ export function renderMissionControl(snapshot, {
     lines.push(paint(`!!! USER INPUT REQUIRED: ${snapshot.needsUserCount} collaboration${snapshot.needsUserCount === 1 ? "" : "s"}. Press a to inspect.`, "31;1", color));
   }
   if (snapshot.historicalNeedsUserCount > 0) {
-    lines.push(truncate(`${snapshot.historicalNeedsUserCount} historical input request${snapshot.historicalNeedsUserCount === 1 ? " remains" : "s remain"} inspectable but will not alert. Press a, then s to include stale records.`, usableWidth));
+    lines.push(truncate(`${snapshot.historicalNeedsUserCount} historical input request${snapshot.historicalNeedsUserCount === 1 ? " remains" : "s remain"} inspectable but will not alert. Press a to inspect; press s if stale records are hidden.`, usableWidth));
   }
   lines.push(paint("─".repeat(usableWidth), "90", color));
 

@@ -328,10 +328,14 @@ function refreshPortfolioState(state) {
 
 function updatePortfolioItemState(state, itemId, patch) {
   let found = false;
+  const updatedAt = new Date().toISOString();
   const items = state.items.map((item) => {
     if (item.id !== String(itemId)) return item;
     found = true;
-    return { ...item, ...patch, id: item.id };
+    const needsUserAt = patch.status === "needs_user" && item.status !== "needs_user"
+      ? updatedAt
+      : item.needsUserAt;
+    return { ...item, ...patch, id: item.id, updatedAt, ...(needsUserAt ? { needsUserAt } : {}) };
   });
   if (!found) throw new Error(`Portfolio item ${itemId} does not exist.`);
   return refreshPortfolioState({ ...state, items });

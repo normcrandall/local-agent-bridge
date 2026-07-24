@@ -564,7 +564,8 @@ export async function queryControlPlane(stateRoot, options = {}) {
           activeAgent: null,
           lifecyclePhase: item.status || "unknown",
           createdAt: p.createdAt || null,
-          updatedAt: p.updatedAt || null,
+          updatedAt: item.updatedAt || p.updatedAt || null,
+          attentionRequestedAt: item.needsUserAt || item.updatedAt || p.updatedAt || p.createdAt || null,
           mode: "work",
           workProfile: null,
           permissionProfile: null,
@@ -580,8 +581,8 @@ export async function queryControlPlane(stateRoot, options = {}) {
           model: null,
           narrative: {
             summary: item.summary || null,
-            updatedAt: p.updatedAt || null,
-            ageSeconds: parseAge(p.updatedAt),
+            updatedAt: item.updatedAt || p.updatedAt || null,
+            ageSeconds: parseAge(item.updatedAt || p.updatedAt),
             source: "portfolio"
           },
           heartbeat: null,

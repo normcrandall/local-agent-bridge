@@ -95,6 +95,27 @@ try {
   assert.equal(state.userAttention, undefined);
   assert.equal(calls.length, callsBeforeHistoricalScan, "historical requests must remain durable without generating desktop alerts");
 
+  const recentEscalation = await createCollaboration(root, {
+    task: "Raise a new protected decision in an old collaboration",
+    workspace: root,
+    agents: ["claude"],
+    participants: ["claude"],
+    status: "needs_user",
+    createdAt: new Date(now - 9 * 60 * 60_000).toISOString(),
+    completion: {
+      lastHandoff: { recordedAt: new Date(now - 7 * 60 * 60_000).toISOString() },
+    },
+    decisionEscalation: {
+      action: "needs_user",
+      reason: "A new authorization boundary was reached.",
+      recordedAt: new Date(now - 1_000).toISOString(),
+    },
+  });
+  const callsBeforeRecentEscalation = calls.length;
+  const escalationResults = await scanPendingUserAttention(root, { now, platform: "darwin", run });
+  assert.ok(escalationResults.some((result) => result.collaborationId === recentEscalation.id && result.delivered));
+  assert.equal(calls.length, callsBeforeRecentEscalation + 1, "the newest request marker must win over an old handoff");
+
   const failed = await createCollaboration(root, {
     task: "Retry a failed desktop signal",
     workspace: root,

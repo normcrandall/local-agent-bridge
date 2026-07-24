@@ -6,14 +6,25 @@ function dateMs(value) {
 }
 
 export function attentionRequestAt(state) {
-  return state.attentionRequestedAt
-    || state.coordinatorWake?.createdAt
-    || state.completion?.lastHandoff?.recordedAt
-    || state.decisionEscalation?.recordedAt
-    || state.decisionEscalation?.createdAt
-    || state.decisionEscalation?.at
-    || state.createdAt
-    || null;
+  const candidates = [
+    state.attentionRequestedAt,
+    state.coordinatorWake?.createdAt,
+    state.completion?.lastHandoff?.recordedAt,
+    state.decisionEscalation?.recordedAt,
+    state.decisionEscalation?.createdAt,
+    state.decisionEscalation?.at,
+    state.createdAt,
+  ];
+  let newest = null;
+  let newestMs = 0;
+  for (const candidate of candidates) {
+    const candidateMs = dateMs(candidate);
+    if (candidateMs > newestMs) {
+      newest = candidate;
+      newestMs = candidateMs;
+    }
+  }
+  return newest;
 }
 
 export function attentionRequestIsFresh(state, now = Date.now(), maxAgeMs = DEFAULT_ATTENTION_FRESH_MS) {

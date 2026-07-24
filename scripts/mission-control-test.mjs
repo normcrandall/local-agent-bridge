@@ -205,6 +205,25 @@ try {
   const historicalOutput = renderSnapshot(historicalNeedsUser, { width: 100, now });
   assert.doesNotMatch(historicalOutput, /!!! USER INPUT REQUIRED/);
   assert.match(historicalOutput, /1 historical input request remains inspectable but will not alert/);
+  await writeFile(join(historicalRoot, "portfolios", "helm-55555555-5555-4555-8555-555555555555.json"), JSON.stringify({
+    id: "helm-55555555-5555-4555-8555-555555555555",
+    workspace,
+    repository: "veliqon/control-plane",
+    createdAt: new Date(now - 2 * 24 * 60 * 60_000).toISOString(),
+    updatedAt: new Date(now - 2 * 24 * 60 * 60_000).toISOString(),
+    items: [{
+      id: "issue-13",
+      title: "A newly blocked portfolio lane",
+      status: "needs_user",
+      writer: "claude",
+      needsUserAt: new Date(now - 30_000).toISOString(),
+      updatedAt: new Date(now - 30_000).toISOString(),
+    }],
+  }));
+  const freshPortfolioRequest = await loadMissionControlSnapshot({ stateRoot: historicalRoot, now });
+  assert.equal(freshPortfolioRequest.needsUserCount, 1, "a new request in an old portfolio must still alert");
+  assert.equal(freshPortfolioRequest.historicalNeedsUserCount, 1);
+  assert.match(renderSnapshot(freshPortfolioRequest, { width: 100, now }), /!!! USER INPUT REQUIRED: 1 collaboration/);
   const expiredHostLane = hostActivityLane({
     ...hostState,
     expiresAt: new Date(now + HOST_ACTIVITY_LIVE_MS).toISOString(),
