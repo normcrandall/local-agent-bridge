@@ -44,5 +44,5 @@ Ensure all outputs are fully sanitized: redact credentials (like GitHub personal
 
 If monitoring or waiting for a running recovery process, apply the default-deny rules:
 - Long-poll compactly with `detail: status`, `includeTurns: 0`, and `waitSeconds: 8` or less. Never block the host CLI with a long-running sleep or bash loop.
-- Never select, inherit, or fall back to Fable unless the user's current request explicitly asks for Fable by name. Override to `claude-opus-4-8[1m]` and remove Fable from `modelFallbacks.claude` if Fable would be triggered without authorization.
+- Never select, inherit, or fall back to Fable unless the user's current request explicitly asks for Fable by name. Override to `claude-opus-5` and remove Fable from `modelFallbacks.claude` if Fable would be triggered without authorization.
 - Process coordinator wakes deterministically. Acknowledge wakes only after executing the next action. Wakes with `needs_user` or `indeterminate` status must stop and prompt the user.

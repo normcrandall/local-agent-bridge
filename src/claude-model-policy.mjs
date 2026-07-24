@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 
-export const DEFAULT_NON_FABLE_CLAUDE_MODEL = "claude-opus-4-8[1m]";
+export const DEFAULT_NON_FABLE_CLAUDE_MODEL = "claude-opus-5";
 
 export function isFableModel(value) {
   return typeof value === "string" && value.toLowerCase().includes("fable");
