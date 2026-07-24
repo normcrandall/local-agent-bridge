@@ -588,6 +588,7 @@ export async function queryControlPlane(stateRoot, options = {}) {
 
   for (const p of portfolios) {
     if (!p.items) continue;
+    const portfolioItemsById = new Map(p.items.map((item) => [item.id, item]));
     for (const item of p.items) {
       const colId = item.collaborationId;
       const matched = colId ? collaborations.find(c => c.state.id === colId) : null;
@@ -613,6 +614,14 @@ export async function queryControlPlane(stateRoot, options = {}) {
         updatedAt: item.updatedAt || p.updatedAt || null,
         priority: item.priority !== undefined ? item.priority : null,
         blockedBy: item.blockedBy || [],
+        blockingDependencies: (item.blockedBy || []).map((dependencyId) => {
+          const dependency = portfolioItemsById.get(dependencyId);
+          return {
+            id: dependencyId,
+            title: dependency?.title || dependency?.task || dependency?.summary || null,
+            status: dependency?.status || "unknown",
+          };
+        }).filter((dependency) => !PORTFOLIO_STATUS_GROUPS.terminal.includes(dependency.status)),
         conflictsWith: item.conflictsWith || [],
         paths: item.paths || [],
         mergeTrain: mtEntry ? {

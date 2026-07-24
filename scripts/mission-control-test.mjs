@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   coalesceTimeline,
+  blockedReason,
   deduplicateOperatorLanes,
   displayWidth,
   isAttentionLane,
@@ -59,6 +60,14 @@ assert.equal(paneFocusIntent("\t", 0), 1);
 assert.equal(paneFocusIntent("\x1b[C", 2), 0);
 assert.equal(paneFocusIntent("\x1b[D", 0), 2);
 assert.equal(paneFocusIntent("j", 1), 1);
+assert.equal(blockedReason({ lifecyclePhase: "blocked", portfolio: { blockedBy: ["issue-672"] } }), "Waiting for issue #672 to complete.");
+assert.equal(blockedReason({ lifecyclePhase: "blocked", blocker: { error: "Reviewer provider is unavailable." } }), "Reviewer provider is unavailable.");
+assert.equal(blockedReason({ lifecyclePhase: "blocked" }), "No blocking reason was recorded by the coordinator.");
+assert.equal(blockedReason({ lifecyclePhase: "working", portfolio: { status: "blocked", blockedBy: [] } }), "No blocking reason was recorded by the coordinator.");
+assert.equal(blockedReason({ lifecyclePhase: "working", portfolio: { status: "merged", blockedBy: ["issue-672"], blockingDependencies: [] } }), "");
+assert.equal(blockedReason({ lifecyclePhase: "blocked", portfolio: { status: "blocked", blockedBy: ["issue-672"], blockingDependencies: [{ id: "issue-672", title: "Publish the contract", status: "repairing" }] }, blocker: { error: "Writer provider is unavailable." } }), "Writer provider is unavailable. Waiting for issue #672 (Publish the contract) to complete.");
+assert.equal(blockedReason({ lifecyclePhase: "working" }), "");
+assert.equal(blockedReason({ lifecyclePhase: "agreed", handoff: { summary: "Review completed." } }), "");
 const selectionFixture = [{ id: "first", updatedAt: "one" }, { id: "last", updatedAt: "two" }];
 assert.equal(resolveMissionControlSelection(selectionFixture, null, Number.MAX_SAFE_INTEGER).id, "last");
 assert.equal(resolveMissionControlSelection(selectionFixture, "first", 1).id, "first");
@@ -290,6 +299,13 @@ try {
     createdAt: new Date(now - 2 * 24 * 60 * 60_000).toISOString(),
     updatedAt: new Date(now - 2 * 24 * 60 * 60_000).toISOString(),
     items: [{
+      id: "issue-401",
+      title: "An unresolved dependency",
+      status: "repairing",
+      writer: "codex",
+      blockedBy: [],
+      updatedAt: new Date(now - 30_000).toISOString(),
+    }, {
       id: "issue-13",
       title: "A newly blocked portfolio lane",
       status: "blocked",
@@ -297,14 +313,40 @@ try {
       blockedBy: ["issue-401"],
       needsUserAt: new Date(now - 30_000).toISOString(),
       updatedAt: new Date(now - 30_000).toISOString(),
+    }, {
+      id: "issue-14",
+      title: "Blocked without a recorded reason",
+      status: "blocked",
+      writer: null,
+      blockedBy: [],
+      updatedAt: new Date(now - 29_000).toISOString(),
     }],
   }));
   const freshPortfolioRequest = await loadMissionControlSnapshot({ stateRoot: historicalRoot, now });
   assert.equal(freshPortfolioRequest.needsUserCount, 0, "a portfolio status without a stopped provider wake must not alert");
   assert.equal(freshPortfolioRequest.historicalNeedsUserCount, 1);
-  const freshPortfolioOutput = renderSnapshot(freshPortfolioRequest, { width: 100, now });
+  const blockedDependencyIndex = freshPortfolioRequest.operatorLanes.findIndex((lane) => lane.portfolio?.itemId === "issue-13");
+  const freshPortfolioOutput = renderSnapshot(freshPortfolioRequest, { width: 100, now, selectedIndex: blockedDependencyIndex });
   assert.doesNotMatch(freshPortfolioOutput, /!!! USER INPUT REQUIRED/);
-  assert.match(freshPortfolioOutput, /WAITING ON.*issue-401/);
+  const flattenedPortfolioOutput = freshPortfolioOutput.replace(/[│\n]/g, " ").replace(/\s+/g, " ");
+  assert.match(flattenedPortfolioOutput, /BLOCKED BECAUSE Waiting for issue #401 \(An unresolved dependency\) to complete\./);
+  const missingPortfolioReason = freshPortfolioRequest.operatorLanes.find((lane) => lane.portfolio?.itemId === "issue-14");
+  assert.equal(blockedReason(missingPortfolioReason), "No blocking reason was recorded by the coordinator.");
+  const terminalDependencyLane = {
+    ...freshPortfolioRequest.operatorLanes.find((lane) => lane.portfolio?.itemId === "issue-13"),
+    lifecyclePhase: "agreed",
+    operatorCategory: "history",
+    portfolio: {
+      ...freshPortfolioRequest.operatorLanes.find((lane) => lane.portfolio?.itemId === "issue-13").portfolio,
+      status: "merged",
+      blockingDependencies: [{ id: "external-release", title: null, status: "unknown" }],
+    },
+  };
+  const terminalDependencyOutput = renderSnapshot({ ...freshPortfolioRequest, operatorLanes: [terminalDependencyLane] }, { width: 100, now });
+  assert.doesNotMatch(terminalDependencyOutput, /BLOCKED BECAUSE/, "terminal work must not inherit declared dependencies as live blockers");
+  const narrowBlockedOutput = renderMissionControl(freshPortfolioRequest, { width: 60, height: 20, now, selectedIndex: blockedDependencyIndex, activePane: 2, color: false, interactive: true });
+  assert.match(narrowBlockedOutput, /BLOCKED BECAUSE/);
+  assert.ok(narrowBlockedOutput.split("\n").every((line) => displayWidth(line) <= 60), "a wrapped blocked reason must preserve the narrow grid");
   const expiredHostLane = hostActivityLane({
     ...hostState,
     expiresAt: new Date(now + HOST_ACTIVITY_LIVE_MS).toISOString(),
@@ -608,6 +650,8 @@ try {
   const noColor = renderMissionControl(attention, { selectedIndex, timeline, width: 120, height: 28, now, color: false, interactive: true });
   assert.doesNotMatch(noColor, /\x1b\[/);
   assert.match(noColor, /│ REPOSITORIES/);
+  assert.match(noColor, /│ DETAILS/);
+  assert.doesNotMatch(noColor, /SELECTED LANE/);
   assert.match(noColor, /WORK · j\/k choose lane · Enter details/);
 
   const secondRepositoryLane = {
