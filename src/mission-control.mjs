@@ -666,8 +666,8 @@ function quotaColor(percent) {
   return "32;1";
 }
 
-function quotaValue(provider, window, color) {
-  if (!provider || provider.status === "unavailable" || !provider.windows?.[window]) return paint("—", "90", color);
+function quotaValue(provider, window, color, { compact = false } = {}) {
+  if (!provider?.windows?.[window]) return paint(compact ? "not rpt" : "not reported", "90", color);
   const remaining = provider.windows[window].remainingPercent;
   const value = `${provider.status === "stale" ? "~" : ""}${remaining}%`;
   return paint(value, provider.status === "stale" ? "33;1" : quotaColor(remaining), color);
@@ -679,26 +679,46 @@ function quotaObservedTime(value) {
   return new Intl.DateTimeFormat("en-US", { hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(timestamp));
 }
 
+const QUOTA_PROVIDER_STYLE = {
+  codex: "36;1",
+  claude: "35;1",
+  antigravity: "34;1",
+};
+
+function quotaProviderGroup(provider, { key, label, shortLabel, color, compact = false, pending = false }) {
+  const name = paint(compact ? shortLabel : label, QUOTA_PROVIDER_STYLE[key], color);
+  if (pending) return `${name} ${paint("loading", "33;1", color)}`;
+  if (!provider || provider.status === "unavailable") return `${name} ${paint("unavailable", "31;1", color)}`;
+  if (provider.status === "unsupported") return `${name} ${paint(compact ? "not exp" : "not exposed", "90", color)}`;
+  const fiveHour = quotaValue(provider, "fiveHour", color, { compact });
+  const week = quotaValue(provider, "week", color, { compact });
+  return compact
+    ? `${name} 5h ${fiveHour} · wk ${week}`
+    : `${name}   5h ${fiveHour}  ·  week ${week}`;
+}
+
 export function renderProviderQuotaFooter(providerQuota, { width = 120, color = true } = {}) {
-  if (!providerQuota?.providers) return null;
+  if (!providerQuota?.providers) return [];
   const providers = providerQuota.providers;
-  const codex5h = quotaValue(providers.codex, "fiveHour", color);
-  const codexWeek = quotaValue(providers.codex, "week", color);
-  const claude5h = quotaValue(providers.claude, "fiveHour", color);
-  const claudeWeek = quotaValue(providers.claude, "week", color);
-  const antigravity = paint("—", "90", color);
-  // Local is a provider category, not an installed/running health assertion.
-  const local = (label) => paint(label, "36", color);
+  const pending = !providerQuota.updatedAt;
   const updated = quotaObservedTime(providerQuota.updatedAt);
-  let line;
   if (width >= 132) {
-    line = ` ${paint("QUOTA REMAINING", "1;34", color)} · refresh 1m  Codex 5h ${codex5h} · wk ${codexWeek}  |  Claude 5h ${claude5h} · wk ${claudeWeek}  |  Antigravity ${antigravity}  |  Docker ${local("local")}  |  Ollama ${local("local")}  |  checked @${updated}`;
-  } else if (width >= 60) {
-    line = ` ${paint("QUOTA 1m", "1;34", color)}  C 5h${codex5h}/wk${codexWeek} · Cl 5h${claude5h}/wk${claudeWeek} · AG${antigravity} · D ${local("local")} · O ${local("local")} · @${updated}`;
-  } else {
-    line = `${paint("Q1m", "1;34", color)} C${codex5h}/${codexWeek} Cl${claude5h}/${claudeWeek} A${antigravity} D+O:${local("L")}`;
+    const header = ` ${paint("QUOTA REMAINING", "1;34", color)}  ${paint("refreshes every minute", "90", color)}  ·  ${paint(pending ? "first check pending" : `checked ${updated}`, "90", color)}`;
+    const groups = [
+      quotaProviderGroup(providers.codex, { key: "codex", label: "Codex", shortLabel: "C", color, pending }),
+      quotaProviderGroup(providers.claude, { key: "claude", label: "Claude", shortLabel: "Cl", color, pending }),
+      quotaProviderGroup(providers.antigravity, { key: "antigravity", label: "Antigravity", shortLabel: "AG", color, pending: false }),
+    ];
+    return [truncateAnsi(header, width), truncateAnsi(` ${groups.join(`  ${paint("│", "90", color)}  `)}`, width)];
   }
-  return truncateAnsi(line, Math.max(30, width));
+  const compactGroups = [
+    quotaProviderGroup(providers.codex, { key: "codex", label: "Codex", shortLabel: "C", color, compact: true, pending }),
+    quotaProviderGroup(providers.claude, { key: "claude", label: "Claude", shortLabel: "Cl", color, compact: true, pending }),
+    quotaProviderGroup(providers.antigravity, { key: "antigravity", label: "Antigravity", shortLabel: "AG", color, compact: true, pending: false }),
+  ];
+  const prefix = width >= 60 ? `${paint("QUOTA", "1;34", color)}  ` : `${paint("Q", "1;34", color)} `;
+  const suffix = !pending && width >= 90 ? `  ${paint(`· ${updated}`, "90", color)}` : "";
+  return [truncateAnsi(`${prefix}${compactGroups.join(` ${paint("│", "90", color)} `)}${suffix}`, Math.max(30, width))];
 }
 
 const CATEGORY_STYLE = {
@@ -1054,7 +1074,7 @@ export function renderMissionControl(snapshot, {
   lines.push(truncateAnsi(headline, usableWidth));
   lines.push(truncate(`${formatLocalDateTime(snapshot.generatedAt)} · ${snapshot.mode} · ${repositoryCount} repo${repositoryCount === 1 ? "" : "s"}${snapshot.filter ? ` · ${snapshot.filter}` : ""}`, usableWidth));
   const quotaFooter = renderProviderQuotaFooter(snapshot.providerQuota, { width: usableWidth, color });
-  const footerRows = (quotaFooter ? 1 : 0) + (interactive ? (actionMessage ? 2 : 1) : snapshot.mode === "all" ? 1 : 0);
+  const footerRows = quotaFooter.length + (interactive ? (actionMessage ? 2 : 1) : snapshot.mode === "all" ? 1 : 0);
   const contentRows = Math.max(4, height - lines.length - footerRows - 4);
   const titles = ["REPOSITORIES", "WORK", "DETAILS"];
   const measurements = gridMeasurements(usableWidth, activePane);
@@ -1068,7 +1088,7 @@ export function renderMissionControl(snapshot, {
   ];
   if (viewportState && typeof viewportState === "object") viewportState.detailOffset = panes[2].appliedOffset || 0;
   lines.push(...gridLayout(measurements, activePane, titles, panes, contentRows, color));
-  if (quotaFooter) lines.push(quotaFooter);
+  lines.push(...quotaFooter);
   if (interactive) {
     if (actionMessage) lines.push(truncateAnsi(paint(` ${actionMessage}`, actionMessage.toLowerCase().includes("failed") ? "31;1" : "33", color), usableWidth));
     const paneHelp = activePane === 0
