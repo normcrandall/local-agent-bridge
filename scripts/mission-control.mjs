@@ -9,8 +9,11 @@ import {
   clearRepositoryCache,
   loadMissionControlSnapshot,
   loadTimeline,
+  missionControlRepositories,
+  missionControlVisibleLanes,
   navigationIntent,
   newlyObservedAttentionKeys,
+  paneFocusIntent,
   renderMissionControl,
   renderSnapshot,
 } from "../src/mission-control.mjs";
@@ -110,6 +113,7 @@ let pendingConfirmation = null;
 let activePane = 1;
 let detailExpanded = false;
 let detailOffset = 0;
+let selectedRepository = repositoryFilter || null;
 const seenAttentionKeys = new Set();
 let resolveExit;
 const exitRequested = new Promise((resolvePromise) => { resolveExit = resolvePromise; });
@@ -218,7 +222,9 @@ async function draw() {
       process.stdout.write("\x07");
     }
     for (const key of current.needsUserKeys || []) seenAttentionKeys.add(key);
-    const operatorLanes = current.operatorLanes || current.lanes;
+    const repositoryChoices = missionControlRepositories(current, { includeAll: !repositoryFilter });
+    if (!repositoryChoices.includes(selectedRepository)) selectedRepository = repositoryChoices[0] ?? null;
+    const operatorLanes = missionControlVisibleLanes(current, selectedRepository);
     if (selectedId) {
       const preserved = operatorLanes.findIndex((lane) => lane.id === selectedId);
       if (preserved >= 0) selectedIndex = preserved;
@@ -227,6 +233,7 @@ async function draw() {
     selectedId = operatorLanes[selectedIndex]?.id || null;
     const timeline = selectedId ? await loadTimeline(stateRoot, selectedId) : [];
     if (stopped) return;
+    const viewportState = {};
     const output = renderMissionControl(current, {
       selectedIndex,
       timeline,
@@ -238,7 +245,11 @@ async function draw() {
       activePane,
       detailExpanded,
       detailOffset,
+      selectedRepository,
+      repositoryLocked: Boolean(repositoryFilter),
+      viewportState,
     });
+    detailOffset = viewportState.detailOffset || 0;
     if (stopped) return;
     process.stdout.write(`\x1b[H\x1b[2J${output}`);
   } catch (error) {
@@ -266,15 +277,35 @@ async function handleKey(key) {
     pendingConfirmation = null;
     detailOffset = 0;
   }
-  else if (key === "\t") {
-    activePane = activePane === 1 ? 2 : 1;
+  else if (key === "\t" || key === "\x1b[C") {
+    activePane = paneFocusIntent(key, activePane);
+    actionMessage = null;
+  }
+  else if (key === "\x1b[Z" || key === "\x1b[D") {
+    activePane = paneFocusIntent(key, activePane);
     actionMessage = null;
   }
   else if (key === "\r" || key === "\n") {
-    detailExpanded = !detailExpanded;
-    activePane = 2;
+    if (activePane === 0) activePane = 1;
+    else if (activePane === 1) activePane = 2;
+    else {
+      detailExpanded = !detailExpanded;
+      detailOffset = 0;
+    }
+    actionMessage = null;
+  }
+  else if (activePane === 0 && ["j", "k", "\x1b[B", "\x1b[A", "g", "G"].includes(key)) {
+    const choices = missionControlRepositories(lastSnapshot || { lanes: [] }, { includeAll: !repositoryFilter });
+    const currentIndex = Math.max(0, choices.findIndex((repository) => repository === selectedRepository));
+    const intent = navigationIntent(key, currentIndex);
+    const nextIndex = Math.min(Math.max(0, intent.selectedIndex), Math.max(0, choices.length - 1));
+    selectedRepository = choices[nextIndex] ?? null;
+    selectedIndex = 0;
+    selectedId = null;
+    detailExpanded = false;
     detailOffset = 0;
     actionMessage = null;
+    pendingConfirmation = null;
   }
   else if (activePane === 2 && ["j", "k", "\x1b[B", "\x1b[A", "g", "G"].includes(key)) {
     if (key === "j" || key === "\x1b[B") detailOffset += 1;
@@ -294,7 +325,8 @@ async function handleKey(key) {
     detailOffset = 0;
   }
   else if (["o", "y", "c", "x", "A", "w"].includes(key)) {
-    const lane = resolveMissionControlSelection(lastSnapshot?.operatorLanes || lastSnapshot?.lanes, selectedId, selectedIndex);
+    const visibleLanes = missionControlVisibleLanes(lastSnapshot || { lanes: [] }, selectedRepository);
+    const lane = resolveMissionControlSelection(visibleLanes, selectedId, selectedIndex);
     const available = missionControlActionAvailability(lane);
     const actionByKey = { o: "openPr", y: "copy", c: "continue", x: "cancel", A: "archive", w: "acknowledgeWake" };
     const action = actionByKey[key];
@@ -338,7 +370,7 @@ async function handleKey(key) {
     }
   }
   else if (key === "r") clearRepositoryCache();
-  else {
+  else if (activePane === 1) {
     const intent = navigationIntent(key, selectedIndex);
     const changedSelection = intent.selectedIndex !== selectedIndex || !intent.preserveSelectedId;
     selectedIndex = intent.selectedIndex;
