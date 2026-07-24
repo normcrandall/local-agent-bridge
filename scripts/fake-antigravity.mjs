@@ -9,6 +9,10 @@ if (args.includes("--help")) {
   process.stdout.write("--print --print-timeout --mode --model --effort --sandbox --dangerously-skip-permissions --conversation --log-file --add-dir\n");
   process.exit(0);
 }
+if (args[0] === "models") {
+  process.stdout.write("gemini-3.6-flash-high\ngemini-3.6-flash-medium\ngemini-3.6-flash-low\n");
+  process.exit(0);
+}
 const modelIndex = args.indexOf("--model");
 const selectedModel = modelIndex >= 0 ? args[modelIndex + 1] : "provider-configured model";
 if ((process.env.FAKE_ANTIGRAVITY_OVERLOAD_MODELS || "").split(",").includes(selectedModel)) {

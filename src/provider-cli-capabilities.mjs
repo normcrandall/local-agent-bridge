@@ -62,9 +62,17 @@ export function probeProviderCapabilities({ provider, binary }) {
   } else {
     mainHelp = run(binary, ["--help"]).output;
   }
-  return {
+  const parsed = {
     ...parseProviderHelp(provider, { version, mainHelp, newHelp, resumeHelp }),
     binary: resolve(binary), binaryName: basename(binary), source: "probe", probedAt: new Date().toISOString(),
+  };
+  if (provider !== "antigravity") return parsed;
+  const modelsResult = run(binary, ["models"]);
+  return {
+    ...parsed,
+    models: modelsResult.ok
+      ? modelsResult.output.split("\n").map((entry) => entry.trim()).filter(Boolean)
+      : [],
   };
 }
 
