@@ -184,11 +184,12 @@ export function isLiveLane(lane, now = Date.now(), heartbeatAfterMs = DEFAULT_LI
 
 export function laneNeedsUser(lane) {
   const wake = lane.coordinatorWake;
-  if (wake?.status === "acknowledged") return false;
   const lifecycle = String(lane.status || lane.lifecyclePhase || "").toLowerCase();
   return lifecycle === "needs_user"
-    || wake?.kind === "needs_user"
-    || wake?.nextAction === "needs_user";
+    && !lane.heartbeat
+    && wake
+    && wake.status !== "acknowledged"
+    && (wake.kind === "needs_user" || wake.nextAction === "needs_user");
 }
 
 export function isStaleLane(lane, now = Date.now(), staleAfterMs = DEFAULT_STALE_AFTER_MS) {
@@ -284,6 +285,7 @@ export async function loadMissionControlSnapshot({
       summary: lane.narrative?.summary || lane.task || null,
       updatedAt: activityAt,
       nextAction: lane.nextAction || null,
+      blockedBy: lane.portfolio?.blockedBy || [],
     }));
 
   const repositories = new Map();
@@ -315,6 +317,12 @@ export async function loadMissionControlSnapshot({
     providerActivity,
     needsUserCount: needsUser.length,
     historicalNeedsUserCount: allNeedsUser.length - needsUser.length,
+    needsUserRequests: needsUser.map((lane) => ({
+      id: lane.id,
+      repository: lane.repository,
+      summary: lane.coordinatorWake?.summary || lane.blocker?.decisionEscalation?.question || lane.task || "Protected decision",
+      requestedAt: attentionRequestAt(lane),
+    })),
     needsUserKeys: needsUser.map((lane) => `${lane.id}:${lane.coordinatorWake?.sequence || 0}`).sort(),
     needsUserSignature: needsUser
       .map((lane) => `${lane.id}:${lane.coordinatorWake?.sequence || 0}`)
@@ -469,6 +477,13 @@ export function renderMissionControl(snapshot, {
   lines.push(truncate(`As of: ${formatLocalDateTime(snapshot.generatedAt)}`, usableWidth));
   if (snapshot.needsUserCount > 0) {
     lines.push(paint(`!!! USER INPUT REQUIRED: ${snapshot.needsUserCount} collaboration${snapshot.needsUserCount === 1 ? "" : "s"}. Press a to inspect.`, "31;1", color));
+    for (const request of (snapshot.needsUserRequests || []).slice(0, 3)) {
+      const bridge = String(request.id || "unknown").replace(/^bridge-/, "").slice(0, 8);
+      lines.push(truncate(`  ${request.repository} · ${bridge} · ${request.summary}`, usableWidth));
+    }
+    if ((snapshot.needsUserRequests || []).length > 3) {
+      lines.push(`  … ${(snapshot.needsUserRequests || []).length - 3} more; press a to inspect.`);
+    }
   }
   if (snapshot.historicalNeedsUserCount > 0) {
     lines.push(truncate(`${snapshot.historicalNeedsUserCount} historical input request${snapshot.historicalNeedsUserCount === 1 ? " remains" : "s remain"} inspectable but will not alert. Press a to inspect; press s if stale records are hidden.`, usableWidth));
@@ -484,7 +499,10 @@ export function renderMissionControl(snapshot, {
         for (const recent of snapshot.recentActivity) {
           const provider = recent.activeAgent ? ` · ${recent.activeAgent}` : "";
           const next = recent.nextAction && recent.nextAction !== "none" ? ` · next ${recent.nextAction}` : "";
-          lines.push(truncate(`  ${recent.repository} · ${recent.lifecyclePhase}${provider} · ${formatLocalDateTime(recent.updatedAt)} (${age(recent.updatedAt, now)} ago)${next}`, usableWidth));
+          const blocked = recent.lifecyclePhase === "blocked" && recent.blockedBy?.length
+            ? ` · waiting on ${recent.blockedBy.join(", ")}`
+            : "";
+          lines.push(truncate(`  ${recent.repository} · ${recent.lifecyclePhase}${provider} · ${formatLocalDateTime(recent.updatedAt)} (${age(recent.updatedAt, now)} ago)${blocked}${next}`, usableWidth));
           if (recent.summary) lines.push(truncate(`    ${recent.summary}`, usableWidth));
         }
       }

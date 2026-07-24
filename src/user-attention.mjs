@@ -1,9 +1,16 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
+import { constants as fsConstants, existsSync } from "node:fs";
+import { access, chmod, lstat, mkdir, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { attentionRequestAt, attentionRequestIsFresh } from "./attention-state.mjs";
+import { repositoryForLane } from "./mission-control.mjs";
 import {
   appendEvent,
+  collaborationDirectory,
   listCollaborations,
   readCollaboration,
   updateCollaboration,
@@ -11,6 +18,10 @@ import {
 
 const execFileAsync = promisify(execFile);
 const SKIP_UPDATE = Symbol("skip-user-attention-update");
+const TERMINAL_NOTIFIER = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../node_modules/node-notifier/vendor/mac.noindex/terminal-notifier.app/Contents/MacOS/terminal-notifier",
+);
 
 export const DEFAULT_ATTENTION_REMINDER_MS = 15 * 60 * 1000;
 export const ATTENTION_CLAIM_TIMEOUT_MS = 2 * 60 * 1000;
@@ -29,16 +40,57 @@ function notificationsEnabled(environment = process.env) {
   return !["0", "false", "off", "no"].includes(String(environment.AGENT_BRIDGE_ATTENTION_NOTIFICATIONS || "").toLowerCase());
 }
 
-export function attentionMessage(state, { environment = process.env } = {}) {
-  const repository = state.github?.repository || state.issueClaim?.repository || null;
+export function attentionRepository(state) {
+  return state.repository
+    || state.github?.repository
+    || state.issueClaim?.repository
+    || state.githubReview?.repository
+    || state.githubBuilder?.repository
+    || null;
+}
+
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", `'"'"'`)}'`;
+}
+
+export async function createAttentionAction(root, state, { home = homedir() } = {}) {
+  const repository = attentionRepository(state);
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository || "")) return null;
+  const directory = resolve(collaborationDirectory(root), "attention-actions");
+  const digest = createHash("sha256").update(repository).digest("hex").slice(0, 16);
+  const path = resolve(directory, `mission-control-${digest}.command`);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const directoryStat = await lstat(directory).catch(() => null);
+  if (!directoryStat?.isDirectory() || directoryStat.isSymbolicLink()) return null;
+  if (typeof process.getuid === "function" && directoryStat.uid !== process.getuid()) return null;
+  await chmod(directory, 0o700);
+  const hardenedDirectory = await lstat(directory).catch(() => null);
+  if (!hardenedDirectory || (hardenedDirectory.mode & 0o077) !== 0) return null;
+
+  const bridge = resolve(home, ".local/bin/bridge");
+  const sourceMissionControl = resolve(dirname(fileURLToPath(import.meta.url)), "../scripts/mission-control.mjs");
+  const bridgeInstalled = await access(bridge, fsConstants.X_OK).then(() => true).catch(() => false);
+  const launch = bridgeInstalled
+    ? `${shellQuote(bridge)} mc --attention --repo ${shellQuote(repository)}`
+    : `${shellQuote(process.execPath)} ${shellQuote(sourceMissionControl)} --attention --repo ${shellQuote(repository)}`;
+  await writeFile(path, `#!/bin/zsh\nexec ${launch}\n`, { mode: 0o700 });
+  await chmod(path, 0o700);
+  return pathToFileURL(path).href;
+}
+
+export function attentionMessage(state, { actionUrl = null, environment = process.env } = {}) {
+  const repository = attentionRepository(state);
   const workspace = state.workspace?.split("/").filter(Boolean).at(-1) || "unknown workspace";
-  const includeRepository = environment.AGENT_BRIDGE_ATTENTION_DETAIL === "repository";
+  const bridge = clean(state.id || "unknown bridge", 24);
+  const generic = String(environment.AGENT_BRIDGE_ATTENTION_DETAIL || "").toLowerCase() === "generic";
   return {
     title: "Agent Bridge needs your input",
-    subtitle: includeRepository ? clean(repository || workspace, 120) : "Protected decision",
-    // Notification previews may be visible on a locked screen. Keep the body
-    // generic; the durable collaboration receipt remains the source of detail.
-    body: "A collaboration is paused at a protected decision. Open Mission Control with: bridge mc --attention",
+    subtitle: generic ? "Protected decision" : clean(`${repository || workspace} · ${bridge}`, 120),
+    body: generic
+      ? "A provider stopped at a protected decision. Click Show or run: bridge mc --attention"
+      : `A provider stopped at a protected decision. Open: bridge mc --attention${repository ? ` --repo ${repository}` : ""}`,
+    actionUrl,
+    group: `${state.id || "bridge"}:${state.coordinatorWake?.sequence || 0}`,
   };
 }
 
@@ -57,17 +109,29 @@ export async function deliverAttentionNotification(message, {
 } = {}) {
   if (!notificationsEnabled(environment)) return { delivered: false, adapter: "disabled", reason: "disabled_by_policy" };
   if (platform === "darwin") {
-    const script = [
-      "on run argv",
-      "display notification (item 1 of argv) with title (item 2 of argv) subtitle (item 3 of argv) sound name \"Glass\"",
-      "end run",
-    ].join("\n");
-    await run("/usr/bin/osascript", ["-e", script, "--", message.body, message.title, message.subtitle], {
+    if (!existsSync(TERMINAL_NOTIFIER)) {
+      const script = `display notification ${JSON.stringify(message.body)} with title ${JSON.stringify(message.title)} subtitle ${JSON.stringify(message.subtitle)} sound name "Glass"`;
+      await run("/usr/bin/osascript", ["-e", script], {
+        timeout: 5_000,
+        windowsHide: true,
+        env: notificationEnvironment(environment),
+      });
+      return { delivered: true, adapter: "macos_notification_center", actionable: false };
+    }
+    const args = [
+      "-title", message.title,
+      "-subtitle", message.subtitle,
+      "-message", message.body,
+      "-sound", "Glass",
+      "-group", message.group || "agent-bridge-attention",
+    ];
+    if (message.actionUrl) args.push("-open", message.actionUrl);
+    await run(TERMINAL_NOTIFIER, args, {
       timeout: 5_000,
       windowsHide: true,
       env: notificationEnvironment(environment),
     });
-    return { delivered: true, adapter: "macos_notification_center" };
+    return { delivered: true, adapter: "macos_terminal_notifier", actionable: Boolean(message.actionUrl) };
   }
   if (platform === "linux") {
     await run("/usr/bin/notify-send", ["--urgency=critical", "--app-name=Agent Bridge", message.title, `${message.subtitle}\n${message.body}`], {
@@ -82,29 +146,27 @@ export async function deliverAttentionNotification(message, {
 
 export function wakeNeedsUser(state) {
   const wake = state.coordinatorWake;
-  const lifecycle = state.status || state.lifecyclePhase;
-  return wake
+  const lifecycle = String(state.status || state.lifecyclePhase || "").toLowerCase();
+  return lifecycle === "needs_user"
+    && !state.runtime?.activeCall
+    && wake
     && wake.status !== "acknowledged"
-    && (wake.kind === "needs_user" || wake.nextAction === "needs_user" || lifecycle === "needs_user");
+    && (wake.kind === "needs_user" || wake.nextAction === "needs_user");
 }
 
 export function attentionNeedsUser(state) {
-  if (state.coordinatorWake) return Boolean(wakeNeedsUser(state));
-  return String(state.status || state.lifecyclePhase || "").toLowerCase() === "needs_user";
+  return Boolean(wakeNeedsUser(state));
 }
 
 function attentionReceipt(state) {
-  return state.coordinatorWake?.userAttention || state.userAttention || null;
+  return state.coordinatorWake?.userAttention || null;
 }
 
 function withAttentionReceipt(state, receipt) {
-  if (state.coordinatorWake) {
-    return {
-      ...state,
-      coordinatorWake: { ...state.coordinatorWake, userAttention: receipt },
-    };
-  }
-  return { ...state, userAttention: receipt };
+  return {
+    ...state,
+    coordinatorWake: { ...state.coordinatorWake, userAttention: receipt },
+  };
 }
 
 function retryDelay(attention, reminderMs) {
@@ -134,6 +196,7 @@ export async function signalUserAttention(root, id, {
       const attention = storedAttention?.requestedAt && storedAttention.requestedAt !== requestedAt
         ? null
         : storedAttention;
+      if (attention?.status === "delivered") throw SKIP_UPDATE;
       if (!notificationsEnabled(environment) && attention?.reason === "disabled_by_policy") throw SKIP_UPDATE;
       if (attention?.reason?.startsWith("unsupported_platform_")) throw SKIP_UPDATE;
       const activeClaim = attention?.status === "sending"
@@ -161,10 +224,18 @@ export async function signalUserAttention(root, id, {
   let delivery;
   let error = null;
   try {
-    delivery = await deliverAttentionNotification(attentionMessage(claimedState, { environment }), { platform, run, environment });
+    const repository = await repositoryForLane({
+      repository: attentionRepository(claimedState),
+      workspace: claimedState.workspace,
+    });
+    const notificationState = { ...claimedState, repository };
+    const actionUrl = platform === "darwin"
+      ? await createAttentionAction(root, notificationState).catch(() => null)
+      : null;
+    delivery = await deliverAttentionNotification(attentionMessage(notificationState, { actionUrl, environment }), { platform, run, environment });
   } catch (caught) {
     error = clean(caught.message || caught, 500);
-    delivery = { delivered: false, adapter: platform === "darwin" ? "macos_notification_center" : "platform_notification", reason: error };
+    delivery = { delivered: false, adapter: platform === "darwin" ? "macos_terminal_notifier" : "platform_notification", reason: error };
   }
   const completedAt = new Date(clock()).toISOString();
   let finalized = false;
@@ -203,11 +274,14 @@ export async function scanPendingUserAttention(root, options = {}) {
   const summaries = await listCollaborations(root, { limit: 10_000 });
   const results = [];
   for (const summary of summaries) {
-    if (summary.status !== "needs_user" && summary.coordinatorWake?.kind !== "needs_user") continue;
+    if (summary.status !== "needs_user" || summary.coordinatorWake?.kind !== "needs_user") continue;
     const state = await readCollaboration(root, summary.id).catch(() => null);
     if (!state || !attentionNeedsUser(state)) continue;
     if (!options.force && !attentionRequestIsFresh(state, options.now)) continue;
-    results.push({ collaborationId: state.id, ...(await signalUserAttention(root, state.id, options)) });
+    const result = await signalUserAttention(root, state.id, options);
+    if (result.reason !== "not_due_or_not_needed") {
+      results.push({ collaborationId: state.id, ...result });
+    }
   }
   return results;
 }
