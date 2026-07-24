@@ -38,6 +38,12 @@ export function navigationIntent(key, selectedIndex) {
   return { selectedIndex, preserveSelectedId: true };
 }
 
+export function paneFocusIntent(key, activePane) {
+  if (key === "\t" || key === "\x1b[C") return (activePane + 1) % 3;
+  if (key === "\x1b[Z" || key === "\x1b[D") return (activePane + 2) % 3;
+  return activePane;
+}
+
 export function clearRepositoryCache() {
   repositoryCacheGeneration += 1;
   repositoryCache.clear();
@@ -502,10 +508,14 @@ function characterWidth(character) {
 export function displayWidth(value) {
   let total = 0;
   for (const { segment } of graphemeSegmenter.segment(stripAnsi(value))) {
-    if (/\p{Extended_Pictographic}|\p{Regional_Indicator}|\u20e3/u.test(segment)) total += 2;
-    else total += Math.max(0, ...[...segment].map(characterWidth));
+    total += graphemeWidth(segment);
   }
   return total;
+}
+
+function graphemeWidth(segment) {
+  if (/\p{Extended_Pictographic}|\p{Regional_Indicator}|\u20e3/u.test(segment)) return 2;
+  return Math.max(0, ...[...segment].map(characterWidth));
 }
 
 function sliceDisplay(value, width, { cleanValue = true } = {}) {
@@ -514,7 +524,7 @@ function sliceDisplay(value, width, { cleanValue = true } = {}) {
   let used = 0;
   const input = cleanValue ? clean(value) : String(value ?? "").replace(/[\r\n\t]+/g, " ");
   for (const { segment } of graphemeSegmenter.segment(input)) {
-    const next = displayWidth(segment);
+    const next = graphemeWidth(segment);
     if (used + next > width) break;
     output += segment;
     used += next;
@@ -532,10 +542,12 @@ function truncate(value, width) {
 
 function pad(value, width) {
   const raw = String(value ?? "").replace(/[\r\n\t]+/g, " ");
-  const text = displayWidth(raw) <= width
+  const rawWidth = displayWidth(raw);
+  const text = rawWidth <= width
     ? raw
     : width === 1 ? "…" : `${sliceDisplay(raw, width - 1, { cleanValue: false })}…`;
-  return `${text}${" ".repeat(Math.max(0, width - displayWidth(text)))}`;
+  const textWidth = rawWidth <= width ? rawWidth : displayWidth(text);
+  return `${text}${" ".repeat(Math.max(0, width - textWidth))}`;
 }
 
 function wrap(value, width, prefix = "") {
@@ -610,6 +622,8 @@ export function coalesceTimeline(events, limit = 5) {
   for (const event of events || []) {
     const rawSummary = clean(event.summary);
     if (!rawSummary) continue;
+    // Provider adapters may emit the same low-information tool-use heartbeat many times.
+    // Collapse those observations without implying which tool ran or that progress completed.
     const summary = /\busing an MCP tool\b/i.test(rawSummary) ? "Provider tool activity" : rawSummary;
     const key = `${clean(event.type)}\0${clean(event.agent)}\0${summary}`;
     const previous = output.at(-1);
@@ -624,14 +638,26 @@ export function coalesceTimeline(events, limit = 5) {
 }
 
 function paneLine(text = "", code = null, meta = {}) {
-  return { text: String(text ?? "").replace(/[\r\n\t]+/g, " ").trim(), code, ...meta };
+  return { text: String(text ?? "").replace(/[\r\n\t]+/g, " ").trimEnd(), code, ...meta };
 }
 
 function paneSection(label, count, category) {
   return paneLine(`${label}${Number.isFinite(count) ? ` ${count}` : ""}`, CATEGORY_STYLE[category] || "1");
 }
 
-function repositoryPane(snapshot, lanes) {
+export function missionControlRepositories(snapshot, { includeAll = true } = {}) {
+  const lanes = snapshot.operatorLanes || snapshot.lanes || [];
+  const repositories = [...new Set(lanes.map((lane) => lane.repository).filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right));
+  return includeAll && repositories.length > 1 ? [null, ...repositories] : repositories;
+}
+
+export function missionControlVisibleLanes(snapshot, selectedRepository = null) {
+  const lanes = snapshot.operatorLanes || snapshot.lanes || [];
+  return selectedRepository ? lanes.filter((lane) => lane.repository === selectedRepository) : lanes;
+}
+
+function repositoryPane(snapshot, lanes, repositories, selectedRepository) {
   const summaries = new Map();
   for (const lane of lanes) {
     const summary = summaries.get(lane.repository) || { active: 0, needs_user: 0, waiting: 0, failed: 0 };
@@ -639,12 +665,19 @@ function repositoryPane(snapshot, lanes) {
     summaries.set(lane.repository, summary);
   }
   const rows = [];
-  for (const [repository, counts] of summaries) {
+  for (const repository of repositories) {
+    if (repository === null) {
+      const selected = selectedRepository === null;
+      rows.push(paneLine(`${selected ? "▶" : " "} All repositories  ${lanes.length}`, selected ? "7" : "36;1", { selected }));
+      continue;
+    }
+    const counts = summaries.get(repository) || {};
     const active = counts.active || 0;
     const needs = counts.needs_user || 0;
     const failed = counts.failed || 0;
     const badge = needs ? `!${needs}` : failed ? `x${failed}` : String(active);
-    rows.push(paneLine(`${repository.split("/").at(-1)}  ${badge}`, needs ? CATEGORY_STYLE.needs_user : failed ? CATEGORY_STYLE.failed : active ? CATEGORY_STYLE.active : null));
+    const selected = repository === selectedRepository;
+    rows.push(paneLine(`${selected ? "▶" : " "} ${repository.split("/").at(-1)}  ${badge}`, selected ? "7" : needs ? CATEGORY_STYLE.needs_user : failed ? CATEGORY_STYLE.failed : active ? CATEGORY_STYLE.active : null, { selected }));
   }
   if (!rows.length) rows.push(paneLine("No active repositories", "90"));
   rows.push(paneLine(""));
@@ -767,7 +800,16 @@ function renderGrid({ titles, panes, widths, contentRows, color, activePane = 0 
 }
 
 export function windowPane(rows, contentRows, centerSelection = false, offset = null) {
-  if (rows.length <= contentRows) return rows;
+  if (contentRows < 3) {
+    const visible = rows.slice(0, Math.max(0, contentRows));
+    Object.defineProperty(visible, "appliedOffset", { value: 0 });
+    return visible;
+  }
+  if (rows.length <= contentRows) {
+    const visible = [...rows];
+    Object.defineProperty(visible, "appliedOffset", { value: 0 });
+    return visible;
+  }
   const selected = centerSelection ? rows.findIndex((row) => row.selected) : -1;
   let start = Number.isFinite(offset) ? Math.max(0, Math.floor(offset)) : 0;
   for (let pass = 0; pass < 3; pass += 1) {
@@ -786,6 +828,7 @@ export function windowPane(rows, contentRows, centerSelection = false, offset = 
   if (topIndicator) visible.unshift(paneLine(`↑ ${start} earlier`, "90"));
   const remaining = rows.length - (start + capacity);
   if (remaining > 0) visible.push(paneLine(`↓ ${remaining} more`, "90"));
+  Object.defineProperty(visible, "appliedOffset", { value: start });
   return visible;
 }
 
@@ -820,14 +863,20 @@ export function renderMissionControl(snapshot, {
   activePane = 1,
   detailExpanded = false,
   detailOffset = 0,
+  selectedRepository = null,
+  repositoryLocked = false,
+  viewportState = null,
   now = Date.now(),
 } = {}) {
   const usableWidth = Math.max(30, width);
-  const lanes = snapshot.operatorLanes || snapshot.lanes.map((lane) => ({ ...lane, operatorCategory: operatorLaneCategory(lane, now) || "history", providers: [lane.activeAgent || lane.writer].filter(Boolean), relatedLaneCount: 1 }));
+  const allLanes = snapshot.operatorLanes || snapshot.lanes.map((lane) => ({ ...lane, operatorCategory: operatorLaneCategory(lane, now) || "history", providers: [lane.activeAgent || lane.writer].filter(Boolean), relatedLaneCount: 1 }));
+  const repositories = missionControlRepositories({ ...snapshot, operatorLanes: allLanes }, { includeAll: !repositoryLocked });
+  const effectiveRepository = repositories.includes(selectedRepository) ? selectedRepository : repositories[0] ?? null;
+  const lanes = missionControlVisibleLanes({ ...snapshot, operatorLanes: allLanes }, effectiveRepository);
   const selected = lanes[Math.min(Math.max(0, selectedIndex), Math.max(0, lanes.length - 1))] || null;
   const lines = [];
   const counts = snapshot.operatorCounts || { active: lanes.filter((lane) => lane.operatorCategory === "active").length, needs_user: snapshot.needsUserCount || 0, waiting: 0, failed: 0 };
-  const repositoryCount = new Set(lanes.map((lane) => lane.repository)).size;
+  const repositoryCount = new Set(allLanes.map((lane) => lane.repository)).size;
   const headline = `${paint("AGENT BRIDGE MISSION CONTROL", "1;34", color)}  ${paint(`ACTIVE ${counts.active || 0}`, "36;1", color)}  ${paint(`NEEDS YOU ${counts.needs_user || 0}`, counts.needs_user ? "33;1" : "90", color)}  ${paint(`WAITING ${counts.waiting || 0}`, "90", color)}  ${paint(`FAILED ${counts.failed || 0}`, counts.failed ? "31;1" : "90", color)}`;
   lines.push(truncateAnsi(headline, usableWidth));
   lines.push(truncate(`${formatLocalDateTime(snapshot.generatedAt)} · ${snapshot.mode} · ${repositoryCount} repo${repositoryCount === 1 ? "" : "s"}${snapshot.filter ? ` · ${snapshot.filter}` : ""}`, usableWidth));
@@ -839,14 +888,20 @@ export function renderMissionControl(snapshot, {
     ? measurements.widths[2] - 2
     : measurements.paneIndex === 2 ? measurements.widths[0] - 2 : Math.max(20, Math.floor(usableWidth * 0.35));
   const panes = [
-    windowPane(repositoryPane(snapshot, lanes), contentRows),
+    windowPane(repositoryPane(snapshot, allLanes, repositories, effectiveRepository), contentRows, true),
     windowPane(workPane(lanes, selectedIndex, now), contentRows, true),
     windowPane(detailPane(selected, timeline, Math.max(1, detailWidth), now, snapshot, detailExpanded), contentRows, false, detailOffset),
   ];
+  if (viewportState && typeof viewportState === "object") viewportState.detailOffset = panes[2].appliedOffset || 0;
   lines.push(...gridLayout(measurements, activePane, titles, panes, contentRows, color));
   if (interactive) {
     if (actionMessage) lines.push(truncateAnsi(paint(` ${actionMessage}`, actionMessage.toLowerCase().includes("failed") ? "31;1" : "33", color), usableWidth));
-    lines.push(sliceDisplay(" Tab pane  Enter expand  j/k move  l live  a attention  h history  o PR  c continue  x cancel  q quit", usableWidth, { cleanValue: false }));
+    const paneHelp = activePane === 0
+      ? "REPOSITORIES · j/k choose · Enter work"
+      : activePane === 1
+        ? "WORK · j/k choose lane · Enter details"
+        : `DETAILS · j/k scroll · g/G ends · Enter ${detailExpanded ? "collapse" : "expand"}`;
+    lines.push(sliceDisplay(` ${paneHelp}  Tab/←/→ pane  l/a/h view  o PR  c continue  x cancel  q quit`, usableWidth, { cleanValue: false }));
   } else if (snapshot.mode === "all") {
     lines.push(truncate("Archive preview: bridge cleanup --older-than-days 7", usableWidth));
   }

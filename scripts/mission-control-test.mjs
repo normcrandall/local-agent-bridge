@@ -15,9 +15,12 @@ import {
   formatLocalDateTime,
   loadMissionControlSnapshot,
   loadTimeline,
+  missionControlRepositories,
+  missionControlVisibleLanes,
   navigationIntent,
   newlyObservedAttentionKeys,
   operatorLaneCategory,
+  paneFocusIntent,
   parseRepositoryRemote,
   renderSnapshot,
   renderMissionControl,
@@ -52,6 +55,10 @@ assert.match(formatLocalDateTime("1970-01-01T00:00:00.000Z"), /^19(?:69|70)-/);
 assert.deepEqual(navigationIntent("j", 1), { selectedIndex: 2, preserveSelectedId: false });
 assert.deepEqual(navigationIntent("k", 1), { selectedIndex: 0, preserveSelectedId: false });
 assert.deepEqual(navigationIntent("r", 1), { selectedIndex: 1, preserveSelectedId: true });
+assert.equal(paneFocusIntent("\t", 0), 1);
+assert.equal(paneFocusIntent("\x1b[C", 2), 0);
+assert.equal(paneFocusIntent("\x1b[D", 0), 2);
+assert.equal(paneFocusIntent("j", 1), 1);
 const selectionFixture = [{ id: "first", updatedAt: "one" }, { id: "last", updatedAt: "two" }];
 assert.equal(resolveMissionControlSelection(selectionFixture, null, Number.MAX_SAFE_INTEGER).id, "last");
 assert.equal(resolveMissionControlSelection(selectionFixture, "first", 1).id, "first");
@@ -81,6 +88,7 @@ assert.equal(displayWidth("👨‍👩‍👧‍👦"), 2);
 assert.deepEqual(windowPane(Array.from({ length: 10 }, (_, index) => ({ text: `row ${index}` })), 5).map(({ text }) => text), [
   "row 0", "row 1", "row 2", "row 3", "↓ 6 more",
 ]);
+assert.equal(windowPane(Array.from({ length: 10 }, (_, index) => ({ text: `row ${index}` })), 2).length, 2);
 for (const status of PORTFOLIO_STATUSES) {
   const expected = !PORTFOLIO_STATUS_GROUPS.terminal.includes(status);
   assert.equal(isAttentionLane({ lifecyclePhase: status, updatedAt: "2026-07-23T11:59:00.000Z" }, Date.parse("2026-07-23T12:00:00.000Z")), expected, `${status} classification drifted`);
@@ -435,12 +443,47 @@ try {
   const noColor = renderMissionControl(attention, { selectedIndex, timeline, width: 120, height: 28, now, color: false, interactive: true });
   assert.doesNotMatch(noColor, /\x1b\[/);
   assert.match(noColor, /│ REPOSITORIES/);
-  assert.match(noColor, / Tab pane  Enter expand  j\/k move/);
+  assert.match(noColor, /WORK · j\/k choose lane · Enter details/);
+
+  const secondRepositoryLane = {
+    ...attention.operatorLanes[0],
+    id: "second-repository-lane",
+    operatorId: "second-repository-lane",
+    repository: "veliqon/second-repo",
+    issueNumber: 314,
+    prNumber: 315,
+    task: "Second repository objective",
+  };
+  const multiRepository = {
+    ...attention,
+    operatorLanes: [...attention.operatorLanes, secondRepositoryLane],
+  };
+  assert.deepEqual(missionControlRepositories(multiRepository), [null, "norm/example", "veliqon/control-plane", "veliqon/second-repo"]);
+  assert.deepEqual(missionControlVisibleLanes(multiRepository, "veliqon/second-repo").map((lane) => lane.id), ["second-repository-lane"]);
+  const repositoryFocused = renderMissionControl(multiRepository, {
+    selectedRepository: "veliqon/second-repo",
+    selectedIndex: 0,
+    width: 120,
+    height: 28,
+    now,
+    color: false,
+    interactive: true,
+    activePane: 0,
+  });
+  assert.match(repositoryFocused, /▶ second-repo/);
+  assert.match(repositoryFocused, /PR #315/);
+  assert.doesNotMatch(repositoryFocused, /PR #42/);
+  assert.match(repositoryFocused, /REPOSITORIES · j\/k choose · Enter work/);
   const narrow = renderMissionControl(attention, { selectedIndex, timeline, width: 60, height: 20, now, color: false, interactive: true, activePane: 2 });
   const narrowGrid = narrow.split("\n").filter((line) => /^[┌├│└]/.test(line));
   assert.ok(narrowGrid.every((line) => displayWidth(line) === 60));
-  const scrolledDetail = renderMissionControl(attention, { selectedIndex, timeline, width: 60, height: 12, now, color: false, interactive: true, activePane: 2, detailExpanded: true, detailOffset: Number.MAX_SAFE_INTEGER });
+  const viewportState = {};
+  const scrolledDetail = renderMissionControl(attention, { selectedIndex, timeline, width: 60, height: 12, now, color: false, interactive: true, activePane: 2, detailExpanded: true, detailOffset: Number.MAX_SAFE_INTEGER, viewportState });
   assert.match(scrolledDetail, /RECENT ACTIVITY|Rendering repository views/);
+  assert.ok(viewportState.detailOffset < Number.MAX_SAFE_INTEGER, "detail scrolling must clamp to a usable offset");
+  const narrowRepositories = renderMissionControl({ ...attention, historicalNeedsUserCount: 1, collapsedStale: { total: 2 } }, { selectedIndex, timeline, width: 60, height: 20, now, color: false, interactive: true, activePane: 0 });
+  assert.match(narrowRepositories, /REPOSITORIES/);
+  assert.match(narrowRepositories, /HISTORICAL INPUT|STALE HIDDEN/);
 
   const cli = execFileSync(process.execPath, [resolve(import.meta.dirname, "mission-control.mjs"), "--snapshot", "--attention", "--stale-after-hours", "72", "--state-root", root, "--repo", "norm/example"], { encoding: "utf8" });
   assert.match(cli, /norm\/example/);
