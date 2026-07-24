@@ -80,6 +80,21 @@ try {
   assert.equal(state.userAttention.status, "delivered");
   assert.equal(state.userAttention.attempt, 1);
 
+  const historical = await createCollaboration(root, {
+    task: "Preserve an old request without alerting",
+    workspace: root,
+    agents: ["claude"],
+    participants: ["claude"],
+    status: "needs_user",
+    createdAt: new Date(now - 7 * 60 * 60_000).toISOString(),
+    updatedAt: new Date(now - 7 * 60 * 60_000).toISOString(),
+  });
+  const callsBeforeHistoricalScan = calls.length;
+  await scanPendingUserAttention(root, { now, platform: "darwin", run });
+  state = await readCollaboration(root, historical.id);
+  assert.equal(state.userAttention, undefined);
+  assert.equal(calls.length, callsBeforeHistoricalScan, "historical requests must remain durable without generating desktop alerts");
+
   const failed = await createCollaboration(root, {
     task: "Retry a failed desktop signal",
     workspace: root,
@@ -164,7 +179,7 @@ try {
   assert.ok(cli.pending.some((entry) => entry.collaborationId === disabled.id), "CLI must read the explicit machine state root, not cwd");
 
   await updateCollaboration(root, failed.id, (current) => ({ ...current, status: "agreed" }));
-  console.log("User attention tests passed: immediate delivery, deduplicated reminders, bounded failure recovery, disabled-policy stability, privacy, and acknowledgement stop are verified.");
+  console.log("User attention tests passed: immediate delivery, deduplicated reminders, fresh-request filtering, bounded failure recovery, disabled-policy stability, privacy, and acknowledgement stop are verified.");
 } finally {
   delete process.env.BRIDGE_COLLABORATION_DIR;
   await rm(root, { recursive: true, force: true });

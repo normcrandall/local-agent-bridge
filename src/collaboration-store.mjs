@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { attentionRequestAt } from "./attention-state.mjs";
 import {
   appendFile,
   mkdir,
@@ -482,6 +483,7 @@ export async function queryControlPlane(stateRoot, options = {}) {
       headSha: cState.githubReview?.headSha || cState.githubBuilder?.headSha || cState.issueClaim?.headSha || null,
       ci: cState.ci || cState.ciTracking || null,
       coordinatorWake: cState.coordinatorWake || null,
+      attentionRequestedAt: attentionRequestAt(cState),
       reviewPublication: cState.reviewPublication || null,
       performanceSummary: cState.performanceSummary || null,
       turnCount: cState.runtime?.turnCount || 0,

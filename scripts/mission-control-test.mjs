@@ -188,6 +188,23 @@ try {
   assert.equal(hostStopped.providerActivity.codex, undefined);
   assert.equal(hostStopped.recentActivity[0].repository, "veliqon/control-plane");
   assert.match(renderSnapshot(hostStopped, { width: 88, now: now + 1_000 }), /Recent activity \(the coordinator may be between lanes\)/);
+
+  const historicalRoot = join(root, "historical-test");
+  await mkdir(historicalRoot);
+  await mkdir(join(historicalRoot, "portfolios"));
+  await writeFile(join(historicalRoot, `${needsUserId}.json`), JSON.stringify({
+    ...needsUserState,
+    createdAt: new Date(now - 7 * 60 * 60_000).toISOString(),
+    updatedAt: new Date(now).toISOString(),
+    userAttention: { status: "delivered", lastDeliveredAt: new Date(now).toISOString() },
+  }));
+  const historicalNeedsUser = await loadMissionControlSnapshot({ stateRoot: historicalRoot, now });
+  assert.equal(historicalNeedsUser.needsUserCount, 0);
+  assert.equal(historicalNeedsUser.historicalNeedsUserCount, 1);
+  assert.equal(historicalNeedsUser.recentActivity.length, 0, "notification receipt writes must not make an old request recent");
+  const historicalOutput = renderSnapshot(historicalNeedsUser, { width: 100, now });
+  assert.doesNotMatch(historicalOutput, /!!! USER INPUT REQUIRED/);
+  assert.match(historicalOutput, /1 historical input request remains inspectable but will not alert/);
   const expiredHostLane = hostActivityLane({
     ...hostState,
     expiresAt: new Date(now + HOST_ACTIVITY_LIVE_MS).toISOString(),

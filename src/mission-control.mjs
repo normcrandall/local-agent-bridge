@@ -3,6 +3,7 @@ import { open, stat } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 import { promisify } from "node:util";
 import { queryControlPlane } from "./collaboration-store.mjs";
+import { attentionRequestAt, attentionRequestIsFresh } from "./attention-state.mjs";
 import { LIVE_COLLABORATION_STATUSES } from "./collaboration-cleanup.mjs";
 import { hostActivityLane, listHostActivities } from "./host-activity-store.mjs";
 import { PORTFOLIO_STATUS_GROUPS } from "./portfolio-status.mjs";
@@ -175,7 +176,7 @@ export function laneNeedsUser(lane) {
 
 export function isStaleLane(lane, now = Date.now(), staleAfterMs = DEFAULT_STALE_AFTER_MS) {
   if (isLiveLane(lane, now) || String(lane.lifecyclePhase || "").toLowerCase() === "indeterminate") return false;
-  const updatedAt = dateMs(lane.updatedAt);
+  const updatedAt = dateMs(laneNeedsUser(lane) ? attentionRequestAt(lane) : lane.updatedAt);
   if (!updatedAt || now - updatedAt < staleAfterMs) return false;
   const status = String(lane.lifecyclePhase || "unknown").toLowerCase();
   if (lane.type === "portfolio_lane") return !PORTFOLIO_STATUS_GROUPS.integration.includes(status);
@@ -231,7 +232,8 @@ export async function loadMissionControlSnapshot({
   const mode = view || (showAll ? "all" : "live");
   if (!["live", "attention", "all"].includes(mode)) throw new Error(`Unknown Mission Control view: ${mode}`);
   const attention = matching.filter((lane) => isAttentionLane(lane, now));
-  const needsUser = matching.filter((lane) => laneNeedsUser(lane));
+  const allNeedsUser = matching.filter((lane) => laneNeedsUser(lane));
+  const needsUser = allNeedsUser.filter((lane) => attentionRequestIsFresh(lane, now));
   const stale = attention.filter((lane) => isStaleLane(lane, now, staleAfterMs));
   const selected = mode === "all"
     ? matching
@@ -248,7 +250,7 @@ export async function loadMissionControlSnapshot({
   const recentActivity = matching
     .filter((lane) => !isLiveLane(lane, now))
     .filter((lane) => {
-      const updatedAt = dateMs(lane.updatedAt);
+      const updatedAt = dateMs(laneNeedsUser(lane) ? attentionRequestAt(lane) : lane.updatedAt);
       return updatedAt > 0 && now - updatedAt <= DEFAULT_RECENT_ACTIVITY_AFTER_MS;
     })
     .sort((left, right) => dateMs(right.updatedAt) - dateMs(left.updatedAt))
@@ -259,7 +261,7 @@ export async function loadMissionControlSnapshot({
       lifecyclePhase: lane.lifecyclePhase,
       activeAgent: lane.activeAgent || lane.writer || null,
       summary: lane.narrative?.summary || lane.task || null,
-      updatedAt: lane.updatedAt,
+      updatedAt: laneNeedsUser(lane) ? attentionRequestAt(lane) : lane.updatedAt,
       nextAction: lane.nextAction || null,
     }));
 
@@ -291,6 +293,7 @@ export async function loadMissionControlSnapshot({
     includeStale,
     providerActivity,
     needsUserCount: needsUser.length,
+    historicalNeedsUserCount: allNeedsUser.length - needsUser.length,
     needsUserKeys: needsUser.map((lane) => `${lane.id}:${lane.coordinatorWake?.sequence || 0}`).sort(),
     needsUserSignature: needsUser
       .map((lane) => `${lane.id}:${lane.coordinatorWake?.sequence || 0}`)
@@ -444,6 +447,9 @@ export function renderMissionControl(snapshot, {
   lines.push(truncate(`Mode: ${snapshot.mode} | repos ${snapshot.visibleRepositories ?? snapshot.repositories.length} | lanes ${snapshot.visibleLanes}/${snapshot.totalLanes} | providers ${providerLine}`, usableWidth));
   if (snapshot.needsUserCount > 0) {
     lines.push(paint(`!!! USER INPUT REQUIRED: ${snapshot.needsUserCount} collaboration${snapshot.needsUserCount === 1 ? "" : "s"}. Press a to inspect.`, "31;1", color));
+  }
+  if (snapshot.historicalNeedsUserCount > 0) {
+    lines.push(truncate(`${snapshot.historicalNeedsUserCount} historical input request${snapshot.historicalNeedsUserCount === 1 ? " remains" : "s remain"} inspectable but will not alert. Press a, then s to include stale records.`, usableWidth));
   }
   lines.push(paint("─".repeat(usableWidth), "90", color));
 
