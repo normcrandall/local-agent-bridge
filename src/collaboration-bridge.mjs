@@ -545,7 +545,6 @@ const githubBuilderSchema = z.object({
   baseRef: z.string().min(1).optional(),
   allowedOperations: z.array(z.enum(["ensure_pull_request", "read_review_threads", "reply_review_thread", "resolve_review_thread", "mark_ready", "merge", "create_branch", "push_branch", "replace_branch"])).min(1).max(9)
     .default(["ensure_pull_request", "read_review_threads", "reply_review_thread", "resolve_review_thread", "mark_ready"]),
-  allowWorkspaceHead: z.boolean().optional().default(false),
 }).strict().superRefine((value, ctx) => {
   if (value.allowedOperations.includes("create_branch") && !value.baseSha) {
     ctx.addIssue({ code: "custom", path: ["baseSha"], message: "create_branch requires an exact baseSha authorization" });

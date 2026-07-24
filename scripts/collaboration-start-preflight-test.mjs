@@ -49,12 +49,17 @@ try {
   assert.equal(plannedIssueClaimWorktree({ workspace: directory, worktree: null }), null);
   const builder = { repository: "owner/repo", headSha: expectedHead };
   assert.equal(
-    workspaceHeadBuilderBinding({ githubBuilder: builder, mode: "review", worktree: { strategy: "self-contained" } }),
-    builder,
+    workspaceHeadBuilderBinding({ githubBuilder: { ...builder, allowWorkspaceHead: true }, mode: "review", worktree: { strategy: "self-contained" } }).allowWorkspaceHead,
+    false,
   );
   assert.deepEqual(
     workspaceHeadBuilderBinding({ githubBuilder: builder, mode: "work", worktree: { strategy: "self-contained" } }),
     { ...builder, allowWorkspaceHead: true },
+  );
+  assert.equal(
+    workspaceHeadBuilderBinding({ githubBuilder: { ...builder, allowWorkspaceHead: true }, mode: "work", worktree: { strategy: "linked" } }).allowWorkspaceHead,
+    false,
+    "caller input cannot retain workspace-head authority outside a self-contained writer checkout",
   );
 
   assert.throws(

@@ -14,7 +14,7 @@ import { exportSkills } from "./skill-portability.mjs";
 import { deployRuntime } from "../src/runtime-deployment.mjs";
 import { refreshSupervisor } from "../src/worker-supervisor-client.mjs";
 import {
-  DEFAULT_MODEL_FALLBACKS_CONFIG,
+  configuredModelFallbacksPath,
   mergeRecommendedWriterFallbacks,
 } from "../src/model-fallbacks.mjs";
 
@@ -241,8 +241,9 @@ async function writeTextAtomic(path, content) {
   }
 }
 
-const modelFallbacks = mergeRecommendedWriterFallbacks(await readJson(DEFAULT_MODEL_FALLBACKS_CONFIG));
-await writeJson(DEFAULT_MODEL_FALLBACKS_CONFIG, modelFallbacks);
+const modelFallbacksPath = configuredModelFallbacksPath();
+const modelFallbacks = mergeRecommendedWriterFallbacks(await readJson(modelFallbacksPath));
+await writeJson(modelFallbacksPath, modelFallbacks);
 
 const hookLauncher = resolve(binRoot, "agent-bridge-coordinator-hook");
 const hostActivityHookLauncher = resolve(binRoot, "agent-bridge-host-activity-hook");

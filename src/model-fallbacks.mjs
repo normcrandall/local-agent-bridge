@@ -7,6 +7,10 @@ export const DEFAULT_MODEL_FALLBACKS_CONFIG = resolve(
   ".config/local-agent-bridge/model-fallbacks.json",
 );
 
+export function configuredModelFallbacksPath() {
+  return process.env.AGENT_BRIDGE_MODEL_FALLBACKS_CONFIG || DEFAULT_MODEL_FALLBACKS_CONFIG;
+}
+
 export const RECOMMENDED_WRITER_FALLBACKS = Object.freeze({
   codex: Object.freeze(["gpt-5.6-terra"]),
   antigravity: Object.freeze([
@@ -44,7 +48,7 @@ export function normalizeFallbackModels(values, source = "fallbackModels") {
 }
 
 export function loadConfiguredFallbackModels(provider, {
-  configPath = process.env.AGENT_BRIDGE_MODEL_FALLBACKS_CONFIG || DEFAULT_MODEL_FALLBACKS_CONFIG,
+  configPath = configuredModelFallbacksPath(),
 } = {}) {
   if (!existsSync(configPath)) return [];
   let config;

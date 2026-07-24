@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import process from "node:process";
 import { createAgentPool } from "../src/agent-pool.mjs";
-import { summarizeDeliveryOutcomes } from "../src/builder-operation-store.mjs";
+import { deliverySummaryForHandoff, summarizeDeliveryOutcomes } from "../src/builder-operation-store.mjs";
 import {
   acquireWorkerLock,
   acquireWorkspaceLock,
@@ -765,7 +765,13 @@ try {
             const receiptPath = githubBuilder.receiptPath
               || resolve(current.workspace, ".bridge", "github-builder-receipts.jsonl");
             const delivery = summarizeDeliveryOutcomes(receiptPath, { headSha: githubBuilder.headSha });
-            if (delivery) completion = { ...completion, delivery: { ...delivery, at: new Date().toISOString() } };
+            const handoffDelivery = deliverySummaryForHandoff({
+              delivery,
+              handoff: turn.handoff,
+              agent: turn.agent,
+              writer: current.writer,
+            });
+            if (handoffDelivery) completion = { ...completion, delivery: handoffDelivery };
           }
         }
         const reviewPublication = turn.metadata?.reviewPublication?.published

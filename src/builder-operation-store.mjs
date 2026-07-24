@@ -173,3 +173,14 @@ export function summarizeDeliveryOutcomes(receiptPath, { headSha = null } = {}) 
   for (const value of latest.values()) counts[value] = (counts[value] || 0) + 1;
   return { outcome: aggregateDeliveryOutcome([...latest.values()]), counts };
 }
+
+export function deliverySummaryForHandoff({ delivery, handoff, agent, writer, at = new Date().toISOString() }) {
+  if (delivery) return { ...delivery, at };
+  if (agent !== writer || !["completed", "needs_review"].includes(handoff?.outcome)) return null;
+  return {
+    outcome: "rejected",
+    counts: { rejected: 1 },
+    detail: "Writer completed a bound-delivery handoff without a remotely verified builder receipt.",
+    at,
+  };
+}

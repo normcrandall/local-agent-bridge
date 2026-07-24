@@ -10,7 +10,7 @@ import {
   loadConfiguredClaudeModel,
   resolveClaudeModelPolicy,
 } from "../src/claude-model-policy.mjs";
-import { mergeRecommendedWriterFallbacks } from "../src/model-fallbacks.mjs";
+import { configuredModelFallbacksPath, mergeRecommendedWriterFallbacks } from "../src/model-fallbacks.mjs";
 
 const mergedWriterFallbacks = mergeRecommendedWriterFallbacks({
   version: 1,
@@ -21,6 +21,11 @@ assert.deepEqual(mergedWriterFallbacks.providers.docker.fallbackModels, ["custom
 assert.deepEqual(mergedWriterFallbacks.providers.antigravity.fallbackModels, [
   "gemini-3.6-flash-medium", "gemini-3.6-flash-low", "gemini-3.5-flash-high",
 ]);
+const priorFallbackPath = process.env.AGENT_BRIDGE_MODEL_FALLBACKS_CONFIG;
+process.env.AGENT_BRIDGE_MODEL_FALLBACKS_CONFIG = "/tmp/bridge-custom-fallbacks.json";
+assert.equal(configuredModelFallbacksPath(), "/tmp/bridge-custom-fallbacks.json");
+if (priorFallbackPath === undefined) delete process.env.AGENT_BRIDGE_MODEL_FALLBACKS_CONFIG;
+else process.env.AGENT_BRIDGE_MODEL_FALLBACKS_CONFIG = priorFallbackPath;
 
 const claudeDefault = claudeToolRequest({ prompt: "test" });
 assert.equal(claudeDefault.name, "ask_claude");

@@ -36,6 +36,7 @@ function workspaceHead(workspace) {
   const result = spawnSync("git", ["rev-parse", "HEAD"], {
     cwd: workspace,
     encoding: "utf8",
+    timeout: 5_000,
     env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
   });
   const sha = result.status === 0 ? result.stdout.trim() : "";
@@ -519,6 +520,9 @@ export function createAgentPool({
           } : null,
           workspaceHeadSha: mode === "work" && githubBuilder?.allowWorkspaceHead
             ? workspaceHead(workspace)
+            : null,
+          workspaceHeadShaSource: mode === "work" && githubBuilder?.allowWorkspaceHead
+            ? "post_turn_isolated_checkout"
             : null,
           reviewPublication: mode === "review" && githubReview ? {
             available: publication.available,

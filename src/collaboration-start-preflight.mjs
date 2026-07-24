@@ -37,7 +37,9 @@ export function resolveClaimedWorktreeHead(workspace) {
 
 export function workspaceHeadBuilderBinding({ githubBuilder, mode, worktree }) {
   if (!githubBuilder) return null;
-  return mode === "work" && worktree?.strategy === "self-contained"
-    ? { ...githubBuilder, allowWorkspaceHead: true }
-    : githubBuilder;
+  return {
+    ...githubBuilder,
+    // This is a broker-derived capability, never an additive caller override.
+    allowWorkspaceHead: mode === "work" && worktree?.strategy === "self-contained",
+  };
 }
