@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { attentionRequestAt, attentionRequestIsFresh } from "./attention-state.mjs";
 import {
   appendEvent,
   listCollaborations,
@@ -128,7 +129,11 @@ export async function signalUserAttention(root, id, {
   try {
     await updateCollaboration(root, id, (current) => {
       if (!attentionNeedsUser(current)) throw SKIP_UPDATE;
-      const attention = attentionReceipt(current);
+      const requestedAt = attentionRequestAt(current);
+      const storedAttention = attentionReceipt(current);
+      const attention = storedAttention?.requestedAt && storedAttention.requestedAt !== requestedAt
+        ? null
+        : storedAttention;
       if (!notificationsEnabled(environment) && attention?.reason === "disabled_by_policy") throw SKIP_UPDATE;
       if (attention?.reason?.startsWith("unsupported_platform_")) throw SKIP_UPDATE;
       const activeClaim = attention?.status === "sending"
@@ -145,6 +150,7 @@ export async function signalUserAttention(root, id, {
         claimedAt: at,
         attempt: (attention?.attempt || 0) + 1,
         lastAttemptAt: at,
+        requestedAt,
       });
     });
   } catch (caught) {
@@ -200,6 +206,7 @@ export async function scanPendingUserAttention(root, options = {}) {
     if (summary.status !== "needs_user" && summary.coordinatorWake?.kind !== "needs_user") continue;
     const state = await readCollaboration(root, summary.id).catch(() => null);
     if (!state || !attentionNeedsUser(state)) continue;
+    if (!options.force && !attentionRequestIsFresh(state, options.now)) continue;
     results.push({ collaborationId: state.id, ...(await signalUserAttention(root, state.id, options)) });
   }
   return results;

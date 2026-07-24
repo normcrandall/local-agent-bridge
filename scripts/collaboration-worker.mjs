@@ -733,7 +733,11 @@ try {
             decisions = [...decisions, recorded];
             if (receipt.action === "needs_user") decisionEscalation = recorded;
           } catch (error) {
-            decisionEscalation = { action: "needs_user", reason: `Invalid decision receipt from ${turn.agent}: ${error.message}` };
+            decisionEscalation = {
+              action: "needs_user",
+              reason: `Invalid decision receipt from ${turn.agent}: ${error.message}`,
+              recordedAt,
+            };
           }
         }
         let completion = current.completion || null;
