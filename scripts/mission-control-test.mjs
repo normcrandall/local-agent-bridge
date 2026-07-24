@@ -107,6 +107,7 @@ assert.equal(isLiveLane({ type: "native_host", lifecyclePhase: "working", hostAc
 assert.equal(isStaleLane({ type: "portfolio_lane", lifecyclePhase: "blocked", updatedAt: "2026-07-22T10:00:00.000Z" }, Date.parse("2026-07-23T12:00:00.000Z")), true);
 assert.equal(isStaleLane({ type: "portfolio_lane", lifecyclePhase: "integrating", updatedAt: "2026-07-22T10:00:00.000Z" }, Date.parse("2026-07-23T12:00:00.000Z")), false);
 assert.equal(operatorLaneCategory({ type: "collaboration", lifecyclePhase: "turn_limit", updatedAt: "2026-07-23T11:59:00.000Z" }, classificationNow), "waiting");
+assert.equal(operatorLaneCategory({ type: "collaboration", lifecyclePhase: "budget", updatedAt: "2026-07-23T11:59:00.000Z" }, classificationNow), "stopped");
 for (const status of PORTFOLIO_STATUS_GROUPS.integration) assert.ok(statusRank(status) < statusRank("ready"));
 const shortReadSource = Buffer.from("incremental-ledger-data");
 const shortRead = await readFileRange({
@@ -317,6 +318,90 @@ try {
   const staleDeadHostLane = hostActivityLane({ ...hostState, hostPid: 99_999_999 }, now + HOST_ACTIVITY_HEARTBEAT_GRACE_MS + 1);
   assert.equal(staleDeadHostLane.hostActivity.livenessProof, "none");
   assert.equal(isLiveLane(staleDeadHostLane, now + HOST_ACTIVITY_HEARTBEAT_GRACE_MS + 1), false);
+
+  const outcomeRoot = join(root, "outcome-test");
+  const budgetReviewId = "bridge-66666666-6666-4666-8666-666666666666";
+  await mkdir(outcomeRoot);
+  await mkdir(join(outcomeRoot, "portfolios"));
+  await writeFile(join(outcomeRoot, `${budgetReviewId}.json`), JSON.stringify({
+    ...base,
+    id: budgetReviewId,
+    status: "budget",
+    updatedAt: "2026-07-23T11:50:00.000Z",
+    task: "Review the exact pull request head",
+    issueClaim: { repository: "veliqon/control-plane", issueNumber: 669 },
+    budget: { maxMinutes: 90 },
+    runtime: { budgetExceeded: true, previousAgent: "claude" },
+    completion: {
+      sequence: 1,
+      acknowledged: true,
+      nextAction: "continue",
+      lastHandoff: { outcome: "completed", summary: "Review completed before the budget boundary." },
+    },
+  }));
+  await writeFile(join(outcomeRoot, "portfolios", "helm-77777777-7777-4777-8777-777777777777.json"), JSON.stringify({
+    id: "helm-77777777-7777-4777-8777-777777777777",
+    workspace,
+    repository: "veliqon/control-plane",
+    createdAt: "2026-07-23T10:00:00.000Z",
+    updatedAt: "2026-07-23T08:00:00.000Z",
+    items: [{
+      id: "issue-669",
+      issueNumber: 669,
+      prNumber: 674,
+      title: "Merged focus lifecycle work",
+      status: "merged",
+      writer: "codex",
+      collaborationId: budgetReviewId,
+      headSha: "c".repeat(40),
+      summary: "PR #674 merged after its independent review completed.",
+      updatedAt: "2026-07-23T08:00:00.000Z",
+      blockedBy: [],
+    }],
+  }));
+  const failedReviewId = "bridge-99999999-9999-4999-8999-999999999999";
+  await writeFile(join(outcomeRoot, `${failedReviewId}.json`), JSON.stringify({
+    ...base,
+    id: failedReviewId,
+    status: "failed",
+    updatedAt: "2026-07-23T11:52:00.000Z",
+    task: "Resolve review threads after the delivery was already accepted",
+    githubReview: { repository: "veliqon/control-plane", prNumber: 674, headSha: "c".repeat(40) },
+    runtime: { previousAgent: "antigravity" },
+    error: "The reviewer identity was unavailable.",
+  }));
+  const mergedOutcome = await loadMissionControlSnapshot({ stateRoot: outcomeRoot, now });
+  assert.equal(mergedOutcome.visibleLanes, 0, "a merged portfolio outcome must not remain live or attention work");
+  assert.equal(mergedOutcome.operatorLanes.length, 0, "a stopped review attempt must not make its merged PR look failed");
+  assert.equal(mergedOutcome.operatorCounts.stopped, 0);
+  assert.equal(mergedOutcome.operatorCounts.failed, 0, "the compatibility alias must also exclude superseded attempts");
+  const mergedHistory = await loadMissionControlSnapshot({ stateRoot: outcomeRoot, showAll: true, now });
+  assert.equal(mergedHistory.operatorLanes.length, 1, "PR identity must reconcile portfolio, writer, and review attempts");
+  assert.equal(mergedHistory.operatorLanes[0].portfolio.status, "merged");
+  assert.equal(mergedHistory.operatorLanes[0].relatedLaneCount, 2);
+  assert.equal(mergedHistory.operatorLanes[0].operatorCategory, "history");
+  const mergedHistoryOutput = renderSnapshot(mergedHistory, { width: 120, height: 30, now, detailExpanded: true });
+  assert.match(mergedHistoryOutput, /DELIVERY\s+PR #674 merged/);
+  assert.match(mergedHistoryOutput, /ATTEMPT\s+stopped · budget reached/);
+  assert.doesNotMatch(mergedHistoryOutput, /FAILED/);
+  assert.doesNotMatch(mergedHistoryOutput, /NEXT\s+continue/);
+
+  const standaloneBudgetId = "bridge-88888888-8888-4888-8888-888888888888";
+  await writeFile(join(outcomeRoot, `${standaloneBudgetId}.json`), JSON.stringify({
+    ...base,
+    id: standaloneBudgetId,
+    status: "budget",
+    updatedAt: "2026-07-23T11:59:00.000Z",
+    task: "A provider attempt that genuinely stopped",
+    githubReview: { repository: "veliqon/control-plane", prNumber: 675, headSha: "d".repeat(40) },
+    budget: { maxMinutes: 90 },
+    runtime: { budgetExceeded: true, previousAgent: "claude" },
+  }));
+  const stoppedAttempt = await loadMissionControlSnapshot({ stateRoot: outcomeRoot, now });
+  assert.equal(stoppedAttempt.operatorCounts.stopped, 1);
+  assert.equal(stoppedAttempt.operatorCounts.failed, 1, "legacy JSON consumers retain the failed count alias");
+  assert.match(renderSnapshot(stoppedAttempt, { width: 120, now }), /STOPPED 1/);
+  assert.match(renderSnapshot(stoppedAttempt, { width: 120, now }), /budget reached/);
 
   const attention = await loadMissionControlSnapshot({ stateRoot: root, view: "attention", now });
   assert.equal(attention.mode, "attention");
