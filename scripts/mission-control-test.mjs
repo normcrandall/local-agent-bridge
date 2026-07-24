@@ -31,6 +31,7 @@ import {
   missionControlActionAvailability,
   missionControlConfirmation,
   missionControlCopyText,
+  missionControlPlatformCommands,
   missionControlPrUrl,
   resolveMissionControlSelection,
 } from "../src/mission-control-actions.mjs";
@@ -53,6 +54,11 @@ selectionFixture[0].updatedAt = "changed";
 const confirmed = missionControlConfirmation(armed.pending, { key: "x", lane: selectionFixture[0], now: 101 });
 assert.equal(confirmed.confirmed, true);
 assert.equal(confirmed.lane.updatedAt, "one", "confirmation must retain the rendered revision fence");
+assert.equal(missionControlActionAvailability({ type: "collaboration", coordinatorWake: { sequence: 1, status: "pending", actionable: true } }).acknowledgeWake, false);
+assert.equal(missionControlActionAvailability({ type: "collaboration", coordinatorWake: { sequence: 1, status: "pending", actionable: false } }).acknowledgeWake, true);
+assert.equal(missionControlPlatformCommands("darwin").open[0].command, "open");
+assert.equal(missionControlPlatformCommands("linux").copy[0].command, "wl-copy");
+assert.equal(missionControlPlatformCommands("win32").copy[0].command, "clip.exe");
 assert.deepEqual(newlyObservedAttentionKeys(new Set(["lane-a:1"]), ["lane-a:1"]), []);
 assert.deepEqual(newlyObservedAttentionKeys(new Set(["lane-a:1", "lane-b:1"]), ["lane-a:1"]), [], "removing a request must not ring again");
 assert.deepEqual(newlyObservedAttentionKeys(new Set(["lane-a:1"]), ["lane-a:1", "lane-b:1"]), ["lane-b:1"]);

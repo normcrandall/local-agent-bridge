@@ -49,6 +49,35 @@ function identityIndexPath(root, identityKey) {
   return resolve(collaborationDirectory(root), `identity-${identityKey}.json`);
 }
 
+function identityLockPath(root, identityKey) {
+  if (!/^[0-9a-f]{64}$/.test(identityKey || "")) throw new Error("Invalid collaboration identity key.");
+  return resolve(collaborationDirectory(root), `identity-${identityKey}.lock`);
+}
+
+async function removeStaleIdentityLock(root, identityKey) {
+  const path = identityLockPath(root, identityKey);
+  try {
+    const owner = Number.parseInt(await readFile(path, "utf8"), 10);
+    const info = await stat(path);
+    let ownerAlive = false;
+    if (Number.isInteger(owner) && owner > 0) {
+      try {
+        process.kill(owner, 0);
+        ownerAlive = true;
+      } catch (error) {
+        ownerAlive = error.code === "EPERM";
+      }
+    }
+    if ((!ownerAlive && Number.isInteger(owner) && owner > 0) || (!Number.isInteger(owner) && Date.now() - info.mtimeMs > LOCK_STALE_MS)) {
+      await unlink(path).catch((error) => {
+        if (error.code !== "ENOENT") throw error;
+      });
+    }
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+}
+
 async function acquireFileLock(path, { attempts = 100, intervalMs = 50 } = {}) {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
@@ -182,6 +211,7 @@ export async function listCollaborations(root, { status, limit = 20 } = {}) {
     .slice(0, limit)
     .map((state) => ({
       id: state.id,
+      identityKey: state.identityKey,
       task: String(state.task || "").split(CLAIMED_ISSUE_CONTEXT_MARKER)[0].trim().slice(0, 500),
       status: state.status,
       agents: state.agents,
@@ -212,6 +242,7 @@ export async function findCollaborationByIdentity(root, identityKey, {
   const candidates = await listCollaborations(root, { limit: 10_000 });
   for (const candidate of candidates) {
     if (!allowed.has(candidate.status)) continue;
+    if (candidate.identityKey && candidate.identityKey !== identityKey) continue;
     const state = await readCollaboration(root, candidate.id);
     if (state.identityKey === identityKey) {
       await atomicWriteJson(identityIndexPath(root, identityKey), { id: state.id, identityKey, updatedAt: state.updatedAt });
@@ -231,7 +262,7 @@ export async function acquireIdentityLock(root, identityKey) {
   if (!/^[0-9a-f]{64}$/.test(identityKey || "")) throw new Error("Invalid collaboration identity key.");
   const directory = collaborationDirectory(root);
   await mkdir(directory, { recursive: true, mode: 0o700 });
-  return acquireFileLock(resolve(directory, `identity-${identityKey}.lock`), {
+  return acquireFileLock(identityLockPath(root, identityKey), {
     attempts: 7_200,
     intervalMs: 50,
   });
@@ -327,6 +358,16 @@ export async function archiveCollaboration(root, id, { expectedUpdatedAt = null 
     catch (error) {
       if (transcriptMoved) await rename(archivedTranscript, target.transcript).catch(() => {});
       throw error;
+    }
+    if (state.identityKey) {
+      const indexPath = identityIndexPath(root, state.identityKey);
+      try {
+        const indexed = JSON.parse(await readFile(indexPath, "utf8"));
+        if (indexed.id === id) await unlink(indexPath);
+      } catch (error) {
+        if (error.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
+      }
+      await removeStaleIdentityLock(root, state.identityKey);
     }
     return { id, archived: true, status: state.status, archive };
   } finally {

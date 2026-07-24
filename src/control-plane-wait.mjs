@@ -56,8 +56,11 @@ export async function waitForControlPlane(stateRoot, {
       return Number.isFinite(laneMs) && (!Number.isFinite(latestMs) || laneMs > latestMs) ? lane.updatedAt : latest;
     }, afterUpdatedAt);
     last = { requested, lanes, classifications, changed, cursor, reached: any ? desired.some(Boolean) : desired.every(Boolean) };
-    if (last.reached || last.classifications.includes("missing") || last.classifications.includes("crashed")) return last;
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, intervalMs));
+    if (last.reached || last.classifications.includes("crashed")) return last;
+    const remainingMs = deadline - now();
+    if (remainingMs <= 0) break;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, Math.min(intervalMs, remainingMs)));
   }
-  return { ...(last || { requested, lanes: [], classifications: [], changed: [], cursor: afterUpdatedAt, reached: false }), timedOut: true };
+  const result = last || { requested, lanes: [], classifications: [], changed: [], cursor: afterUpdatedAt, reached: false };
+  return result.classifications.includes("missing") ? { ...result, missing: true } : { ...result, timedOut: true };
 }

@@ -18,6 +18,7 @@ import {
   missionControlActionAvailability,
   missionControlConfirmation,
   missionControlCopyText,
+  missionControlPlatformCommands,
   missionControlPrUrl,
   resolveMissionControlSelection,
 } from "../src/mission-control-actions.mjs";
@@ -112,6 +113,7 @@ function restore() {
   if (restorePromise) return restorePromise;
   stopped = true;
   if (timer) clearInterval(timer);
+  timer = null;
   process.stdout.off("resize", draw);
   process.stdin.setRawMode?.(false);
   process.stdin.pause();
@@ -131,7 +133,21 @@ function restoreSynchronously() {
   terminalRestored = true;
 }
 
+function startRefreshTimer() {
+  if (stopped || timer) return;
+  timer = setInterval(draw, refreshMs);
+  timer.unref();
+}
+
+function pauseRefreshTimer() {
+  const shouldResume = Boolean(timer) && !stopped;
+  if (timer) clearInterval(timer);
+  timer = null;
+  return shouldResume;
+}
+
 async function promptLine(label) {
+  const shouldResumeRefresh = pauseRefreshTimer();
   process.stdin.off("data", handleKey);
   process.stdin.setRawMode(false);
   process.stdout.write(`\x1b[?25h\x1b[H\x1b[2J${label}\n`);
@@ -143,7 +159,36 @@ async function promptLine(label) {
     process.stdin.setRawMode(true);
     process.stdin.on("data", handleKey);
     process.stdout.write("\x1b[?25l");
+    if (shouldResumeRefresh) startRefreshTimer();
   }
+}
+
+function openExternalUrl(url) {
+  const candidates = missionControlPlatformCommands().open;
+  const attempt = (index) => {
+    const candidate = candidates[index];
+    if (!candidate) {
+      actionMessage = `Open failed: no supported URL opener is installed. Copy the PR URL with y instead.`;
+      void draw();
+      return;
+    }
+    execFile(candidate.command, [...candidate.args, url], (error) => {
+      if (error?.code === "ENOENT") return attempt(index + 1);
+      actionMessage = error ? `Open failed: ${error.message}` : `Opened ${url}`;
+      void draw();
+    });
+  };
+  attempt(0);
+}
+
+function copySelection(lane) {
+  const input = missionControlCopyText(lane);
+  for (const candidate of missionControlPlatformCommands().copy) {
+    const copied = spawnSync(candidate.command, candidate.args, { input, encoding: "utf8" });
+    if (copied.status === 0) return true;
+    if (copied.error?.code !== "ENOENT") return false;
+  }
+  return false;
 }
 
 async function shutdown(code) {
@@ -221,13 +266,9 @@ async function handleKey(key) {
       actionMessage = `Action ${action} is unavailable for the selected lane.`;
     } else if (key === "o") {
       const url = missionControlPrUrl(lane);
-      execFile("/usr/bin/open", [url], (error) => {
-        actionMessage = error ? `Open failed: ${error.message}` : `Opened ${url}`;
-        void draw();
-      });
+      openExternalUrl(url);
     } else if (key === "y") {
-      const copied = spawnSync("/usr/bin/pbcopy", [], { input: missionControlCopyText(lane), encoding: "utf8" });
-      actionMessage = copied.status === 0 ? `Copied ${lane.alias || lane.id}.` : "Clipboard copy failed.";
+      actionMessage = copySelection(lane) ? `Copied ${lane.alias || lane.id}.` : "Clipboard copy failed: no supported clipboard command is available.";
     } else if (key === "c") {
       const message = await promptLine(`Continue ${lane.alias || lane.id}. Enter the next instruction; blank cancels.`);
       if (!message) actionMessage = "Continue cancelled.";
@@ -271,7 +312,6 @@ process.on("SIGTERM", () => { void shutdown(143); });
 process.on("exit", restoreSynchronously);
 process.stdout.on("resize", draw);
 
-timer = setInterval(draw, refreshMs);
-timer.unref();
+startRefreshTimer();
 await draw();
 await exitRequested;

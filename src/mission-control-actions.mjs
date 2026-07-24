@@ -31,7 +31,32 @@ export function missionControlActionAvailability(lane) {
       && !(lane.coordinatorWake?.actionable && lane.coordinatorWake.status !== "acknowledged"),
     cancel: collaboration && ["queued", "running", "recovering", "cancelling"].includes(lane.lifecyclePhase),
     archive: collaboration && TERMINAL.has(lane.lifecyclePhase) && lane.lifecyclePhase !== "indeterminate",
-    acknowledgeWake: collaboration && Boolean(lane.coordinatorWake?.sequence && lane.coordinatorWake.status !== "acknowledged"),
+    acknowledgeWake: collaboration
+      && lane.coordinatorWake?.actionable === false
+      && Boolean(lane.coordinatorWake?.sequence && lane.coordinatorWake.status !== "acknowledged"),
+  };
+}
+
+export function missionControlPlatformCommands(platform = process.platform) {
+  if (platform === "darwin") {
+    return {
+      open: [{ command: "open", args: [] }],
+      copy: [{ command: "pbcopy", args: [] }],
+    };
+  }
+  if (platform === "win32") {
+    return {
+      open: [{ command: "rundll32.exe", args: ["url.dll,FileProtocolHandler"] }],
+      copy: [{ command: "clip.exe", args: [] }],
+    };
+  }
+  return {
+    open: [{ command: "xdg-open", args: [] }],
+    copy: [
+      { command: "wl-copy", args: [] },
+      { command: "xclip", args: ["-selection", "clipboard"] },
+      { command: "xsel", args: ["--clipboard", "--input"] },
+    ],
   };
 }
 

@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { collaborationAlias, collaborationIdentity } from "../src/collaboration-identity.mjs";
-import { acquireIdentityLock, createCollaboration, findCollaborationByIdentity, queryControlPlane, updateCollaboration } from "../src/collaboration-store.mjs";
+import { acquireIdentityLock, archiveCollaboration, collaborationDirectory, createCollaboration, findCollaborationByIdentity, queryControlPlane, updateCollaboration } from "../src/collaboration-store.mjs";
 import { classifyWaitLane, waitForControlPlane } from "../src/control-plane-wait.mjs";
 
 const root = await mkdtemp(join(tmpdir(), "bridge-coordination-"));
@@ -66,6 +66,17 @@ try {
 
   const missing = await waitForControlPlane(root, { handles: ["missing-lane"], timeoutMs: 0 });
   assert.deepEqual(missing.classifications, ["missing"]);
+  assert.equal(missing.missing, true);
+  assert.equal(missing.timedOut, undefined);
+
+  const futureId = "bridge-33333333-3333-4333-8333-333333333333";
+  const waitsBeforeCreation = waitForControlPlane(root, { handles: [futureId], timeoutMs: 2_000, intervalMs: 20 });
+  setTimeout(async () => {
+    await createCollaboration(root, { id: futureId, workspace, status: "running", agents: ["claude"] });
+    await updateCollaboration(root, futureId, (current) => ({ ...current, status: "completed" }));
+  }, 50);
+  assert.equal((await waitsBeforeCreation).reached, true, "a waiter started before lane creation must observe the later terminal lane");
+
   await createCollaboration(root, {
     id: "bridge-11111111-2222-4222-8222-222222222222",
     workspace,
@@ -75,6 +86,14 @@ try {
   });
   await assert.rejects(() => waitForControlPlane(root, { handles: [plane.lanes[0].alias], timeoutMs: 0 }), /Ambiguous collaboration alias/);
   await assert.rejects(() => waitForControlPlane(root, { handles: ["bridge-11111111"], timeoutMs: 0 }), /Ambiguous collaboration ID prefix/);
+  await updateCollaboration(root, id, (current) => ({ ...current, status: "completed" }));
+  const indexPath = join(collaborationDirectory(root), `identity-${identity}.json`);
+  const identityLockPath = join(collaborationDirectory(root), `identity-${identity}.lock`);
+  await access(indexPath);
+  await writeFile(identityLockPath, "999999999\n");
+  await archiveCollaboration(root, id);
+  await assert.rejects(() => access(indexPath), { code: "ENOENT" });
+  await assert.rejects(() => access(identityLockPath), { code: "ENOENT" });
   assert.equal(classifyWaitLane({ lifecyclePhase: "running", recovery: { processAlive: false }, heartbeat: { heartbeatAt: "2026-07-24T00:00:00.000Z" } }, { now: Date.parse("2026-07-24T00:02:00.000Z") }), "crashed");
   await assert.rejects(() => waitForControlPlane(root, { handles: [id], timeoutMs: Number.NaN }), /timeoutMs/);
 
