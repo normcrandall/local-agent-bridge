@@ -759,9 +759,10 @@ function meaningfulNarrative(lane) {
 function activeRole(lane) {
   if (lane.type === "native_host") return "host";
   if (lane.mode === "review") return "reviewer";
-  if (lane.mode === "work" || (lane.writer && lane.activeAgent === lane.writer)) return "writer";
+  if (lane.writer && lane.activeAgent === lane.writer) return "writer";
   if (/\bre-?review|\breview(?:ing)?\b/i.test(clean(lane.task))) return "reviewer";
-  return lane.writer ? "coordinator" : "agent";
+  if (lane.mode === "work" && lane.writer) return "peer";
+  return "agent";
 }
 
 function activeActivity(lane) {
@@ -771,6 +772,10 @@ function activeActivity(lane) {
   if (phase && !/^(?:running|working|provider work|continue)$/i.test(phase)) return phase;
   if (lane.type === "native_host") return clean(lane.task) || "Native provider turn is active";
   return "Waiting for the provider's first progress update";
+}
+
+function activeActivityAt(lane) {
+  return meaningfulNarrative(lane) ? lane.narrative?.updatedAt : lane.updatedAt;
 }
 
 function activeColumnWidths(width) {
@@ -783,7 +788,7 @@ function activeColumnWidths(width) {
 
 function activeTableHeader(width) {
   const columns = activeColumnWidths(width);
-  if (width < columns.total) return "  ITEM · AGENT · ROLE · UPDATED";
+  if (width < columns.total) return `  ${pad("ITEM", 7)} · ${pad("AGENT", 7)} · ${pad("ROLE", 7)} · ${pad("UPDATED", 7)}`;
   return `  ${pad("ITEM", columns.item)} ${pad("AGENT", columns.agent)} ${pad("ROLE", columns.role)} ${pad("UPDATED", columns.updated)}`;
 }
 
@@ -792,11 +797,11 @@ function activeTableRow(lane, selected, now, width) {
   const item = laneLabel(lane);
   const provider = lane.activeAgent || lane.providers?.[0] || lane.writer || "unassigned";
   const role = activeRole(lane);
-  const updated = age(lane.narrative?.updatedAt || lane.updatedAt, now);
+  const updated = age(activeActivityAt(lane) || lane.updatedAt, now);
   const columns = activeColumnWidths(width);
   const title = width >= columns.total
     ? `${marker} ${pad(item, columns.item)} ${pad(provider, columns.agent)} ${pad(role, columns.role)} ${pad(updated, columns.updated)}`
-    : `${marker} ${item} · ${provider} · ${role} · ${updated}`;
+    : `${marker} ${pad(item, 7)} · ${pad(provider, 7)} · ${pad(role, 7)} · ${pad(updated, 7)}`;
   const repository = clean(lane.repository).split("/").at(-1) || "unknown repo";
   const narrative = `  ${repository} · ${activeActivity(lane)}`;
   return [

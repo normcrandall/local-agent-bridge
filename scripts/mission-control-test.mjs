@@ -701,6 +701,25 @@ try {
   const narrow = renderMissionControl(attention, { selectedIndex, timeline, width: 60, height: 20, now, color: false, interactive: true, activePane: 2 });
   const narrowGrid = narrow.split("\n").filter((line) => /^[┌├│└]/.test(line));
   assert.ok(narrowGrid.every((line) => displayWidth(line) === 60));
+  const compactWork = renderMissionControl(attention, { selectedIndex, timeline, width: 43, height: 20, now, color: false, interactive: true, activePane: 1 });
+  assert.match(compactWork, /ITEM\s+· AGENT\s+· ROLE\s+· UPDATED/);
+  assert.match(compactWork, /codex\s+· writer\s+· 2m/);
+  const peerLane = {
+    ...attention.operatorLanes[selectedIndex],
+    id: "active-peer-lane",
+    operatorId: "active-peer-lane",
+    issueNumber: 999,
+    activeAgent: "claude",
+    writer: "codex",
+    mode: "work",
+    task: "Challenge the implementation approach",
+  };
+  const peerWork = renderMissionControl({
+    ...attention,
+    operatorLanes: [peerLane],
+    operatorCounts: { active: 1, needs_user: 0, waiting: 0, stopped: 0 },
+  }, { selectedIndex: 0, width: 120, height: 20, now, color: false, interactive: true, activePane: 1 });
+  assert.match(peerWork, /claude\s+peer\s+2m/);
   const viewportState = {};
   const scrolledDetail = renderMissionControl(attention, { selectedIndex, timeline, width: 60, height: 12, now, color: false, interactive: true, activePane: 2, detailExpanded: true, detailOffset: Number.MAX_SAFE_INTEGER, viewportState });
   assert.match(scrolledDetail, /RECENT ACTIVITY|Rendering repository views/);
