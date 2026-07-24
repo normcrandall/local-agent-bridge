@@ -276,7 +276,6 @@ async function handleKey(key) {
     actionMessage = null;
     pendingConfirmation = null;
     detailOffset = 0;
-    selectedRepository = repositoryFilter || null;
   }
   else if (key === "\t" || key === "\x1b[C") {
     activePane = paneFocusIntent(key, activePane);

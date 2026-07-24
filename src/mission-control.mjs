@@ -649,7 +649,7 @@ export function missionControlRepositories(snapshot, { includeAll = true } = {})
   const lanes = snapshot.operatorLanes || snapshot.lanes || [];
   const repositories = [...new Set(lanes.map((lane) => lane.repository).filter(Boolean))]
     .sort((left, right) => left.localeCompare(right));
-  return includeAll && repositories.length > 1 ? [null, ...repositories] : repositories;
+  return includeAll && repositories.length ? [null, ...repositories] : repositories;
 }
 
 export function missionControlVisibleLanes(snapshot, selectedRepository = null) {
@@ -800,8 +800,11 @@ function renderGrid({ titles, panes, widths, contentRows, color, activePane = 0 
 }
 
 export function windowPane(rows, contentRows, centerSelection = false, offset = null) {
-  if (contentRows < 3) {
-    const visible = rows.slice(0, Math.max(0, contentRows));
+  if (contentRows <= 0) return [];
+  if (contentRows < 3 && rows.length > contentRows) {
+    const visible = contentRows === 1
+      ? [paneLine(`${rows.length} rows · expand terminal`, "90")]
+      : [rows[0], paneLine(`↓ ${rows.length - 1} more`, "90")];
     Object.defineProperty(visible, "appliedOffset", { value: 0 });
     return visible;
   }
@@ -873,7 +876,8 @@ export function renderMissionControl(snapshot, {
   const repositories = missionControlRepositories({ ...snapshot, operatorLanes: allLanes }, { includeAll: !repositoryLocked });
   const effectiveRepository = repositories.includes(selectedRepository) ? selectedRepository : repositories[0] ?? null;
   const lanes = missionControlVisibleLanes({ ...snapshot, operatorLanes: allLanes }, effectiveRepository);
-  const selected = lanes[Math.min(Math.max(0, selectedIndex), Math.max(0, lanes.length - 1))] || null;
+  const effectiveSelectedIndex = Math.min(Math.max(0, selectedIndex), Math.max(0, lanes.length - 1));
+  const selected = lanes[effectiveSelectedIndex] || null;
   const lines = [];
   const counts = snapshot.operatorCounts || { active: lanes.filter((lane) => lane.operatorCategory === "active").length, needs_user: snapshot.needsUserCount || 0, waiting: 0, failed: 0 };
   const repositoryCount = new Set(allLanes.map((lane) => lane.repository)).size;
@@ -889,7 +893,7 @@ export function renderMissionControl(snapshot, {
     : measurements.paneIndex === 2 ? measurements.widths[0] - 2 : Math.max(20, Math.floor(usableWidth * 0.35));
   const panes = [
     windowPane(repositoryPane(snapshot, allLanes, repositories, effectiveRepository), contentRows, true),
-    windowPane(workPane(lanes, selectedIndex, now), contentRows, true),
+    windowPane(workPane(lanes, effectiveSelectedIndex, now), contentRows, true),
     windowPane(detailPane(selected, timeline, Math.max(1, detailWidth), now, snapshot, detailExpanded), contentRows, false, detailOffset),
   ];
   if (viewportState && typeof viewportState === "object") viewportState.detailOffset = panes[2].appliedOffset || 0;
@@ -901,7 +905,7 @@ export function renderMissionControl(snapshot, {
       : activePane === 1
         ? "WORK · j/k choose lane · Enter details"
         : `DETAILS · j/k scroll · g/G ends · Enter ${detailExpanded ? "collapse" : "expand"}`;
-    lines.push(sliceDisplay(` ${paneHelp}  Tab/←/→ pane  l/a/h view  o PR  c continue  x cancel  q quit`, usableWidth, { cleanValue: false }));
+    lines.push(sliceDisplay(` ${paneHelp}  Tab/⇧Tab/←/→ pane  l/a/h view  o PR  c continue  x cancel  q quit`, usableWidth, { cleanValue: false }));
   } else if (snapshot.mode === "all") {
     lines.push(truncate("Archive preview: bridge cleanup --older-than-days 7", usableWidth));
   }

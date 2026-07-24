@@ -88,7 +88,8 @@ assert.equal(displayWidth("👨‍👩‍👧‍👦"), 2);
 assert.deepEqual(windowPane(Array.from({ length: 10 }, (_, index) => ({ text: `row ${index}` })), 5).map(({ text }) => text), [
   "row 0", "row 1", "row 2", "row 3", "↓ 6 more",
 ]);
-assert.equal(windowPane(Array.from({ length: 10 }, (_, index) => ({ text: `row ${index}` })), 2).length, 2);
+const tinyWindow = windowPane(Array.from({ length: 10 }, (_, index) => ({ text: `row ${index}` })), 2);
+assert.deepEqual(tinyWindow.map(({ text }) => text), ["row 0", "↓ 9 more"]);
 for (const status of PORTFOLIO_STATUSES) {
   const expected = !PORTFOLIO_STATUS_GROUPS.terminal.includes(status);
   assert.equal(isAttentionLane({ lifecyclePhase: status, updatedAt: "2026-07-23T11:59:00.000Z" }, Date.parse("2026-07-23T12:00:00.000Z")), expected, `${status} classification drifted`);
@@ -459,6 +460,7 @@ try {
     operatorLanes: [...attention.operatorLanes, secondRepositoryLane],
   };
   assert.deepEqual(missionControlRepositories(multiRepository), [null, "norm/example", "veliqon/control-plane", "veliqon/second-repo"]);
+  assert.deepEqual(missionControlRepositories({ operatorLanes: [secondRepositoryLane] }), [null, "veliqon/second-repo"]);
   assert.deepEqual(missionControlVisibleLanes(multiRepository, "veliqon/second-repo").map((lane) => lane.id), ["second-repository-lane"]);
   const repositoryFocused = renderMissionControl(multiRepository, {
     selectedRepository: "veliqon/second-repo",
@@ -474,6 +476,15 @@ try {
   assert.match(repositoryFocused, /PR #315/);
   assert.doesNotMatch(repositoryFocused, /PR #42/);
   assert.match(repositoryFocused, /REPOSITORIES · j\/k choose · Enter work/);
+  const clampedSelection = renderMissionControl(multiRepository, {
+    selectedIndex: Number.MAX_SAFE_INTEGER,
+    width: 120,
+    height: 28,
+    now,
+    color: false,
+    interactive: true,
+  });
+  assert.match(clampedSelection, /▶ PR #315/, "the work marker must match the detail lane after renderer clamping");
   const narrow = renderMissionControl(attention, { selectedIndex, timeline, width: 60, height: 20, now, color: false, interactive: true, activePane: 2 });
   const narrowGrid = narrow.split("\n").filter((line) => /^[┌├│└]/.test(line));
   assert.ok(narrowGrid.every((line) => displayWidth(line) === 60));
