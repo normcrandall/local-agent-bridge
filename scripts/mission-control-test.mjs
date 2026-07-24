@@ -594,6 +594,10 @@ try {
   assert.match(rendered, /AGENT BRIDGE MISSION CONTROL/);
   assert.match(rendered, /NEEDS YOU 1/);
   assert.match(rendered, /control-plane/);
+  assert.match(rendered, /ITEM\s+AGENT\s+ROLE\s+UPDATED/);
+  assert.match(rendered, /PR #?\d+|11111111/);
+  assert.match(rendered, /codex\s+writer\s+2m/);
+  assert.match(rendered, /control-plane · Rendering the repository/);
   assert.match(rendered, /WORKSPACE/);
   assert.match(rendered, /CREATED.*2026/);
   assert.match(rendered, /UPDATED.*2026/);
@@ -652,6 +656,7 @@ try {
   assert.match(noColor, /│ REPOSITORIES/);
   assert.match(noColor, /│ DETAILS/);
   assert.doesNotMatch(noColor, /SELECTED LANE/);
+  assert.match(noColor, /ITEM\s+AGENT\s+ROLE\s+UPDATED/);
   assert.match(noColor, /WORK · j\/k choose lane · Enter details/);
 
   const secondRepositoryLane = {

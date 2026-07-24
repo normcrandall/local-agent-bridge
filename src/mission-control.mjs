@@ -756,6 +756,55 @@ function meaningfulNarrative(lane) {
   return summary;
 }
 
+function activeRole(lane) {
+  if (lane.type === "native_host") return "host";
+  if (lane.mode === "review") return "reviewer";
+  if (lane.mode === "work" || (lane.writer && lane.activeAgent === lane.writer)) return "writer";
+  if (/\bre-?review|\breview(?:ing)?\b/i.test(clean(lane.task))) return "reviewer";
+  return lane.writer ? "coordinator" : "agent";
+}
+
+function activeActivity(lane) {
+  const narrative = meaningfulNarrative(lane);
+  if (narrative) return narrative;
+  const phase = clean(lane.providerPhase).replace(/_/g, " ");
+  if (phase && !/^(?:running|working|provider work|continue)$/i.test(phase)) return phase;
+  if (lane.type === "native_host") return clean(lane.task) || "Native provider turn is active";
+  return "Waiting for the provider's first progress update";
+}
+
+function activeColumnWidths(width) {
+  const item = 10;
+  const agent = width >= 48 ? 11 : 9;
+  const role = width >= 48 ? 11 : 9;
+  const updated = 7;
+  return { item, agent, role, updated, total: 2 + item + 1 + agent + 1 + role + 1 + updated };
+}
+
+function activeTableHeader(width) {
+  const columns = activeColumnWidths(width);
+  if (width < columns.total) return "  ITEM · AGENT · ROLE · UPDATED";
+  return `  ${pad("ITEM", columns.item)} ${pad("AGENT", columns.agent)} ${pad("ROLE", columns.role)} ${pad("UPDATED", columns.updated)}`;
+}
+
+function activeTableRow(lane, selected, now, width) {
+  const marker = selected ? "▶" : " ";
+  const item = laneLabel(lane);
+  const provider = lane.activeAgent || lane.providers?.[0] || lane.writer || "unassigned";
+  const role = activeRole(lane);
+  const updated = age(lane.narrative?.updatedAt || lane.updatedAt, now);
+  const columns = activeColumnWidths(width);
+  const title = width >= columns.total
+    ? `${marker} ${pad(item, columns.item)} ${pad(provider, columns.agent)} ${pad(role, columns.role)} ${pad(updated, columns.updated)}`
+    : `${marker} ${item} · ${provider} · ${role} · ${updated}`;
+  const repository = clean(lane.repository).split("/").at(-1) || "unknown repo";
+  const narrative = `  ${repository} · ${activeActivity(lane)}`;
+  return [
+    paneLine(title, selected ? "7" : CATEGORY_STYLE.active, { selected }),
+    paneLine(narrative, selected ? "7" : "36", { selected }),
+  ];
+}
+
 function readableDependency(value) {
   const dependency = clean(typeof value === "object" ? value?.id : value);
   const issue = dependency.match(/^issue-(\d+)$/i);
@@ -863,7 +912,7 @@ function repositoryPane(snapshot, lanes, repositories, selectedRepository) {
   return rows;
 }
 
-function workPane(lanes, selectedIndex, now) {
+function workPane(lanes, selectedIndex, now, width) {
   if (!lanes.length) return [paneLine("No work is running", "90"), paneLine("Press a for attention or h for history", "90")];
   const rows = [];
   let category = null;
@@ -873,6 +922,11 @@ function workPane(lanes, selectedIndex, now) {
       category = lane.operatorCategory;
       const count = lanes.filter((candidate) => candidate.operatorCategory === category).length;
       rows.push(paneSection(categoryLabel(category), count, category));
+      if (category === "active") rows.push(paneLine(activeTableHeader(width), "90"));
+    }
+    if (category === "active") {
+      rows.push(...activeTableRow(lane, index === selectedIndex, now, width));
+      return;
     }
     const provider = lane.providers?.join("+") || lane.activeAgent || lane.writer || "unassigned";
     const related = lane.relatedLaneCount > 1 ? ` +${lane.relatedLaneCount - 1}` : "";
@@ -1081,9 +1135,12 @@ export function renderMissionControl(snapshot, {
   const detailWidth = measurements.paneIndex === null
     ? measurements.widths[2] - 2
     : measurements.paneIndex === 2 ? measurements.widths[0] - 2 : Math.max(20, Math.floor(usableWidth * 0.35));
+  const workWidth = measurements.paneIndex === null
+    ? measurements.widths[1] - 2
+    : measurements.paneIndex === 1 ? measurements.widths[0] - 2 : Math.max(20, Math.floor(usableWidth * 0.35));
   const panes = [
     windowPane(repositoryPane(snapshot, allLanes, repositories, effectiveRepository), contentRows, true),
-    windowPane(workPane(lanes, effectiveSelectedIndex, now), contentRows, true),
+    windowPane(workPane(lanes, effectiveSelectedIndex, now, Math.max(1, workWidth)), contentRows, true),
     windowPane(detailPane(selected, timeline, Math.max(1, detailWidth), now, snapshot, detailExpanded), contentRows, false, detailOffset),
   ];
   if (viewportState && typeof viewportState === "object") viewportState.detailOffset = panes[2].appliedOffset || 0;
