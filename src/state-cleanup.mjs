@@ -148,8 +148,9 @@ export async function auditBridgeCleanup(options = {}) {
   const retirementEvidenceCache = new Map();
   const verifyRetirement = async (state) => {
     const binding = collaborationRetirementBinding(state);
+    const injectedVerifier = Boolean(options.verifyGithubOutcome || options.inspectWorkspace);
     const retirementKey = JSON.stringify([
-      state.id,
+      ...(injectedVerifier ? [state.id] : []),
       binding.repository, binding.prNumber, binding.issueNumber, binding.expectedHeadSha, binding.branch,
       binding.workspace, binding.workspaceProofRequired,
     ]);

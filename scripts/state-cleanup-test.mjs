@@ -201,6 +201,11 @@ try {
         head: { sha: "a".repeat(40), ref: "codex/gone", repo: { full_name: "norm/example" } },
       }), { status: 200 });
     }
+    if (path === "/repos/norm/example/issues/11") {
+      return new Response(JSON.stringify({
+        state: "closed", html_url: "https://github.com/norm/example/issues/11",
+      }), { status: 200 });
+    }
     if (path === "/repos/norm/example/git/ref/heads/codex/cleanup") {
       return new Response(JSON.stringify({ object: { sha: apiHead } }), { status: 200 });
     }
@@ -228,6 +233,11 @@ try {
   }, { fetchImpl: fakeFetch, getInstallationToken: fakeToken });
   assert.equal(verifiedClosedUnrecoverable.safe, false);
   assert.equal(verifiedClosedUnrecoverable.reason, "pull_request_closed_head_unrecoverable");
+  const verifiedClosedIssue = await verifyCollaborationGitHubOutcome({
+    issueClaim: { repository: "norm/example", issueNumber: 11 },
+  }, { fetchImpl: fakeFetch, getInstallationToken: fakeToken });
+  assert.equal(verifiedClosedIssue.safe, true);
+  assert.equal(verifiedClosedIssue.reason, "issue_closed");
 
   const changedOutcomeId = "bridge-fafafafa-fafa-4afa-8afa-fafafafafafa";
   await writeCollaboration(changedOutcomeId, {

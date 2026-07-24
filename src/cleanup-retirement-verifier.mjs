@@ -160,6 +160,9 @@ export async function verifyCollaborationGitHubOutcome(state, {
   if (String(issue?.state || "").toLowerCase() !== "closed") {
     return { safe: false, reason: "issue_open", outcome: "open", ...binding };
   }
+  // An issue-only record has no delivery head of its own; the closed issue is
+  // its complete durable GitHub outcome. Work-mode records still proceed to
+  // workspace verification and must prove an exact recoverable head there.
   const remoteHeadSha = binding.branch
     ? await remoteBranchHead({ apiUrl, fetchImpl, token, repository: binding.repository, branch: binding.branch })
     : null;
