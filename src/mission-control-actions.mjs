@@ -67,5 +67,11 @@ export function missionControlPrUrl(lane) {
 
 export function missionControlCopyText(lane) {
   if (!lane) return "";
-  return [lane.alias, lane.id, lane.repository, lane.prNumber ? `PR #${lane.prNumber}` : null].filter(Boolean).join("\t");
+  return [
+    lane.alias,
+    lane.id,
+    lane.repository,
+    lane.prNumber ? `PR #${lane.prNumber}` : null,
+    lane.relatedLaneCount > 1 ? `related: ${lane.relatedLaneIds.join(",")}` : null,
+  ].filter(Boolean).join("\t");
 }

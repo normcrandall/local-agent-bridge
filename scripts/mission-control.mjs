@@ -81,13 +81,16 @@ if (oneShot) {
   if (args.includes("--json")) {
     output = `${JSON.stringify(current, null, 2)}\n`;
   } else {
-    const selected = current.lanes[0];
+    const selected = (current.operatorLanes || current.lanes)[0];
     const timeline = selected ? await loadTimeline(stateRoot, selected.id) : [];
     const parsedWidth = Number.parseInt(process.env.COLUMNS || "120", 10);
+    const parsedHeight = Number.parseInt(process.env.LINES || "60", 10);
     output = `${renderSnapshot(current, {
       selectedIndex: 0,
       timeline,
       width: Number.isFinite(parsedWidth) ? parsedWidth : 120,
+      height: Number.isFinite(parsedHeight) ? Math.max(20, parsedHeight) : 60,
+      detailExpanded: true,
     })}\n`;
   }
   await new Promise((resolveWrite) => process.stdout.write(output, resolveWrite));
@@ -104,6 +107,9 @@ let terminalRestored = false;
 let lastSnapshot = null;
 let actionMessage = null;
 let pendingConfirmation = null;
+let activePane = 1;
+let detailExpanded = false;
+let detailOffset = 0;
 const seenAttentionKeys = new Set();
 let resolveExit;
 const exitRequested = new Promise((resolvePromise) => { resolveExit = resolvePromise; });
@@ -163,17 +169,19 @@ async function promptLine(label) {
   }
 }
 
-function openExternalUrl(url) {
+function openExternalUrl(url, laneId) {
   const candidates = missionControlPlatformCommands().open;
   const attempt = (index) => {
     const candidate = candidates[index];
     if (!candidate) {
+      if (selectedId !== laneId) return;
       actionMessage = `Open failed: no supported URL opener is installed. Copy the PR URL with y instead.`;
       void draw();
       return;
     }
     execFile(candidate.command, [...candidate.args, url], (error) => {
       if (error?.code === "ENOENT") return attempt(index + 1);
+      if (selectedId !== laneId) return;
       actionMessage = error ? `Open failed: ${error.message}` : `Opened ${url}`;
       void draw();
     });
@@ -210,12 +218,13 @@ async function draw() {
       process.stdout.write("\x07");
     }
     for (const key of current.needsUserKeys || []) seenAttentionKeys.add(key);
+    const operatorLanes = current.operatorLanes || current.lanes;
     if (selectedId) {
-      const preserved = current.lanes.findIndex((lane) => lane.id === selectedId);
+      const preserved = operatorLanes.findIndex((lane) => lane.id === selectedId);
       if (preserved >= 0) selectedIndex = preserved;
     }
-    selectedIndex = Math.min(Math.max(0, selectedIndex), Math.max(0, current.lanes.length - 1));
-    selectedId = current.lanes[selectedIndex]?.id || null;
+    selectedIndex = Math.min(Math.max(0, selectedIndex), Math.max(0, operatorLanes.length - 1));
+    selectedId = operatorLanes[selectedIndex]?.id || null;
     const timeline = selectedId ? await loadTimeline(stateRoot, selectedId) : [];
     if (stopped) return;
     const output = renderMissionControl(current, {
@@ -226,6 +235,9 @@ async function draw() {
       color,
       interactive: true,
       actionMessage,
+      activePane,
+      detailExpanded,
+      detailOffset,
     });
     if (stopped) return;
     process.stdout.write(`\x1b[H\x1b[2J${output}`);
@@ -250,15 +262,39 @@ async function handleKey(key) {
     view = key === "l" ? "live" : key === "a" ? "attention" : "all";
     selectedIndex = 0;
     selectedId = null;
+    actionMessage = null;
+    pendingConfirmation = null;
+    detailOffset = 0;
+  }
+  else if (key === "\t") {
+    activePane = activePane === 1 ? 2 : 1;
+    actionMessage = null;
+  }
+  else if (key === "\r" || key === "\n") {
+    detailExpanded = !detailExpanded;
+    activePane = 2;
+    detailOffset = 0;
+    actionMessage = null;
+  }
+  else if (activePane === 2 && ["j", "k", "\x1b[B", "\x1b[A", "g", "G"].includes(key)) {
+    if (key === "j" || key === "\x1b[B") detailOffset += 1;
+    else if (key === "k" || key === "\x1b[A") detailOffset = Math.max(0, detailOffset - 1);
+    else if (key === "g") detailOffset = 0;
+    else detailOffset = Number.MAX_SAFE_INTEGER;
+    actionMessage = null;
+    pendingConfirmation = null;
   }
   else if (key === "s") {
     if (view !== "attention") view = "attention";
     includeStale = !includeStale;
     selectedIndex = 0;
     selectedId = null;
+    actionMessage = null;
+    pendingConfirmation = null;
+    detailOffset = 0;
   }
   else if (["o", "y", "c", "x", "A", "w"].includes(key)) {
-    const lane = resolveMissionControlSelection(lastSnapshot?.lanes, selectedId, selectedIndex);
+    const lane = resolveMissionControlSelection(lastSnapshot?.operatorLanes || lastSnapshot?.lanes, selectedId, selectedIndex);
     const available = missionControlActionAvailability(lane);
     const actionByKey = { o: "openPr", y: "copy", c: "continue", x: "cancel", A: "archive", w: "acknowledgeWake" };
     const action = actionByKey[key];
@@ -266,7 +302,7 @@ async function handleKey(key) {
       actionMessage = `Action ${action} is unavailable for the selected lane.`;
     } else if (key === "o") {
       const url = missionControlPrUrl(lane);
-      openExternalUrl(url);
+      openExternalUrl(url, lane.id);
     } else if (key === "y") {
       actionMessage = copySelection(lane) ? `Copied ${lane.alias || lane.id}.` : "Clipboard copy failed: no supported clipboard command is available.";
     } else if (key === "c") {
@@ -284,7 +320,10 @@ async function handleKey(key) {
       const confirmation = missionControlConfirmation(pendingConfirmation, { key, lane });
       pendingConfirmation = confirmation.pending;
       if (!confirmation.confirmed) {
-        actionMessage = `Press ${key} again within 5 seconds to confirm ${action}.`;
+        const related = lane.relatedLaneCount > 1
+          ? ` This targets ${lane.alias || lane.id} only; ${lane.relatedLaneCount - 1} related lane${lane.relatedLaneCount === 2 ? " remains" : "s remain"}.`
+          : "";
+        actionMessage = `Press ${key} again within 5 seconds to confirm ${action}.${related}`;
       } else {
         const armedLane = confirmation.lane;
         try {
@@ -301,8 +340,15 @@ async function handleKey(key) {
   else if (key === "r") clearRepositoryCache();
   else {
     const intent = navigationIntent(key, selectedIndex);
+    const changedSelection = intent.selectedIndex !== selectedIndex || !intent.preserveSelectedId;
     selectedIndex = intent.selectedIndex;
     if (!intent.preserveSelectedId) selectedId = null;
+    if (changedSelection) {
+      actionMessage = null;
+      pendingConfirmation = null;
+      detailExpanded = false;
+      detailOffset = 0;
+    }
   }
   await draw();
 }
