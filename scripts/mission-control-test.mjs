@@ -115,8 +115,27 @@ assert.equal(isLiveLane({ type: "native_host", lifecyclePhase: "working", hostAc
 assert.equal(isLiveLane({ type: "native_host", lifecyclePhase: "working", hostActivity: { live: false } }), false);
 assert.equal(isStaleLane({ type: "portfolio_lane", lifecyclePhase: "blocked", updatedAt: "2026-07-22T10:00:00.000Z" }, Date.parse("2026-07-23T12:00:00.000Z")), true);
 assert.equal(isStaleLane({ type: "portfolio_lane", lifecyclePhase: "integrating", updatedAt: "2026-07-22T10:00:00.000Z" }, Date.parse("2026-07-23T12:00:00.000Z")), false);
-assert.equal(operatorLaneCategory({ type: "collaboration", lifecyclePhase: "turn_limit", updatedAt: "2026-07-23T11:59:00.000Z" }, classificationNow), "waiting");
+assert.equal(operatorLaneCategory({ type: "collaboration", lifecyclePhase: "turn_limit", updatedAt: "2026-07-23T11:59:00.000Z" }, classificationNow), null);
+assert.equal(operatorLaneCategory({
+  type: "collaboration",
+  lifecyclePhase: "agreed",
+  updatedAt: "2026-07-23T11:59:00.000Z",
+  handoff: { acknowledged: false },
+}, classificationNow), null);
 assert.equal(operatorLaneCategory({ type: "collaboration", lifecyclePhase: "budget", updatedAt: "2026-07-23T11:59:00.000Z" }, classificationNow), "stopped");
+assert.equal(operatorLaneCategory({
+  type: "collaboration",
+  lifecyclePhase: "turn_limit",
+  updatedAt: "2026-07-23T11:59:00.000Z",
+  portfolio: { status: null },
+  handoff: { acknowledged: false },
+}, classificationNow), null, "a missing portfolio status must not revive a terminal receipt");
+assert.equal(operatorLaneCategory({
+  type: "collaboration",
+  lifecyclePhase: "cancelled",
+  updatedAt: "2026-07-23T11:59:00.000Z",
+  portfolio: { status: "reviewing" },
+}, classificationNow), "stopped", "a cancelled attempt for open work is stopped, not waiting");
 for (const status of PORTFOLIO_STATUS_GROUPS.integration) assert.ok(statusRank(status) < statusRank("ready"));
 const shortReadSource = Buffer.from("incremental-ledger-data");
 const shortRead = await readFileRange({
@@ -213,6 +232,115 @@ try {
   assert.equal(live.needsUserCount, 1);
   assert.match(live.needsUserSignature, new RegExp(needsUserId));
   assert.deepEqual(live.needsUserRequests.map(({ repository, summary }) => ({ repository, summary })), [{ repository: "norm/example", summary: "Authorization required" }]);
+
+  const ledgerNoiseRoot = join(root, "ledger-noise-test");
+  await mkdir(ledgerNoiseRoot);
+  await mkdir(join(ledgerNoiseRoot, "portfolios"));
+  const liveLaneId = "bridge-dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  await writeFile(join(ledgerNoiseRoot, `${liveLaneId}.json`), JSON.stringify({
+    ...base,
+    id: liveLaneId,
+    status: "running",
+    updatedAt: "2026-07-23T11:59:59.000Z",
+    githubBuilder: { repository: "veliqon/control-plane" },
+    runtime: { activeCall: { agent: "codex", phase: "working", heartbeatAt: "2026-07-23T11:59:59.000Z" } },
+  }));
+  for (const [index, status] of ["turn_limit", "agreed", "cancelled", "failed", "budget"].entries()) {
+    const id = `bridge-eeeeeeee-eeee-4eee-8eee-${String(index).padStart(12, "0")}`;
+    await writeFile(join(ledgerNoiseRoot, `${id}.json`), JSON.stringify({
+      ...base,
+      id,
+      status,
+      updatedAt: "2026-07-23T11:59:30.000Z",
+      githubReview: { repository: "norm/historical-noise", prNumber: 100 + index },
+      completion: { sequence: 1, acknowledged: false, nextAction: "chair_verify", lastHandoff: { outcome: "completed" } },
+    }));
+  }
+  const currentWaitId = "bridge-ffffffff-ffff-4fff-8fff-ffffffffffff";
+  await writeFile(join(ledgerNoiseRoot, `${currentWaitId}.json`), JSON.stringify({
+    ...base,
+    id: currentWaitId,
+    status: "turn_limit",
+    updatedAt: "2026-07-23T11:59:45.000Z",
+    githubReview: { repository: "veliqon/control-plane", prNumber: 684 },
+    completion: { sequence: 1, acknowledged: false, nextAction: "writer_fix", lastHandoff: { outcome: "needs_review" } },
+  }));
+  await writeFile(join(ledgerNoiseRoot, "portfolios", "helm-ffffffff-ffff-4fff-8fff-ffffffffffff.json"), JSON.stringify({
+    id: "helm-ffffffff-ffff-4fff-8fff-ffffffffffff",
+    workspace,
+    repository: "veliqon/control-plane",
+    createdAt: "2026-07-23T11:00:00.000Z",
+    updatedAt: "2026-07-23T11:59:45.000Z",
+    items: [{ id: "issue-683", issueNumber: 683, prNumber: 684, status: "reviewing", collaborationId: currentWaitId }],
+  }));
+  const recoveringNeedsUserId = "bridge-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  await writeFile(join(ledgerNoiseRoot, `${recoveringNeedsUserId}.json`), JSON.stringify({
+    ...base,
+    id: recoveringNeedsUserId,
+    status: "needs_user",
+    updatedAt: "2026-07-23T11:40:00.000Z",
+    githubReview: { repository: "veliqon/recovery-plane", prNumber: 685 },
+    workerPid: process.pid,
+    runtime: { activeCall: null },
+  }));
+  const recoveringWaitId = "bridge-abababab-abab-4bab-8bab-abababababab";
+  await writeFile(join(ledgerNoiseRoot, `${recoveringWaitId}.json`), JSON.stringify({
+    ...base,
+    id: recoveringWaitId,
+    status: "blocked",
+    updatedAt: "2026-07-23T11:59:00.000Z",
+    githubReview: { repository: "veliqon/recovery-plane", prNumber: 686 },
+  }));
+  const globalNeedsUserId = "bridge-acacacac-acac-4cac-8cac-acacacacacac";
+  await writeFile(join(ledgerNoiseRoot, `${globalNeedsUserId}.json`), JSON.stringify({
+    ...base,
+    id: globalNeedsUserId,
+    status: "needs_user",
+    updatedAt: "2026-07-23T11:59:00.000Z",
+    githubReview: { repository: "norm/protected-boundary", prNumber: 687 },
+    coordinatorWake: {
+      sequence: 1,
+      kind: "needs_user",
+      status: "pending",
+      nextAction: "needs_user",
+      summary: "Owner authorization required",
+      createdAt: "2026-07-23T11:59:00.000Z",
+    },
+  }));
+  const ledgerNoise = await loadMissionControlSnapshot({ stateRoot: ledgerNoiseRoot, now });
+  assert.equal(ledgerNoise.operatorCounts.active, 2);
+  assert.equal(ledgerNoise.operatorCounts.needs_user, 1, "fresh protected input remains visible outside live repositories");
+  assert.equal(ledgerNoise.operatorCounts.waiting, 2, "open portfolio and active-repository waits remain visible");
+  assert.equal(ledgerNoise.operatorCounts.stopped, 0, "stopped attempts from inactive repositories must not inflate the live view");
+  assert.deepEqual(new Set(ledgerNoise.operatorLanes.map((lane) => lane.repository)), new Set([
+    "norm/protected-boundary", "veliqon/control-plane", "veliqon/recovery-plane",
+  ]));
+  assert.ok(ledgerNoise.operatorLanes.some((lane) => lane.prNumber === 684 && lane.operatorCategory === "waiting"));
+  assert.ok(ledgerNoise.operatorLanes.some((lane) => lane.id === recoveringWaitId && lane.operatorCategory === "waiting"), "active category defines repository scope even when isLiveLane is false");
+  assert.deepEqual(ledgerNoise.scopedOut, { total: 2, repositories: ["norm/historical-noise"] });
+  assert.match(renderSnapshot(ledgerNoise, { width: 120, height: 30 }), /OUTSIDE LIVE SCOPE 2/);
+
+  const ledgerAttention = await loadMissionControlSnapshot({ stateRoot: ledgerNoiseRoot, now, view: "attention" });
+  assert.equal(ledgerAttention.scopedOut.total, 0);
+  assert.ok(ledgerAttention.operatorLanes.some((lane) => lane.repository === "norm/historical-noise" && lane.operatorCategory === "stopped"));
+  const ledgerHistory = await loadMissionControlSnapshot({ stateRoot: ledgerNoiseRoot, now, view: "all", includeStale: true });
+  assert.equal(ledgerHistory.scopedOut.total, 0);
+  assert.ok(ledgerHistory.operatorLanes.some((lane) => lane.repository === "norm/historical-noise"));
+
+  const noLiveRoot = join(root, "no-live-ledger-test");
+  await mkdir(noLiveRoot);
+  await mkdir(join(noLiveRoot, "portfolios"));
+  const noLiveWaitId = "bridge-adadadad-adad-4dad-8dad-adadadadadad";
+  await writeFile(join(noLiveRoot, `${noLiveWaitId}.json`), JSON.stringify({
+    ...base,
+    id: noLiveWaitId,
+    status: "blocked",
+    updatedAt: "2026-07-23T11:59:00.000Z",
+    githubReview: { repository: "norm/no-live", prNumber: 688 },
+  }));
+  const noLive = await loadMissionControlSnapshot({ stateRoot: noLiveRoot, now });
+  assert.equal(noLive.operatorCounts.waiting, 1, "the default remains unscoped when no repository is active");
+  assert.equal(noLive.scopedOut.total, 0);
   await writeFile(join(root, `${needsUserId}.json`), JSON.stringify({
     ...needsUserState,
     coordinatorWake: { sequence: 1, kind: "needs_user", status: "acknowledged", nextAction: "needs_user", summary: "Authorization required" },

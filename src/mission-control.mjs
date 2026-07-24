@@ -6,7 +6,7 @@ import { queryControlPlane } from "./collaboration-store.mjs";
 import { attentionRequestAt, attentionRequestIsFresh } from "./attention-state.mjs";
 import { LIVE_COLLABORATION_STATUSES } from "./collaboration-cleanup.mjs";
 import { hostActivityLane, listHostActivities } from "./host-activity-store.mjs";
-import { PORTFOLIO_STATUS_GROUPS } from "./portfolio-status.mjs";
+import { PORTFOLIO_STATUSES, PORTFOLIO_STATUS_GROUPS } from "./portfolio-status.mjs";
 
 const ACTIVE_STATUSES = new Set([
   "queued", "waiting_capacity", "running", "working", "recovering", "cancelling",
@@ -273,7 +273,15 @@ export function operatorLaneCategory(lane, now = Date.now()) {
   }
   if (isLiveLane(lane, now)) return "active";
   if (PORTFOLIO_STATUS_GROUPS.terminal.includes(status)) return null;
-  if (["failed", "indeterminate", "budget"].includes(status)) {
+  const portfolioStatus = String(lane.portfolio?.status || "").toLowerCase();
+  const openPortfolio = PORTFOLIO_STATUSES.includes(portfolioStatus)
+    && !PORTFOLIO_STATUS_GROUPS.terminal.includes(portfolioStatus);
+  // A terminal collaboration receipt is history unless it still represents
+  // an open portfolio item. This keeps completed prior-wave attempts from
+  // masquerading as queued capacity while preserving a current lane whose
+  // provider turn ended and is waiting for its coordinator.
+  if (!openPortfolio && TERMINAL_STATUSES.has(status)) return null;
+  if (["failed", "indeterminate", "budget", "cancelled"].includes(status)) {
     return now - dateMs(lane.updatedAt) <= 86_400_000 || status === "indeterminate" ? "stopped" : null;
   }
   if ([
@@ -477,7 +485,20 @@ export async function loadMissionControlSnapshot({
   // plane. Terminal portfolio evidence may not itself be an attention lane,
   // and may be older than the stale cutoff, but it must still supersede a
   // newer stopped attempt for the same PR.
-  const modeSource = mode === "attention" ? attention : matching;
+  const categorized = matching.map((lane) => ({ lane, category: operatorLaneCategory(lane, now) }));
+  const liveRepositories = new Set(categorized
+    .filter(({ category }) => category === "active")
+    .map(({ lane }) => lane.repository));
+  const liveOperatorSource = categorized.filter(({ lane, category }) => {
+    if (!category) return false;
+    if (["active", "needs_user"].includes(category)) return true;
+    return liveRepositories.size === 0 || liveRepositories.has(lane.repository);
+  }).map(({ lane }) => lane);
+  const liveOperatorIds = new Set(liveOperatorSource.map((lane) => lane.id));
+  const scopedOutLanes = mode === "live" && liveRepositories.size > 0
+    ? categorized.filter(({ lane, category }) => category && !liveOperatorIds.has(lane.id)).map(({ lane }) => lane)
+    : [];
+  const modeSource = mode === "all" ? matching : mode === "attention" ? attention : liveOperatorSource;
   const operatorSource = [...new Set([
     ...modeSource.filter((lane) => includeStale || !isStaleLane(lane, now, staleAfterMs)),
     ...matching.filter((lane) => portfolioTerminalStatus(lane)),
@@ -505,6 +526,10 @@ export async function loadMissionControlSnapshot({
     providerActivity,
     operatorCounts,
     operatorLanes,
+    scopedOut: {
+      total: scopedOutLanes.length,
+      repositories: [...new Set(scopedOutLanes.map((lane) => lane.repository))].sort(),
+    },
     needsUserCount: needsUser.length,
     historicalNeedsUserCount: allNeedsUser.length - needsUser.length,
     needsUserRequests: needsUser.map((lane) => ({
@@ -953,6 +978,10 @@ function repositoryPane(snapshot, lanes, repositories, selectedRepository) {
   rows.push(paneSection("STOPPED", snapshot.operatorCounts?.stopped ?? snapshot.operatorCounts?.failed ?? 0, "stopped"));
   if (snapshot.historicalNeedsUserCount) rows.push(paneLine(`HISTORICAL INPUT ${snapshot.historicalNeedsUserCount}`, "90"));
   if (snapshot.collapsedStale?.total) rows.push(paneLine(`STALE HIDDEN ${snapshot.collapsedStale.total} · press s`, "90"));
+  if (snapshot.scopedOut?.total) {
+    const repositories = snapshot.scopedOut.repositories?.length || 0;
+    rows.push(paneLine(`OUTSIDE LIVE SCOPE ${snapshot.scopedOut.total} · ${repositories} repo${repositories === 1 ? "" : "s"} · a/h`, "90"));
+  }
   return rows;
 }
 
