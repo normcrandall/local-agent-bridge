@@ -659,6 +659,48 @@ function paint(text, code, enabled) {
   return enabled ? `\x1b[${code}m${text}\x1b[0m` : text;
 }
 
+function quotaColor(percent) {
+  if (!Number.isFinite(percent)) return "90";
+  if (percent < 20) return "31;1";
+  if (percent < 50) return "33;1";
+  return "32;1";
+}
+
+function quotaValue(provider, window, color) {
+  if (!provider || provider.status === "unavailable" || !provider.windows?.[window]) return paint("—", "90", color);
+  const remaining = provider.windows[window].remainingPercent;
+  const value = `${provider.status === "stale" ? "~" : ""}${remaining}%`;
+  return paint(value, provider.status === "stale" ? "33;1" : quotaColor(remaining), color);
+}
+
+function quotaObservedTime(value) {
+  const timestamp = Date.parse(value || "");
+  if (!Number.isFinite(timestamp)) return "pending";
+  return new Intl.DateTimeFormat("en-US", { hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date(timestamp));
+}
+
+export function renderProviderQuotaFooter(providerQuota, { width = 120, color = true } = {}) {
+  if (!providerQuota?.providers) return null;
+  const providers = providerQuota.providers;
+  const codex5h = quotaValue(providers.codex, "fiveHour", color);
+  const codexWeek = quotaValue(providers.codex, "week", color);
+  const claude5h = quotaValue(providers.claude, "fiveHour", color);
+  const claudeWeek = quotaValue(providers.claude, "week", color);
+  const antigravity = paint("—", "90", color);
+  // Local is a provider category, not an installed/running health assertion.
+  const local = (label) => paint(label, "36", color);
+  const updated = quotaObservedTime(providerQuota.updatedAt);
+  let line;
+  if (width >= 132) {
+    line = ` ${paint("QUOTA REMAINING", "1;34", color)} · refresh 1m  Codex 5h ${codex5h} · wk ${codexWeek}  |  Claude 5h ${claude5h} · wk ${claudeWeek}  |  Antigravity ${antigravity}  |  Docker ${local("local")}  |  Ollama ${local("local")}  |  checked @${updated}`;
+  } else if (width >= 60) {
+    line = ` ${paint("QUOTA 1m", "1;34", color)}  C 5h${codex5h}/wk${codexWeek} · Cl 5h${claude5h}/wk${claudeWeek} · AG${antigravity} · D ${local("local")} · O ${local("local")} · @${updated}`;
+  } else {
+    line = `${paint("Q1m", "1;34", color)} C${codex5h}/${codexWeek} Cl${claude5h}/${claudeWeek} A${antigravity} D+O:${local("L")}`;
+  }
+  return truncateAnsi(line, Math.max(30, width));
+}
+
 const CATEGORY_STYLE = {
   active: "36;1",
   needs_user: "33;1",
@@ -970,7 +1012,8 @@ export function renderMissionControl(snapshot, {
   const headline = `${paint("AGENT BRIDGE MISSION CONTROL", "1;34", color)}  ${paint(`ACTIVE ${counts.active || 0}`, "36;1", color)}  ${paint(`NEEDS YOU ${counts.needs_user || 0}`, counts.needs_user ? "33;1" : "90", color)}  ${paint(`WAITING ${counts.waiting || 0}`, "90", color)}  ${paint(`STOPPED ${stoppedCount}`, stoppedCount ? "31;1" : "90", color)}`;
   lines.push(truncateAnsi(headline, usableWidth));
   lines.push(truncate(`${formatLocalDateTime(snapshot.generatedAt)} · ${snapshot.mode} · ${repositoryCount} repo${repositoryCount === 1 ? "" : "s"}${snapshot.filter ? ` · ${snapshot.filter}` : ""}`, usableWidth));
-  const footerRows = interactive ? (actionMessage ? 2 : 1) : snapshot.mode === "all" ? 1 : 0;
+  const quotaFooter = renderProviderQuotaFooter(snapshot.providerQuota, { width: usableWidth, color });
+  const footerRows = (quotaFooter ? 1 : 0) + (interactive ? (actionMessage ? 2 : 1) : snapshot.mode === "all" ? 1 : 0);
   const contentRows = Math.max(4, height - lines.length - footerRows - 4);
   const titles = ["REPOSITORIES", "WORK", "SELECTED LANE"];
   const measurements = gridMeasurements(usableWidth, activePane);
@@ -984,6 +1027,7 @@ export function renderMissionControl(snapshot, {
   ];
   if (viewportState && typeof viewportState === "object") viewportState.detailOffset = panes[2].appliedOffset || 0;
   lines.push(...gridLayout(measurements, activePane, titles, panes, contentRows, color));
+  if (quotaFooter) lines.push(quotaFooter);
   if (interactive) {
     if (actionMessage) lines.push(truncateAnsi(paint(` ${actionMessage}`, actionMessage.toLowerCase().includes("failed") ? "31;1" : "33", color), usableWidth));
     const paneHelp = activePane === 0

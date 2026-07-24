@@ -26,6 +26,7 @@ import {
   resolveMissionControlSelection,
 } from "../src/mission-control-actions.mjs";
 import { callMissionControlAction } from "../src/mission-control-client.mjs";
+import { createProviderQuotaMonitor } from "../src/provider-quota.mjs";
 
 process.stdout.on("error", (error) => {
   if (error.code === "EPIPE") process.exit(0);
@@ -52,6 +53,8 @@ function usage() {
   process.stdout.write(`  --refresh-ms N      Interactive refresh interval (default: 1000)\n`);
   process.stdout.write(`  --state-root PATH   Read a different bridge state directory\n`);
   process.stdout.write(`  --no-color          Disable ANSI colors\n`);
+  process.stdout.write(`  --quota             Include a synchronous quota reading in one-shot output\n`);
+  process.stdout.write(`  --no-quota          Disable provider quota probes and footer\n`);
 }
 
 if (args.includes("--help") || args.includes("-h")) {
@@ -67,15 +70,21 @@ let includeStale = args.includes("--include-stale");
 const staleAfterHours = Math.max(1, Number.parseInt(value("--stale-after-hours", "24"), 10) || 24);
 const color = !args.includes("--no-color") && process.env.NO_COLOR === undefined;
 const oneShot = args.includes("--snapshot") || args.includes("--json") || !process.stdin.isTTY || !process.stdout.isTTY;
+const quotaEnabled = !args.includes("--no-quota")
+  && process.env.AGENT_BRIDGE_PROVIDER_QUOTA !== "off"
+  && (!oneShot || args.includes("--quota"));
+const providerQuotaMonitor = createProviderQuotaMonitor();
 
 async function snapshot() {
-  return loadMissionControlSnapshot({
+  const current = await loadMissionControlSnapshot({
     stateRoot,
     view,
     includeStale,
     staleAfterMs: staleAfterHours * 60 * 60 * 1000,
     repositoryFilter,
   });
+  current.providerQuota = quotaEnabled ? await providerQuotaMonitor.snapshot({ waitForRefresh: oneShot }) : null;
+  return current;
 }
 
 if (oneShot) {
@@ -122,6 +131,7 @@ const restoreSequence = "\x1b[?25h\x1b[?1049l";
 function restore() {
   if (restorePromise) return restorePromise;
   stopped = true;
+  providerQuotaMonitor.stop();
   if (timer) clearInterval(timer);
   timer = null;
   process.stdout.off("resize", draw);
