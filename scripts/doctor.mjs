@@ -194,8 +194,10 @@ check("Codex native host activity hooks", () => {
   accessSync(hostActivityHookLauncher, constants.X_OK);
   const hooks = JSON.parse(readFileSync(resolve(homedir(), ".codex/hooks.json"), "utf8"));
   return hasCommandHook(hooks, "UserPromptSubmit", `${hostActivityHookLauncher} codex start`)
+    && hasCommandHook(hooks, "SubagentStart", `${hostActivityHookLauncher} codex start`)
     && hasCommandHook(hooks, "PreToolUse", `${hostActivityHookLauncher} codex heartbeat`)
     && hasCommandHook(hooks, "PostToolUse", `${hostActivityHookLauncher} codex heartbeat`)
+    && hasCommandHook(hooks, "SubagentStop", `${hostActivityHookLauncher} codex stop`)
     && hasCommandHook(hooks, "Stop", `${hostActivityHookLauncher} codex stop`)
     && hasCommandHook(hooks, "SessionEnd", `${hostActivityHookLauncher} codex stop`);
 }, "run npm run install:global to expose native Codex turns in Mission Control");

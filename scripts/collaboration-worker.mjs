@@ -432,6 +432,10 @@ try {
       let summaryAt = null;
       let summarySource = "broker";
       let livenessMessage = null;
+      let progressEventCount = 0;
+      let observedOutputBytes = 0;
+      let lastOutputAt = null;
+      let lastProgressAt = null;
       const permissionDecision = providerPermissionDecisionForRequest({
         provider: call.agent,
         mode: call.mode,
@@ -456,6 +460,12 @@ try {
               summaryAt,
               summarySource,
               livenessMessage,
+              activity: {
+                progressEventCount,
+                outputBytes: observedOutputBytes,
+                lastOutputAt,
+                lastProgressAt,
+              },
               permissionProfile: activePermissionProfile,
               permissionReason,
               capacity: {
@@ -513,8 +523,14 @@ try {
         let activeCommand = null;
         const response = await pool.send(call, async (progress) => {
           const incoming = progress.summary?.trim().slice(0, 500);
+          if (incoming) {
+            progressEventCount += 1;
+            observedOutputBytes += Buffer.byteLength(incoming, "utf8");
+            lastProgressAt = progress.at || new Date().toISOString();
+          }
           if (incoming && isTransportLivenessSummary(incoming)) livenessMessage = incoming;
           else if (incoming) {
+            lastOutputAt = progress.at || new Date().toISOString();
             if (!firstProgressObserved) {
               firstProgressObserved = true;
               await recordTiming({ action: "finish", name: "first_progress", key: firstProgressTimingKey, at: progress.at, metadata: { agent: call.agent } });
@@ -546,6 +562,12 @@ try {
             summarySource,
             livenessMessage,
             verificationCommand: activeCommand,
+            activity: {
+              progressEventCount,
+              outputBytes: observedOutputBytes,
+              lastOutputAt,
+              lastProgressAt,
+            },
           });
           if (incoming) {
             await appendEvent(workspaceRoot, id, {

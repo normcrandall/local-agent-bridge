@@ -16,6 +16,13 @@ const invoke = (provider, action, input) => execFileSync(process.execPath, [hook
 });
 
 try {
+  assert.equal(await recordHostActivity(stateRoot, {
+    provider: "codex",
+    sessionId: "orphan-nested-session",
+    workspace: "/workspace/example",
+    action: "start",
+    nestedEvent: true,
+  }), null, "a nested event without a parent receipt must be an explicit no-op");
   assert.equal(invoke("codex", "start", {
     hook_event_name: "UserPromptSubmit",
     session_id: "codex-secret-session",
@@ -29,6 +36,42 @@ try {
   assert.equal(states[0].model, "gpt-5.6-sol");
   assert.equal(states[0].task, "Implement native Mission Control activity");
   assert.equal(states[0].hostPid, process.pid);
+  assert.equal(states[0].activeRunCount, 1);
+
+  invoke("codex", "start", {
+    hook_event_name: "SubagentStart",
+    session_id: "codex-secret-session",
+    cwd: "/workspace/example",
+  });
+  invoke("codex", "stop", {
+    hook_event_name: "SubagentStop",
+    session_id: "codex-secret-session",
+    cwd: "/workspace/example",
+  });
+  states = await listHostActivities(stateRoot);
+  assert.equal(states[0].active, true, "an anonymous nested stop must not delete the parent run");
+  assert.equal(states[0].activeRunCount, 1);
+
+  invoke("codex", "start", {
+    hook_event_name: "SubagentStart",
+    session_id: "codex-secret-session",
+    turn_id: "subagent-turn-1",
+    agent_id: "subagent-1",
+    cwd: "/workspace/example",
+  });
+  states = await listHostActivities(stateRoot);
+  assert.equal(states[0].activeRunCount, 2);
+
+  invoke("codex", "stop", {
+    hook_event_name: "SubagentStop",
+    session_id: "codex-secret-session",
+    turn_id: "subagent-turn-1",
+    agent_id: "subagent-1",
+    cwd: "/workspace/example",
+  });
+  states = await listHostActivities(stateRoot);
+  assert.equal(states[0].active, true, "a subagent stop must not stop its active parent turn");
+  assert.equal(states[0].activeRunCount, 1);
 
   invoke("codex", "heartbeat", {
     hook_event_name: "PreToolUse",
@@ -39,6 +82,8 @@ try {
   states = await listHostActivities(stateRoot);
   assert.equal(states[0].summary, "Native codex host is using exec_command.");
   assert.equal(states[0].sourceEvent, "PreToolUse");
+  assert.equal(states[0].activity.toolEventCount, 1);
+  assert.ok(states[0].activity.lastToolAt);
 
   invoke("codex", "stop", {
     hook_event_name: "Stop",
