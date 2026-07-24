@@ -8,6 +8,11 @@ import { LIVE_COLLABORATION_STATUSES } from "./collaboration-cleanup.mjs";
 import { archivePortfolio, listPortfolios } from "./portfolio-store.mjs";
 import { PORTFOLIO_STATUS_GROUPS } from "./portfolio-status.mjs";
 import { auditHostActivityArtifacts, pruneHostActivityArtifacts } from "./host-activity-store.mjs";
+import {
+  collaborationRetirementBinding,
+  inspectCollaborationWorkspace,
+  verifyCollaborationGitHubOutcome,
+} from "./cleanup-retirement-verifier.mjs";
 
 const SAFE_COLLABORATION_ARCHIVE_STATUSES = new Set([
   "agreed", "completed", "cancelled", "closed", "superseded", "failed", "turn_limit", "budget",
@@ -22,6 +27,19 @@ function alive(pid) {
 function dateMs(value) {
   const parsed = Date.parse(value || "");
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+async function mapLimit(values, concurrency, mapper) {
+  const output = new Array(values.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(concurrency, values.length) }, async () => {
+    while (next < values.length) {
+      const index = next;
+      next += 1;
+      output[index] = await mapper(values[index], index);
+    }
+  }));
+  return output;
 }
 
 function pendingWake(state) {
@@ -46,7 +64,7 @@ function collaborationProtectionReasons(state) {
   return reasons;
 }
 
-function collaborationSummary(state, reasons = []) {
+function collaborationSummary(state, reasons = [], retirement = null) {
   return {
     id: state.id,
     status: state.status,
@@ -59,7 +77,44 @@ function collaborationSummary(state, reasons = []) {
     pullRequest: state.githubReview?.prNumber || state.githubBuilder?.prNumber || state.ciTracking?.prNumber || null,
     worktree: state.worktree?.path || state.writerCheckout?.path || null,
     reasons,
+    retirement,
   };
+}
+
+export async function verifyCollaborationRetirement(state, {
+  verifyGithubOutcome,
+  inspectWorkspace,
+  githubVerification,
+} = {}) {
+  let github;
+  try {
+    github = await (verifyGithubOutcome || verifyCollaborationGitHubOutcome)(state, githubVerification);
+  } catch (error) {
+    return {
+      safe: false,
+      reasons: ["github_outcome_unavailable"],
+      github: { safe: false, reason: "github_outcome_unavailable", error: error.message },
+      workspace: null,
+    };
+  }
+  if (!github?.safe) {
+    return { safe: false, reasons: [github?.reason || "github_outcome_unverified"], github, workspace: null };
+  }
+  let workspace;
+  try {
+    workspace = await (inspectWorkspace || inspectCollaborationWorkspace)(state, github);
+  } catch (error) {
+    return {
+      safe: false,
+      reasons: ["workspace_verification_unavailable"],
+      github,
+      workspace: { safe: false, reason: "workspace_verification_unavailable", error: error.message },
+    };
+  }
+  if (!workspace?.safe) {
+    return { safe: false, reasons: [workspace?.reason || "workspace_unverified"], github, workspace };
+  }
+  return { safe: true, reasons: [], github, workspace };
 }
 
 function portfolioSummary(state, reasons = []) {
@@ -75,12 +130,13 @@ function portfolioSummary(state, reasons = []) {
   };
 }
 
-export async function auditBridgeCleanup({
-  workspaceRoot,
-  stateRoot,
-  olderThanDays = 7,
-  now = Date.now(),
-} = {}) {
+export async function auditBridgeCleanup(options = {}) {
+  const {
+    workspaceRoot,
+    stateRoot,
+    olderThanDays = 7,
+    now = Date.now(),
+  } = options;
   if (!Number.isInteger(olderThanDays) || olderThanDays < 1) throw new Error("olderThanDays must be a positive integer.");
   const cutoff = now - olderThanDays * 86_400_000;
   const listed = await listCollaborations(workspaceRoot, { limit: 10_000 });
@@ -89,6 +145,20 @@ export async function auditBridgeCleanup({
   const staleCollaborations = [];
   const protectedCollaborations = [];
 
+  const retirementEvidenceCache = new Map();
+  const verifyRetirement = async (state) => {
+    const binding = collaborationRetirementBinding(state);
+    const retirementKey = JSON.stringify([
+      binding.repository, binding.prNumber, binding.issueNumber, binding.expectedHeadSha, binding.branch,
+      binding.workspace, binding.workspaceProofRequired,
+    ]);
+    if (!retirementEvidenceCache.has(retirementKey)) {
+      retirementEvidenceCache.set(retirementKey, Promise.resolve().then(() => verifyCollaborationRetirement(state, options)));
+    }
+    return retirementEvidenceCache.get(retirementKey);
+  };
+
+  const retirementEligible = [];
   for (const state of collaborations) {
     const isOld = dateMs(state.updatedAt) > 0 && dateMs(state.updatedAt) <= cutoff;
     const reasons = collaborationProtectionReasons(state);
@@ -97,10 +167,18 @@ export async function auditBridgeCleanup({
       continue;
     }
     if (SAFE_COLLABORATION_ARCHIVE_STATUSES.has(state.status)) {
-      collaborationArchiveCandidates.push(collaborationSummary(state));
+      retirementEligible.push(state);
     } else {
       staleCollaborations.push(collaborationSummary(state, [`status:${state.status || "unknown"}`]));
     }
+  }
+  const verifiedRetirements = await mapLimit(retirementEligible, options.verificationConcurrency || 6, async (state) => ({
+    state,
+    retirement: await verifyRetirement(state),
+  }));
+  for (const { state, retirement } of verifiedRetirements) {
+    if (retirement.safe) collaborationArchiveCandidates.push(collaborationSummary(state, [], retirement));
+    else protectedCollaborations.push(collaborationSummary(state, retirement.reasons, retirement));
   }
 
   const portfolioRoot = process.env.BRIDGE_PORTFOLIO_DIR || resolve(stateRoot, "portfolios");
@@ -128,7 +206,7 @@ export async function auditBridgeCleanup({
   });
 
   return {
-    version: 1,
+    version: 2,
     generatedAt: new Date(now).toISOString(),
     cutoff: new Date(cutoff).toISOString(),
     olderThanDays,
@@ -162,6 +240,12 @@ export async function applyBridgeCleanup(options = {}) {
   const failedPortfolios = [];
   for (const candidate of audit.collaborationArchiveCandidates) {
     try {
+      const current = await readCollaboration(options.workspaceRoot, candidate.id);
+      if (current.updatedAt !== candidate.updatedAt) throw new Error("collaboration changed after cleanup audit");
+      const protectionReasons = collaborationProtectionReasons(current);
+      if (protectionReasons.length) throw new Error(`collaboration is protected: ${protectionReasons.join(", ")}`);
+      const retirement = await verifyCollaborationRetirement(current, options);
+      if (!retirement.safe) throw new Error(`retirement verification failed: ${retirement.reasons.join(", ")}`);
       archivedCollaborations.push(await archiveCollaboration(options.workspaceRoot, candidate.id, { expectedUpdatedAt: candidate.updatedAt }));
     } catch (error) {
       failedCollaborations.push({ id: candidate.id, error: error.message });
@@ -196,7 +280,7 @@ export function formatCleanupReport(report, { applied = report.applied === true,
   const lines = [
     `Bridge cleanup ${applied ? "result" : "audit (dry-run)"}`,
     `Cutoff: ${report.cutoff} (${report.olderThanDays} day retention)`,
-    `Archive-ready: ${report.counts.collaborationArchiveCandidates} collaborations, ${report.counts.portfolioArchiveCandidates} portfolios; ${report.counts.hostActivityCleanupCandidates || 0} expired host receipts`,
+    `Archive-ready: ${report.counts.collaborationArchiveCandidates} GitHub/workspace-verified collaborations, ${report.counts.portfolioArchiveCandidates} portfolios; ${report.counts.hostActivityCleanupCandidates || 0} expired host receipts`,
     `Preserved: ${report.counts.protectedCollaborations} protected collaborations, ${report.counts.staleCollaborations} unresolved collaborations, ${report.counts.stalePortfolios} nonterminal portfolios`,
   ];
   if (applied) {
@@ -216,6 +300,14 @@ export function formatCleanupReport(report, { applied = report.applied === true,
     lines.push("Candidates:");
     lines.push(...candidates.slice(0, limit).map((entry) => `  ${entry}`));
     if (candidates.length > limit) lines.push(`  … ${candidates.length - limit} more; use --json for the complete audit`);
+  }
+  const preserved = report.protectedCollaborations
+    .filter((entry) => entry.reasons?.length)
+    .map((entry) => `${entry.id} ${entry.reasons.join(", ")}`);
+  if (preserved.length) {
+    lines.push("Preserved collaborations:");
+    lines.push(...preserved.slice(0, limit).map((entry) => `  ${entry}`));
+    if (preserved.length > limit) lines.push(`  … ${preserved.length - limit} more; use --json for the complete audit`);
   }
   lines.push("Stale unresolved records are never auto-cancelled, and cleanup never deletes worktrees, branches, claims, or GitHub history.");
   return lines.join("\n");
