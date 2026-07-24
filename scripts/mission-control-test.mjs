@@ -357,6 +357,8 @@ try {
   assert.equal(recentDeadHostLane.hostActivity.processAlive, false);
   assert.equal(recentDeadHostLane.hostActivity.livenessProof, "recent_receipt");
   assert.equal(isLiveLane(recentDeadHostLane, now + 1), true);
+  const hostWithoutStart = hostActivityLane({ ...hostState, startedAt: null }, now + 1);
+  assert.equal(hostWithoutStart.createdAt, hostState.updatedAt, "legacy host activity must retain a stable creation fallback");
   const staleDeadHostLane = hostActivityLane({ ...hostState, hostPid: 99_999_999 }, now + HOST_ACTIVITY_HEARTBEAT_GRACE_MS + 1);
   assert.equal(staleDeadHostLane.hostActivity.livenessProof, "none");
   assert.equal(isLiveLane(staleDeadHostLane, now + HOST_ACTIVITY_HEARTBEAT_GRACE_MS + 1), false);
@@ -628,13 +630,47 @@ try {
   assert.ok(renderSnapshot(all, { width: 30, now }).split("\n").every((line) => displayWidth(line) <= 30));
 
   const duplicate = deduplicateOperatorLanes([
-    { ...attention.operatorLanes[0], id: "one", issueNumber: 99, repository: "veliqon/control-plane", lifecyclePhase: "ready", updatedAt: new Date(now - 1_000).toISOString() },
-    { ...attention.operatorLanes[0], id: "two", issueNumber: 99, repository: "veliqon/control-plane", lifecyclePhase: "running", recovery: { processAlive: true }, updatedAt: new Date(now).toISOString() },
+    { ...attention.operatorLanes[0], id: "one", issueNumber: 99, repository: "veliqon/control-plane", lifecyclePhase: "ready", createdAt: new Date(now - 20_000).toISOString(), updatedAt: new Date(now - 1_000).toISOString() },
+    { ...attention.operatorLanes[0], id: "two", issueNumber: 99, repository: "veliqon/control-plane", lifecyclePhase: "running", recovery: { processAlive: true }, createdAt: new Date(now - 10_000).toISOString(), updatedAt: new Date(now).toISOString() },
   ], { now });
   assert.equal(duplicate.length, 1);
   assert.equal(duplicate[0].relatedLaneCount, 2);
   assert.equal(duplicate[0].id, "two", "the live collaboration must represent a duplicated issue");
+  assert.equal(duplicate[0].operatorStartedAt, new Date(now - 20_000).toISOString(), "representative changes must retain the operator's earliest execution start");
   assert.match(missionControlCopyText(duplicate[0]), /related: one,two|related: two,one/);
+
+  const stableActiveFixture = [
+    {
+      ...attention.operatorLanes[0],
+      id: "active-older",
+      issueNumber: 201,
+      prNumber: null,
+      type: "collaboration",
+      lifecyclePhase: "running",
+      recovery: { processAlive: true },
+      createdAt: new Date(now - 10_000).toISOString(),
+      updatedAt: new Date(now - 1_000).toISOString(),
+    },
+    {
+      ...attention.operatorLanes[0],
+      id: "active-newer",
+      issueNumber: 202,
+      prNumber: null,
+      type: "collaboration",
+      lifecyclePhase: "running",
+      recovery: { processAlive: true },
+      createdAt: new Date(now - 5_000).toISOString(),
+      updatedAt: new Date(now).toISOString(),
+    },
+  ];
+  const stableBeforeHeartbeat = deduplicateOperatorLanes(stableActiveFixture, { now });
+  assert.deepEqual(stableBeforeHeartbeat.map((lane) => lane.id), ["active-older", "active-newer"]);
+  const stableAfterHeartbeat = deduplicateOperatorLanes([
+    { ...stableActiveFixture[0], updatedAt: new Date(now + 10_000).toISOString() },
+    { ...stableActiveFixture[1], updatedAt: new Date(now + 5_000).toISOString() },
+  ], { now: now + 10_000 });
+  assert.deepEqual(stableAfterHeartbeat.map((lane) => lane.id), ["active-older", "active-newer"], "heartbeat timestamps must not reorder active work");
+  assert.deepEqual(stableAfterHeartbeat.map((lane) => lane.operatorStartedAt), stableBeforeHeartbeat.map((lane) => lane.operatorStartedAt));
 
   const colored = renderMissionControl(attention, { selectedIndex, timeline, width: 120, height: 28, now, color: true, interactive: true });
   assert.match(colored, /\x1b\[/);

@@ -284,6 +284,7 @@ export function hostActivityLane(state, now = Date.now()) {
     activeAgent: state.provider,
     writer: null,
     model: state.model,
+    createdAt: state.startedAt || state.updatedAt,
     narrative: {
       summary: state.summary,
       updatedAt: state.updatedAt,
@@ -313,7 +314,6 @@ export function hostActivityLane(state, now = Date.now()) {
       },
     },
     updatedAt: state.updatedAt,
-    createdAt: state.startedAt,
     nextAction: live ? "continue" : "none",
   };
 }

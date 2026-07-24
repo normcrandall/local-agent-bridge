@@ -317,6 +317,31 @@ function compareRank(left, right) {
   return 0;
 }
 
+function operatorStartAt(group, representative) {
+  const executionAttempts = group.filter((lane) => ["collaboration", "combined", "native_host"].includes(lane.type));
+  const sources = executionAttempts.length ? executionAttempts : group;
+  const starts = sources.map((lane) => dateMs(lane.createdAt)).filter((value) => value > 0);
+  if (starts.length) return new Date(Math.min(...starts)).toISOString();
+  return representative.createdAt || null;
+}
+
+function compareOperatorLanes(left, right) {
+  const categoryDelta = (OPERATOR_CATEGORY_RANK[left.operatorCategory] ?? 9)
+    - (OPERATOR_CATEGORY_RANK[right.operatorCategory] ?? 9);
+  if (categoryDelta) return categoryDelta;
+  const repositoryDelta = left.repository.localeCompare(right.repository);
+  if (repositoryDelta) return repositoryDelta;
+  if (left.operatorCategory === "active") {
+    const leftStart = dateMs(left.operatorStartedAt);
+    const rightStart = dateMs(right.operatorStartedAt);
+    if (leftStart && rightStart && leftStart !== rightStart) return leftStart - rightStart;
+    if (leftStart !== rightStart) return leftStart ? -1 : 1;
+    return left.operatorId.localeCompare(right.operatorId);
+  }
+  return dateMs(right.updatedAt) - dateMs(left.updatedAt)
+    || left.operatorId.localeCompare(right.operatorId);
+}
+
 export function deduplicateOperatorLanes(lanes, { now = Date.now(), includeHistory = false } = {}) {
   const issueToPrCandidates = new Map();
   for (const lane of lanes || []) {
@@ -365,15 +390,14 @@ export function deduplicateOperatorLanes(lanes, { now = Date.now(), includeHisto
       ...representative,
       operatorId,
       operatorCategory,
+      operatorStartedAt: operatorStartAt(group, representative),
       legacyOperatorCategory: operatorCategory === "stopped" ? "failed" : operatorCategory,
       relatedLaneCount: group.length,
       relatedLaneIds: group.map((lane) => lane.id),
       relatedAttempts,
       providers,
     }];
-  }).sort((left, right) => (OPERATOR_CATEGORY_RANK[left.operatorCategory] ?? 9) - (OPERATOR_CATEGORY_RANK[right.operatorCategory] ?? 9)
-    || left.repository.localeCompare(right.repository)
-    || dateMs(right.updatedAt) - dateMs(left.updatedAt));
+  }).sort(compareOperatorLanes);
 }
 
 export async function loadMissionControlSnapshot({
