@@ -786,9 +786,20 @@ function activeColumnWidths(width) {
   return { item, agent, role, updated, total: 2 + item + 1 + agent + 1 + role + 1 + updated };
 }
 
+function compactActiveColumnWidths(width) {
+  const agent = 6;
+  const role = 6;
+  const ageWidth = 4;
+  const item = Math.max(4, width - (2 + agent + role + ageWidth + 3));
+  return { item, agent, role, age: ageWidth };
+}
+
 function activeTableHeader(width) {
   const columns = activeColumnWidths(width);
-  if (width < columns.total) return `  ${pad("ITEM", 7)} · ${pad("AGENT", 7)} · ${pad("ROLE", 7)} · ${pad("UPDATED", 7)}`;
+  if (width < columns.total) {
+    const compact = compactActiveColumnWidths(width);
+    return `  ${pad("ITEM", compact.item)} ${pad("AGENT", compact.agent)} ${pad("ROLE", compact.role)} ${pad("AGE", compact.age)}`;
+  }
   return `  ${pad("ITEM", columns.item)} ${pad("AGENT", columns.agent)} ${pad("ROLE", columns.role)} ${pad("UPDATED", columns.updated)}`;
 }
 
@@ -799,14 +810,18 @@ function activeTableRow(lane, selected, now, width) {
   const role = activeRole(lane);
   const updated = age(activeActivityAt(lane) || lane.updatedAt, now);
   const columns = activeColumnWidths(width);
-  const title = width >= columns.total
-    ? `${marker} ${pad(item, columns.item)} ${pad(provider, columns.agent)} ${pad(role, columns.role)} ${pad(updated, columns.updated)}`
-    : `${marker} ${pad(item, 7)} · ${pad(provider, 7)} · ${pad(role, 7)} · ${pad(updated, 7)}`;
+  let title;
+  if (width >= columns.total) {
+    title = `${marker} ${pad(item, columns.item)} ${pad(provider, columns.agent)} ${pad(role, columns.role)} ${pad(updated, columns.updated)}`;
+  } else {
+    const compact = compactActiveColumnWidths(width);
+    title = `${marker} ${pad(item, compact.item)} ${pad(provider, compact.agent)} ${pad(role, compact.role)} ${pad(updated, compact.age)}`;
+  }
   const repository = clean(lane.repository).split("/").at(-1) || "unknown repo";
   const narrative = `  ${repository} · ${activeActivity(lane)}`;
   return [
     paneLine(title, selected ? "7" : CATEGORY_STYLE.active, { selected }),
-    paneLine(narrative, selected ? "7" : "36", { selected }),
+    paneLine(narrative, selected ? "7" : "36"),
   ];
 }
 

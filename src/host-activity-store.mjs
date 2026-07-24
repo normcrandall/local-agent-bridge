@@ -283,7 +283,6 @@ export function hostActivityLane(state, now = Date.now()) {
     task: state.task,
     activeAgent: state.provider,
     writer: null,
-    providerPhase: state.sourceEvent || "native turn",
     model: state.model,
     narrative: {
       summary: state.summary,

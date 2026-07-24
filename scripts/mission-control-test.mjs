@@ -702,8 +702,11 @@ try {
   const narrowGrid = narrow.split("\n").filter((line) => /^[┌├│└]/.test(line));
   assert.ok(narrowGrid.every((line) => displayWidth(line) === 60));
   const compactWork = renderMissionControl(attention, { selectedIndex, timeline, width: 43, height: 20, now, color: false, interactive: true, activePane: 1 });
-  assert.match(compactWork, /ITEM\s+· AGENT\s+· ROLE\s+· UPDATED/);
-  assert.match(compactWork, /codex\s+· writer\s+· 2m/);
+  assert.match(compactWork, /ITEM\s+AGENT\s+ROLE\s+AGE/);
+  assert.match(compactWork, /codex\s+writer\s+2m/);
+  const commonThreePaneWork = renderMissionControl(attention, { selectedIndex, timeline, width: 84, height: 20, now, color: false, interactive: true, activePane: 1 });
+  assert.match(commonThreePaneWork, /ITEM\s+AGENT\s+ROLE\s+AGE/);
+  assert.match(commonThreePaneWork, /codex\s+writer\s+2m/);
   const peerLane = {
     ...attention.operatorLanes[selectedIndex],
     id: "active-peer-lane",
