@@ -33,7 +33,7 @@ assert.equal(parseRepositoryRemote("git@github.com:owner/repo.git"), "owner/repo
 assert.equal(parseRepositoryRemote("ssh://git@github.com/owner/repo.git"), "owner/repo");
 assert.equal(parseRepositoryRemote("not-a-remote"), null);
 assert.equal(formatLocalDateTime("not-a-date"), "unknown");
-assert.match(formatLocalDateTime("2026-07-23T12:00:00.000Z"), /^2026-07-23 \d{2}:\d{2}:\d{2} \S/);
+assert.match(formatLocalDateTime("2026-07-23T12:00:00.000Z"), /^2026-07-2[34] \d{2}:\d{2}:\d{2} \S/);
 assert.match(formatLocalDateTime("1970-01-01T00:00:00.000Z"), /^19(?:69|70)-/);
 assert.deepEqual(navigationIntent("j", 1), { selectedIndex: 2, preserveSelectedId: false });
 assert.deepEqual(navigationIntent("k", 1), { selectedIndex: 0, preserveSelectedId: false });

@@ -65,7 +65,7 @@ function dateMs(value) {
 export function formatLocalDateTime(value) {
   const ms = Date.parse(value || "");
   if (!Number.isFinite(ms)) return "unknown";
-  const parts = new Intl.DateTimeFormat("sv-SE-u-ca-gregory-nu-latn", {
+  const parts = new Intl.DateTimeFormat("en-US-u-ca-gregory-nu-latn", {
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
