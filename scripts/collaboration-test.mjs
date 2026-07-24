@@ -116,6 +116,7 @@ let completionClient;
 let receiptClient;
 let capacityClient;
 let recoveryClient;
+let mixedFailureClient;
 try {
   firstClient = await connect("collaboration-test-app-one");
   const tools = await firstClient.listTools();
@@ -352,6 +353,7 @@ try {
       agents: ["claude"],
       maxTurns: 2,
       modelFallbacks: { claude: ["claude-opus-4-6", "claude-sonnet-5"], codex: ["5.6 terra"] },
+      providerFailover: { enabled: false, agents: ["claude"] },
       allowClaudeFable: true,
       verificationCommands: ["npm test"],
       handoffPath: ".bridge/test-handoffs/collaboration-review.md",
@@ -374,6 +376,7 @@ try {
     codex: ["5.6 terra"],
   });
   assert.equal(firstRun.allowClaudeFable, true);
+  assert.deepEqual(firstRun.providerFailover, { enabled: false, agents: ["claude"] });
   assert.match(firstRun.turns[0].message, /--fallback-model/);
   assert.match(firstRun.turns[0].message, /claude-opus-4-6,claude-sonnet-5/);
   assert.match(firstRun.turns[0].message, /Bash\(npm test\)/);
@@ -573,6 +576,7 @@ try {
     codex: ["5.6 base"],
   });
   assert.equal(secondRun.allowClaudeFable, false, "Fable authorization must not survive collaboration continuation");
+  assert.deepEqual(secondRun.providerFailover, { enabled: false, agents: ["claude"] });
   assert.match(secondRun.turns[2].message, /Continue from this second app/);
   assert.match(secondRun.turns[2].message, /Bash\(npm test\)/, "Claude must retain narrow permission to challenge and rerun a reused receipt");
   assert.match(secondRun.turns[2].message, /Broker-attested verification receipts reused/);
@@ -652,6 +656,15 @@ try {
   assert.equal(writerFailoverRun.runtime.writer, "claude");
   assert.deepEqual(writerFailoverRun.turns.map((turn) => turn.agent), ["claude"]);
   assert.match(writerFailoverRun.runtime.unavailableAgents.antigravity, /exited|failed/i);
+  assert.equal(writerFailoverRun.providerFailoverState.status, "transferred");
+  assert.deepEqual(
+    {
+      from: writerFailoverRun.providerFailoverState.lastTransition.from,
+      to: writerFailoverRun.providerFailoverState.lastTransition.to,
+      phase: writerFailoverRun.providerFailoverState.lastTransition.phase,
+    },
+    { from: "antigravity", to: "claude", phase: "turn" },
+  );
 
   recoveryClient = await connect("collaboration-test-provider-recovery", {
     AGY_BIN: resolve(root, "scripts/fake-antigravity.mjs"),
@@ -671,7 +684,30 @@ try {
   assert.equal(recoveryRun.status, "failed");
   assert.equal(recoveryRun.providerRecoveryState.attempts, 1);
   assert.equal(recoveryRun.providerRecoveryState.status, "exhausted");
-  assert.match(recoveryRun.error, /No requested model/);
+  assert.match(recoveryRun.error, /All requested providers failed/);
+  assert.match(recoveryRun.error, /transient_capacity/);
+
+  mixedFailureClient = await connect("collaboration-test-mixed-provider-failure", {
+    CLAUDE_BIN: "/usr/bin/false",
+    AGY_BIN: resolve(root, "scripts/fake-antigravity.mjs"),
+    FAKE_ANTIGRAVITY_OVERLOAD_MODELS: "provider-configured model",
+  });
+  const mixedFailureStarted = await mixedFailureClient.callTool({
+    name: "start_collaboration",
+    arguments: {
+      task: "Do not convert a mixed provider failure into a capacity recovery loop",
+      agents: ["claude", "antigravity"],
+      maxTurns: 1,
+      modelFallbacks: { antigravity: [] },
+      providerRecovery: { enabled: true, maxAttempts: 2, backoffSeconds: [1] },
+    },
+  });
+  const mixedFailureRun = await waitForStop(mixedFailureClient, mixedFailureStarted.structuredContent.id);
+  assert.equal(mixedFailureRun.status, "failed");
+  assert.equal(mixedFailureRun.providerRecoveryState.attempts, 0);
+  assert.notEqual(mixedFailureRun.providerRecoveryState.status, "exhausted");
+  assert.match(mixedFailureRun.error, /Claude Code \((?:transport|provider_failure)\)/);
+  assert.match(mixedFailureRun.error, /Antigravity \(transient_capacity\)/);
 
   const singleTurnStarted = await fallbackClient.callTool({
     name: "start_collaboration",
@@ -874,6 +910,7 @@ try {
   await receiptClient?.close().catch(() => {});
   await capacityClient?.close().catch(() => {});
   await recoveryClient?.close().catch(() => {});
+  await mixedFailureClient?.close().catch(() => {});
   try {
     const supervisor = JSON.parse(await readFile(join(stateDirectory, "supervisor.json"), "utf8"));
     process.kill(supervisor.pid, "SIGTERM");

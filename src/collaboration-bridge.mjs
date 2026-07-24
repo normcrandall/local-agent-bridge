@@ -75,6 +75,9 @@ import { hydrateClaimedIssueTask } from "./claimed-issue-context.mjs";
 import { startSupervisedWorker } from "./worker-supervisor-client.mjs";
 import { collaborationAlias, collaborationIdentity } from "./collaboration-identity.mjs";
 import { runWorkspaceRecipe, workspaceRecipePlan } from "./workspace-operations.mjs";
+import {
+  resolveProviderFailoverRoster,
+} from "./provider-failover.mjs";
 
 const RUNTIME_ROOT = realpathSync(process.env.BRIDGE_RUNTIME_ROOT || process.env.BRIDGE_ROOT || process.cwd());
 const WORKSPACE_ROOT = realpathSync(process.env.BRIDGE_WORKSPACE_ROOT || process.env.BRIDGE_ROOT || process.cwd());
@@ -131,6 +134,10 @@ function summary(view) {
   if (available?.length) lines.push(`Available: ${available.join(", ")}`);
   for (const [agent, reason] of Object.entries(unavailable)) {
     lines.push(`Skipped: ${agent} — ${reason}`);
+  }
+  if (view.providerFailoverState?.lastTransition) {
+    const failover = view.providerFailoverState.lastTransition;
+    lines.push(`Failover: ${failover.from} → ${failover.to} (${failover.failureClass}) — ${failover.reason}`);
   }
   if (active) {
     const elapsedSeconds = active.startedAt
@@ -586,6 +593,12 @@ const providerRecoverySchema = z.object({
 }).strict().optional().describe(
   "Retry the full eligible-provider roster after every requested provider is confirmed unavailable. Recovery remains visible and preserves the workspace; indeterminate ownership is never retried.",
 );
+const providerFailoverSchema = z.object({
+  enabled: z.boolean().default(true),
+  agents: z.array(z.enum(WRITER_AGENTS)).min(1).max(WRITER_AGENTS.length).optional(),
+}).strict().optional().describe(
+  "Preflight eligible writer providers for claimed work but keep appended providers on standby until a confirmed provider-local failure transfers the same checkout. Set enabled false only for an intentionally strict single-provider lane.",
+);
 const ciTrackingSchema = z.object({
   prNumber: z.number().int().positive(),
 }).strict().optional().describe("Refresh GitHub PR checks after each completed turn.");
@@ -635,7 +648,7 @@ const server = new McpServer(
   { name: "desktop-agent-collaboration", version: "0.2.0" },
   {
     instructions:
-      "Use start_collaboration for an asynchronous durable job with one provider or a bounded roundtable with multiple providers. It returns immediately with a portable collaborationId. Unavailable providers are skipped and the run continues with any remaining participant. Autonomous work lanes should include an ordered eligible-provider roster and an explicit preferred writer so a confirmed unavailable writer fails over in the same worktree. Pass verificationCommands and handoffPath for independently verified reviews. Choose workProfile implement for local ownership through commit or deliver when the writer also owns push and PR delivery; use workCommands only for unusual additions. When repository policy requires reviewer-authored PR feedback, pass githubReview so the delegated Claude or Codex reviewer receives target-bound handoff and formal-review tools. Native coordinators must use merge_pull_request for an exact-head merge authorized by machine-local policy; never request Bash permission for gh pr merge. Use wait_for_portfolio_lane to race expected success signals against collaboration failure, cancellation, indeterminate ownership, recovery, and handoff completion; never park on a PR-head or CI-only waiter. Use modelFallbacks.claude, modelFallbacks.codex, or modelFallbacks.antigravity for ordered overload-only downgrade chains. Fable is denied by default; set allowClaudeFable only when the user's current request explicitly asks for Fable by name. Use get_collaboration to poll or inspect it, continue_collaboration for another phase, and cancel_collaboration to stop. The broker owns routing; never ask a peer to call another peer.",
+      "Use start_collaboration for an asynchronous durable job with one provider or a bounded roundtable with multiple providers. It returns immediately with a portable collaborationId. Unavailable providers are skipped and the run continues with any remaining participant. Claimed autonomous work automatically appends eligible cloud writers and transfers confirmed failures in the same private checkout; set providerFailover.enabled false only for an intentionally strict provider pin. Indeterminate ownership never transfers. Pass verificationCommands and handoffPath for independently verified reviews. Choose workProfile implement for local ownership through commit or deliver when the writer also owns push and PR delivery; use workCommands only for unusual additions. When repository policy requires reviewer-authored PR feedback, pass githubReview so the delegated Claude or Codex reviewer receives target-bound handoff and formal-review tools. Native coordinators must use merge_pull_request for an exact-head merge authorized by machine-local policy; never request Bash permission for gh pr merge. Use wait_for_portfolio_lane to race expected success signals against collaboration failure, cancellation, indeterminate ownership, recovery, and handoff completion; never park on a PR-head or CI-only waiter. Use modelFallbacks.claude, modelFallbacks.codex, or modelFallbacks.antigravity for ordered overload-only downgrade chains. Fable is denied by default; set allowClaudeFable only when the user's current request explicitly asks for Fable by name. Use get_collaboration to poll or inspect it, continue_collaboration for another phase, and cancel_collaboration to stop. The broker owns routing; never ask a peer to call another peer.",
   },
 );
 
@@ -693,6 +706,7 @@ server.registerTool(
       worktree: worktreeSchema,
       budget: budgetSchema,
       providerRecovery: providerRecoverySchema,
+      providerFailover: providerFailoverSchema,
       ciTracking: ciTrackingSchema,
       decisionPolicy: decisionPolicySchema,
       chair: chairSchema,
@@ -706,11 +720,19 @@ server.registerTool(
       taskNumber: input.taskNumber, agents: input.agents, offset: input.rotationOffset,
     });
     const requestedWriter = input.mode === "work" ? (input.writer || participantRotation?.writer || input.startAgent || input.agents[0]) : null;
+    const failoverRoster = resolveProviderFailoverRoster({
+      agents: input.agents,
+      mode: input.mode,
+      // A native chair that owns the requested writer role must not silently
+      // gain delegated peers merely because the lane also carries an issue claim.
+      issueClaim: input.chair?.provider === requestedWriter ? null : input.issueClaim,
+      providerFailover: input.providerFailover,
+    });
     if (requestedWriter && !WRITER_AGENTS.includes(requestedWriter)) {
       throw new Error(`Provider ${requestedWriter} is review-only and cannot be selected as writer.`);
     }
     const native = resolveNativeChair({
-      chair: input.chair || null, agents: input.agents, startAgent: input.startAgent,
+      chair: input.chair || null, agents: failoverRoster.agents, startAgent: input.startAgent,
       writer: requestedWriter, mode: input.mode,
     });
     const delegatedAgents = native.agents;
@@ -919,6 +941,7 @@ server.registerTool(
           collaborationId,
           phase: "preflight",
           summary: "Worktree created and collaboration preflight passed.",
+          writer: resolvedIssueClaim.writer,
           headSha: resolvedIssueClaim.headSha,
           branch: resolvedIssueClaim.branch,
           worktree: resolvedIssueClaim.worktree,
@@ -988,6 +1011,10 @@ server.registerTool(
         budget: input.budget || {},
         providerRecovery: input.providerRecovery || { enabled: true, maxAttempts: 3, backoffSeconds: [15, 60, 180] },
         providerRecoveryState: { attempts: 0, status: "idle" },
+        providerFailover: failoverRoster.policy,
+        requestedAgents: failoverRoster.requestedAgents,
+        standbyAgents: failoverRoster.standbyAgents.filter((agent) => delegatedAgents.includes(agent)),
+        providerFailoverState: { transitions: [], status: "idle" },
         usage: {},
         ciTracking: input.ciTracking || null,
         ci: null,
@@ -2002,6 +2029,7 @@ server.registerTool(
         collaborationId: id,
         phase: "working",
         summary: "Collaboration continuation queued.",
+        writer: resolvedContinuationIssueClaim.writer || current.writer,
         headSha: resolvedContinuationIssueClaim.headSha,
         branch: resolvedContinuationIssueClaim.branch,
         worktree: resolvedContinuationIssueClaim.worktree || current.workspace,

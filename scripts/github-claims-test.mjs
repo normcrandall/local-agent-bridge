@@ -221,6 +221,12 @@ function createPausableMockGitHub() {
 
 async function runTests() {
   const tempWorkspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-claims-test-"));
+  const previousCollaborationDirectory = process.env.BRIDGE_COLLABORATION_DIR;
+  // Verification commands can run inside a live collaboration worker, which
+  // exports the machine-wide state directory. Keep fixed test IDs in the test
+  // workspace so they can never appear in Mission Control or overwrite a live
+  // collaboration fixture.
+  process.env.BRIDGE_COLLABORATION_DIR = path.join(tempWorkspaceRoot, ".bridge", "collaborations");
   const mock = createPausableMockGitHub();
 
   const baseClientConfig = {
@@ -446,6 +452,49 @@ async function runTests() {
   const claimsAfterRefresh = await parseClaims(client, 42);
   const stateWorking = claimsAfterRefresh.find(c => c.data.collaboration === "bridge-33333333-3333-3333-4444-555555555555").data;
   assert.equal(stateWorking.phase, "working");
+
+  const failoverHistoryBeforeWriterChange = stateWorking.history.filter((entry) => entry.event === "writer_failover").length;
+  await refreshClaimLease({
+    client,
+    issueNumber: 42,
+    collaborationId: "bridge-33333333-3333-3333-4444-555555555555",
+    phase: "working",
+    writer: "claude",
+    summary: "Writer metadata refreshed after an ordinary continuation.",
+  });
+  const claimsAfterWriterChange = await parseClaims(client, 42);
+  const stateAfterWriterChange = claimsAfterWriterChange.find(c => c.data.collaboration === "bridge-33333333-3333-3333-4444-555555555555").data;
+  assert.equal(stateAfterWriterChange.writer, "claude");
+  assert.equal(
+    stateAfterWriterChange.history.filter((entry) => entry.event === "writer_failover").length,
+    failoverHistoryBeforeWriterChange,
+    "a bare writer refresh must not fabricate a provider failover",
+  );
+
+  await refreshClaimLease({
+    client,
+    issueNumber: 42,
+    collaborationId: "bridge-33333333-3333-3333-4444-555555555555",
+    phase: "working",
+    writer: "codex",
+    writerFailover: {
+      from: "claude",
+      to: "codex",
+      failureClass: "transport",
+      reason: "Claude transport closed."
+    },
+    summary: "Claude failed; writer transferred to Codex."
+  });
+  const claimsAfterWriterFailover = await parseClaims(client, 42);
+  const stateAfterWriterFailover = claimsAfterWriterFailover.find(c => c.data.collaboration === "bridge-33333333-3333-3333-4444-555555555555").data;
+  assert.equal(stateAfterWriterFailover.writer, "codex");
+  assert.equal(stateAfterWriterFailover.history[0].event, "writer_failover");
+  assert.equal(stateAfterWriterFailover.history[0].previousWriter, "claude");
+  assert.equal(stateAfterWriterFailover.history[0].writer, "codex");
+  assert.equal(stateAfterWriterFailover.history[0].failureClass, "transport");
+  assert.equal(stateAfterWriterFailover.history[0].reason, "Claude transport closed.");
+  assert.match(mock.getComments()[0].body, /Transfer: `claude` → `codex`/);
+  assert.match(mock.getComments()[0].body, /Cause: `transport` — Claude transport closed\./);
 
   await refreshClaimLease({
     client,
@@ -939,6 +988,8 @@ async function runTests() {
   assert.ok(!mock.getLabels().has("agent:in-progress"));
 
   fs.rmSync(tempWorkspaceRoot, { recursive: true, force: true });
+  if (previousCollaborationDirectory === undefined) delete process.env.BRIDGE_COLLABORATION_DIR;
+  else process.env.BRIDGE_COLLABORATION_DIR = previousCollaborationDirectory;
   console.log("All claim subsystem unit tests passed successfully!");
 }
 

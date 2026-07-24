@@ -632,6 +632,7 @@ for (const property of [
   "modelFallbacks",
   "allowClaudeFable",
   "providerRecovery",
+  "providerFailover",
   "verificationCommands",
   "workCommands",
   "workProfile",

@@ -135,10 +135,57 @@ assert.equal(fallbackOutcome.reason, "agreed");
 assert.deepEqual(fallbackOutcome.state.availableAgents, ["claude", "antigravity"]);
 assert.match(fallbackOutcome.state.unavailableAgents.codex, /not installed/);
 assert.equal(skipped[0].agent, "codex");
+assert.equal(skipped[0].failureClass, "configuration");
+assert.equal(skipped[0].nextAgent, "antigravity");
 assert.deepEqual(
   fallbackOutcome.turns.map((turn) => turn.agent),
   ["claude", "antigravity", "claude"],
 );
+
+const standbyCalls = [];
+const standbyFailures = [];
+const standbyOutcome = await runConversation({
+  task: "Transfer a failed writer without spending turns on standby providers",
+  agents: ["codex"],
+  standbyAgents: ["claude", "antigravity"],
+  startAgent: "codex",
+  writer: "codex",
+  mode: "work",
+  maxTurns: 1,
+  send: async ({ agent }) => {
+    standbyCalls.push(agent);
+    if (agent === "codex") throw new Error("Codex transport closed");
+    return { message: `${agent} completed the work.\nSTATUS: AGREED`, sessionId: `${agent}-standby` };
+  },
+  onAgentUnavailable: async (failure) => standbyFailures.push(failure),
+});
+assert.deepEqual(standbyCalls, ["codex", "claude"]);
+assert.deepEqual(standbyOutcome.turns.map((turn) => turn.agent), ["claude"]);
+assert.equal(standbyOutcome.state.writer, "claude");
+assert.deepEqual(standbyOutcome.state.standbyAgents, ["antigravity"]);
+assert.equal(standbyFailures[0].previousWriter, "codex");
+assert.equal(standbyFailures[0].writer, "claude");
+
+const mixedRosterCalls = [];
+const mixedRosterOutcome = await runConversation({
+  task: "Promote standby after the writer fails beside a review-only participant",
+  agents: ["ollama", "codex"],
+  standbyAgents: ["claude"],
+  startAgent: "codex",
+  writer: "codex",
+  mode: "work",
+  maxTurns: 1,
+  send: async ({ agent }) => {
+    mixedRosterCalls.push(agent);
+    if (agent === "codex") throw new Error("Codex transport closed");
+    return { message: `${agent} completed the work.\nSTATUS: AGREED`, sessionId: `${agent}-mixed-standby` };
+  },
+});
+assert.deepEqual(mixedRosterCalls, ["codex", "claude"]);
+assert.deepEqual(mixedRosterOutcome.turns.map((turn) => turn.agent), ["claude"]);
+assert.equal(mixedRosterOutcome.state.writer, "claude");
+assert.deepEqual(mixedRosterOutcome.state.availableAgents, ["claude", "ollama"]);
+assert.deepEqual(mixedRosterOutcome.state.standbyAgents, []);
 
 const noProviderOutcome = await runConversation({
   task: "Fail clearly only when nobody is available",
@@ -148,7 +195,9 @@ const noProviderOutcome = await runConversation({
 });
 assert.equal(noProviderOutcome.reason, "failed");
 assert.equal(noProviderOutcome.state.availableAgents.length, 0);
-assert.match(noProviderOutcome.error, /No requested model/);
+assert.match(noProviderOutcome.error, /All requested providers failed/);
+assert.match(noProviderOutcome.error, /Claude Code \(provider_failure\): claude unavailable/);
+assert.match(noProviderOutcome.error, /Codex \(provider_failure\): codex unavailable/);
 
 const indeterminateError = new Error("MCP request timed out while provider state is unknown");
 indeterminateError.indeterminate = true;

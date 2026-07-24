@@ -146,7 +146,10 @@ export async function getBuilderClientForWorkspace(workspace, issueNum, fetchImp
 
 function generateCommentBody(payload) {
   const historyLines = (payload.history || []).map(h => {
-    return `- [${h.at}] Event: **${h.event}** | Collab: \`${h.collaboration}\` | Writer: \`${h.writer}\` | Phase: \`${h.phase || ""}\``;
+    const failover = h.event === "writer_failover"
+      ? ` | Transfer: \`${h.previousWriter}\` → \`${h.writer}\` | Cause: \`${h.failureClass || "provider_failure"}\`${h.reason ? ` — ${claimSummary(h.reason)}` : ""}`
+      : ` | Writer: \`${h.writer}\``;
+    return `- [${h.at}] Event: **${h.event}** | Collab: \`${h.collaboration}\`${failover} | Phase: \`${h.phase || ""}\``;
   }).join("\n");
 
   return `### Agent Bridge Issue Claim Lease\n` +
@@ -390,7 +393,7 @@ export async function acquireClaimLease({
   }
 }
 
-export async function refreshClaimLease({ client, issueNumber, collaborationId, phase, headSha, branch, worktree, summary, ttlMs = 300_000 }) {
+export async function refreshClaimLease({ client, issueNumber, collaborationId, phase, headSha, branch, worktree, writer, writerFailover, summary, ttlMs = 300_000 }) {
   const claims = await parseClaims(client, issueNumber);
   const ours = canonicalClaim(claims.filter(c => c.data.collaboration === collaborationId));
   if (!ours) {
@@ -414,12 +417,13 @@ export async function refreshClaimLease({ client, issueNumber, collaborationId, 
   const sameHead = ours.data.head === headSha || !headSha;
   const sameBranch = ours.data.branch === branch || !branch;
   const sameWorktree = ours.data.worktree === worktree || !worktree;
+  const sameWriter = ours.data.writer === writer || !writer;
   const normalizedSummary = claimSummary(summary);
   const sameSummary = normalizedSummary === undefined || ours.data.summary === normalizedSummary;
   const lastUpdated = ours.data.timestamps?.updated;
   const ageMs = lastUpdated ? Date.now() - Date.parse(lastUpdated) : Infinity;
 
-  if (samePhase && sameHead && sameBranch && sameWorktree && sameSummary && ageMs < 60_000) {
+  if (samePhase && sameHead && sameBranch && sameWorktree && sameWriter && sameSummary && ageMs < 60_000) {
     return;
   }
 
@@ -429,8 +433,24 @@ export async function refreshClaimLease({ client, issueNumber, collaborationId, 
       ...(ours.data.history || [])
     ].slice(0, 10);
   }
+  if (writer && ours.data.writer !== writer && writerFailover) {
+    ours.data.history = [
+      {
+        event: "writer_failover",
+        collaboration: collaborationId,
+        previousWriter: writerFailover?.from || ours.data.writer,
+        writer,
+        failureClass: writerFailover?.failureClass || null,
+        reason: writerFailover?.reason || null,
+        phase: targetPhase,
+        at: new Date().toISOString(),
+      },
+      ...(ours.data.history || []),
+    ].slice(0, 10);
+  }
 
   ours.data.phase = targetPhase;
+  if (writer) ours.data.writer = writer;
   if (headSha) {
     ours.data.head = headSha;
   }
