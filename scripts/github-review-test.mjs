@@ -9,7 +9,11 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { existsSync, realpathSync, symlinkSync } from "node:fs";
 import { reviewGateState, reviewMarker, submitBoundReview } from "../src/github-review-client.mjs";
 import { createBoundBuilderClient } from "../src/github-builder-client.mjs";
-import { approvedSubmissionEvent, createReviewerThreadController } from "../src/github-review-threads.mjs";
+import {
+  approvedSubmissionEvent,
+  createReviewerThreadController,
+  reviewThreadReceiptPath,
+} from "../src/github-review-threads.mjs";
 import { parseReviewEnvelope, reviewEnvelopeInstructions } from "../src/review-envelope.mjs";
 import { ensureContainedHandoffPath, resolveContainedHandoffPath } from "../src/handoff-path.mjs";
 
@@ -45,6 +49,16 @@ assert.equal(approvedSubmissionEvent("approved"), "APPROVE");
 assert.equal(approvedSubmissionEvent("COMMENTED"), null);
 assert.equal(approvedSubmissionEvent("PENDING"), null);
 assert.equal(approvedSubmissionEvent(undefined), null);
+assert.equal(
+  reviewThreadReceiptPath({
+    repository: "owner/repo",
+    prNumber: 42,
+    headSha: "a".repeat(40),
+    expectedLogin: "reviewer[bot]",
+    stateRoot: "/bridge-state",
+  }),
+  `/bridge-state/owner__repo--42--${"a".repeat(40)}--reviewer[bot].jsonl`,
+);
 
 const ownedThread = {
   id: "PRRT_owned",

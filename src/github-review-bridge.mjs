@@ -9,7 +9,11 @@ import { z } from "zod";
 import { submitBoundReview } from "./github-review-client.mjs";
 import { canPublishReviewStatus, GITHUB_LOGIN_PATTERN, resolveReviewToken } from "./github-app-auth.mjs";
 import { createBoundBuilderClient } from "./github-builder-client.mjs";
-import { approvedSubmissionEvent, createReviewerThreadController } from "./github-review-threads.mjs";
+import {
+  approvedSubmissionEvent,
+  createReviewerThreadController,
+  reviewThreadReceiptPath,
+} from "./github-review-threads.mjs";
 
 const repository = process.env.GITHUB_REVIEW_REPOSITORY;
 const prNumber = Number.parseInt(process.env.GITHUB_REVIEW_PR_NUMBER || "", 10);
@@ -70,7 +74,7 @@ const threadClient = appCredential
       headSha,
       prNumber,
       allowedOperations: ["read_review_threads", "resolve_review_thread"],
-      receiptPath: resolve(dirname(handoffPath), ".review-thread-receipts.jsonl"),
+      receiptPath: reviewThreadReceiptPath({ repository, prNumber, headSha, expectedLogin }),
     })
   : null;
 const threadController = createReviewerThreadController({

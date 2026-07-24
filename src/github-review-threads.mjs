@@ -1,3 +1,6 @@
+import { homedir } from "node:os";
+import { resolve } from "node:path";
+
 function normalizeBotLogin(login) {
   const normalized = (login || "").toLowerCase();
   return normalized.endsWith("[bot]") ? normalized.slice(0, -5) : normalized;
@@ -12,6 +15,14 @@ function requireReviewerApp(client) {
 
 export function approvedSubmissionEvent(reviewState) {
   return String(reviewState || "").toUpperCase() === "APPROVED" ? "APPROVE" : null;
+}
+
+export function reviewThreadReceiptPath({ repository, prNumber, headSha, expectedLogin, stateRoot }) {
+  const root = stateRoot || resolve(homedir(), ".local/share/agent-bridge/review-receipts");
+  return resolve(
+    root,
+    `${repository.replace("/", "__")}--${prNumber}--${headSha}--${expectedLogin}.jsonl`,
+  );
 }
 
 export function createReviewerThreadController({ client, expectedLogin, getSubmittedEvent }) {
