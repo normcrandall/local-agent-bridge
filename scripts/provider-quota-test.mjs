@@ -12,11 +12,13 @@ import {
   createProviderQuotaMonitor,
   parseClaudeUsage,
   parseCodexRateLimits,
+  emptyProviderQuotaSnapshot,
 } from "../src/provider-quota.mjs";
 import { displayWidth, renderProviderQuotaFooter, stripAnsi } from "../src/mission-control.mjs";
 
 assert.equal(PROVIDER_QUOTA_REFRESH_MS, 60_000);
 assert.equal(PROVIDER_QUOTA_MAX_STALE_MS, 300_000);
+assert.equal(emptyProviderQuotaSnapshot().providers.antigravity.status, "unsupported");
 
 const codex = parseCodexRateLimits({
   rateLimits: {
@@ -139,17 +141,36 @@ const footerSnapshot = {
   },
 };
 const wide = renderProviderQuotaFooter(footerSnapshot, { width: 180, color: false });
-assert.match(wide, /QUOTA REMAINING · refresh 1m/);
-assert.match(wide, /Codex 5h ~90% · wk —/);
-assert.match(wide, /Claude 5h 51% · wk 46%/);
-assert.match(wide, /Antigravity —/);
-assert.match(wide, /Docker local/);
-assert.match(wide, /Ollama local/);
+assert.equal(wide.length, 2);
+assert.match(wide[0], /QUOTA REMAINING.*refreshes every minute.*checked \d{2}:\d{2}/);
+assert.match(wide[1], /Codex\s+5h ~90%\s+·\s+week not reported/);
+assert.match(wide[1], /Claude\s+5h 51%\s+·\s+week 46%/);
+assert.match(wide[1], /Antigravity not exposed/);
+assert.doesNotMatch(wide.join("\n"), /Docker|Ollama/);
+assert.ok(wide.every((line) => displayWidth(line) <= 180));
+const coloredWide = renderProviderQuotaFooter({
+  ...footerSnapshot,
+  providers: {
+    ...footerSnapshot.providers,
+    codex: parseCodexRateLimits({ rateLimits: { secondary: { usedPercent: 94, windowDurationMins: 10_080 } } }, Date.parse(footerSnapshot.updatedAt)),
+  },
+}, { width: 180, color: true }).join("\n");
+assert.match(coloredWide, /\x1b\[36;1mCodex/);
+assert.match(coloredWide, /\x1b\[35;1mClaude/);
+assert.match(coloredWide, /\x1b\[34;1mAntigravity/);
+assert.match(coloredWide, /\x1b\[31;1m6%/);
 const compact = renderProviderQuotaFooter(footerSnapshot, { width: 74, color: true });
-assert.ok(displayWidth(compact) <= 74);
-assert.match(stripAnsi(compact), /C 5h~90%\/wk—/);
+assert.equal(compact.length, 1);
+assert.ok(displayWidth(compact[0]) <= 74);
+assert.match(stripAnsi(compact[0]), /C 5h ~90% · wk not rpt/);
+assert.doesNotMatch(stripAnsi(compact[0]), /Docker|Ollama/);
 const narrow = renderProviderQuotaFooter(footerSnapshot, { width: 30, color: false });
-assert.ok(displayWidth(narrow) <= 30);
-assert.match(narrow, /D\+O:L/);
+assert.equal(narrow.length, 1);
+assert.ok(displayWidth(narrow[0]) <= 30);
+assert.doesNotMatch(narrow[0], /Docker|Ollama|D\+O/);
+const loading = renderProviderQuotaFooter(emptyProviderQuotaSnapshot(), { width: 180, color: false });
+assert.match(loading.join("\n"), /Codex loading/);
+assert.match(loading.join("\n"), /Claude loading/);
+assert.match(loading.join("\n"), /Antigravity not exposed/);
 
 console.log("provider quota tests passed");

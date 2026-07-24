@@ -20,6 +20,14 @@ const localProvider = (provider) => ({
   windows: { fiveHour: null, week: null },
 });
 
+const unsupportedProvider = (provider) => ({
+  provider,
+  status: "unsupported",
+  observedAt: null,
+  lastAttemptAt: null,
+  windows: { fiveHour: null, week: null },
+});
+
 export function emptyProviderQuotaSnapshot(now = Date.now()) {
   return {
     refreshMs: PROVIDER_QUOTA_REFRESH_MS,
@@ -28,7 +36,7 @@ export function emptyProviderQuotaSnapshot(now = Date.now()) {
     providers: {
       codex: hostedProvider("codex"),
       claude: hostedProvider("claude"),
-      antigravity: hostedProvider("antigravity"),
+      antigravity: unsupportedProvider("antigravity"),
       docker: localProvider("docker"),
       ollama: localProvider("ollama"),
     },
