@@ -13,6 +13,7 @@ import {
 } from "node:fs/promises";
 import { resolve } from "node:path";
 import { CLAIMED_ISSUE_CONTEXT_MARKER } from "./claimed-issue-context.mjs";
+import { collaborationAlias } from "./collaboration-identity.mjs";
 
 const LOCK_STALE_MS = 30_000;
 
@@ -41,6 +42,11 @@ function paths(root, id) {
     updateLock: resolve(directory, `${id}.update.lock`),
     workerLock: resolve(directory, `${id}.worker.lock`),
   };
+}
+
+function identityIndexPath(root, identityKey) {
+  if (!/^[0-9a-f]{64}$/.test(identityKey || "")) throw new Error("Invalid collaboration identity key.");
+  return resolve(collaborationDirectory(root), `identity-${identityKey}.json`);
 }
 
 async function acquireFileLock(path, { attempts = 100, intervalMs = 50 } = {}) {
@@ -100,6 +106,9 @@ export async function createCollaboration(root, input) {
     ...input,
   };
   await atomicWriteJson(target.state, state);
+  if (state.identityKey) {
+    await atomicWriteJson(identityIndexPath(root, state.identityKey), { id, identityKey: state.identityKey, updatedAt: now });
+  }
   await appendEvent(root, id, { type: "collaboration_started", at: now, ...input });
   return state;
 }
@@ -190,10 +199,42 @@ export async function listCollaborations(root, { status, limit = 20 } = {}) {
     }));
 }
 
+export async function findCollaborationByIdentity(root, identityKey, {
+  statuses = ["queued", "running", "recovering", "cancelling", "needs_user", "indeterminate"],
+} = {}) {
+  if (!identityKey) return null;
+  const allowed = new Set(statuses);
+  try {
+    const indexed = JSON.parse(await readFile(identityIndexPath(root, identityKey), "utf8"));
+    const state = await readCollaboration(root, indexed.id);
+    if (state.identityKey === identityKey && allowed.has(state.status)) return state;
+  } catch {}
+  const candidates = await listCollaborations(root, { limit: 10_000 });
+  for (const candidate of candidates) {
+    if (!allowed.has(candidate.status)) continue;
+    const state = await readCollaboration(root, candidate.id);
+    if (state.identityKey === identityKey) {
+      await atomicWriteJson(identityIndexPath(root, identityKey), { id: state.id, identityKey, updatedAt: state.updatedAt });
+      return state;
+    }
+  }
+  return null;
+}
+
 export async function acquireWorkerLock(root, id) {
   const target = paths(root, id);
   await mkdir(target.directory, { recursive: true, mode: 0o700 });
   return acquireFileLock(target.workerLock, { attempts: 200, intervalMs: 50 });
+}
+
+export async function acquireIdentityLock(root, identityKey) {
+  if (!/^[0-9a-f]{64}$/.test(identityKey || "")) throw new Error("Invalid collaboration identity key.");
+  const directory = collaborationDirectory(root);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  return acquireFileLock(resolve(directory, `identity-${identityKey}.lock`), {
+    attempts: 7_200,
+    intervalMs: 50,
+  });
 }
 
 export function workspaceLockPath(root, workspace) {
@@ -464,6 +505,7 @@ export async function queryControlPlane(stateRoot, options = {}) {
 
     return {
       id: cState.id,
+      alias: cState.alias || collaborationAlias(cState),
       type: "collaboration",
       workspace: cState.workspace || null,
       repository: cState.issueClaim?.repository || cState.githubReview?.repository || cState.githubBuilder?.repository || null,
@@ -490,6 +532,7 @@ export async function queryControlPlane(stateRoot, options = {}) {
       model: activeCall?.model || activeCall?.selectedModel || null,
       narrative,
       heartbeat,
+      activity: activeCall?.activity || null,
       handoff,
       blocker,
       recovery,
@@ -593,6 +636,7 @@ export async function queryControlPlane(stateRoot, options = {}) {
           usage,
           portfolio: portfolioInfo,
           nextAction: item.status === "ready" ? "start_collaboration" : "none",
+          alias: `${p.repository || `local/${String(p.workspace || "workspace").split("/").at(-1)}`}:#${item.issueNumber || item.id}:${item.writer ? `${item.writer}-writer` : "portfolio"}`,
           archived: false
         });
       }

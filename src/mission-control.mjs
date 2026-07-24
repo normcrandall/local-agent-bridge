@@ -465,6 +465,7 @@ export function renderMissionControl(snapshot, {
   height = 40,
   color = true,
   interactive = true,
+  actionMessage = null,
   now = Date.now(),
 } = {}) {
   const usableWidth = Math.max(30, width);
@@ -527,7 +528,7 @@ export function renderMissionControl(snapshot, {
       }
       const cursor = index === selectedIndex ? ">" : " ";
       const provider = lane.activeAgent || lane.writer || "unassigned";
-      const label = lane.issueNumber ? `#${lane.issueNumber}` : lane.id.replace(/^bridge-/, "").slice(0, 8);
+      const label = lane.issueNumber ? `#${lane.issueNumber}` : lane.alias || lane.id.replace(/^bridge-/, "").slice(0, 8);
       const raw = `${cursor} ${statusSymbol(lane.lifecyclePhase)} ${label} ${lane.lifecyclePhase} ${provider} - ${lane.task || lane.narrative?.summary || "untitled lane"}`;
       lines.push(index === selectedIndex ? paint(truncate(raw, usableWidth), "7", color) : truncate(raw, usableWidth));
     }
@@ -545,6 +546,7 @@ export function renderMissionControl(snapshot, {
   if (selected) {
     lines.push(paint("─".repeat(usableWidth), "90", color));
     lines.push(`${statusText(selected.lifecyclePhase, color)}  ${paint(selected.repository, "1", color)}  ${selected.id}`);
+    lines.push(...field("Alias", selected.alias, usableWidth));
     lines.push(...field("Workspace", selected.workspace, usableWidth));
     lines.push(...field("Task", selected.task, usableWidth));
     lines.push(...field("Created", formatLocalDateTime(selected.createdAt), usableWidth));
@@ -557,6 +559,13 @@ export function renderMissionControl(snapshot, {
       lines.push(...wrap(`Narrative (${source}, ${formatLocalDateTime(selected.narrative.updatedAt)}; ${age(selected.narrative.updatedAt, now)} old${stale ? ", stale while heartbeat remains live" : ""}): ${selected.narrative.summary}`, usableWidth));
     }
     if (selected.heartbeat?.heartbeatAt) lines.push(`Heartbeat: ${formatLocalDateTime(selected.heartbeat.heartbeatAt)} (${age(selected.heartbeat.heartbeatAt, now)} ago)`);
+    const activity = selected.type === "native_host" ? selected.hostActivity?.activity : selected.activity;
+    if (activity) {
+      const count = activity.progressEventCount ?? activity.toolEventCount ?? 0;
+      const lastActivityAt = activity.lastOutputAt || activity.lastToolAt || activity.lastProgressAt;
+      const quiet = lastActivityAt ? `last observed ${age(lastActivityAt, now)} ago` : "no observed provider output yet";
+      lines.push(...field("Activity", `${count} event${count === 1 ? "" : "s"} | ${Number(activity.outputBytes || 0)} bytes | ${quiet}`, usableWidth));
+    }
     const github = [selected.issueNumber && `issue #${selected.issueNumber}`, selected.prNumber && `PR #${selected.prNumber}`, selected.branch, selected.headSha && selected.headSha.slice(0, 12)].filter(Boolean).join(" | ");
     lines.push(...field("GitHub", github, usableWidth));
     if (selected.portfolio) {
@@ -585,7 +594,8 @@ export function renderMissionControl(snapshot, {
 
   if (interactive) {
     lines.push(paint("─".repeat(usableWidth), "90", color));
-    lines.push("j/k or arrows move | l live | a attention | h history | s stale | r refresh | q quit");
+    if (actionMessage) lines.push(truncate(`Action: ${actionMessage}`, usableWidth));
+    lines.push("j/k move | l live | a attention | h history | o PR | y copy | c continue | x cancel | A archive | w ack | q quit");
   }
   return lines.slice(0, Math.max(1, height)).map((line) => truncateAnsi(line, usableWidth)).join("\n");
 }

@@ -22,6 +22,10 @@ import { appendEvent, archiveCollaboration, pruneTerminalCollaborations, readCol
 import { clearTerminalRuntime, workerCancellationMatches } from "../src/collaboration-cleanup.mjs";
 import { replayIncident, formatReplayHuman } from "../src/incident-replay.mjs";
 import { applyBridgeCleanup, auditBridgeCleanup, formatCleanupReport } from "../src/state-cleanup.mjs";
+import { waitForControlPlane } from "../src/control-plane-wait.mjs";
+import { auditWorkspaceSweep, runWorkspaceRecipe, workspaceRecipePlan } from "../src/workspace-operations.mjs";
+import { effectiveBridgeConfig } from "../src/effective-config.mjs";
+import { inspectPortfolioConflict } from "../src/conflict-inspection.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const stateRoot = process.env.BRIDGE_COLLABORATION_DIR || resolve(homedir(), ".local/share/agent-bridge/state");
@@ -40,6 +44,20 @@ function firstValue(flags, fallback = null) {
     if (found !== null && found !== undefined) return found;
   }
   return fallback;
+}
+
+function positionalValues(valueFlags = []) {
+  const consumesValue = new Set(valueFlags);
+  const positional = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (consumesValue.has(arg)) {
+      index += 1;
+      continue;
+    }
+    if (!arg.startsWith("-")) positional.push(arg);
+  }
+  return positional;
 }
 
 switch (command) {
@@ -139,6 +157,11 @@ switch (command) {
     }));
     break;
   case "recover": { // explicit inspection by default; mutation requires a flag
+    if (args.includes("--all")) {
+      const states = collaborationStates(stateRoot);
+      json({ dryRun: true, collaborations: states.map((summary) => inspectRecovery(summary)) });
+      break;
+    }
     const id = args.find((arg) => arg.startsWith("bridge-"));
     if (!id) throw new Error("recover requires a collaboration ID.");
     const state = await readCollaboration(root, id);
@@ -159,6 +182,55 @@ switch (command) {
       await appendEvent(root, id, { type: "recovery_marked_indeterminate", at: new Date().toISOString() });
       json(inspectRecovery(changed));
     } else json(inspectRecovery(state));
+    break;
+  }
+  case "config": {
+    const subcommand = args.find((arg) => !arg.startsWith("-")) || "effective";
+    if (subcommand !== "effective" && subcommand !== "paths") throw new Error("config supports effective or paths.");
+    const config = await effectiveBridgeConfig({ workspace: resolve(value("--workspace", process.cwd())) });
+    json(subcommand === "paths" ? {
+      modelFallbacks: config.modelFallbacks.path,
+      providerConcurrency: config.providerConcurrency.path,
+      githubApps: config.githubApps.configPath,
+      workspaceRecipes: config.workspaceRecipes,
+    } : config);
+    break;
+  }
+  case "workspace": {
+    const subcommand = args.find((arg) => !arg.startsWith("-"));
+    const workspace = resolve(value("--workspace", process.cwd()));
+    if (subcommand === "recipe") {
+      const phase = value("--phase", "postCreate");
+      json(args.includes("--apply") ? runWorkspaceRecipe(workspace, phase) : workspaceRecipePlan(workspace, phase));
+    } else if (subcommand === "sweep") {
+      if (args.includes("--apply")) throw new Error("Workspace sweep is report-only in this release; destructive retirement remains disabled.");
+      json(await auditWorkspaceSweep(workspace, { stateRoot, retiredHeads: args.flatMap((arg, index) => arg === "--retired-head" ? [args[index + 1]] : []).filter(Boolean) }));
+    } else throw new Error("workspace supports recipe or sweep.");
+    break;
+  }
+  case "conflict": {
+    const portfolio = value("--portfolio");
+    const item = value("--item");
+    if (!portfolio || !item) throw new Error("conflict requires --portfolio and --item.");
+    json(await inspectPortfolioConflict(resolve(stateRoot, "portfolios"), portfolio, item));
+    break;
+  }
+  case "wait": {
+    const handles = positionalValues(["--timeout", "--status", "--after-updated-at"]);
+    const timeoutMs = Number(value("--timeout", "30")) * 1_000;
+    if (!Number.isFinite(timeoutMs) || timeoutMs < 0) throw new Error("--timeout must be a non-negative number of seconds.");
+    const statuses = value("--status")?.split(",").filter(Boolean) || null;
+    const result = await waitForControlPlane(stateRoot, {
+      handles,
+      any: args.includes("--any"),
+      statuses,
+      afterUpdatedAt: value("--after-updated-at"),
+      timeoutMs,
+    });
+    json(result);
+    if (result.timedOut) process.exitCode = 1;
+    else if (result.classifications.includes("missing")) process.exitCode = 2;
+    else if (result.classifications.includes("crashed")) process.exitCode = 3;
     break;
   }
   case "archive": {
@@ -247,5 +319,5 @@ print "Authenticate Claude Code, Codex, and Antigravity. Configure your reviewer
     break;
   }
   default:
-    process.stdout.write("Usage: bridge <talk|start|watchdog|doctor|smoke|models|status|capabilities|roles|preflight|recover|archive|prune|worktree|ci|reconcile|usage|bundle|replay> [options]\n");
+    process.stdout.write("Usage: bridge <talk|start|watchdog|doctor|smoke|models|config|workspace|conflict|status|capabilities|roles|preflight|recover|wait|archive|prune|worktree|ci|reconcile|usage|bundle|replay> [options]\n");
 }

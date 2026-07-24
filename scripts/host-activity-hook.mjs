@@ -17,6 +17,10 @@ const stateRoot = resolve(process.env.BRIDGE_COLLABORATION_DIR || resolve(homedi
 const sourceEvent = input.hook_event_name || input.hookEventName || action;
 const tool = input.tool_name || input.toolName || null;
 const sessionId = input.session_id || input.sessionId || input.thread_id || input.threadId || null;
+const turnId = input.turn_id || input.turnId || input.agent_id || input.agentId || null;
+const nestedEvent = ["SubagentStart", "SubagentStop"].includes(sourceEvent);
+const authoritativeStart = ["UserPromptSubmit", "BeforeAgent"].includes(sourceEvent) && !input.agent_id && !input.agentId;
+const authoritativeStop = ["Stop", "SessionEnd", "AfterAgent"].includes(sourceEvent) && !input.agent_id && !input.agentId;
 const task = action === "start" ? input.prompt : null;
 const model = typeof input.model === "string"
   ? input.model
@@ -36,6 +40,11 @@ try {
     task,
     summary,
     sourceEvent,
+    runId: turnId,
+    authoritativeStart,
+    authoritativeStop,
+    nestedEvent,
+    toolEvent: action === "heartbeat" && Boolean(tool),
   });
 } catch {
   // Activity telemetry must never block or change the host agent's turn.

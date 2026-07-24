@@ -10,10 +10,12 @@ import { GITHUB_LOGIN_PATTERN } from "./github-app-auth.mjs";
 import { mergePullRequestWithBuilder } from "./native-github-builder.mjs";
 import {
   appendEvent,
+  acquireIdentityLock,
   archiveCollaboration,
   collaborationDirectory,
   collaborationView,
   createCollaboration,
+  findCollaborationByIdentity,
   listCollaborations,
   pruneTerminalCollaborations,
   readCollaboration,
@@ -71,6 +73,8 @@ import {
 } from "./collaboration-start-preflight.mjs";
 import { hydrateClaimedIssueTask } from "./claimed-issue-context.mjs";
 import { startSupervisedWorker } from "./worker-supervisor-client.mjs";
+import { collaborationAlias, collaborationIdentity } from "./collaboration-identity.mjs";
+import { runWorkspaceRecipe, workspaceRecipePlan } from "./workspace-operations.mjs";
 
 const RUNTIME_ROOT = realpathSync(process.env.BRIDGE_RUNTIME_ROOT || process.env.BRIDGE_ROOT || process.cwd());
 const WORKSPACE_ROOT = realpathSync(process.env.BRIDGE_WORKSPACE_ROOT || process.env.BRIDGE_ROOT || process.cwd());
@@ -692,6 +696,8 @@ server.registerTool(
       ciTracking: ciTrackingSchema,
       decisionPolicy: decisionPolicySchema,
       chair: chairSchema,
+      resumeKey: z.string().trim().min(1).max(200).regex(/^[A-Za-z0-9._:/#-]+$/).optional().describe("Optional stable caller key for idempotent resume-or-start when no issue or PR binding exists."),
+      resumeIfCompatible: z.boolean().default(true).describe("Return a compatible live or recoverable collaboration instead of creating a duplicate lane."),
     },
   },
   async (input) => {
@@ -729,6 +735,28 @@ server.registerTool(
     }
     if (writer && !delegatedAgents.includes(writer)) throw new Error("writer must be included in delegated agents.");
     const requestedWorkspace = projectDirectory(input.workspace);
+    const identityKey = collaborationIdentity({
+      workspace: requestedWorkspace,
+      mode: effectiveMode,
+      writer,
+      issueClaim: input.issueClaim,
+      githubReview: input.githubReview,
+      githubBuilder: input.githubBuilder,
+      resumeKey: input.resumeKey,
+    });
+    let releaseIdentityLock = null;
+    if (identityKey && input.resumeIfCompatible !== false) {
+      releaseIdentityLock = await acquireIdentityLock(WORKSPACE_ROOT, identityKey);
+      const existing = await findCollaborationByIdentity(WORKSPACE_ROOT, identityKey);
+      if (existing) {
+        await releaseIdentityLock();
+        releaseIdentityLock = null;
+        return toolResponse({
+          ...(await collaborationView(WORKSPACE_ROOT, existing.id, 1)),
+          resume: { reused: true, identityKey, reason: "compatible_live_or_recoverable_lane" },
+        });
+      }
+    }
     const collaborationId = `bridge-${randomUUID()}`;
     let leaseAcquired = false;
     let claimClient = null;
@@ -848,6 +876,14 @@ server.registerTool(
           ? adoptExistingWriterCheckout({ workspace: requestedWorkspace })
           : null;
       const workspace = worktree?.path || requestedWorkspace;
+      const recipeOptions = { approvalWorkspace: requestedWorkspace };
+      const postCreatePlan = workspaceRecipePlan(workspace, "postCreate", recipeOptions);
+      const postCreateRecipe = effectiveMode === "work" && worktree && postCreatePlan.executable
+        ? runWorkspaceRecipe(workspace, "postCreate", recipeOptions)
+        : postCreatePlan;
+      if (postCreateRecipe.applied && !postCreateRecipe.ok) {
+        throw new Error(`Workspace postCreate recipe failed: ${postCreateRecipe.results.find((result) => result.exitCode !== 0)?.command || "unknown command"}`);
+      }
       const effectiveGithubBuilder = workspaceHeadBuilderBinding({
         githubBuilder: input.githubBuilder,
         mode: effectiveMode,
@@ -908,6 +944,8 @@ server.registerTool(
       }
       const state = await createCollaboration(WORKSPACE_ROOT, {
         id: collaborationId,
+        identityKey,
+        resumeKey: input.resumeKey || null,
         task: resolvedTask,
         taskBase,
         workspace,
@@ -945,6 +983,7 @@ server.registerTool(
         rotation: rotated ? { taskNumber: input.taskNumber, offset: input.rotationOffset, ...rotated } : null,
         worktree,
         preflight: readiness,
+        workspaceRecipe: postCreateRecipe,
         capabilities: readiness.capabilities,
         budget: input.budget || {},
         providerRecovery: input.providerRecovery || { enabled: true, maxAttempts: 3, backoffSeconds: [15, 60, 180] },
@@ -979,9 +1018,21 @@ server.registerTool(
           writer,
         },
       });
+      if (identityKey) {
+        const labeled = await updateCollaboration(WORKSPACE_ROOT, state.id, (current) => ({
+          ...current,
+          alias: collaborationAlias(current),
+        }));
+        await startWorker(labeled.id);
+        await releaseIdentityLock?.();
+        releaseIdentityLock = null;
+        return toolResponse(await collaborationView(WORKSPACE_ROOT, labeled.id, 1));
+      }
       await startWorker(state.id);
       return toolResponse(await collaborationView(WORKSPACE_ROOT, state.id, 1));
     } catch (startError) {
+      await releaseIdentityLock?.().catch(() => {});
+      releaseIdentityLock = null;
       if (leaseAcquired && claimClient && input.issueClaim) {
         try {
           const { releaseClaimLease } = await import("./github-issue-claims.mjs");
@@ -1841,6 +1892,7 @@ server.registerTool(
     inputSchema: {
       collaborationId,
       message: z.string().min(1).describe("User answer, correction, or next-phase instruction."),
+      expectedUpdatedAt: z.string().optional().describe("Optional revision fence from Mission Control; continuation is refused if the lane changed after rendering."),
       additionalTurns: z.number().int().min(1).max(20).default(6),
       models: modelsSchema,
       modelFallbacks: modelFallbacksSchema,
@@ -1864,6 +1916,7 @@ server.registerTool(
   async ({
     collaborationId: id,
     message,
+    expectedUpdatedAt,
     additionalTurns,
     models,
     modelFallbacks,
@@ -1885,6 +1938,9 @@ server.registerTool(
   }) => {
     blockNestedCollaboration();
     const current = await readCollaboration(WORKSPACE_ROOT, id);
+    if (expectedUpdatedAt && current.updatedAt !== expectedUpdatedAt) {
+      throw new Error(`Refusing to continue ${id}: the collaboration changed after Mission Control rendered it.`);
+    }
     if (["queued", "running", "recovering", "cancelling", "indeterminate"].includes(current.status)) {
       throw new Error(`Collaboration ${id} is ${current.status}; wait for it to stop before continuing.`);
     }
@@ -1897,12 +1953,14 @@ server.registerTool(
     if (current.coordinatorWake?.actionable && current.coordinatorWake.status !== "acknowledged") {
       throw new Error(`Collaboration ${id} has unacknowledged coordinator wake ${current.coordinatorWake.sequence}; call acknowledge_coordinator_wake before continuing.`);
     }
+    let continuationRevision = expectedUpdatedAt;
     if (current.coordinatorWake && !current.coordinatorWake.actionable && current.coordinatorWake.status !== "acknowledged") {
-      await acknowledgeCoordinatorWake(WORKSPACE_ROOT, id, current.coordinatorWake.sequence, {
+      const acknowledged = await acknowledgeCoordinatorWake(WORKSPACE_ROOT, id, current.coordinatorWake.sequence, {
         provider: current.coordinatorWake.provider,
         summary: "Coordinator supplied the user answer or inspection result and continued the collaboration.",
         action: "continued",
       });
+      if (continuationRevision) continuationRevision = acknowledged.updatedAt;
     }
     if (githubReview && !(handoffPath || current.handoffPath)) {
       throw new Error("githubReview requires handoffPath.");
@@ -1981,6 +2039,9 @@ server.registerTool(
       formatReusableVerification(continuationVerificationPlan.reusable),
     ].filter(Boolean).join("\n\n");
     const state = await updateCollaboration(WORKSPACE_ROOT, id, async (previous) => {
+      if (continuationRevision && previous.updatedAt !== continuationRevision) {
+        throw new Error(`Refusing to continue ${id}: the collaboration changed after Mission Control rendered it.`);
+      }
       if (["queued", "running", "recovering", "cancelling", "indeterminate"].includes(previous.status)
         || previous.workspaceOperation || previous.runtime?.activeCall
         || (isSafeWorkerPid(previous.workerPid) && processAlive(previous.workerPid))) {
@@ -2123,10 +2184,13 @@ server.registerTool(
   {
     title: "Cancel agent collaboration",
     description: "Cancel the collaboration and terminate its detached worker process group, including the active provider adapter.",
-    inputSchema: { collaborationId },
+    inputSchema: { collaborationId, expectedUpdatedAt: z.string().optional() },
   },
-  async ({ collaborationId: id }) => {
+  async ({ collaborationId: id, expectedUpdatedAt }) => {
     const before = await readCollaboration(WORKSPACE_ROOT, id);
+    if (expectedUpdatedAt && before.updatedAt !== expectedUpdatedAt) {
+      throw new Error(`Refusing to cancel ${id}: the collaboration changed after Mission Control rendered it.`);
+    }
     if (before.workspaceOperation) {
       throw new Error(`Refusing to cancel: ${before.workspaceOperation.type} owns the collaboration workspace; reconcile that operation first.`);
     }
@@ -2135,6 +2199,9 @@ server.registerTool(
       throw new Error("Refusing to cancel: the live PID does not match this collaboration's owned worker metadata. Inspect with bridge recover; no process was terminated.");
     }
     await updateCollaboration(WORKSPACE_ROOT, id, (previous) => {
+      if (expectedUpdatedAt && previous.updatedAt !== expectedUpdatedAt) {
+        throw new Error(`Refusing to cancel ${id}: the collaboration changed after Mission Control rendered it.`);
+      }
       if (previous.workspaceOperation) {
         throw new Error(`Refusing to cancel: ${previous.workspaceOperation.type} reserved the collaboration workspace after inspection.`);
       }
@@ -2236,9 +2303,9 @@ server.registerTool(
   {
     title: "Archive collaboration",
     description: "Move one terminal collaboration state and JSONL history into the local archive. Running and indeterminate work is retained.",
-    inputSchema: { collaborationId },
+    inputSchema: { collaborationId, expectedUpdatedAt: z.string().optional() },
   },
-  async ({ collaborationId: id }) => toolResponse(await archiveCollaboration(WORKSPACE_ROOT, id)),
+  async ({ collaborationId: id, expectedUpdatedAt }) => toolResponse(await archiveCollaboration(WORKSPACE_ROOT, id, { expectedUpdatedAt })),
 );
 
 server.registerTool(

@@ -35,16 +35,20 @@ case "$COMMAND" in
     shift
     exec node "$ROOT/scripts/model-policy-cli.mjs" "$@"
     ;;
+  config|workspace|conflict)
+    shift
+    exec node "$ROOT/scripts/bridge-ops.mjs" "$COMMAND" "$@"
+    ;;
   mc|mission-control)
     shift
     exec node "$ROOT/scripts/mission-control.mjs" "$@"
     ;;
-  status|capabilities|roles|preflight|recover|archive|prune|cleanup|worktree|ci|reconcile|usage|bundle|replay)
+  status|capabilities|roles|preflight|recover|wait|archive|prune|cleanup|worktree|ci|reconcile|usage|bundle|replay)
     shift
     exec node "$ROOT/scripts/bridge-ops.mjs" "$COMMAND" "$@"
     ;;
   ""|help|--help|-h)
-    print "Usage: ./bridge <talk|start|watchdog|doctor|smoke|skills|models|mc|mission-control|status|capabilities|roles|preflight|recover|archive|prune|cleanup|worktree|ci|reconcile|usage|bundle|replay> [options]"
+    print "Usage: ./bridge <talk|start|watchdog|doctor|smoke|skills|models|config|workspace|conflict|mc|mission-control|status|capabilities|roles|preflight|recover|wait|archive|prune|cleanup|worktree|ci|reconcile|usage|bundle|replay> [options]"
     print "Run './bridge talk --help' for conversation options."
     ;;
   *)
