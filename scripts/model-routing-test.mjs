@@ -36,12 +36,13 @@ const claudeFableOptIn = claudeToolRequest({ prompt: "test", model: "fable", all
 assert.equal(claudeFableOptIn.arguments.allowFable, true);
 
 const blockedRequestedFable = resolveClaudeModelPolicy({ model: "fable" });
+assert.equal(DEFAULT_NON_FABLE_CLAUDE_MODEL, "claude-opus-5");
 assert.equal(blockedRequestedFable.model, DEFAULT_NON_FABLE_CLAUDE_MODEL);
 assert.deepEqual(blockedRequestedFable.blockedModels, ["fable"]);
 const blockedConfiguredFable = resolveClaudeModelPolicy({ configuredModel: "claude-fable-latest" });
 assert.equal(blockedConfiguredFable.model, DEFAULT_NON_FABLE_CLAUDE_MODEL);
-const preservedConfiguredOpus = resolveClaudeModelPolicy({ configuredModel: "claude-opus-4-8[1m]" });
-assert.equal(preservedConfiguredOpus.model, "claude-opus-4-8[1m]");
+const preservedConfiguredOpus = resolveClaudeModelPolicy({ configuredModel: "claude-opus-5" });
+assert.equal(preservedConfiguredOpus.model, "claude-opus-5");
 const filteredFableFallback = resolveClaudeModelPolicy({
   model: "claude-opus-4-8[1m]",
   fallbackModels: ["fable", "claude-opus-4-6", "fable"],

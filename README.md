@@ -597,7 +597,7 @@ In work mode, `writer` defaults to the starting agent. The designated writer rec
 
 Provider capacity is acquired for every turn, not merely when the collaboration starts. This means a coordinator may call the same provider repeatedly and several portfolios may share it safely. Work and review limits are independent, so an active writer does not consume a review slot. A transport-indeterminate call keeps its capacity reservation until the collaboration is explicitly cancelled or otherwise reconciled.
 
-Model fields are optional. Omitting them preserves each provider's configured model. Explicit values pass through unchanged except for the Claude Fable policy: the bridge runtime denies Fable unless the user's current request explicitly asks for Fable by name. Saved defaults, earlier requests, aliases, and fallback chains do not grant permission. Without that explicit request, the runtime preserves any configured non-Fable Claude model, substitutes `claude-opus-4-8[1m]` if the configured/default model resolves to Fable, and removes Fable from the Claude fallback chain.
+Model fields are optional. Omitting them preserves each provider's configured model. Explicit values pass through unchanged except for the Claude Fable policy: the bridge runtime denies Fable unless the user's current request explicitly asks for Fable by name. Saved defaults, earlier requests, aliases, and fallback chains do not grant permission. Without that explicit request, the runtime preserves any configured non-Fable Claude model, substitutes `claude-opus-5` if the configured/default model resolves to Fable, and removes Fable from the Claude fallback chain.
 
 `modelFallbacks.claude`, `modelFallbacks.codex`, `modelFallbacks.antigravity`, `modelFallbacks.docker`, and `modelFallbacks.ollama` are optional. Omitting them loads the machine-local overload policy; an explicit provider array replaces that policy for the collaboration. Overload retries happen inside one provider turn, so they do not consume another broker turn or trigger writer reassignment.
 
@@ -733,7 +733,7 @@ Claude Code, Codex, Antigravity, Docker Model Runner, and Ollama capacity failur
 ```json
 {
   "models": {
-    "claude": "claude-opus-4-8",
+    "claude": "claude-opus-5",
     "codex": "gpt-5.6-sol",
     "antigravity": "gemini-3.6-flash-high",
     "docker": "ai/qwen3.6",
