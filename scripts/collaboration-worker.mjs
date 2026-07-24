@@ -890,7 +890,7 @@ try {
         ? {
           from: failure.agent,
           to: failoverTarget,
-          role: writerTransferred ? "writer" : "turn",
+          role: "writer",
           failureClass: failure.failureClass,
           reason: failure.reason,
           phase: "turn",

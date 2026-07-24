@@ -15,6 +15,9 @@ assert.equal(
 );
 assert.equal(classifyProviderFailure("Codex handoffPath must stay inside delegated workspace."), "invalid_request");
 assert.equal(classifyProviderFailure("permission denied by sandbox allowlist"), "permission");
+assert.equal(classifyProviderFailure("Write is not allowed in review mode"), "permission");
+assert.equal(classifyProviderFailure("allowlist violation"), "permission");
+assert.equal(classifyProviderFailure("Error 403"), "permission");
 assert.equal(classifyProviderFailure("API token is unauthorized (401)"), "authentication");
 assert.equal(classifyProviderFailure("MCP error -32000: Connection closed"), "transport");
 

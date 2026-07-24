@@ -31,7 +31,7 @@ export function classifyProviderFailure(errorOrReason) {
 
   // Classify deterministic failures before capacity language. Adapter errors such
   // as "model unavailable: --effort is required" must not enter a capacity loop.
-  if (matches(reason, /permission denied|operation not permitted|command (?:is )?not allowed|denied by (?:the )?allowlist|allowlist (?:denied|rejected)|sandbox (?:denied|violation|rejected)|forbidden|(?:http|status|response)[^\n]{0,20}\b403\b/i)) {
+  if (matches(reason, /permission denied|operation not permitted|(?:command|operation|tool|shell|bash|write|read|network(?: access)?) (?:is )?not allowed|denied by (?:the )?allowlist|allowlist (?:denied|rejected|violation)|sandbox (?:denied|violation|rejected)|forbidden|(?:http|status|response)[^\n]{0,20}\b403\b|\berror\s+403\b/i)) {
     return PROVIDER_FAILURE_CLASSES.PERMISSION;
   }
   if (matches(reason, /policy (?:denied|rejected|violation)|blocked by policy|not authorized by policy/i)) {

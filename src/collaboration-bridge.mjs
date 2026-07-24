@@ -1013,7 +1013,7 @@ server.registerTool(
         providerRecoveryState: { attempts: 0, status: "idle" },
         providerFailover: failoverRoster.policy,
         requestedAgents: failoverRoster.requestedAgents,
-        standbyAgents: failoverRoster.standbyAgents,
+        standbyAgents: failoverRoster.standbyAgents.filter((agent) => delegatedAgents.includes(agent)),
         providerFailoverState: { transitions: [], status: "idle" },
         usage: {},
         ciTracking: input.ciTracking || null,

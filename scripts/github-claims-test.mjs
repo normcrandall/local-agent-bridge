@@ -221,6 +221,12 @@ function createPausableMockGitHub() {
 
 async function runTests() {
   const tempWorkspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-claims-test-"));
+  const previousCollaborationDirectory = process.env.BRIDGE_COLLABORATION_DIR;
+  // Verification commands can run inside a live collaboration worker, which
+  // exports the machine-wide state directory. Keep fixed test IDs in the test
+  // workspace so they can never appear in Mission Control or overwrite a live
+  // collaboration fixture.
+  process.env.BRIDGE_COLLABORATION_DIR = path.join(tempWorkspaceRoot, ".bridge", "collaborations");
   const mock = createPausableMockGitHub();
 
   const baseClientConfig = {
@@ -982,6 +988,8 @@ async function runTests() {
   assert.ok(!mock.getLabels().has("agent:in-progress"));
 
   fs.rmSync(tempWorkspaceRoot, { recursive: true, force: true });
+  if (previousCollaborationDirectory === undefined) delete process.env.BRIDGE_COLLABORATION_DIR;
+  else process.env.BRIDGE_COLLABORATION_DIR = previousCollaborationDirectory;
   console.log("All claim subsystem unit tests passed successfully!");
 }
 
