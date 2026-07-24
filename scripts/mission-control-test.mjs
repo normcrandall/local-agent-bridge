@@ -124,6 +124,14 @@ try {
     writer: "claude",
     githubReview: { repository: "norm/example", prNumber: 42, headSha: "b".repeat(40) },
     completion: { sequence: 1, acknowledged: false, nextAction: "needs_user", lastHandoff: { outcome: "blocked", summary: "Authorization required" } },
+    coordinatorWake: {
+      sequence: 1,
+      kind: "needs_user",
+      status: "pending",
+      nextAction: "needs_user",
+      summary: "Authorization required",
+      createdAt: "2026-07-23T11:58:00.000Z",
+    },
   };
   await writeFile(join(root, `${needsUserId}.json`), JSON.stringify(needsUserState));
   await writeFile(join(root, "portfolios", "helm-44444444-4444-4444-8444-444444444444.json"), JSON.stringify({
@@ -143,6 +151,7 @@ try {
   assert.equal(live.collapsedStale.total, 0);
   assert.equal(live.needsUserCount, 1);
   assert.match(live.needsUserSignature, new RegExp(needsUserId));
+  assert.deepEqual(live.needsUserRequests.map(({ repository, summary }) => ({ repository, summary })), [{ repository: "norm/example", summary: "Authorization required" }]);
   await writeFile(join(root, `${needsUserId}.json`), JSON.stringify({
     ...needsUserState,
     coordinatorWake: { sequence: 1, kind: "needs_user", status: "acknowledged", nextAction: "needs_user", summary: "Authorization required" },
@@ -200,6 +209,10 @@ try {
     ...needsUserState,
     createdAt: new Date(now - 7 * 60 * 60_000).toISOString(),
     updatedAt: new Date(now).toISOString(),
+    coordinatorWake: {
+      ...needsUserState.coordinatorWake,
+      createdAt: new Date(now - 7 * 60 * 60_000).toISOString(),
+    },
     userAttention: { status: "delivered", lastDeliveredAt: new Date(now).toISOString() },
   }));
   const historicalNeedsUser = await loadMissionControlSnapshot({ stateRoot: historicalRoot, now });
@@ -225,9 +238,9 @@ try {
     }],
   }));
   const freshPortfolioRequest = await loadMissionControlSnapshot({ stateRoot: historicalRoot, now });
-  assert.equal(freshPortfolioRequest.needsUserCount, 1, "a new request in an old portfolio must still alert");
+  assert.equal(freshPortfolioRequest.needsUserCount, 0, "a portfolio status without a stopped provider wake must not alert");
   assert.equal(freshPortfolioRequest.historicalNeedsUserCount, 1);
-  assert.match(renderSnapshot(freshPortfolioRequest, { width: 100, now }), /!!! USER INPUT REQUIRED: 1 collaboration/);
+  assert.doesNotMatch(renderSnapshot(freshPortfolioRequest, { width: 100, now }), /!!! USER INPUT REQUIRED/);
   const expiredHostLane = hostActivityLane({
     ...hostState,
     expiresAt: new Date(now + HOST_ACTIVITY_LIVE_MS).toISOString(),
@@ -310,6 +323,7 @@ try {
   const rendered = renderSnapshot(attention, { selectedIndex, timeline, width: 88, height: 100, now });
   assert.match(rendered, /AGENT BRIDGE MISSION CONTROL/);
   assert.match(rendered, /USER INPUT REQUIRED: 1 collaboration/);
+  assert.match(rendered, /norm\/example · 33333333 · Authorization required/);
   assert.match(rendered, /veliqon\/control-plane/);
   assert.match(rendered, /Workspace:/);
   assert.match(rendered, /Created: .*2026/);

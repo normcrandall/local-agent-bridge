@@ -2,9 +2,10 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createCollaboration, readCollaboration, updateCollaboration } from "../src/collaboration-store.mjs";
 import { acknowledgeCoordinatorWake } from "../src/coordinator-wake.mjs";
 import { attentionMessage, deliverAttentionNotification, scanPendingUserAttention, signalUserAttention } from "../src/user-attention.mjs";
@@ -23,6 +24,7 @@ try {
     participants: ["codex", "claude"],
     chair: { provider: "codex", source: "native-chair" },
     status: "needs_user",
+    githubReview: { repository: "veliqon/example", prNumber: 42, headSha: "a".repeat(40) },
     coordinatorWake: {
       sequence: 1,
       provider: "codex",
@@ -37,12 +39,19 @@ try {
 
   const first = await signalUserAttention(root, collaboration.id, { now, platform: "darwin", run });
   assert.equal(first.delivered, true);
-  assert.equal(first.adapter, "macos_notification_center");
+  assert.equal(first.adapter, "macos_terminal_notifier");
+  assert.equal(first.actionable, true);
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].command, "/usr/bin/osascript");
+  assert.match(calls[0].command, /terminal-notifier$/);
+  const actionUrl = calls[0].args.find((argument) => String(argument).startsWith("file://"));
+  assert.ok(actionUrl, "the click action must open the repository-filtered Mission Control launcher");
+  assert.match(await readFile(fileURLToPath(actionUrl), "utf8"), /bridge' mc --attention --repo 'veliqon\/example'/);
   assert.ok(calls[0].args.some((argument) => String(argument).includes("Agent Bridge needs your input")));
+  assert.ok(calls[0].args.some((argument) => String(argument).includes("veliqon/example")));
+  assert.ok(calls[0].args.some((argument) => String(argument).includes(collaboration.id.slice(0, 24))));
   assert.doesNotMatch(JSON.stringify(calls[0]), /external expense/, "lock-screen notification text must not expose the decision summary");
-  assert.doesNotMatch(JSON.stringify(calls[0]), new RegExp(root.split("/").at(-1)), "workspace details must be opt-in");
+  const visibleNotificationArguments = calls[0].args.slice(0, calls[0].args.indexOf("-open"));
+  assert.doesNotMatch(JSON.stringify(visibleNotificationArguments), new RegExp(root.split("/").at(-1)), "a known repository should replace the visible workspace fallback");
   let state = await readCollaboration(root, collaboration.id);
   assert.equal(state.coordinatorWake.userAttention.status, "delivered");
   assert.equal(state.coordinatorWake.userAttention.attempt, 1);
@@ -55,16 +64,15 @@ try {
   assert.equal(state.updatedAt, deliveredStateUpdatedAt, "a not-due reminder must not churn collaboration state");
 
   const reminder = await scanPendingUserAttention(root, { now: now + 16 * 60_000, platform: "darwin", run });
-  assert.equal(reminder.length, 1);
-  assert.equal(reminder[0].delivered, true);
-  assert.equal(calls.length, 2);
+  assert.equal(reminder.length, 0);
+  assert.equal(calls.length, 1);
   state = await readCollaboration(root, collaboration.id);
-  assert.equal(state.coordinatorWake.userAttention.attempt, 2);
+  assert.equal(state.coordinatorWake.userAttention.attempt, 1);
 
   await acknowledgeCoordinatorWake(root, collaboration.id, 1, { provider: "codex", action: "needs_user" });
   const afterAcknowledgement = await signalUserAttention(root, collaboration.id, { now: now + 32 * 60_000, platform: "darwin", run, force: true });
   assert.equal(afterAcknowledgement.reason, "not_due_or_not_needed");
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 1);
 
   const chairless = await createCollaboration(root, {
     task: "Wait for input without a native chair",
@@ -74,11 +82,30 @@ try {
     status: "needs_user",
   });
   const chairlessDelivery = await signalUserAttention(root, chairless.id, { now, platform: "darwin", run });
-  assert.equal(chairlessDelivery.delivered, true);
+  assert.equal(chairlessDelivery.delivered, false);
+  assert.equal(chairlessDelivery.reason, "not_due_or_not_needed");
   state = await readCollaboration(root, chairless.id);
   assert.equal(state.coordinatorWake, undefined);
-  assert.equal(state.userAttention.status, "delivered");
-  assert.equal(state.userAttention.attempt, 1);
+  assert.equal(state.userAttention, undefined);
+
+  const providerStillRunning = await createCollaboration(root, {
+    task: "Resolve a question autonomously before stopping",
+    workspace: root,
+    agents: ["claude"],
+    participants: ["codex", "claude"],
+    status: "needs_user",
+    runtime: { activeCall: { agent: "claude", status: "running" } },
+    coordinatorWake: {
+      sequence: 1,
+      provider: "codex",
+      kind: "needs_user",
+      nextAction: "needs_user",
+      status: "pending",
+      createdAt: new Date(now).toISOString(),
+    },
+  });
+  const activeDelivery = await signalUserAttention(root, providerStillRunning.id, { now, platform: "darwin", run });
+  assert.equal(activeDelivery.reason, "not_due_or_not_needed");
 
   const historical = await createCollaboration(root, {
     task: "Preserve an old request without alerting",
@@ -110,6 +137,15 @@ try {
       reason: "A new authorization boundary was reached.",
       recordedAt: new Date(now - 1_000).toISOString(),
     },
+    coordinatorWake: {
+      sequence: 1,
+      provider: "codex",
+      kind: "needs_user",
+      nextAction: "needs_user",
+      summary: "A new authorization boundary was reached.",
+      status: "pending",
+      createdAt: new Date(now - 1_000).toISOString(),
+    },
   });
   const callsBeforeRecentEscalation = calls.length;
   const escalationResults = await scanPendingUserAttention(root, { now, platform: "darwin", run });
@@ -123,6 +159,7 @@ try {
     participants: ["codex", "claude"],
     chair: { provider: "codex", source: "native-chair" },
     status: "needs_user",
+    githubReview: { repository: "veliqon/example", prNumber: 43, headSha: "b".repeat(40) },
     coordinatorWake: {
       sequence: 1,
       provider: "codex",
@@ -152,6 +189,7 @@ try {
     participants: ["codex", "claude"],
     chair: { provider: "codex", source: "native-chair" },
     status: "needs_user",
+    githubReview: { repository: "veliqon/example", prNumber: 44, headSha: "c".repeat(40) },
     coordinatorWake: {
       sequence: 1,
       provider: "codex",
@@ -174,15 +212,14 @@ try {
   assert.equal(state.updatedAt, disabledUpdatedAt, "disabled notifications must not create a periodic write loop");
   assert.equal(state.coordinatorWake.userAttention.attempt, 1);
 
-  const hiddenMessage = attentionMessage({ workspace: "/private/client-secret", coordinatorWake: {} });
-  assert.equal(hiddenMessage.subtitle, "Protected decision");
-  const detailedMessage = attentionMessage({ workspace: "/private/client-secret", coordinatorWake: {} }, {
-    environment: { AGENT_BRIDGE_ATTENTION_DETAIL: "repository" },
-  });
-  assert.equal(detailedMessage.subtitle, "client-secret");
+  const fallbackMessage = attentionMessage({ id: "bridge-example", workspace: "/private/client-secret", coordinatorWake: {} });
+  assert.equal(fallbackMessage.subtitle, "client-secret · bridge-example");
+  const repositoryMessage = attentionMessage({ id: "bridge-example", githubReview: { repository: "veliqon/example" }, workspace: "/private/client-secret" });
+  assert.equal(repositoryMessage.subtitle, "veliqon/example · bridge-example");
+  assert.match(repositoryMessage.body, /bridge mc --attention --repo veliqon\/example/);
 
   const linuxCalls = [];
-  await deliverAttentionNotification(hiddenMessage, {
+  await deliverAttentionNotification(fallbackMessage, {
     platform: "linux",
     environment: { HOME: "/tmp/home", PATH: "/untrusted/bin" },
     run: async (command, args, options) => { linuxCalls.push({ command, args, options }); },
@@ -198,9 +235,10 @@ try {
   ], { cwd: tmpdir(), encoding: "utf8", env: { ...process.env, BRIDGE_COLLABORATION_DIR: "" } }));
   assert.equal(cli.stateRoot, process.env.BRIDGE_COLLABORATION_DIR);
   assert.ok(cli.pending.some((entry) => entry.collaborationId === disabled.id), "CLI must read the explicit machine state root, not cwd");
+  assert.ok(cli.pending.some((entry) => entry.collaborationId === disabled.id && entry.repository === "veliqon/example" && entry.status === "needs_user"));
 
   await updateCollaboration(root, failed.id, (current) => ({ ...current, status: "agreed" }));
-  console.log("User attention tests passed: immediate delivery, deduplicated reminders, fresh-request filtering, bounded failure recovery, disabled-policy stability, privacy, and acknowledgement stop are verified.");
+  console.log("User attention tests passed: stopped-provider gating, one-shot delivery, repository identity, fresh-request filtering, bounded failure recovery, disabled-policy stability, and acknowledgement stop are verified.");
 } finally {
   delete process.env.BRIDGE_COLLABORATION_DIR;
   await rm(root, { recursive: true, force: true });
