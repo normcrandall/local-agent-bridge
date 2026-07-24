@@ -736,6 +736,33 @@ function meaningfulNarrative(lane) {
   return summary;
 }
 
+function readableDependency(value) {
+  const dependency = clean(value);
+  const issue = dependency.match(/^issue-(\d+)$/i);
+  return issue ? `issue #${issue[1]}` : dependency;
+}
+
+export function blockedReason(lane) {
+  const status = effectiveLaneStatus(lane);
+  const dependencies = (lane.portfolio?.blockedBy || []).map(readableDependency).filter(Boolean);
+  if (dependencies.length) {
+    const label = dependencies.length === 1 ? dependencies[0] : dependencies.join(", ");
+    return `Waiting for ${label} to complete.`;
+  }
+  const candidates = [
+    lane.blocker?.error,
+    lane.blocker?.pendingDecision?.question,
+    lane.blocker?.pendingDecision?.reason,
+    lane.blocker?.decisionEscalation?.question,
+    lane.blocker?.decisionEscalation?.reason,
+    status === "blocked" ? lane.coordinatorWake?.summary : null,
+    status === "blocked" ? lane.recovery?.recommendation : null,
+  ].map(clean).filter(Boolean);
+  const specific = candidates.find((candidate) => !/^(?:blocked|waiting|failed|stopped)$/i.test(candidate));
+  if (specific) return specific;
+  return status === "blocked" ? "No blocking reason was recorded by the coordinator." : "";
+}
+
 export function coalesceTimeline(events, limit = 5) {
   const output = [];
   for (const event of events || []) {
@@ -875,12 +902,14 @@ function detailPane(lane, timeline, width, now, snapshot, expanded = false) {
   if (summaryIsStale) rows.push(paneLine("SUMMARY STALE · process heartbeat remains live", "33;1"));
   const github = [lane.issueNumber && `issue #${lane.issueNumber}`, lane.prNumber && `PR #${lane.prNumber}`, lane.branch, lane.headSha && lane.headSha.slice(0, 10)].filter(Boolean).join(" · ");
   if (github) rows.push(paneLine(""), paneLine(`GITHUB  ${github}`, "35"));
-  if (!deliveryStatus && lane.nextAction && lane.nextAction !== "none") rows.push(paneLine(`NEXT  ${friendlyPhase(lane)}`, "33"));
-  const blocker = lane.blocker?.error || lane.blocker?.pendingDecision?.question || lane.blocker?.decisionEscalation?.question;
-  if (blocker) rows.push(...wrap(`BLOCKED  ${blocker}`, width).slice(0, 2).map((line) => paneLine(line, "31;1")));
-  if (lane.portfolio?.blockedBy?.length) rows.push(paneLine(`WAITING ON  ${lane.portfolio.blockedBy.join(", ")}`, "33"));
+  if (!deliveryStatus && lane.nextAction && !["none", "blocked"].includes(lane.nextAction)) rows.push(paneLine(`NEXT  ${friendlyPhase(lane)}`, "33"));
+  const blockingReason = blockedReason(lane);
+  if (blockingReason) {
+    rows.push(paneLine(""), paneLine("BLOCKED BECAUSE", "31;1"));
+    rows.push(...wrap(blockingReason, width).slice(0, expanded ? 5 : 3).map((line) => paneLine(line, "31")));
+  }
   if (expanded) {
-    rows.push(paneLine(""), paneLine("DETAILS", "1"));
+    rows.push(paneLine(""), paneLine("METADATA", "1"));
     rows.push(paneLine(`ID  ${lane.id}`, "90"));
     if (lane.workspace) rows.push(paneLine(`WORKSPACE  ${lane.workspace}`, "90"));
     if (lane.model) rows.push(paneLine(`MODEL  ${lane.model}`, "90"));
@@ -1015,7 +1044,7 @@ export function renderMissionControl(snapshot, {
   const quotaFooter = renderProviderQuotaFooter(snapshot.providerQuota, { width: usableWidth, color });
   const footerRows = (quotaFooter ? 1 : 0) + (interactive ? (actionMessage ? 2 : 1) : snapshot.mode === "all" ? 1 : 0);
   const contentRows = Math.max(4, height - lines.length - footerRows - 4);
-  const titles = ["REPOSITORIES", "WORK", "SELECTED LANE"];
+  const titles = ["REPOSITORIES", "WORK", "DETAILS"];
   const measurements = gridMeasurements(usableWidth, activePane);
   const detailWidth = measurements.paneIndex === null
     ? measurements.widths[2] - 2

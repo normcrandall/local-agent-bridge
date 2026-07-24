@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
   coalesceTimeline,
+  blockedReason,
   deduplicateOperatorLanes,
   displayWidth,
   isAttentionLane,
@@ -59,6 +60,11 @@ assert.equal(paneFocusIntent("\t", 0), 1);
 assert.equal(paneFocusIntent("\x1b[C", 2), 0);
 assert.equal(paneFocusIntent("\x1b[D", 0), 2);
 assert.equal(paneFocusIntent("j", 1), 1);
+assert.equal(blockedReason({ lifecyclePhase: "blocked", portfolio: { blockedBy: ["issue-672"] } }), "Waiting for issue #672 to complete.");
+assert.equal(blockedReason({ lifecyclePhase: "blocked", blocker: { error: "Reviewer provider is unavailable." } }), "Reviewer provider is unavailable.");
+assert.equal(blockedReason({ lifecyclePhase: "blocked" }), "No blocking reason was recorded by the coordinator.");
+assert.equal(blockedReason({ lifecyclePhase: "working" }), "");
+assert.equal(blockedReason({ lifecyclePhase: "agreed", handoff: { summary: "Review completed." } }), "");
 const selectionFixture = [{ id: "first", updatedAt: "one" }, { id: "last", updatedAt: "two" }];
 assert.equal(resolveMissionControlSelection(selectionFixture, null, Number.MAX_SAFE_INTEGER).id, "last");
 assert.equal(resolveMissionControlSelection(selectionFixture, "first", 1).id, "first");
@@ -304,7 +310,7 @@ try {
   assert.equal(freshPortfolioRequest.historicalNeedsUserCount, 1);
   const freshPortfolioOutput = renderSnapshot(freshPortfolioRequest, { width: 100, now });
   assert.doesNotMatch(freshPortfolioOutput, /!!! USER INPUT REQUIRED/);
-  assert.match(freshPortfolioOutput, /WAITING ON.*issue-401/);
+  assert.match(freshPortfolioOutput, /BLOCKED BECAUSE[\s\S]*Waiting for issue #401 to complete\./);
   const expiredHostLane = hostActivityLane({
     ...hostState,
     expiresAt: new Date(now + HOST_ACTIVITY_LIVE_MS).toISOString(),
@@ -608,6 +614,8 @@ try {
   const noColor = renderMissionControl(attention, { selectedIndex, timeline, width: 120, height: 28, now, color: false, interactive: true });
   assert.doesNotMatch(noColor, /\x1b\[/);
   assert.match(noColor, /│ REPOSITORIES/);
+  assert.match(noColor, /│ DETAILS/);
+  assert.doesNotMatch(noColor, /SELECTED LANE/);
   assert.match(noColor, /WORK · j\/k choose lane · Enter details/);
 
   const secondRepositoryLane = {
