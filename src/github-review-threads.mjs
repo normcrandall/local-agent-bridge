@@ -41,21 +41,30 @@ export function reviewThreadReceiptPath({ repository, prNumber, headSha, expecte
   );
 }
 
-export function createReviewerThreadController({ client, expectedLogin, getSubmittedEvent }) {
+export function createReviewerThreadController({
+  client = null,
+  readerClient = client,
+  resolverClient = client,
+  expectedLogin,
+  getSubmittedEvent,
+}) {
   if (!expectedLogin) throw new Error("expectedLogin is required.");
   if (typeof getSubmittedEvent !== "function") throw new Error("getSubmittedEvent is required.");
 
   return {
     async read() {
-      return requireReviewerApp(client).reviewThreads();
+      return requireReviewerApp(readerClient).reviewThreads();
     },
 
     async resolve({ threadId }) {
-      const appClient = requireReviewerApp(client);
+      const appReader = requireReviewerApp(readerClient);
+      if (!resolverClient) {
+        throw new Error("Review-thread resolution requires the configured builder GitHub App executor.");
+      }
       if (getSubmittedEvent() !== "APPROVE") {
         throw new Error("The reviewer must submit its exact-head APPROVE review before resolving satisfied threads.");
       }
-      const threads = await appClient.reviewThreads();
+      const threads = await appReader.reviewThreads();
       const thread = threads.find((candidate) => candidate.id === threadId);
       if (!thread) throw new Error("Review thread is not part of the bound pull request.");
       const originalComment = thread.comments?.nodes?.[0];
@@ -65,7 +74,12 @@ export function createReviewerThreadController({ client, expectedLogin, getSubmi
       ) {
         throw new Error("The reviewer App may resolve only a thread opened by that same reviewer identity.");
       }
-      return appClient.resolveReviewThread({ threadId });
+      const result = await resolverClient.resolveReviewThread({ threadId });
+      return {
+        ...result,
+        authorizedBy: expectedLogin,
+        executedBy: result.login,
+      };
     },
   };
 }

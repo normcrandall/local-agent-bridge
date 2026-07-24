@@ -87,11 +87,13 @@ const humanThreadWithMatchingLogin = {
 let submittedEvent = null;
 const resolvedThreadIds = [];
 const reviewerThreadController = createReviewerThreadController({
-  client: {
+  readerClient: {
     reviewThreads: async () => [ownedThread, foreignThread, humanThreadWithMatchingLogin],
+  },
+  resolverClient: {
     resolveReviewThread: async ({ threadId }) => {
       resolvedThreadIds.push(threadId);
-      return { operation: "resolve_review_thread", threadId };
+      return { login: "builder[bot]", operation: "resolve_review_thread", threadId };
     },
   },
   expectedLogin: "example-reviewer[bot]",
@@ -112,12 +114,16 @@ await assert.rejects(
   /only a thread opened by that same reviewer/i,
 );
 assert.deepEqual(await reviewerThreadController.resolve({ threadId: ownedThread.id }), {
+  authorizedBy: "example-reviewer[bot]",
+  executedBy: "builder[bot]",
+  login: "builder[bot]",
   operation: "resolve_review_thread",
   threadId: ownedThread.id,
 });
 assert.deepEqual(resolvedThreadIds, [ownedThread.id]);
 const patThreadController = createReviewerThreadController({
-  client: null,
+  readerClient: null,
+  resolverClient: null,
   expectedLogin: "reviewer",
   getSubmittedEvent: () => "APPROVE",
 });
@@ -125,6 +131,16 @@ await assert.rejects(patThreadController.read(), /requires the configured review
 await assert.rejects(
   patThreadController.resolve({ threadId: ownedThread.id }),
   /requires the configured reviewer GitHub App/i,
+);
+const missingExecutorController = createReviewerThreadController({
+  readerClient: { reviewThreads: async () => [ownedThread] },
+  resolverClient: null,
+  expectedLogin: "example-reviewer[bot]",
+  getSubmittedEvent: () => "APPROVE",
+});
+await assert.rejects(
+  missingExecutorController.resolve({ threadId: ownedThread.id }),
+  /requires the configured builder GitHub App executor/i,
 );
 const narrowedReviewerClient = createBoundBuilderClient({
   token: "ghs_test",
