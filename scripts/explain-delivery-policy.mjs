@@ -1,14 +1,20 @@
 #!/usr/bin/env node
 
 import process from "node:process";
-import { resolveDeliveryPolicy, explainDeliveryPolicy } from "../src/delivery-policy.mjs";
+import { resolve } from "node:path";
+import {
+  deliveryPolicyExplainDocument,
+  explainDeliveryPolicy,
+  resolveDeliveryPolicy,
+} from "../src/delivery-policy.mjs";
 
 function usage() {
-  console.log(`Usage: node scripts/explain-delivery-policy.mjs [options]
+  process.stdout.write(`Usage: node scripts/explain-delivery-policy.mjs [options]
+       ./bridge policy explain [options]
 
 Options:
   --workspace PATH   Exact repository worktree (default: cwd)
-  --json             Emit structured JSON output instead of human-readable report
+  --json             Emit the structured explain document instead of the report
   --help             Show this help message
 `);
 }
@@ -16,32 +22,33 @@ Options:
 async function main() {
   const argv = process.argv.slice(2);
   let workspace = process.cwd();
-  let json = false;
+  let asJson = false;
 
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i];
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
     if (arg === "--help" || arg === "-h") {
       usage();
-      process.exit(0);
+      return;
     }
     if (arg === "--json") {
-      json = true;
+      asJson = true;
     } else if (arg === "--workspace") {
-      const val = argv[i + 1];
-      if (!val || val.startsWith("--")) throw new Error("--workspace requires a path");
-      workspace = val;
-      i += 1;
+      const supplied = argv[index + 1];
+      if (!supplied || supplied.startsWith("--")) throw new Error("--workspace requires a path");
+      workspace = supplied;
+      index += 1;
     } else {
       throw new Error(`Unknown argument: ${arg}`);
     }
   }
 
-  const effectivePolicy = await resolveDeliveryPolicy({ workspace });
-  const output = explainDeliveryPolicy(effectivePolicy, { format: json ? "json" : "human" });
-  console.log(output);
+  const policy = await resolveDeliveryPolicy({ workspace: resolve(workspace) });
+  process.stdout.write(asJson
+    ? `${JSON.stringify(deliveryPolicyExplainDocument(policy), null, 2)}\n`
+    : `${explainDeliveryPolicy(policy, { format: "human" })}\n`);
 }
 
-main().catch((err) => {
-  console.error(`Error: ${err.message}`);
+main().catch((error) => {
+  process.stderr.write(`Error: ${error.message}\n`);
   process.exit(1);
 });

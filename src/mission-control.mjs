@@ -7,6 +7,7 @@ import { attentionRequestAt, attentionRequestIsFresh } from "./attention-state.m
 import { LIVE_COLLABORATION_STATUSES } from "./collaboration-cleanup.mjs";
 import { hostActivityLane, listHostActivities } from "./host-activity-store.mjs";
 import { PORTFOLIO_STATUSES, PORTFOLIO_STATUS_GROUPS } from "./portfolio-status.mjs";
+import { deliveryPolicyForSurface } from "./delivery-policy.mjs";
 
 const ACTIVE_STATUSES = new Set([
   "queued", "waiting_capacity", "running", "working", "recovering", "cancelling",
@@ -416,6 +417,9 @@ export async function loadMissionControlSnapshot({
   includeStale = false,
   staleAfterMs = DEFAULT_STALE_AFTER_MS,
   repositoryFilter = null,
+  // Mission Control reads the delivery policy only when a caller names the workspace it
+  // should be resolved against. Without one the snapshot shape stays unchanged.
+  policyWorkspace = null,
   now = Date.now(),
 } = {}) {
   const controlPlane = await queryControlPlane(stateRoot, { includeArchived, now });
@@ -512,7 +516,11 @@ export async function loadMissionControlSnapshot({
   // Compatibility alias for JSON consumers written before the operator-facing
   // distinction between a stopped attempt and a failed objective.
   operatorCounts.failed = operatorCounts.stopped;
+  const deliveryPolicy = policyWorkspace
+    ? (await deliveryPolicyForSurface("missionControl", { workspace: policyWorkspace })).policy
+    : undefined;
   return {
+    ...(deliveryPolicy ? { deliveryPolicy } : {}),
     version: 1,
     generatedAt: new Date(now).toISOString(),
     stateRoot: resolve(stateRoot),

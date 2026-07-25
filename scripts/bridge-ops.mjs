@@ -25,6 +25,7 @@ import { applyBridgeCleanup, auditBridgeCleanup, formatCleanupReport } from "../
 import { waitForControlPlane } from "../src/control-plane-wait.mjs";
 import { auditWorkspaceSweep, runWorkspaceRecipe, workspaceRecipePlan } from "../src/workspace-operations.mjs";
 import { effectiveBridgeConfig } from "../src/effective-config.mjs";
+import { deliveryPolicyExplainDocument, explainDeliveryPolicy, resolveDeliveryPolicy } from "../src/delivery-policy.mjs";
 import { inspectPortfolioConflict } from "../src/conflict-inspection.mjs";
 
 const root = resolve(import.meta.dirname, "..");
@@ -196,6 +197,18 @@ switch (command) {
     } : config);
     break;
   }
+  case "policy": {
+    const subcommand = args.find((arg) => !arg.startsWith("-")) || "explain";
+    if (subcommand !== "explain") throw new Error("policy supports explain.");
+    const policy = await resolveDeliveryPolicy({ workspace: resolve(value("--workspace", process.cwd())) });
+    const format = args.includes("--json") ? "json" : value("--format", "human");
+    if (format === "json") {
+      json(deliveryPolicyExplainDocument(policy));
+    } else {
+      process.stdout.write(`${explainDeliveryPolicy(policy, { format })}\n`);
+    }
+    break;
+  }
   case "workspace": {
     const subcommand = args.find((arg) => !arg.startsWith("-"));
     const workspace = resolve(value("--workspace", process.cwd()));
@@ -319,5 +332,5 @@ print "Authenticate Claude Code, Codex, and Antigravity. Configure your reviewer
     break;
   }
   default:
-    process.stdout.write("Usage: bridge <talk|start|watchdog|doctor|smoke|models|config|workspace|conflict|status|capabilities|roles|preflight|recover|wait|archive|prune|worktree|ci|reconcile|usage|bundle|replay> [options]\n");
+    process.stdout.write("Usage: bridge <talk|start|watchdog|doctor|smoke|models|config|policy|workspace|conflict|status|capabilities|roles|preflight|recover|wait|archive|prune|worktree|ci|reconcile|usage|bundle|replay> [options]\n");
 }
