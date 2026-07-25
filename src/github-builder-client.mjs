@@ -1537,5 +1537,14 @@ export function createBoundBuilderClient({
     });
   }
 
-  return { identity, ensurePullRequest, reviewThreads, replyReviewThread, resolveReviewThread, markReady, merge, createBranch, pushBranch, replaceBranch, getIssue, addIssueLabel, removeIssueLabel, getIssueComments, getIssueTimeline, getIssueDependencies, getIssueProjectItems, updateIssueProjectSingleSelect, postIssueComment, updateIssueComment, deleteIssueComment, listTagLocks, acquireTagLock, releaseTagLock, expectedLogin, repository, issueNumber, authority: boundAuthority };
+  function binding() {
+    return {
+      repository,
+      prNumber,
+      headSha: activeHeadSha,
+      authorizationHeadSha,
+    };
+  }
+
+  return { identity, binding, ensurePullRequest, reviewThreads, replyReviewThread, resolveReviewThread, markReady, merge, createBranch, pushBranch, replaceBranch, getIssue, addIssueLabel, removeIssueLabel, getIssueComments, getIssueTimeline, getIssueDependencies, getIssueProjectItems, updateIssueProjectSingleSelect, postIssueComment, updateIssueComment, deleteIssueComment, listTagLocks, acquireTagLock, releaseTagLock, expectedLogin, repository, issueNumber, authority: boundAuthority };
 }

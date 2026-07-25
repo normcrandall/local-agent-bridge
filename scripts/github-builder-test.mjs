@@ -327,6 +327,7 @@ const createAndContinueApi = fakeGitHub();
 const createAndContinue = createBoundBuilderClient({ ...base, prNumber: null, fetchImpl: createAndContinueApi.fetchImpl });
 assert.equal((await createAndContinue.ensurePullRequest({ title: "Created", body: "Body" })).prNumber, 42);
 assert.equal((await createAndContinue.reviewThreads())[0].id, "thread-1");
+assert.equal(createAndContinue.binding().prNumber, 42);
 const threads = await builder.reviewThreads();
 assert.equal(threads[0].id, "thread-1");
 const replied = await builder.replyReviewThread({ threadId: "thread-1", body: "Fixed." });
@@ -920,6 +921,12 @@ const dynamicClient = createBoundBuilderClient({
 const dynamicResult = await dynamicClient.createBranch({ ref: "refs/heads/feature-dynamic", sha: dynamicHeadSha });
 assert.equal(dynamicResult.requestedSha, dynamicHeadSha);
 assert.equal(dynamicResult.authorizationHeadSha, headSha);
+assert.deepEqual(dynamicClient.binding(), {
+  repository: "owner/repo",
+  prNumber: null,
+  headSha: dynamicHeadSha,
+  authorizationHeadSha: headSha,
+});
 assert.equal(gitOut(["rev-parse", "refs/heads/feature-dynamic"], { cwd: bareRepoPath }), dynamicHeadSha);
 const dynamicReceipts = fs.readFileSync(dynamicReceiptLogPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
 assert.ok(dynamicReceipts.some((receipt) => receipt.operation === "adopt_workspace_head"

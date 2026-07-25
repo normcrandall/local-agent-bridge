@@ -88,7 +88,7 @@ server.registerTool("read_review_threads", {
   title: "Read bound pull request review threads",
   description: "Read review threads only from the pre-bound pull request and head SHA.",
   inputSchema: {},
-}, async () => response({ threads: await client.reviewThreads(), repository, prNumber, headSha }));
+}, async () => response({ threads: await client.reviewThreads(), ...client.binding() }));
 
 server.registerTool("reply_review_thread", {
   title: "Reply to bound review thread",
