@@ -3,7 +3,8 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { antigravityToolRequest, claudeToolRequest, codexToolRequest, dockerToolRequest, ollamaToolRequest } from "./tool-requests.mjs";
 import { parseReviewEnvelope, reviewEnvelopeInstructions } from "./review-envelope.mjs";
 import { loadConfiguredFallbackModels } from "./model-fallbacks.mjs";
-import { builderEnvelopeInstructions, parseBuilderEnvelope } from "./builder-envelope.mjs";
+import { builderEnvelopeInstructions } from "./builder-envelope.mjs";
+import { deliverBuilderEnvelope } from "./builder-delivery-repair.mjs";
 import { configuredReviewerLogin, createInstallationToken, inspectGitHubAppRoles, sameGitHubAppLogin } from "./github-app-auth.mjs";
 import { createBoundBuilderClient } from "./github-builder-client.mjs";
 import { localReviewPrompt, republishValidatedReview, resolveReviewPublication } from "./review-publication.mjs";
@@ -244,8 +245,7 @@ export function createAgentPool({
     });
   }
 
-  async function publishAntigravityBuilder(message) {
-    const envelope = parseBuilderEnvelope(message);
+  async function publishAntigravityBuilder(envelope) {
     if (envelope.operations.length === 0) return [];
     const builder = await boundBuilderClient();
     const receipts = [];
@@ -267,6 +267,23 @@ export function createAgentPool({
       await emitTiming({ action: "finish", name: "publication", key: timingKey, at: new Date().toISOString(), metadata: { agent: "antigravity", channel: "github_builder" } });
     }
     return receipts;
+  }
+
+  // Validate, optionally repair, then publish exactly once. The bounded repair
+  // loop itself lives in builder-delivery-repair.mjs so it stays independently
+  // testable without live builder credentials.
+  async function deliverAntigravityBuilder({ message, conversationId, threads, requestRepair, onProgress }) {
+    return deliverBuilderEnvelope({
+      message,
+      conversationId,
+      githubBuilder,
+      threads,
+      requestRepair,
+      onProgress,
+      emitTiming,
+      publish: publishAntigravityBuilder,
+      readWorkspaceHead: () => (githubBuilder?.allowWorkspaceHead ? workspaceHead(workspace) : null),
+    });
   }
 
   async function clientFor(agent) {
@@ -376,6 +393,22 @@ export function createAgentPool({
         onProgress({ at: new Date().toISOString(), ...staticBoundary.progress });
       }
       let request;
+      let builderThreads = [];
+      // Reused for a bounded delivery-repair turn so the correction keeps the
+      // exact same workspace, permission profile, and provider conversation.
+      const antigravityRequestFor = (antigravityPrompt, antigravitySessionId, overrides = {}) => antigravityToolRequest({
+        prompt: antigravityPrompt,
+        sessionId: antigravitySessionId,
+        cwd: workspace,
+        mode,
+        model: models.antigravity,
+        fallbackModels: modelFallbacks.antigravity,
+        timeoutSeconds: turnTimeoutSeconds,
+        permissionProfile: effectivePermissionProfile,
+        verificationCommands: permissionDecision.verificationCommands,
+        writableRoots,
+        ...overrides,
+      });
       if (agent === "claude") {
         request = claudeToolRequest({
           prompt: effectivePrompt,
@@ -422,21 +455,10 @@ export function createAgentPool({
           : effectivePrompt;
         if (githubBuilder && mode === "work") {
           const builder = await boundBuilderClient();
-          const threads = githubBuilder.prNumber ? await builder.reviewThreads() : [];
-          antigravityPrompt += builderEnvelopeInstructions({ githubBuilder, threads });
+          builderThreads = githubBuilder.prNumber ? await builder.reviewThreads() : [];
+          antigravityPrompt += builderEnvelopeInstructions({ githubBuilder, threads: builderThreads });
         }
-        request = antigravityToolRequest({
-          prompt: antigravityPrompt,
-          sessionId,
-          cwd: workspace,
-          mode,
-          model: models.antigravity,
-          fallbackModels: modelFallbacks.antigravity,
-          timeoutSeconds: turnTimeoutSeconds,
-          permissionProfile: effectivePermissionProfile,
-          verificationCommands: permissionDecision.verificationCommands,
-          writableRoots,
-        });
+        request = antigravityRequestFor(antigravityPrompt, sessionId);
       } else if (agent === "ollama") {
         const ollamaPrompt = effectiveGithubReview
           ? `${effectivePrompt}${reviewEnvelopeInstructions({ githubReview: effectiveGithubReview, handoffPath, provider: "Ollama" })}`
@@ -495,16 +517,48 @@ export function createAgentPool({
         publishedReviewReceipt = await publishEnvelopeReview(agent, message, effectiveGithubReview);
         message = `${message}\n\nBound review published as ${publishedReviewReceipt.login}: ${publishedReviewReceipt.url}`;
       }
+      let resolvedSessionId = sessionFrom(agent, result);
+      let deliveryRepair = null;
       if (agent === "antigravity" && githubBuilder && mode === "work") {
-        const receipts = await publishAntigravityBuilder(message);
-        message = `${message}\n\nBound builder operations published: ${JSON.stringify(receipts)}`;
+        const delivery = await deliverAntigravityBuilder({
+          message,
+          conversationId: resolvedSessionId,
+          threads: builderThreads,
+          onProgress,
+          requestRepair: async ({ prompt: repairPrompt, conversationId }) => {
+            // A delivery-syntax correction may not run commands; only the
+            // envelope is being rewritten.
+            const repairRequest = antigravityRequestFor(repairPrompt, conversationId, { verificationCommands: [] });
+            repairRequest._meta = { progressToken: `antigravity-delivery-repair-${Date.now()}` };
+            const repairResult = await client.callTool(repairRequest, undefined, {
+              timeout: requestTimeoutMs,
+              maxTotalTimeout: maxTotalTimeoutMs,
+              resetTimeoutOnProgress: true,
+              onprogress: (progress) => onProgress({
+                at: new Date().toISOString(),
+                progress: progress.progress,
+                total: progress.total,
+                summary: progress.message || null,
+              }),
+            });
+            if (repairResult.isError) throw new Error(`antigravity delivery repair failed: ${textFrom(repairResult)}`);
+            return { message: textFrom(repairResult), conversationId: sessionFrom(agent, repairResult) };
+          },
+        });
+        deliveryRepair = delivery.deliveryRepair;
+        resolvedSessionId = delivery.conversationId || resolvedSessionId;
+        if (deliveryRepair.repaired) {
+          message = `${message}\n\nDelivery repair: the builder envelope was corrected to canonical fields in the same Antigravity conversation after ${deliveryRepair.attempts.length} attempt(s); the implementation commit was unchanged.`;
+        }
+        message = `${message}\n\nBound builder operations published: ${JSON.stringify(delivery.receipts)}`;
       }
       const structured = result.structuredContent || {};
       const routing = structured.modelRouting || structured;
       return {
         message,
-        sessionId: sessionFrom(agent, result),
+        sessionId: resolvedSessionId,
         metadata: {
+          deliveryRepair,
           usage: structured.usage || structured.tokenUsage || null,
           durationMs: structured.durationMs || structured.duration_ms || null,
           timing: structured.timing || null,

@@ -26,7 +26,7 @@ import {
   recordReviewPublicationResult,
 } from "../src/review-publication.mjs";
 import { acquireProviderCapacity, assertNoProviderPoolReentry, loadProviderConcurrency } from "../src/provider-concurrency.mjs";
-import { activeVerificationCommand, capacityWaitNarrative, verificationNarrative } from "../src/collaboration-narrative.mjs";
+import { activeVerificationCommand, capacityWaitNarrative, deliveryRepairSummary, verificationNarrative } from "../src/collaboration-narrative.mjs";
 import { enqueueCoordinatorWake } from "../src/coordinator-wake.mjs";
 import { createBoundBuilderClient } from "../src/github-builder-client.mjs";
 import { createInstallationToken } from "../src/github-app-auth.mjs";
@@ -740,6 +740,27 @@ try {
             reason: "mutable_work_mode",
           });
         }
+        // Delivery repair is a distinct, visible lifecycle event: the provider
+        // kept custody and its commit, and only the builder envelope was
+        // corrected inside the same conversation.
+        if (response.metadata?.deliveryRepair?.attempted) {
+          const repair = response.metadata.deliveryRepair;
+          await recordTiming({
+            action: "milestone",
+            name: "delivery_repair",
+            at: completedAt,
+            metadata: { agent: call.agent, attempts: repair.attempts.length, outcome: repair.outcome },
+          });
+          await appendEvent(workspaceRoot, id, {
+            type: "delivery_repair",
+            at: completedAt,
+            agent: call.agent,
+            outcome: repair.outcome,
+            repaired: repair.repaired === true,
+            attempts: repair.attempts,
+            summary: deliveryRepairSummary(call.agent, repair),
+          });
+        }
         if (response.metadata?.reviewPublication?.published) {
           await recordTiming({
             action: "milestone",
@@ -765,6 +786,17 @@ try {
         await verificationTiming.finishAll({ at: failedAt, metadata: { failed: true } }).catch(() => {});
         await recordTiming({ action: "finish", name: "first_progress", key: firstProgressTimingKey, at: failedAt, metadata: { agent: call.agent, failed: true } }).catch(() => {});
         await recordTiming({ action: "finish", name: "provider_turn", key: providerTimingKey, at: failedAt, metadata: { agent: call.agent, failed: true } }).catch(() => {});
+        if (error?.deliveryRepair?.attempted) {
+          await appendEvent(workspaceRoot, id, {
+            type: "delivery_repair",
+            at: failedAt,
+            agent: call.agent,
+            outcome: error.deliveryRepair.outcome,
+            repaired: false,
+            attempts: error.deliveryRepair.attempts,
+            summary: deliveryRepairSummary(call.agent, error.deliveryRepair),
+          }).catch(() => {});
+        }
         if (error?.indeterminate) {
           lastSummary = `Caller lost contact with ${call.agent}; execution state is unknown and ownership is preserved.`;
           await writeActiveCall({ status: "indeterminate", phase: "unknown", summary: lastSummary });

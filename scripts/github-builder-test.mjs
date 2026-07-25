@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import { createBoundBuilderClient } from "../src/github-builder-client.mjs";
 import { assertBranchRef, resolveTransportUrl } from "../src/github-builder-transport.mjs";
-import { builderEnvelopeInstructions, parseBuilderEnvelope } from "../src/builder-envelope.mjs";
+import {
+  BuilderEnvelopeError,
+  builderEnvelopeInstructions,
+  builderEnvelopeRepairInstructions,
+  builderOperationSpecifications,
+  parseBuilderEnvelope,
+} from "../src/builder-envelope.mjs";
+import { MAX_BUILDER_REPAIR_ATTEMPTS, deliverBuilderEnvelope } from "../src/builder-delivery-repair.mjs";
+import { deliveryRepairSummary } from "../src/collaboration-narrative.mjs";
 import {
   builderMcpInputSchema,
   builderEnvelopeOperationSchema,
@@ -1816,6 +1824,266 @@ await assert.rejects(
   /not authorized: get_issue_project_items/,
 );
 
+// ---------------------------------------------------------------------------
+// (8) Issue #40 regression fixtures (observed 2026-07-25, collaboration
+// bridge-d7adbfc4). Antigravity completed issue #146 at commit 74d2f02 and then
+// described the delivery with non-canonical fields: create_branch
+// {branch, headCommit} and ensure_pull_request {head, base}. Zod rejected the
+// envelope and writer custody failed over to Claude. These fixtures pin the
+// repaired behavior: contract-derived instructions, a schema-only classification,
+// a bounded same-session correction, unchanged publication, exactly one remote
+// mutation, and an explicit exhaustion path for failover.
+// ---------------------------------------------------------------------------
+const wrapEnvelope = (operations) => `implementation complete at 74d2f02\n---BEGIN BOUND_GITHUB_BUILDER---\n${JSON.stringify({ operations })}\n---END BOUND_GITHUB_BUILDER---`;
+
+// (8a) Instructions are generated from the canonical contract per operation,
+// not from a single reply-thread example.
+const specifications = builderOperationSpecifications({ githubBuilder: base, threads: [{ id: "thread-1" }] });
+assert.deepEqual(
+  specifications.map((entry) => entry.operation).sort(),
+  ["create_branch", "ensure_pull_request", "mark_ready", "merge", "push_branch", "replace_branch", "reply_review_thread", "resolve_review_thread"].sort(),
+);
+for (const [operation, expectedFields] of [
+  ["create_branch", ["ref", "sha"]],
+  ["push_branch", ["ref", "sha", "oldSha"]],
+  ["ensure_pull_request", ["title", "body", "draft"]],
+  ["reply_review_thread", ["threadId", "body"]],
+]) {
+  const entry = specifications.find((candidate) => candidate.operation === operation);
+  for (const field of expectedFields) {
+    assert.match(entry.canonical, new RegExp(`\\b${field}\\b`), `${operation} instructions must name canonical field ${field}`);
+  }
+  // Every generated example is itself a valid canonical envelope operation.
+  assert.equal(
+    parseBuilderEnvelope(wrapEnvelope([entry.example])).operations[0].operation,
+    operation,
+    `${operation} example must satisfy the canonical schema`,
+  );
+}
+const generatedInstructions = builderEnvelopeInstructions({ githubBuilder: base, threads: [{ id: "thread-1" }] });
+for (const operation of ["create_branch", "ensure_pull_request", "reply_review_thread"]) {
+  assert.match(generatedInstructions, new RegExp(`${operation}: `), `instructions must specify ${operation}`);
+}
+assert.match(generatedInstructions, /aliases such as branch, headCommit, head, base/);
+// Instructions never teach an operation this lane is not authorized to perform.
+const branchOnlyInstructions = builderEnvelopeInstructions({
+  githubBuilder: { ...base, allowedOperations: ["create_branch"] },
+  threads: [],
+});
+assert.match(branchOnlyInstructions, /create_branch: /);
+assert.equal(/ensure_pull_request: /.test(branchOnlyInstructions), false);
+
+// (8b) The exact observed malformed fields classify as schema-only failures with
+// compact diagnostics naming both the rejected alias and the canonical field.
+const MALFORMED_FIXTURES = [
+  {
+    scenario: "create_branch branch/headCommit",
+    malformed: { operation: "create_branch", branch: "agent/issue-146", headCommit: "74d2f02" },
+    aliases: ["branch", "headCommit"],
+    missing: ["ref", "sha"],
+    canonical: { operation: "create_branch", ref: "refs/heads/agent/issue-146", sha: "c".repeat(40) },
+  },
+  {
+    scenario: "ensure_pull_request head/base",
+    malformed: { operation: "ensure_pull_request", head: "agent/issue-146", base: "main" },
+    aliases: ["head", "base"],
+    missing: ["title"],
+    canonical: { operation: "ensure_pull_request", title: "Deliver issue #146" },
+  },
+];
+for (const { scenario, malformed, aliases, missing } of MALFORMED_FIXTURES) {
+  assert.throws(
+    () => parseBuilderEnvelope(wrapEnvelope([malformed])),
+    (error) => {
+      assert.ok(error instanceof BuilderEnvelopeError, `${scenario}: must be a builder envelope error`);
+      assert.equal(error.stage, "schema", `${scenario}: stage`);
+      assert.equal(error.schemaOnly, true, `${scenario}: must be repairable in-session`);
+      assert.deepEqual(error.operations, [malformed.operation], `${scenario}: attempted operation is recorded`);
+      const diagnostics = error.diagnostics.join(" | ");
+      for (const alias of aliases) assert.match(diagnostics, new RegExp(`"${alias}"`), `${scenario}: diagnostics name rejected alias ${alias}`);
+      for (const field of missing) assert.match(diagnostics, new RegExp(`\\b${field}\\b`), `${scenario}: diagnostics name canonical field ${field}`);
+      return true;
+    },
+    `${scenario}: malformed envelope must fail closed`,
+  );
+}
+// A missing envelope is NOT schema-only: it is indistinguishable from a turn
+// that never reached delivery, so it must not trigger a repair demand.
+const missingEnvelopeError = (() => { try { parseBuilderEnvelope("no envelope here"); } catch (error) { return error; } })();
+assert.equal(missingEnvelopeError.schemaOnly, false);
+assert.equal(missingEnvelopeError.stage, "missing");
+// Invalid JSON inside the delimiters is repairable syntax.
+const brokenJsonError = (() => {
+  try { parseBuilderEnvelope("x\n---BEGIN BOUND_GITHUB_BUILDER---\n{operations:[}\n---END BOUND_GITHUB_BUILDER---"); }
+  catch (error) { return error; }
+})();
+assert.equal(brokenJsonError.stage, "json");
+assert.equal(brokenJsonError.schemaOnly, true);
+
+// (8c) Bounded same-session repair harness. Publication is recorded so a repair
+// round can never produce a second remote mutation.
+function repairHarness({ replies = [], heads = null } = {}) {
+  const state = { published: [], prompts: [], conversations: [], progress: [], timing: [] };
+  let headIndex = 0;
+  const remaining = [...replies];
+  return {
+    state,
+    run: (message, overrides = {}) => deliverBuilderEnvelope({
+      message,
+      conversationId: "conv-146",
+      githubBuilder: base,
+      threads: [{ id: "thread-1" }],
+      publish: async (envelope) => {
+        state.published.push(envelope.operations);
+        return envelope.operations.map((operation) => ({ operation: operation.operation, outcome: "created" }));
+      },
+      requestRepair: async ({ prompt, conversationId }) => {
+        state.prompts.push(prompt);
+        state.conversations.push(conversationId);
+        if (!remaining.length) throw new Error("harness ran out of scripted repair replies");
+        return remaining.shift();
+      },
+      readWorkspaceHead: heads ? () => heads[Math.min(headIndex++, heads.length - 1)] : () => null,
+      onProgress: (event) => state.progress.push(event.summary),
+      emitTiming: async (event) => state.timing.push(event),
+      ...overrides,
+    }),
+  };
+}
+
+for (const { scenario, malformed, canonical } of MALFORMED_FIXTURES) {
+  const harness = repairHarness({
+    replies: [{ message: wrapEnvelope([canonical]), conversationId: "conv-146" }],
+  });
+  const delivery = await harness.run(wrapEnvelope([malformed]));
+  const { state } = harness;
+  assert.equal(delivery.deliveryRepair.repaired, true, `${scenario}: repaired in session`);
+  assert.equal(delivery.deliveryRepair.outcome, "repaired", `${scenario}: outcome`);
+  assert.equal(delivery.deliveryRepair.attempts.length, 1, `${scenario}: exactly one repair round`);
+  // Same conversation, so the verified implementation and its checkout are kept.
+  assert.deepEqual(state.conversations, ["conv-146"], `${scenario}: repair stays in the same conversation`);
+  assert.equal(delivery.conversationId, "conv-146", `${scenario}: conversation id is preserved`);
+  // Published exactly once, and byte-for-byte unchanged (no injected zod defaults).
+  assert.equal(state.published.length, 1, `${scenario}: exactly one publication`);
+  assert.deepEqual(state.published[0], [canonical], `${scenario}: corrected envelope publishes unchanged`);
+  assert.deepEqual(delivery.receipts, [{ operation: canonical.operation, outcome: "created" }], `${scenario}: receipts`);
+  // The repair prompt carries compact diagnostics, the canonical shape, and an
+  // explicit prohibition on redoing the implementation.
+  assert.match(state.prompts[0], /must not be repeated/, `${scenario}: repair prompt preserves implementation`);
+  assert.match(state.prompts[0], /Do not edit files, re-run the implementation, create commits/, `${scenario}: repair prompt forbids new commits`);
+  assert.match(state.prompts[0], new RegExp(`${canonical.operation}: `), `${scenario}: repair prompt quotes the canonical shape`);
+  assert.match(state.progress.join(" "), /same-session delivery repair \(attempt 1\/2\)/, `${scenario}: repair narrative is surfaced`);
+  assert.match(state.progress.join(" "), /publishing it unchanged/, `${scenario}: repaired narrative is surfaced`);
+  assert.ok(state.timing.some((event) => event.name === "delivery_repair"), `${scenario}: delivery repair is timed`);
+}
+
+// (8d) An already-canonical envelope never triggers a repair turn.
+const cleanHarness = repairHarness();
+const cleanDelivery = await cleanHarness.run(wrapEnvelope([MALFORMED_FIXTURES[0].canonical]));
+assert.equal(cleanDelivery.deliveryRepair.attempted, false);
+assert.equal(cleanDelivery.deliveryRepair.outcome, "none");
+assert.equal(cleanHarness.state.prompts.length, 0);
+assert.equal(cleanHarness.state.published.length, 1);
+
+// (8e) Retry exhaustion: the bounded budget is spent, nothing is published, and
+// the failure stays classified so the caller can fail the lane over to another
+// writer instead of silently retrying forever.
+const exhaustedHarness = repairHarness({
+  replies: [
+    { message: wrapEnvelope([MALFORMED_FIXTURES[0].malformed]), conversationId: "conv-146" },
+    { message: wrapEnvelope([MALFORMED_FIXTURES[0].malformed]), conversationId: "conv-146" },
+    { message: wrapEnvelope([MALFORMED_FIXTURES[0].canonical]), conversationId: "conv-146" },
+  ],
+});
+await assert.rejects(
+  exhaustedHarness.run(wrapEnvelope([MALFORMED_FIXTURES[0].malformed])),
+  (error) => {
+    assert.equal(error.deliveryRepair.outcome, "exhausted");
+    assert.equal(error.deliveryRepair.attempts.length, MAX_BUILDER_REPAIR_ATTEMPTS);
+    assert.equal(error.schemaOnly, true);
+    return true;
+  },
+);
+assert.equal(exhaustedHarness.state.published.length, 0, "an exhausted repair must publish nothing");
+assert.equal(exhaustedHarness.state.prompts.length, MAX_BUILDER_REPAIR_ATTEMPTS, "repair rounds are bounded");
+
+// (8f) Without a resumable conversation there is no same-session repair path, so
+// the failure is reported instead of being retried blind.
+const noSessionHarness = repairHarness();
+await assert.rejects(
+  noSessionHarness.run(wrapEnvelope([MALFORMED_FIXTURES[0].malformed]), { conversationId: null }),
+  (error) => {
+    assert.equal(error.deliveryRepair.outcome, "unavailable");
+    return true;
+  },
+);
+assert.equal(noSessionHarness.state.prompts.length, 0);
+
+// (8g) A missing envelope is not repaired here and publishes nothing.
+const missingHarness = repairHarness();
+await assert.rejects(
+  missingHarness.run("Antigravity finished but emitted no envelope."),
+  (error) => {
+    assert.equal(error.deliveryRepair.outcome, "not_repairable");
+    return true;
+  },
+);
+assert.equal(missingHarness.state.prompts.length, 0);
+assert.equal(missingHarness.state.published.length, 0);
+
+// (8h) Checkout ownership: if the repair turn moves the writer checkout, the
+// corrected envelope describes a different commit and must not be published.
+const movedHarness = repairHarness({
+  replies: [{ message: wrapEnvelope([MALFORMED_FIXTURES[0].canonical]), conversationId: "conv-146" }],
+  heads: ["a".repeat(40), "d".repeat(40)],
+});
+await assert.rejects(
+  movedHarness.run(wrapEnvelope([MALFORMED_FIXTURES[0].malformed])),
+  (error) => {
+    assert.equal(error.deliveryRepair.outcome, "checkout_moved");
+    assert.match(error.message, /changed the writer checkout/);
+    return true;
+  },
+);
+assert.equal(movedHarness.state.published.length, 0, "a moved checkout must publish nothing");
+// An unchanged checkout across the repair turn publishes normally.
+const stableHarness = repairHarness({
+  replies: [{ message: wrapEnvelope([MALFORMED_FIXTURES[0].canonical]), conversationId: "conv-146" }],
+  heads: ["a".repeat(40), "a".repeat(40)],
+});
+assert.equal((await stableHarness.run(wrapEnvelope([MALFORMED_FIXTURES[0].malformed]))).deliveryRepair.repaired, true);
+assert.equal(stableHarness.state.published.length, 1);
+
+// (8i) Idempotency: replaying the identical malformed turn produces the identical
+// canonical operation set and exactly one publication per delivery, so a retried
+// lane cannot double-mutate the remote.
+const replays = [];
+for (const attempt of [1, 2]) {
+  const harness = repairHarness({
+    replies: [{ message: wrapEnvelope([MALFORMED_FIXTURES[0].canonical]), conversationId: "conv-146" }],
+  });
+  const delivery = await harness.run(wrapEnvelope([MALFORMED_FIXTURES[0].malformed]));
+  assert.equal(harness.state.published.length, 1, `replay ${attempt}: exactly one publication`);
+  replays.push(delivery.receipts);
+}
+assert.deepEqual(replays[0], replays[1], "repeated delivery repair is deterministic");
+
+// (8j) Delivery repair is distinguishable in the operator narrative for every
+// terminal state, so Mission Control never renders it as a plain provider failure.
+const repairSummaries = ["repaired", "exhausted", "unavailable", "checkout_moved", "not_repairable"]
+  .map((outcome) => deliveryRepairSummary("antigravity", { outcome, attempts: [{ attempt: 1 }] }));
+assert.equal(new Set(repairSummaries).size, repairSummaries.length, "each delivery-repair outcome reads differently");
+for (const summary of repairSummaries) assert.match(summary, /^Delivery repair: antigravity/);
+
+// The repair instruction generator degrades safely for a lane bound to a single
+// operation: it quotes only that operation's canonical shape.
+const boundedRepairPrompt = builderEnvelopeRepairInstructions({
+  githubBuilder: { ...base, allowedOperations: ["create_branch"] },
+  error: new BuilderEnvelopeError("x", { stage: "schema", diagnostics: ["operations.0: unrecognized fields \"branch\""], operations: ["create_branch"] }),
+});
+assert.match(boundedRepairPrompt, /create_branch: /);
+assert.equal(/ensure_pull_request: /.test(boundedRepairPrompt), false);
+
 cleanup();
 clearTimeout(watchdog);
-console.log("Bound GitHub builder tests passed: PR lifecycle, exact head, trusted latest review gate, merge paths, bounded no-shell transport, create_branch, fast-forward push_branch, guarded replace_branch, canonical contract derivation, delivery-outcome mapping, durable restart reconciliation, and GraphQL project-field error classification.");
+console.log("Bound GitHub builder tests passed: PR lifecycle, exact head, trusted latest review gate, merge paths, bounded no-shell transport, create_branch, fast-forward push_branch, guarded replace_branch, canonical contract derivation, delivery-outcome mapping, durable restart reconciliation, GraphQL project-field error classification, contract-generated Antigravity builder instructions, and bounded same-session delivery repair for the observed malformed envelopes.");

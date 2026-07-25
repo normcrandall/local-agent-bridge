@@ -18,6 +18,24 @@ export function capacityWaitNarrative({ agent, role, limit, inUse, position } = 
   };
 }
 
+// Issue #40 regression: a bound builder envelope can fail canonical validation for
+// delivery-syntax reasons only. That is repaired inside the provider's own
+// conversation, so the operator must see it as delivery repair rather than as a
+// provider failure or a silent custody transfer.
+const DELIVERY_REPAIR_OUTCOMES = Object.freeze({
+  repaired: "was corrected in the same conversation; the implementation commit was preserved",
+  exhausted: "could not be corrected within the bounded retry budget; writer custody must be reassigned",
+  unavailable: "could not be corrected because the provider conversation could not be resumed",
+  checkout_moved: "was rejected because the writer checkout moved during repair; nothing was published",
+  not_repairable: "was not a schema-only failure, so no repair was attempted",
+});
+
+export function deliveryRepairSummary(agent, repair = {}) {
+  const attempts = repair.attempts?.length || 0;
+  const detail = DELIVERY_REPAIR_OUTCOMES[repair.outcome] || "ended in an unrecognized delivery-repair state";
+  return `Delivery repair: ${agent}'s bound builder envelope ${detail} (${attempts} attempt${attempts === 1 ? "" : "s"}).`;
+}
+
 // Detect which coordinator verification command a provider progress line is running,
 // so the narrative can name the active command. Matches when the progress summary
 // mentions an allowlisted command verbatim (longest match wins to avoid a prefix
