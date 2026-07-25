@@ -165,6 +165,18 @@ function authorityMismatch(existing, expected) {
   return null;
 }
 
+function canonicalAuthority(authority) {
+  return {
+    login: authority.login,
+    appId: String(authority.appId),
+    installationId: Number(authority.installationId),
+    repository: authority.repository,
+    permissions: Object.fromEntries(
+      Object.entries(authority.permissions || {}).sort(([left], [right]) => left.localeCompare(right)),
+    ),
+  };
+}
+
 function repairableAuthorityError(issueNumber, collaborationId, reason) {
   return new Error(
     `Issue #${issueNumber} claim identity cannot be safely rebound for collaboration ${collaborationId}: ${reason}. `
@@ -186,23 +198,19 @@ export async function rebindIssueClaim({ client, issueNumber, collaborationId, w
   const mismatch = authorityMismatch(ours.data.authority, authority);
   if (mismatch) throw repairableAuthorityError(issueNumber, collaborationId, mismatch);
 
-  const canonicalAuthority = {
-    login: authority.login,
-    appId: authority.appId,
-    installationId: authority.installationId,
-    repository: authority.repository,
-    permissions: { ...authority.permissions },
-  };
-  if (JSON.stringify(ours.data.authority) === JSON.stringify(canonicalAuthority)) return { rebound: false, authority: canonicalAuthority };
+  const resolvedAuthority = canonicalAuthority(authority);
+  if (JSON.stringify(canonicalAuthority(ours.data.authority)) === JSON.stringify(resolvedAuthority)) {
+    return { rebound: false, authority: resolvedAuthority };
+  }
   const now = new Date().toISOString();
-  ours.data.authority = canonicalAuthority;
+  ours.data.authority = resolvedAuthority;
   ours.data.timestamps.updated = now;
   ours.data.history = [
     { event: "identity_rebound", collaboration: collaborationId, writer: ours.data.writer, phase: ours.data.phase, at: now },
     ...(ours.data.history || []),
   ].slice(0, 10);
   await client.updateIssueComment(ours.commentId, generateCommentBody(ours.data));
-  return { rebound: true, authority: canonicalAuthority };
+  return { rebound: true, authority: resolvedAuthority };
 }
 
 function generateCommentBody(payload) {
@@ -419,13 +427,7 @@ export async function acquireClaimLease({
         updated: now,
       },
       leaseExpiresAt: new Date(Date.now() + ttlMs).toISOString(),
-      authority: {
-        login: authority.login,
-        appId: authority.appId,
-        installationId: authority.installationId,
-        repository: authority.repository,
-        permissions: { ...authority.permissions },
-      },
+      authority: canonicalAuthority(authority),
       history,
     };
 

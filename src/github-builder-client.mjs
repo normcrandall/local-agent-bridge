@@ -304,12 +304,15 @@ export function createBoundBuilderClient({
     }
   }
   if (!expectedLogin) throw new Error("expectedLogin is required.");
+  const sortedPermissions = Object.fromEntries(
+    Object.entries(authority?.permissions || {}).sort(([left], [right]) => left.localeCompare(right)),
+  );
   const boundAuthority = authority ? Object.freeze({
     login: String(authority.login || expectedLogin),
     appId: String(authority.appId || ""),
     installationId: Number(authority.installationId),
     repository: String(authority.repository || repository),
-    permissions: Object.freeze({ ...(authority.permissions || {}) }),
+    permissions: Object.freeze(sortedPermissions),
   }) : null;
   if (boundAuthority) {
     const normalizeAppLogin = (login) => String(login || "").toLowerCase().replace(/\[bot\]$/, "");

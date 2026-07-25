@@ -328,10 +328,40 @@ async function runTests() {
     rebindIssueClaim({ client, issueNumber: 42, collaborationId: "bridge-11111111-2222-3333-4444-555555555555" }),
     /Release the inspected claim before mutation/,
   );
-  mock.setComments([{
-    ...mock.getComments()[0],
-    body: `### Agent Bridge Issue Claim Lease\n<!-- agent-bridge-issue-claim\n${JSON.stringify(acquired.data, null, 2)}\n-->`,
-  }]);
+  await releaseClaimLease({
+    client,
+    issueNumber: 42,
+    collaborationId: "bridge-11111111-2222-3333-4444-555555555555",
+    outcome: "recovered",
+  });
+  assert.equal((await parseClaims(client, 42))[0].data.phase, "recovered");
+
+  await acquireClaimLease({
+    client,
+    issueNumber: 42,
+    portfolioId: "p1",
+    itemId: "42",
+    writer: "codex",
+    collaborationId: "bridge-11111111-2222-3333-4444-555555555555",
+    branch: "feature-branch",
+    worktree: "/tmp/wt1",
+    baseSha: "0000000000000000000000000000000000000000",
+    headSha: "1111111111111111111111111111111111111111",
+    workspaceRoot: tempWorkspaceRoot,
+  });
+  acquired = (await parseClaims(client, 42))[0];
+  assert.deepEqual(acquired.data.authority, baseClientConfig.authority);
+
+  const reorderedAuthority = {
+    ...baseClientConfig.authority,
+    permissions: Object.fromEntries(Object.entries(baseClientConfig.authority.permissions).reverse()),
+  };
+  const reorderedClient = createBoundBuilderClient({ ...baseClientConfig, authority: reorderedAuthority });
+  assert.equal((await rebindIssueClaim({
+    client: reorderedClient,
+    issueNumber: 42,
+    collaborationId: "bridge-11111111-2222-3333-4444-555555555555",
+  })).rebound, false);
 
   await acquireClaimLease({
     client,
