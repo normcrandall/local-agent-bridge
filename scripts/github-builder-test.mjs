@@ -19,6 +19,7 @@ import {
   DELIVERY_OUTCOMES,
 } from "../src/builder-contract.mjs";
 import { deliverySummaryForHandoff, loadBranchReconciliationState, summarizeDeliveryOutcomes } from "../src/builder-operation-store.mjs";
+import { reviewFindingMarker, writerDispositionMarker } from "../src/github-review-threads.mjs";
 import { claudeToolRequest, codexToolRequest } from "../src/tool-requests.mjs";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -226,6 +227,7 @@ function fakeGitHub({
   reviewStatus = "success", reviewLogin = "reviewer[bot]", reviewStatuses = null, reviews = [],
   statusPermissionDenied = false, branchShas = {}, graphqlReplyLogin = "builder[bot]", graphqlReplyType = "Bot",
   rules = [], branchProtection = null, branchProtectionStatus = 200, merged = false,
+  reviewThreads = null,
 } = {}) {
   const calls = [];
   const branchState = { main: baseCommitSha, ...branchShas };
@@ -293,9 +295,11 @@ function fakeGitHub({
       return json(reviews.slice((page - 1) * 100, page * 100));
     }
     if (path === "/graphql") {
-      if (body.query.includes("reviewThreads")) return json({ data: { repository: { pullRequest: { reviewThreads: { nodes: wrongThread ? [] : [{
-         id: "thread-1", isResolved: false, comments: { nodes: [] },
-      }] } } } } });
+      if (body.query.includes("reviewThreads")) return json({ data: { repository: { pullRequest: { reviewThreads: {
+        nodes: wrongThread ? [] : (reviewThreads || [{
+          id: "thread-1", isResolved: false, comments: { nodes: [] },
+        }]),
+      } } } } });
       if (body.query.includes("addPullRequestReviewThreadReply")) return json({ data: { addPullRequestReviewThreadReply: {
         comment: { id: "comment-1", url: "https://github.test/comment/1", author: { login: graphqlReplyLogin, __typename: graphqlReplyType } },
       } } });
@@ -342,12 +346,128 @@ await assert.rejects(
     .replyReviewThread({ threadId: "thread-1", body: "Spoofed identity." }),
   /unexpected identity/i,
 );
-assert.equal((await builder.resolveReviewThread({ threadId: "thread-1" })).idempotent, false);
+await assert.rejects(
+  builder.resolveReviewThread({ threadId: "thread-1" }),
+  /owning reviewer App/i,
+);
+const reviewerOwnedApi = fakeGitHub({
+  reviewThreads: [{
+    id: "thread-1",
+    isResolved: false,
+    comments: { nodes: [{
+      body: "Legacy reviewer thread.",
+      author: { login: "reviewer", __typename: "Bot" },
+    }] },
+  }],
+});
+const reviewerAuthorizedBuilder = createBoundBuilderClient({
+  ...base,
+  fetchImpl: reviewerOwnedApi.fetchImpl,
+  reviewResolutionAuthority: {
+    reviewerLogin: "reviewer[bot]",
+    headSha,
+    trustedWriterLogins: ["builder[bot]"],
+  },
+});
+assert.equal((await reviewerAuthorizedBuilder.resolveReviewThread({ threadId: "thread-1" })).idempotent, false);
 assert.equal((await builder.markReady()).operation, "mark_ready");
 const merged = await builder.merge({ method: "squash" });
 assert.equal(merged.operation, "merge");
 assert.equal(merged.reviewGate.login, "reviewer[bot]");
 assert.equal(merged.mergeEnforcement.effectiveMode, "broker");
+
+const actionableFindingBody = `Guard this input.\n\n${reviewFindingMarker({
+  headSha: baseCommitSha,
+  reviewerLogin: "reviewer[bot]",
+  classification: "blocker",
+  fixRecommendation: "Validate the input before changing state.",
+})}`;
+const dispositionComment = ({ dispositionHead = headSha, disposition = "fixed", isResolved = false } = {}) => ({
+  id: "thread-actionable",
+  isResolved,
+  comments: { nodes: [
+    {
+      body: actionableFindingBody,
+      author: { login: "reviewer", __typename: "Bot" },
+    },
+    {
+      body: `Handled.\n\n${writerDispositionMarker({
+        headSha: dispositionHead,
+        writerLogin: "builder[bot]",
+        disposition,
+        rationale: disposition === "declined" ? "The proposed behavior conflicts with the public contract." : "",
+        followUpUrl: disposition === "follow_up" ? "https://github.com/owner/repo/issues/149" : null,
+        repository: "owner/repo",
+      })}`,
+      url: "https://github.test/reply/actionable",
+      author: { login: "builder", __typename: "Bot" },
+    },
+  ] },
+});
+const unansweredApi = fakeGitHub({
+  reviewThreads: [{
+    id: "thread-actionable",
+    isResolved: false,
+    comments: { nodes: [{
+      body: actionableFindingBody,
+      author: { login: "reviewer", __typename: "Bot" },
+    }] },
+  }],
+});
+await assert.rejects(
+  createBoundBuilderClient({ ...base, fetchImpl: unansweredApi.fetchImpl }).merge({ method: "squash" }),
+  /1 unanswered/i,
+);
+assert.equal(unansweredApi.calls.some((call) => call.path === "/repos/owner/repo/pulls/42/merge"), false);
+
+const staleDispositionApi = fakeGitHub({
+  reviewThreads: [dispositionComment({ dispositionHead: baseCommitSha })],
+});
+await assert.rejects(
+  createBoundBuilderClient({ ...base, fetchImpl: staleDispositionApi.fetchImpl }).merge({ method: "squash" }),
+  /1 unanswered/i,
+);
+
+const reopenedApi = fakeGitHub({
+  reviewThreads: [dispositionComment({ isResolved: false })],
+});
+await assert.rejects(
+  createBoundBuilderClient({ ...base, fetchImpl: reopenedApi.fetchImpl }).merge({ method: "squash" }),
+  /1 unresolved/i,
+);
+
+const followUpResolvedApi = fakeGitHub({
+  reviewThreads: [dispositionComment({ disposition: "follow_up", isResolved: true })],
+});
+const followUpMerge = await createBoundBuilderClient({
+  ...base,
+  fetchImpl: followUpResolvedApi.fetchImpl,
+}).merge({ method: "squash" });
+assert.equal(followUpMerge.reviewReadiness.ready, true);
+assert.equal(followUpMerge.reviewReadiness.headSha, headSha);
+
+const foreignProviderApi = fakeGitHub({
+  reviewThreads: [{
+    ...dispositionComment(),
+    comments: { nodes: [{
+      body: actionableFindingBody,
+      author: { login: "reviewer", __typename: "Bot" },
+    }] },
+  }],
+});
+const failoverResolver = createBoundBuilderClient({
+  ...base,
+  fetchImpl: foreignProviderApi.fetchImpl,
+  reviewResolutionAuthority: {
+    reviewerLogin: "failover-reviewer[bot]",
+    headSha,
+    trustedWriterLogins: ["builder[bot]"],
+  },
+});
+await assert.rejects(
+  failoverResolver.resolveReviewThread({ threadId: "thread-actionable" }),
+  /only its own review thread/i,
+);
 
 const organizationRulesetApi = fakeGitHub({
   rules: [{
@@ -587,7 +707,15 @@ await assert.rejects(stale.markReady(), /head changed/i);
 await assert.rejects(stale.ensurePullRequest({ title: "Stale", body: "" }), /head ref changed/i);
 
 const foreignApi = fakeGitHub({ wrongThread: true });
-const foreign = createBoundBuilderClient({ ...base, fetchImpl: foreignApi.fetchImpl });
+const foreign = createBoundBuilderClient({
+  ...base,
+  fetchImpl: foreignApi.fetchImpl,
+  reviewResolutionAuthority: {
+    reviewerLogin: "reviewer[bot]",
+    headSha,
+    trustedWriterLogins: ["builder[bot]"],
+  },
+});
 await assert.rejects(foreign.replyReviewThread({ threadId: "foreign", body: "No" }), /not part of the bound pull request/i);
 await assert.rejects(foreign.resolveReviewThread({ threadId: "foreign" }), /not part of the bound pull request/i);
 

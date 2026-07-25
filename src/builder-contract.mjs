@@ -66,6 +66,9 @@ export function builderOperationShapes() {
     reply_review_thread: {
       threadId: z.string().min(1),
       body: z.string().min(1).max(60_000),
+      disposition: z.enum(["fixed", "declined", "follow_up"]).optional(),
+      rationale: z.string().max(20_000).optional(),
+      followUpUrl: z.string().url().max(2_000).optional(),
     },
     resolve_review_thread: { threadId: z.string().min(1) },
     mark_ready: {},

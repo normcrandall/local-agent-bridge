@@ -195,7 +195,12 @@ export function createAgentPool({
       if (handoff.isError) throw new Error(`${agent} handoff publication failed: ${textFrom(handoff)}`);
       const review = await publisher.callTool({
         name: "submit_pr_review",
-        arguments: { event: envelope.event, body: envelope.body, comments: envelope.comments },
+        arguments: {
+          event: envelope.event,
+          body: envelope.body,
+          comments: envelope.comments,
+          summary: envelope.summary,
+        },
       });
       if (review.isError) throw new Error(`${agent} PR review publication failed: ${textFrom(review)}`);
       return review.structuredContent;

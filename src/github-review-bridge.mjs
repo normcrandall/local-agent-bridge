@@ -6,13 +6,14 @@ import { dirname, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { submitBoundReview } from "./github-review-client.mjs";
+import { publishBoundReviewGate, submitBoundReview } from "./github-review-client.mjs";
 import {
   canPublishReviewStatus,
   createInstallationToken,
   DEFAULT_GITHUB_APPS_CONFIG,
   GITHUB_LOGIN_PATTERN,
   loadGitHubAppRole,
+  inspectGitHubAppRoles,
   resolveReviewToken,
   sameGitHubAppLogin,
 } from "./github-app-auth.mjs";
@@ -20,6 +21,7 @@ import { createBoundBuilderClient } from "./github-builder-client.mjs";
 import {
   approvedSubmissionEvent,
   createReviewerThreadController,
+  evaluateReviewThreadState,
   reviewThreadReceiptPath,
 } from "./github-review-threads.mjs";
 
@@ -57,15 +59,21 @@ const statusGateEnabled = Boolean(
 const reviewApiUrl = verifiedLogin ? "https://api.github.com" : apiUrl;
 const appConfigPath = process.env.GITHUB_APP_CONFIG || DEFAULT_GITHUB_APPS_CONFIG;
 let builderRole = null;
+let trustedReviewerLogins = [expectedLogin];
 if (appCredential) {
   try {
+    const roles = await inspectGitHubAppRoles({ configPath: appConfigPath });
+    trustedReviewerLogins = [
+      roles.roles?.reviewer?.expectedLogin,
+      ...Object.values(roles.roles?.reviewers || {}).map((reviewer) => reviewer.expectedLogin),
+    ].filter(Boolean);
     builderRole = await loadGitHubAppRole({
       role: "builder",
       repository,
       configPath: appConfigPath,
     });
   } catch {
-    // Thread resolution is optional. A missing or malformed builder role must
+    // Thread resolution is optional. Missing or malformed App configuration must
     // degrade to read-only threads rather than taking down formal review.
     builderRole = null;
   }
@@ -78,6 +86,11 @@ const inlineComment = z.object({
   side: z.enum(["LEFT", "RIGHT"]),
   start_line: z.number().int().min(1).optional(),
   start_side: z.enum(["LEFT", "RIGHT"]).optional(),
+  classification: z.enum(["blocker", "suggestion"]).optional(),
+  fixRecommendation: z.string().min(1).max(10_000).optional(),
+}).strict();
+const reviewSummary = z.object({
+  testingSufficiency: z.string().min(1).max(10_000),
 }).strict();
 
 const server = new McpServer(
@@ -118,6 +131,11 @@ const threadResolverClient = appCredential && builderRole
       headSha,
       prNumber,
       allowedOperations: ["resolve_review_thread"],
+      reviewResolutionAuthority: {
+        reviewerLogin: authorizingReviewerLogin,
+        headSha,
+        trustedWriterLogins: [builderRole.expectedLogin],
+      },
       receiptPath: reviewThreadReceiptPath({
         repository,
         prNumber,
@@ -130,6 +148,8 @@ const threadController = createReviewerThreadController({
   readerClient: threadReaderClient,
   resolverClient: threadResolverClient,
   expectedLogin,
+  headSha,
+  trustedWriterLogins: builderRole ? [builderRole.expectedLogin] : [],
   getSubmittedEvent: () => submittedEvent,
 });
 
@@ -165,9 +185,10 @@ server.registerTool(
       event: z.enum(["COMMENT", "APPROVE", "REQUEST_CHANGES"]),
       body: z.string().min(1).max(60_000),
       comments: z.array(inlineComment).max(50).default([]),
+      summary: reviewSummary.optional(),
     },
   },
-  async ({ event, body, comments }) => {
+  async ({ event, body, comments, summary }) => {
     if (submittedReview) {
       return {
         content: [{
@@ -182,6 +203,16 @@ server.registerTool(
     if (!appCredential && event !== "COMMENT") {
       throw new Error("A PAT fallback may post an attributed comment but cannot APPROVE or REQUEST_CHANGES; configure the reviewer GitHub App.");
     }
+    let gateReviewState = null;
+    if (statusGateEnabled && event === "APPROVE" && threadReaderClient) {
+      const readiness = evaluateReviewThreadState({
+        threads: await threadController.read(),
+        headSha,
+        trustedReviewerLogins,
+        trustedWriterLogins: builderRole ? [builderRole.expectedLogin] : [],
+      });
+      gateReviewState = readiness.ready ? "APPROVE" : "COMMENT";
+    }
     const result = await submitBoundReview({
       apiUrl: reviewApiUrl,
       token,
@@ -193,8 +224,10 @@ server.registerTool(
       event,
       body,
       comments,
+      summary,
       statusContext,
       publishGate: statusGateEnabled,
+      gateReviewState,
     });
     submittedReview = result;
     submittedEvent = approvedSubmissionEvent(result.state);
@@ -243,9 +276,32 @@ if (appCredential) {
       },
       async ({ threadId }) => {
         const result = await threadController.resolve({ threadId });
+        let gate = null;
+        if (statusGateEnabled && submittedReview && submittedEvent === "APPROVE") {
+          const readiness = evaluateReviewThreadState({
+            threads: await threadController.read(),
+            headSha,
+            trustedReviewerLogins,
+            trustedWriterLogins: [builderRole.expectedLogin],
+          });
+          if (readiness.ready) {
+            gate = await publishBoundReviewGate({
+              apiUrl: reviewApiUrl,
+              token,
+              repository,
+              headSha,
+              expectedLogin,
+              reviewState: "APPROVE",
+              reviewUrl: submittedReview.url,
+              context: statusContext,
+            });
+            submittedReview = { ...submittedReview, gate };
+          }
+        }
+        const receipt = gate ? { ...result, gate } : result;
         return {
-          content: [{ type: "text", text: JSON.stringify(result) }],
-          structuredContent: result,
+          content: [{ type: "text", text: JSON.stringify(receipt) }],
+          structuredContent: receipt,
         };
       },
     );
