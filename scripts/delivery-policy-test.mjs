@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import {
@@ -113,7 +113,7 @@ try {
     productFacts: { productName: "repo-product", defaultBranch: "develop", labels: ["autonomously-built"] },
     lifecycleMappings: { claimLabel: "in-progress", prTitlePrefixes: { feat: "feat:" } },
     verificationRoles: { requiredGates: ["npm run smoke"], reviewerRoles: ["codex"] },
-    pathRules: { protectedPaths: ["docs/generated/**"] },
+    pathRules: { protectedPaths: ["docs/generated/**"], writableRoots: ["src"] },
     resourceRules: { maxParallelLanes: 3 },
     providerConcurrency: {
       claude: { work: 2 },   // narrower than the machine ceiling of 4
@@ -127,6 +127,7 @@ try {
     version: 1,
     phases: { preRetire: ["echo retire"] },
   });
+  await mkdir(resolve(workspace, "src"), { recursive: true });
 
   const policy = await resolveDeliveryPolicy({
     workspace,
@@ -172,6 +173,7 @@ try {
   // Protected path floor survives repository additions.
   assert.ok(policy.pathRules.protectedPaths.includes("**/*.pem"));
   assert.ok(policy.pathRules.protectedPaths.includes("docs/generated/**"));
+  assert.deepEqual(policy.pathRules.writableRoots, [await realpath(resolve(workspace, "src"))]);
 
   // Review-only providers are never writers.
   assert.deepEqual(policy.writerProviders, ["claude", "codex", "antigravity"]);
@@ -317,8 +319,24 @@ try {
   });
   assert.equal(local.deliveryProfile, "local-only");
   assert.equal(local.rejections.filter((entry) => entry.field === "deliveryProfile").length, 2);
+  assert.match(local.rejections.find((entry) => entry.field === "deliveryProfile" && entry.origin !== "per_run_narrowing").origin, /delivery-policy\.json$/);
   assert.equal(local.surfaces.publication.enabled, false);
   assert.match(local.surfaces.publication.reason, /local-only/);
+
+  const malformedResourcesWorkspace = await repositoryWorkspace("malformed-resources", {
+    version: 1,
+    resourceRules: 5,
+    pathRules: { writableRoots: ["../outside"] },
+  });
+  const malformedResources = await resolveDeliveryPolicy({
+    workspace: malformedResourcesWorkspace,
+    home: governed.home,
+    environment: governed.environment,
+  });
+  assert.equal(malformedResources.decisions.resourceRules.source, "machine_default");
+  assert.ok(rejectionFor(malformedResources, "resourceRules"));
+  assert.equal(malformedResources.pathRules.writableRoots, null);
+  assert.ok(rejectionFor(malformedResources, "pathRules.writableRoots"));
 
   // --- Surfaces -------------------------------------------------------------
   const surface = await deliveryPolicyForSurface("scheduling", {

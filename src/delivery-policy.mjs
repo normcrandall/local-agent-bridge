@@ -11,6 +11,7 @@ import { DEFAULT_GITHUB_APPS_CONFIG, inspectGitHubAppRoles } from "./github-app-
 import { GITHUB_MERGE_ENFORCEMENT_MODES, resolveGitHubMergeEnforcement } from "./github-merge-enforcement.mjs";
 import { DECISION_CATEGORIES } from "./decision-policy.mjs";
 import { loadWorkspaceRecipe } from "./workspace-operations.mjs";
+import { resolveContainedWritableRoots } from "./writable-roots.mjs";
 
 // One delivery policy resolver. Collaboration, scheduling, publication, review, merge,
 // cleanup, and Mission Control read the same effective values through `surfaces`, so a
@@ -388,17 +389,32 @@ function resolveVerificationRoles(ledger, { repositoryValue, perRunValue, reposi
 }
 
 function resolveResourceRules(ledger, { repositoryValue, perRunValue, repositoryOrigin, rejections }) {
+  const repositoryValid = repositoryValue === undefined || isPlainObject(repositoryValue);
+  const perRunValid = perRunValue === undefined || isPlainObject(perRunValue);
   const repository = isPlainObject(repositoryValue) ? repositoryValue : {};
   const run = isPlainObject(perRunValue) ? perRunValue : {};
   const considered = [{ level: "machine_default", value: { maxParallelLanes: null, timeouts: {} }, applied: true }];
   let maxParallelLanes = null;
-  let source = repositoryValue === undefined ? "machine_default" : "repository_policy";
-  let detail = repositoryValue === undefined
+  let source = repositoryValue === undefined || !repositoryValid ? "machine_default" : "repository_policy";
+  let detail = repositoryValue === undefined || !repositoryValid
     ? "No repository resource rules supplied; parallel lanes are not additionally limited."
     : `Repository resource rules come from ${repositoryOrigin}.`;
 
-  if (repositoryValue !== undefined) {
-    considered.push({ level: "repository_policy", value: repositoryValue, applied: true });
+  if (!repositoryValid) {
+    considered.push({ level: "repository_policy", value: repositoryValue, applied: false });
+    rejections.push({
+      origin: repositoryOrigin,
+      field: "resourceRules",
+      reason: "Repository resourceRules must be an object; the malformed value was ignored.",
+    });
+  }
+  if (!perRunValid) {
+    considered.push({ level: "per_run_narrowing", value: perRunValue, applied: false });
+    rejections.push({
+      origin: "per_run_narrowing",
+      field: "resourceRules",
+      reason: "Per-run resourceRules must be an object; the malformed value was ignored.",
+    });
   }
 
   const candidates = [
@@ -418,9 +434,7 @@ function resolveResourceRules(ledger, { repositoryValue, perRunValue, repository
       continue;
     }
     const applied = maxParallelLanes === null || parsed < maxParallelLanes;
-    if (candidate.level !== "repository_policy") {
-      considered.push({ level: candidate.level, value: parsed, applied });
-    }
+    considered.push({ level: candidate.level, value: parsed, applied });
     if (applied) {
       maxParallelLanes = parsed;
       source = candidate.level;
@@ -438,8 +452,19 @@ function resolveResourceRules(ledger, { repositoryValue, perRunValue, repository
       reason: "Resource timeout definitions are repository-owned; per-run input cannot replace them.",
     });
   }
+  const repositoryTimeoutsValid = repository.timeouts === undefined || isPlainObject(repository.timeouts);
+  if (repository.timeouts !== undefined) {
+    considered.push({ level: "repository_policy", value: { timeouts: repository.timeouts }, applied: repositoryTimeoutsValid });
+    if (!repositoryTimeoutsValid) {
+      rejections.push({
+        origin: repositoryOrigin,
+        field: "resourceRules.timeouts",
+        reason: "Repository resource timeouts must be an object; the malformed value was ignored.",
+      });
+    }
+  }
   return ledger.record("resourceRules", {
-    value: { maxParallelLanes, timeouts: isPlainObject(repository.timeouts) ? repository.timeouts : {} },
+    value: { maxParallelLanes, timeouts: repositoryTimeoutsValid && repository.timeouts ? repository.timeouts : {} },
     source,
     detail,
     considered,
@@ -781,10 +806,25 @@ export async function resolveDeliveryPolicy({
   });
 
   const repoPaths = Array.isArray(repoPolicy.pathRules?.protectedPaths) ? repoPolicy.pathRules.protectedPaths : [];
+  let writableRoots = null;
+  if (repoPolicy.pathRules?.writableRoots !== undefined) {
+    try {
+      if (!Array.isArray(repoPolicy.pathRules.writableRoots)) throw new Error("writableRoots must be an array");
+      writableRoots = resolveContainedWritableRoots(workspace, repoPolicy.pathRules.writableRoots, {
+        label: "Repository policy writable root",
+      });
+    } catch (error) {
+      rejections.push({
+        origin: repoOrigin,
+        field: "pathRules.writableRoots",
+        reason: `${error.message}; repository writable roots were ignored.`,
+      });
+    }
+  }
   const pathRules = ledger.record("pathRules", {
     value: {
       protectedPaths: [...new Set([...PROTECTED_INVARIANTS.alwaysProtectedPaths, ...repoPaths])],
-      writableRoots: repoPolicy.pathRules?.writableRoots || null,
+      writableRoots,
     },
     source: repoPaths.length ? "repository_policy" : "protected_invariant",
     detail: repoPaths.length
