@@ -14,6 +14,7 @@ import {
   GITHUB_LOGIN_PATTERN,
   loadGitHubAppRole,
   resolveReviewToken,
+  sameGitHubAppLogin,
 } from "./github-app-auth.mjs";
 import { createBoundBuilderClient } from "./github-builder-client.mjs";
 import {
@@ -25,7 +26,7 @@ import {
 const repository = process.env.GITHUB_REVIEW_REPOSITORY;
 const prNumber = Number.parseInt(process.env.GITHUB_REVIEW_PR_NUMBER || "", 10);
 const headSha = process.env.GITHUB_REVIEW_HEAD_SHA;
-const expectedLogin = process.env.GITHUB_REVIEW_EXPECTED_LOGIN;
+const configuredExpectedLogin = process.env.GITHUB_REVIEW_EXPECTED_LOGIN;
 const handoffPath = process.env.GITHUB_REVIEW_HANDOFF_PATH;
 const tokenFile = process.env.GITHUB_REVIEW_TOKEN_FILE || resolve(homedir(), ".config/ghtoken");
 const apiUrl = process.env.GITHUB_REVIEW_API_URL || "https://api.github.com";
@@ -37,14 +38,15 @@ if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository || "")) {
 }
 if (!Number.isInteger(prNumber) || prNumber < 1) throw new Error("GITHUB_REVIEW_PR_NUMBER is invalid.");
 if (!/^[0-9a-f]{40}$/i.test(headSha || "")) throw new Error("GITHUB_REVIEW_HEAD_SHA must be a full commit SHA.");
-if (!GITHUB_LOGIN_PATTERN.test(expectedLogin || "")) throw new Error("GITHUB_REVIEW_EXPECTED_LOGIN is invalid.");
+if (!GITHUB_LOGIN_PATTERN.test(configuredExpectedLogin || "")) throw new Error("GITHUB_REVIEW_EXPECTED_LOGIN is invalid.");
+let expectedLogin = configuredExpectedLogin;
 if (!handoffPath) throw new Error("GITHUB_REVIEW_HANDOFF_PATH is required.");
-const authorizingReviewerLogin = expectedLogin;
-
 const credential = await resolveReviewToken({ repository, tokenFile, expectedLogin });
-if (credential.expectedLogin && credential.expectedLogin !== expectedLogin) {
+if (credential.expectedLogin && !sameGitHubAppLogin(credential.expectedLogin, expectedLogin)) {
   throw new Error(`Configured reviewer identity ${credential.expectedLogin} does not match authorized identity ${expectedLogin}.`);
 }
+if (credential.expectedLogin) expectedLogin = credential.expectedLogin;
+const authorizingReviewerLogin = expectedLogin;
 const { token, verifiedLogin } = credential;
 const appCredential = credential.credentialSource === "github-app";
 const statusGateEnabled = Boolean(
