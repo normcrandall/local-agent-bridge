@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "deliveryProfile": "local-only",
+  "productFacts": {
+    "productName": "your-product",
+    "defaultBranch": "main",
+    "labels": ["autonomously-built", "agent-reviewed"]
+  },
+  "lifecycleMappings": {
+    "claimLabel": "in-progress",
+    "readyLabel": "ready-for-review",
+    "branchPrefix": "agent/",
+    "prTitlePrefixes": {
+      "feature": "feat:",
+      "fix": "fix:"
+    }
+  },
+  "verificationRoles": {
+    "requiredGates": ["npm run smoke"],
+    "reviewerRoles": ["codex", "antigravity"],
+    "verificationCommands": ["npm test"]
+  },
+  "pathRules": {
+    "protectedPaths": ["docs/generated/**"],
+    "writableRoots": ["src", "scripts", "docs"]
+  },
+  "resourceRules": {
+    "maxParallelLanes": 3
+  },
+  "providerConcurrency": {
+    "claude": { "work": 2, "review": 4 }
+  },
+  "deniedModels": {
+    "claude": ["claude-fable-5"]
+  },
+  "deniedProviders": []
+}

@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { auditWorkspaceSweep, runWorkspaceRecipe, sanitizedRecipeEnvironment, workspaceRecipePlan } from "../src/workspace-operations.mjs";
 import { createPortfolio } from "../src/portfolio-store.mjs";
 import { inspectPortfolioConflict } from "../src/conflict-inspection.mjs";
+import { resolveDeliveryPolicy } from "../src/delivery-policy.mjs";
 
 const root = await mkdtemp(join(tmpdir(), "bridge-workspace-ops-"));
 const repository = join(root, "repo");
@@ -39,6 +40,24 @@ try {
   const recipeEnvironment = sanitizedRecipeEnvironment({ PATH: process.env.PATH, HOME: home, GITHUB_TOKEN: "must-not-leak", BRIDGE_GITHUB_APP_PRIVATE_KEY: "/secret/key.pem" });
   assert.equal(recipeEnvironment.GITHUB_TOKEN, undefined);
   assert.equal(recipeEnvironment.BRIDGE_GITHUB_APP_PRIVATE_KEY, undefined);
+
+  // The delivery policy reads recipes through the same approval gate rather than reading
+  // the project file directly, so an unapproved recipe can never reach a consumer.
+  const policy = await resolveDeliveryPolicy({
+    workspace: repository,
+    home,
+    environment: { AGENT_BRIDGE_GITHUB_APPS_CONFIG: join(root, "absent-apps.json") },
+  });
+  assert.equal(policy.workspaceRecipe.phases.postCreate.approved, true);
+  await writeFile(join(repository, ".agent-bridge/workspace-recipes.json"), `${JSON.stringify({ version: 1, phases: { postCreate: [command], preRetire: ["echo unapproved"] } }, null, 2)}\n`);
+  const unapproved = await resolveDeliveryPolicy({
+    workspace: repository,
+    home,
+    environment: { AGENT_BRIDGE_GITHUB_APPS_CONFIG: join(root, "absent-apps.json") },
+  });
+  assert.equal(unapproved.surfaces.cleanup.preRetireRecipe.approved, false);
+  assert.ok(unapproved.surfaces.cleanup.protectedPaths.includes("**/*.pem"));
+  await writeFile(join(repository, ".agent-bridge/workspace-recipes.json"), `${JSON.stringify({ version: 1, phases: { postCreate: [command] } }, null, 2)}\n`);
 
   const worktree = join(root, "feature-worktree");
   execFileSync("git", ["worktree", "add", "-qb", "feature", worktree], { cwd: repository });

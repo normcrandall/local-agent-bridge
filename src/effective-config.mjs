@@ -5,6 +5,8 @@ import { configuredModelFallbacksPath, loadConfiguredFallbackModels } from "./mo
 import { DEFAULT_PROVIDER_CONCURRENCY_CONFIG, loadProviderConcurrency } from "./provider-concurrency.mjs";
 import { DEFAULT_GITHUB_APPS_CONFIG, inspectGitHubAppRoles } from "./github-app-auth.mjs";
 
+import { resolveDeliveryPolicy } from "./delivery-policy.mjs";
+
 export async function effectiveBridgeConfig({ workspace = process.cwd(), home = homedir(), environment = process.env } = {}) {
   const fallbackPath = configuredModelFallbacksPath();
   const fallbacks = {};
@@ -12,9 +14,11 @@ export async function effectiveBridgeConfig({ workspace = process.cwd(), home = 
     try { fallbacks[provider] = loadConfiguredFallbackModels(provider, { configPath: fallbackPath }); }
     catch (error) { fallbacks[provider] = { error: error.message }; }
   }
+  const deliveryPolicy = await resolveDeliveryPolicy({ workspace, home, environment, diagnostic: true });
   return {
     version: 1,
     workspace: resolve(workspace),
+    deliveryPolicy,
     models: {
       codex: { value: loadConfiguredCodexModel({ home, environment }), source: environment.CODEX_MODEL ? "CODEX_MODEL" : resolve(environment.CODEX_HOME || resolve(home, ".codex"), "config.toml") },
       antigravity: { value: loadConfiguredAntigravityModel({ environment }), source: ["AGY_MODEL", "ANTIGRAVITY_MODEL", "GEMINI_MODEL"].find((name) => environment[name]) || "provider default" },

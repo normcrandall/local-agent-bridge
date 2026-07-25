@@ -211,6 +211,8 @@ Choose one machine-local mode:
 
 Explicit GitHub modes fail closed when their App-bound check cannot be verified. `auto` is the only mode that downgrades, and it never treats an unbound check name as trusted. A selected reviewer App must have **Commit statuses: Read and write** to publish the required `agent-review` context. These modes inspect existing GitHub configuration only; the bridge never creates or changes branch protection or rulesets.
 
+The machine-local mode is an enforcement floor. A repository policy or per-run narrowing may require a stricter mode (for example, moving from `broker` or `auto` to `organization-ruleset`), but it cannot downgrade the machine setting. Offline policy inspection reports stronger GitHub modes as `not-inspected` and blocked until live capability evidence is supplied; it never interprets missing evidence as a failed GitHub check. `bridge config effective` and `bridge policy explain` remain diagnostic when a repository policy is malformed: they report the parse/version rejection and ignore that repository layer, while delivery resolution fails closed.
+
 Produce a credential-free verification snapshot and give it to the read-only policy doctor:
 
 ```bash
@@ -655,6 +657,7 @@ bridge reconcile --reviews reviews.json
 bridge usage --id bridge-<uuid> --max-cost 10 --max-tokens 500000
 bridge bundle --output ~/agent-bridge-transfer # --destination is also accepted
 bridge config effective --workspace /path/to/repo
+bridge policy explain --workspace /path/to/repo # add --json for the structured document
 bridge workspace recipe --workspace /path/to/repo --phase postCreate
 bridge workspace sweep --workspace /path/to/repo # report-only recoverability audit
 bridge conflict --portfolio helm-<uuid> --item issue-123
@@ -673,7 +676,7 @@ bridge conflict --portfolio helm-<uuid> --item issue-123
 - Recovery is inspect-first; marking indeterminate or cancelling requires an explicit flag.
 - Target-bound `start_collaboration` calls are idempotent by default. Repository, issue/PR, exact head, role, mode, and workspace form a private identity key; a compatible live, recovering, `needs_user`, or indeterminate lane is returned instead of creating a duplicate. Untargeted work remains non-deduplicated unless the caller supplies an explicit `resumeKey`. `bridge wait` accepts UUIDs or human aliases, supports `--any` and `--after-updated-at` cursors, and returns distinct timeout, missing, and crashed exit codes.
 - Workspace recipes live at `.agent-bridge/workspace-recipes.json`, but execute only when the exact phase command list also appears under that absolute workspace in `~/.config/local-agent-bridge/workspace-recipe-approvals.json`. `postCreate`, `prePublish`, and `preRetire` are supported; approved `postCreate` runs before a new delegated writer starts. Preview with `bridge workspace recipe`; add `--apply` for an explicitly approved phase. Recipes run in a non-login POSIX shell with a bounded timeout and a small environment allowlist; broker credentials, tokens, and private-key paths are not inherited, copied, or linked.
-- `bridge workspace sweep` is intentionally report-only. It identifies dirty worktrees, live control-plane owners, and remote exact-SHA recovery refs, but does not call a worktree safe until retirement is also proven from GitHub (a trusted caller can supply an inspected `--retired-head SHA`). It performs no retirement. `bridge recover --all` similarly produces a fleet recovery plan without restarting or cancelling lanes. `bridge config effective` explains resolved model, fallback, concurrency, GitHub App, and recipe paths without printing tokens or private keys. `bridge conflict` exposes a portfolio item's exact target/head and arbitration dossier without assigning another writer.
+- `bridge workspace sweep` is intentionally report-only. It identifies dirty worktrees, live control-plane owners, and remote exact-SHA recovery refs, but does not call a worktree safe until retirement is also proven from GitHub (a trusted caller can supply an inspected `--retired-head SHA`). It performs no retirement. `bridge recover --all` similarly produces a fleet recovery plan without restarting or cancelling lanes. `bridge config effective` explains resolved model, fallback, concurrency, GitHub App, and recipe paths without printing tokens or private keys. `bridge conflict` exposes a portfolio item's exact target/head and arbitration dossier without assigning another writer. `bridge policy explain` resolves one workspace's effective delivery policy — protected invariants, machine defaults, repository policy, workspace recipes, and per-run narrowing — and prints the effective value, its provenance, and every ignored broadening attempt in human-readable or JSON form. See [docs/delivery-policy.md](docs/delivery-policy.md).
 - `ciTracking.prNumber` refreshes hosted checks after completed turns.
 - Structured reviews reconcile into accepted, disputed, and rejected evidence rather than majority vote.
 - Optional cost, token, and elapsed-time budgets stop after the current turn.

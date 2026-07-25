@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { resolveModelRoute, updateModelPolicy } from "../src/model-policy.mjs";
+import { explainDeliveryPolicy, resolveDeliveryPolicy } from "../src/delivery-policy.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const temporary = mkdtempSync(join(tmpdir(), "bridge-model-policy-test-"));
@@ -104,6 +105,40 @@ try {
     policyPath: configPath,
   });
   assert.equal(dockerRoute.model, "ai/qwen3-coder");
+
+  // The delivery policy resolver is the composition layer over this machine model policy.
+  // Verify here that machine denials reach it intact and that a repository can only narrow.
+  const workspace = join(temporary, "repo");
+  mkdirSync(join(workspace, ".agent-bridge"), { recursive: true });
+  writeFileSync(join(workspace, ".agent-bridge/delivery-policy.json"), JSON.stringify({
+    version: 1,
+    deniedModels: { docker: ["ai/qwen3-coder"] },
+    providerConcurrency: { claude: { work: 99 } },
+    privateKeyPath: "/tmp/builder.pem",
+  }));
+  const deliveryEnvironment = {
+    AGENT_BRIDGE_MODEL_POLICY_CONFIG: configPath,
+    AGENT_BRIDGE_PROVIDER_CONCURRENCY_CONFIG: join(temporary, "absent-concurrency.json"),
+    AGENT_BRIDGE_GITHUB_APPS_CONFIG: join(temporary, "absent-apps.json"),
+  };
+  const delivery = await resolveDeliveryPolicy({
+    workspace,
+    home: join(temporary, "home"),
+    environment: deliveryEnvironment,
+  });
+  assert.ok(delivery.deniedModels.ollama.includes("gemma4:latest"));
+  assert.ok(delivery.deniedModels.docker.includes("ai/qwen2.5-coder"));
+  assert.ok(delivery.deniedModels.docker.includes("ai/qwen3-coder"));
+  assert.equal(delivery.deliveryProfile, "local-only");
+  assert.equal(delivery.concurrency.claude.work, 5);
+  assert.equal(delivery.decisions["concurrency.claude.work"].source, "machine_default");
+  assert.ok(delivery.rejections.some((entry) => entry.field === "privateKeyPath"));
+  assert.equal(JSON.parse(explainDeliveryPolicy(delivery, { format: "json" })).deliveryProfile, "local-only");
+  const explained = explainDeliveryPolicy(delivery, { format: "human" });
+  assert.match(explained, /Delivery profile: local-only \[machine_default\]/);
+  assert.match(explained, /ignored: repository_policy proposed 99/);
+  assert.match(explained, /\[rejected\] privateKeyPath/);
+  assert.match(explained, /deniedModels\.docker = ai\/qwen2\.5-coder, ai\/qwen3-coder/);
 } finally {
   rmSync(temporary, { recursive: true, force: true });
 }
