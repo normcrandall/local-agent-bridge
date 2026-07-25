@@ -1,7 +1,7 @@
 import { readCollaboration } from "./collaboration-store.mjs";
 import { listPortfolios, readPortfolio, updatePortfolio } from "./portfolio-store.mjs";
 import { createBoundBuilderClient } from "./github-builder-client.mjs";
-import { createInstallationToken } from "./github-app-auth.mjs";
+import { createInstallationToken, sameGitHubAppLogin } from "./github-app-auth.mjs";
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 
@@ -122,7 +122,7 @@ export function getHeadShaFromWorkspace(workspacePath) {
   throw new Error(`Unable to retrieve HEAD SHA from workspace: ${workspacePath}`);
 }
 
-const ISSUE_CLAIM_OPERATIONS = [
+const ISSUE_CLAIM_OPERATIONS = Object.freeze([
   "get_issue",
   "add_issue_label",
   "remove_issue_label",
@@ -133,7 +133,7 @@ const ISSUE_CLAIM_OPERATIONS = [
   "list_tag_locks",
   "acquire_tag_lock",
   "release_tag_lock",
-];
+]);
 
 export function createIssueClaimClient({
   credential,
@@ -145,6 +145,17 @@ export function createIssueClaimClient({
   apiUrl = process.env.GITHUB_BUILDER_API_URL || "https://api.github.com",
   fetchImpl = fetch,
 }) {
+  if (!credential?.verifiedLogin) {
+    throw new Error("Issue-claim client requires a credential-verified GitHub App login.");
+  }
+  if (!expectedLogin) {
+    throw new Error("Issue-claim client requires an expected GitHub App login.");
+  }
+  if (!sameGitHubAppLogin(credential.verifiedLogin, expectedLogin)) {
+    throw new Error(
+      `Issue-claim identity mismatch: expected ${expectedLogin}, credential verified ${credential.verifiedLogin}.`,
+    );
+  }
   return createBoundBuilderClient({
     apiUrl,
     token: credential.token,
@@ -579,6 +590,7 @@ export async function releaseClaimLease({ client, issueNumber, collaborationId, 
     throw new Error(`Invalid claim lease release outcome: ${outcome}.`);
   }
 
+  // Presence only: inspected cleanup must remain possible after builder-App rotation.
   requireBoundAuthority(client);
   const claims = await parseClaims(client, issueNumber);
   const ours = canonicalClaim(claims.filter(c => c.data.collaboration === collaborationId));
@@ -613,6 +625,7 @@ export async function releaseClaimLease({ client, issueNumber, collaborationId, 
 }
 
 export async function recoverIssueClaim({ client, issueNumber, collaborationId, generation, workspaceRoot, ttlMs = 300_000 }) {
+  // Presence only: orphan recovery must remain possible after builder-App rotation.
   requireBoundAuthority(client);
   const claims = await parseClaims(client, issueNumber);
   const canonical = canonicalClaim(claims);

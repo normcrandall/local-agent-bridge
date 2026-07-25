@@ -262,15 +262,16 @@ async function runTests() {
     fetchImpl: mock.fetchImpl
   };
 
-  const client = createIssueClaimClient({
-    credential: {
-      token: baseClientConfig.token,
-      verifiedLogin: baseClientConfig.verifiedLogin,
-      expectedLogin: baseClientConfig.expectedLogin,
-      appId: baseClientConfig.authority.appId,
-      installationId: baseClientConfig.authority.installationId,
-      permissions: baseClientConfig.authority.permissions,
-    },
+  const claimCredential = {
+    token: baseClientConfig.token,
+    verifiedLogin: baseClientConfig.verifiedLogin,
+    expectedLogin: baseClientConfig.expectedLogin,
+    appId: baseClientConfig.authority.appId,
+    installationId: baseClientConfig.authority.installationId,
+    permissions: baseClientConfig.authority.permissions,
+  };
+  const claimClientArgs = {
+    credential: claimCredential,
     repository: baseClientConfig.repository,
     expectedLogin: baseClientConfig.expectedLogin,
     headSha: baseClientConfig.headSha,
@@ -278,8 +279,43 @@ async function runTests() {
     workspace: baseClientConfig.workspace,
     apiUrl: baseClientConfig.apiUrl,
     fetchImpl: mock.fetchImpl,
-  });
-  assert.deepEqual(client.authority, baseClientConfig.authority);
+  };
+  const client = createIssueClaimClient(claimClientArgs);
+  assert.deepStrictEqual(client.authority, baseClientConfig.authority);
+
+  assert.throws(
+    () => createIssueClaimClient({
+      ...claimClientArgs,
+      credential: { token: "ghs_test-token", verifiedLogin: "builder-app[bot]" },
+    }),
+    /authority does not match/,
+  );
+  assert.throws(
+    () => createIssueClaimClient({
+      ...claimClientArgs,
+      credential: { ...claimCredential, verifiedLogin: "other-app[bot]" },
+    }),
+    /Issue-claim identity mismatch/,
+  );
+  const cannotWiden = createIssueClaimClient({ ...claimClientArgs, allowedOperations: ["merge"] });
+  await assert.rejects(
+    cannotWiden.merge({ method: "squash" }),
+    /GitHub builder operation is not authorized/,
+  );
+  assert.throws(
+    () => createIssueClaimClient({
+      ...claimClientArgs,
+      credential: { ...claimCredential, token: "ghp_pat" },
+    }),
+    /short-lived GitHub App installation tokens/,
+  );
+  assert.throws(
+    () => createIssueClaimClient({
+      ...claimClientArgs,
+      credential: { ...claimCredential, verifiedLogin: null },
+    }),
+    /credential-verified GitHub App login/,
+  );
 
   console.log("1. Testing target-bound check & wrong target validation...");
   await client.getIssue(42);
@@ -1087,6 +1123,8 @@ async function runTests() {
     recoverIssueClaim({ client: unboundClient, issueNumber: 42, collaborationId: "bridge-orphan", generation: 3 }),
     /Claim mutation requires a verified GitHub App authority binding/,
   );
+  assert.ok(mock.getRefs().has("refs/tags/claims/issue-42-generation-3"));
+  assert.ok(mock.getLabels().has("agent:in-progress"));
   await assert.rejects(
     recoverIssueClaim({ client, issueNumber: 42, collaborationId: "bridge-orphan", generation: 2 }),
     /Generation 2 does not exist/,
