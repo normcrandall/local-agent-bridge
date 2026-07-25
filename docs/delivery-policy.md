@@ -33,6 +33,12 @@ printed by the explain report, so a silently dropped override is always visible.
 
 Per-run input owns nothing; it may only narrow.
 
+Repository `pathRules.writableRoots` has three explicit states in the resolved policy: `null`
+means the repository supplied no writable-root restriction, `[]` means the repository grants no
+writable roots, and a non-empty array contains canonical existing directories proven to stay
+inside the workspace (including after symlink resolution). Consumers must branch on `null` versus
+an array; they must not use array length to decide whether repository policy is active.
+
 ## Delivery profiles
 
 - `github-governed` — a builder App and at least one reviewer App are configured. Publication,

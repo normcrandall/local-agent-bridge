@@ -328,6 +328,7 @@ try {
     resourceRules: 5,
     pathRules: { writableRoots: ["../outside"] },
   });
+  await mkdir(resolve(temporary, "malformed-resources/outside"), { recursive: true });
   const malformedResources = await resolveDeliveryPolicy({
     workspace: malformedResourcesWorkspace,
     home: governed.home,
@@ -336,7 +337,19 @@ try {
   assert.equal(malformedResources.decisions.resourceRules.source, "machine_default");
   assert.ok(rejectionFor(malformedResources, "resourceRules"));
   assert.equal(malformedResources.pathRules.writableRoots, null);
-  assert.ok(rejectionFor(malformedResources, "pathRules.writableRoots"));
+  assert.match(rejectionFor(malformedResources, "pathRules.writableRoots").reason, /must stay inside the delegated workspace/);
+
+  const denyAllWritableWorkspace = await repositoryWorkspace("deny-all-writable", {
+    version: 1,
+    pathRules: { writableRoots: [] },
+  });
+  const denyAllWritable = await resolveDeliveryPolicy({
+    workspace: denyAllWritableWorkspace,
+    home: governed.home,
+    environment: governed.environment,
+  });
+  assert.deepEqual(denyAllWritable.pathRules.writableRoots, []);
+  assert.equal(rejectionFor(denyAllWritable, "pathRules.writableRoots"), undefined);
 
   // --- Surfaces -------------------------------------------------------------
   const surface = await deliveryPolicyForSurface("scheduling", {
