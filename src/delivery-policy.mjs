@@ -268,7 +268,7 @@ function resolveNarrowedNumber(ledger, key, { label, ceiling, machine, layers = 
     const candidate = Number(layer.value);
     if (!Number.isInteger(candidate) || candidate < 1) {
       rejections.push({
-        origin: layer.level,
+        origin: layer.origin || layer.level,
         field: key,
         reason: `${label} must be a positive integer; ignored ${JSON.stringify(layer.value)}.`,
       });
@@ -387,6 +387,65 @@ function resolveVerificationRoles(ledger, { repositoryValue, perRunValue, reposi
   });
 }
 
+function resolveResourceRules(ledger, { repositoryValue, perRunValue, repositoryOrigin, rejections }) {
+  const repository = isPlainObject(repositoryValue) ? repositoryValue : {};
+  const run = isPlainObject(perRunValue) ? perRunValue : {};
+  const considered = [{ level: "machine_default", value: { maxParallelLanes: null, timeouts: {} }, applied: true }];
+  let maxParallelLanes = null;
+  let source = repositoryValue === undefined ? "machine_default" : "repository_policy";
+  let detail = repositoryValue === undefined
+    ? "No repository resource rules supplied; parallel lanes are not additionally limited."
+    : `Repository resource rules come from ${repositoryOrigin}.`;
+
+  if (repositoryValue !== undefined) {
+    considered.push({ level: "repository_policy", value: repositoryValue, applied: true });
+  }
+
+  const candidates = [
+    { level: "repository_policy", origin: repositoryOrigin, value: repository.maxParallelLanes },
+    { level: "per_run_narrowing", origin: "per_run_narrowing", value: run.maxParallelLanes },
+  ];
+  for (const candidate of candidates) {
+    if (candidate.value === undefined || candidate.value === null) continue;
+    const parsed = Number(candidate.value);
+    if (!Number.isInteger(parsed) || parsed < 1) {
+      considered.push({ level: candidate.level, value: candidate.value, applied: false });
+      rejections.push({
+        origin: candidate.origin,
+        field: "resourceRules.maxParallelLanes",
+        reason: `Maximum parallel lanes must be a positive integer; ignored ${JSON.stringify(candidate.value)}.`,
+      });
+      continue;
+    }
+    const applied = maxParallelLanes === null || parsed < maxParallelLanes;
+    if (candidate.level !== "repository_policy") {
+      considered.push({ level: candidate.level, value: parsed, applied });
+    }
+    if (applied) {
+      maxParallelLanes = parsed;
+      source = candidate.level;
+      detail = `${candidate.level} narrowed maximum parallel lanes to ${parsed}.`;
+    } else if (parsed > maxParallelLanes) {
+      detail = `${candidate.level} requested ${parsed}; maximum parallel lanes stays ${maxParallelLanes} because per-run input may only narrow.`;
+    }
+  }
+
+  if (run.timeouts !== undefined) {
+    considered.push({ level: "per_run_narrowing", value: { timeouts: run.timeouts }, applied: false });
+    rejections.push({
+      origin: "per_run_narrowing",
+      field: "resourceRules.timeouts",
+      reason: "Resource timeout definitions are repository-owned; per-run input cannot replace them.",
+    });
+  }
+  return ledger.record("resourceRules", {
+    value: { maxParallelLanes, timeouts: isPlainObject(repository.timeouts) ? repository.timeouts : {} },
+    source,
+    detail,
+    considered,
+  });
+}
+
 function resolveMergeEnforcementMode(ledger, { machineValue, machineOrigin, repositoryValue, perRunValue, repositoryOrigin, rejections }) {
   const considered = [];
   let value = "broker";
@@ -497,7 +556,7 @@ function resolveDeliveryProfile(ledger, { available, layers, rejections }) {
     const candidate = String(layer.value);
     if (!DELIVERY_PROFILES.includes(candidate)) {
       rejections.push({
-        origin: layer.level,
+        origin: layer.origin || layer.level,
         field: "deliveryProfile",
         reason: `Unknown delivery profile ${JSON.stringify(layer.value)}; expected one of ${DELIVERY_PROFILES.join(", ")}.`,
       });
@@ -512,7 +571,7 @@ function resolveDeliveryProfile(ledger, { available, layers, rejections }) {
     } else if (candidate !== value) {
       detail = `${layer.level} requested ${candidate}; delivery stays ${value} because GitHub authority is machine-owned and cannot be broadened.`;
       rejections.push({
-        origin: layer.level,
+        origin: layer.origin || layer.level,
         field: "deliveryProfile",
         reason: `Requested ${candidate} but the machine layer only grants ${value}. Lower layers may narrow delivery authority, never broaden it.`,
       });
@@ -603,7 +662,7 @@ export async function resolveDeliveryPolicy({
   const deliveryProfile = resolveDeliveryProfile(ledger, {
     available,
     layers: [
-      { level: "repository_policy", value: repoPolicy.deliveryProfile },
+      { level: "repository_policy", origin: repoOrigin, value: repoPolicy.deliveryProfile },
       { level: "per_run_narrowing", value: perRun.deliveryProfile },
     ],
     rejections,
@@ -671,7 +730,7 @@ export async function resolveDeliveryPolicy({
         ceiling: PROTECTED_INVARIANTS.maxProviderWorkConcurrency,
         machine: machineConcurrency[provider].work,
         layers: [
-          { level: "repository_policy", value: repoEntry.work },
+          { level: "repository_policy", origin: repoOrigin, value: repoEntry.work },
           { level: "per_run_narrowing", value: runEntry.work },
         ],
         rejections,
@@ -681,7 +740,7 @@ export async function resolveDeliveryPolicy({
         ceiling: PROTECTED_INVARIANTS.maxProviderReviewConcurrency,
         machine: machineConcurrency[provider].review,
         layers: [
-          { level: "repository_policy", value: repoEntry.review },
+          { level: "repository_policy", origin: repoOrigin, value: repoEntry.review },
           { level: "per_run_narrowing", value: runEntry.review },
         ],
         rejections,
@@ -692,14 +751,16 @@ export async function resolveDeliveryPolicy({
   // --- Repository-owned product and lifecycle facts ------------------------
   const productFacts = resolveOwnedValue(ledger, "productFacts", {
     machineDefault: { productName: null, defaultBranch: "main", labels: [] },
-    layers: [
-      { level: "repository_policy", value: repoPolicy.productFacts },
-      { level: "per_run_narrowing", value: perRun.productFacts },
-    ],
-    detailFor: (layer) => (layer.level === "repository_policy"
-      ? `Product facts come from ${repoOrigin}.`
-      : "Per-run input supplied product facts for this run only."),
+    layers: [{ level: "repository_policy", value: repoPolicy.productFacts }],
+    detailFor: () => `Product facts come from ${repoOrigin}.`,
   });
+  if (perRun.productFacts !== undefined) {
+    rejections.push({
+      origin: "per_run_narrowing",
+      field: "productFacts",
+      reason: "Product facts, including the publication base branch, are repository-owned; per-run input cannot replace them.",
+    });
+  }
 
   const lifecycleMappings = resolveOwnedValue(ledger, "lifecycleMappings", {
     machineDefault: {
@@ -731,13 +792,11 @@ export async function resolveDeliveryPolicy({
       : "Only the protected path floor applies; a repository may add rules but never remove one.",
   });
 
-  const resourceRules = resolveOwnedValue(ledger, "resourceRules", {
-    machineDefault: { maxParallelLanes: null, timeouts: {} },
-    layers: [
-      { level: "repository_policy", value: repoPolicy.resourceRules },
-      { level: "per_run_narrowing", value: perRun.resourceRules },
-    ],
-    detailFor: (layer) => `${layer.level} supplied resource rules.`,
+  const resourceRules = resolveResourceRules(ledger, {
+    repositoryValue: repoPolicy.resourceRules,
+    perRunValue: perRun.resourceRules,
+    repositoryOrigin: repoOrigin,
+    rejections,
   });
 
   // --- Merge enforcement ---------------------------------------------------
@@ -749,7 +808,7 @@ export async function resolveDeliveryPolicy({
     repositoryOrigin: repoOrigin,
     rejections,
   });
-  const merge = configuredMerge.value !== "broker" && mergeCapabilities === undefined
+  const merge = configuredMerge.value !== "broker" && mergeCapabilities == null
     ? {
         configuredMode: configuredMerge.value,
         effectiveMode: null,

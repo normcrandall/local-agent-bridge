@@ -203,6 +203,41 @@ try {
   assert.deepEqual(narrowedVerification.verificationRoles.verificationCommands, ["git diff --check"]);
   assert.deepEqual(narrowedVerification.verificationRoles.reviewerRoles, ["codex"]);
 
+  const narrowedResources = await resolveDeliveryPolicy({
+    workspace,
+    home: governed.home,
+    environment: governed.environment,
+    options: {
+      productFacts: { defaultBranch: "attacker-controlled" },
+      resourceRules: { maxParallelLanes: 100, timeouts: { review: 999999 } },
+    },
+  });
+  assert.equal(narrowedResources.productFacts.defaultBranch, "develop");
+  assert.equal(narrowedResources.resourceRules.maxParallelLanes, 3);
+  assert.deepEqual(narrowedResources.resourceRules.timeouts, {});
+  assert.ok(rejectionFor(narrowedResources, "productFacts"));
+  assert.ok(rejectionFor(narrowedResources, "resourceRules.timeouts"));
+
+  const lowerLaneLimit = await resolveDeliveryPolicy({
+    workspace,
+    home: governed.home,
+    environment: governed.environment,
+    options: { resourceRules: { maxParallelLanes: 2 } },
+  });
+  assert.equal(lowerLaneLimit.resourceRules.maxParallelLanes, 2);
+  assert.equal(lowerLaneLimit.decisions.resourceRules.source, "per_run_narrowing");
+
+  const invalidConcurrencyWorkspace = await repositoryWorkspace("invalid-concurrency", {
+    version: 1,
+    providerConcurrency: { codex: { work: "many" } },
+  });
+  const invalidConcurrency = await resolveDeliveryPolicy({
+    workspace: invalidConcurrencyWorkspace,
+    home: governed.home,
+    environment: governed.environment,
+  });
+  assert.match(rejectionFor(invalidConcurrency, "concurrency.codex.work").origin, /delivery-policy\.json$/);
+
   // Merge enforcement is a monotonic floor. Repository/per-run layers may strengthen it but
   // may not downgrade the machine setting, and uninspected GitHub capability is explicit.
   const rulesetMachine = await machineLayer("ruleset-machine", { mergeEnforcement: "organization-ruleset" });
@@ -223,6 +258,14 @@ try {
   assert.equal(uninspectedRuleset.rejections.filter((entry) => entry.field === "mergeEnforcement").length, 2);
   assert.match(uninspectedRuleset.rejections[0].origin, /delivery-policy\.json$/);
   assert.equal(uninspectedRuleset.rejections[1].origin, "per_run_narrowing");
+
+  const nullCapabilities = await resolveDeliveryPolicy({
+    workspace: rulesetWorkspace,
+    home: rulesetMachine.home,
+    environment: rulesetMachine.environment,
+    mergeCapabilities: null,
+  });
+  assert.equal(nullCapabilities.merge.verificationSource, "not-inspected");
 
   const verifiedRuleset = await resolveDeliveryPolicy({
     workspace: rulesetWorkspace,
