@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createBoundBuilderClient } from "../src/github-builder-client.mjs";
 import {
   acquireClaimLease,
+  createIssueClaimClient,
   refreshClaimLease,
   releaseClaimLease,
   recoverIssueClaim,
@@ -261,7 +262,60 @@ async function runTests() {
     fetchImpl: mock.fetchImpl
   };
 
-  const client = createBoundBuilderClient(baseClientConfig);
+  const claimCredential = {
+    token: baseClientConfig.token,
+    verifiedLogin: baseClientConfig.verifiedLogin,
+    expectedLogin: baseClientConfig.expectedLogin,
+    appId: baseClientConfig.authority.appId,
+    installationId: baseClientConfig.authority.installationId,
+    permissions: baseClientConfig.authority.permissions,
+  };
+  const claimClientArgs = {
+    credential: claimCredential,
+    repository: baseClientConfig.repository,
+    expectedLogin: baseClientConfig.expectedLogin,
+    headSha: baseClientConfig.headSha,
+    issueNumber: baseClientConfig.issueNumber,
+    workspace: baseClientConfig.workspace,
+    apiUrl: baseClientConfig.apiUrl,
+    fetchImpl: mock.fetchImpl,
+  };
+  const client = createIssueClaimClient(claimClientArgs);
+  assert.deepStrictEqual(client.authority, baseClientConfig.authority);
+
+  assert.throws(
+    () => createIssueClaimClient({
+      ...claimClientArgs,
+      credential: { token: "ghs_test-token", verifiedLogin: "builder-app[bot]" },
+    }),
+    /authority does not match/,
+  );
+  assert.throws(
+    () => createIssueClaimClient({
+      ...claimClientArgs,
+      credential: { ...claimCredential, verifiedLogin: "other-app[bot]" },
+    }),
+    /Issue-claim identity mismatch/,
+  );
+  const cannotWiden = createIssueClaimClient({ ...claimClientArgs, allowedOperations: ["merge"] });
+  await assert.rejects(
+    cannotWiden.merge({ method: "squash" }),
+    /GitHub builder operation is not authorized/,
+  );
+  assert.throws(
+    () => createIssueClaimClient({
+      ...claimClientArgs,
+      credential: { ...claimCredential, token: "ghp_pat" },
+    }),
+    /short-lived GitHub App installation tokens/,
+  );
+  assert.throws(
+    () => createIssueClaimClient({
+      ...claimClientArgs,
+      credential: { ...claimCredential, verifiedLogin: null },
+    }),
+    /credential-verified GitHub App login/,
+  );
 
   console.log("1. Testing target-bound check & wrong target validation...");
   await client.getIssue(42);
@@ -274,6 +328,10 @@ async function runTests() {
   const unauthorizedClient = createBoundBuilderClient({
     ...baseClientConfig,
     allowedOperations: ["get_issue"]
+  });
+  const unboundClient = createBoundBuilderClient({
+    ...baseClientConfig,
+    authority: undefined,
   });
   await assert.rejects(
     unauthorizedClient.addIssueLabel(42, "agent:in-progress"),
@@ -970,6 +1028,15 @@ async function runTests() {
   });
   await refreshClaimLease({ client, issueNumber: 42, collaborationId: "bridge-44444444-3333-4444-5555-666666666666", phase: "completed" });
   await assert.rejects(
+    releaseClaimLease({
+      client: unboundClient,
+      issueNumber: 42,
+      collaborationId: "bridge-44444444-3333-4444-5555-666666666666",
+      outcome: "cancelled",
+    }),
+    /Claim mutation requires a verified GitHub App authority binding/,
+  );
+  await assert.rejects(
     acquireClaimLease({
       client: client2,
       issueNumber: 42,
@@ -1052,6 +1119,12 @@ async function runTests() {
   mock.clear();
   mock.getLabels().add("agent:in-progress");
   mock.getRefs().set("refs/tags/claims/issue-42-generation-3", "1111111111111111111111111111111111111111");
+  await assert.rejects(
+    recoverIssueClaim({ client: unboundClient, issueNumber: 42, collaborationId: "bridge-orphan", generation: 3 }),
+    /Claim mutation requires a verified GitHub App authority binding/,
+  );
+  assert.ok(mock.getRefs().has("refs/tags/claims/issue-42-generation-3"));
+  assert.ok(mock.getLabels().has("agent:in-progress"));
   await assert.rejects(
     recoverIssueClaim({ client, issueNumber: 42, collaborationId: "bridge-orphan", generation: 2 }),
     /Generation 2 does not exist/,

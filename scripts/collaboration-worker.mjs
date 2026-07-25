@@ -28,7 +28,7 @@ import {
 import { acquireProviderCapacity, assertNoProviderPoolReentry, loadProviderConcurrency } from "../src/provider-concurrency.mjs";
 import { activeVerificationCommand, capacityWaitNarrative, deliveryRepairSummary, verificationNarrative } from "../src/collaboration-narrative.mjs";
 import { enqueueCoordinatorWake } from "../src/coordinator-wake.mjs";
-import { createBoundBuilderClient } from "../src/github-builder-client.mjs";
+import { createIssueClaimClient } from "../src/github-issue-claims.mjs";
 import { createInstallationToken } from "../src/github-app-auth.mjs";
 import { providerPermissionDecisionForRequest } from "../src/verification-allowlist.mjs";
 import {
@@ -201,15 +201,13 @@ try {
 
     workerHeadSha = claimWorkspaceMetadata(state).headSha;
 
-    claimClient = createBoundBuilderClient({
+    claimClient = createIssueClaimClient({
       apiUrl: state.issueClaim.apiUrl || "https://api.github.com",
-      token: credential.token,
-      verifiedLogin: credential.verifiedLogin,
+      credential,
       repository,
       expectedLogin,
       headSha: workerHeadSha,
       issueNumber: state.issueClaim.issueNumber,
-      allowedOperations: ["get_issue", "add_issue_label", "remove_issue_label", "get_issue_comments", "post_issue_comment", "update_issue_comment", "delete_issue_comment", "list_tag_locks", "acquire_tag_lock", "release_tag_lock"],
       workspace: state.workspace,
       fetchImpl: fetch,
     });
