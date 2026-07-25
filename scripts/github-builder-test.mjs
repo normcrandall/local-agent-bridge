@@ -1756,6 +1756,66 @@ for (const { scenario, op } of EQUIVALENCE_FIXTURES) {
   assert.equal(codexRequest.arguments.config["mcp_servers.github_builder.env.GITHUB_BUILDER_BASE_SHA"], baseCommitSha, `${scenario}: Codex request wires the exact base authorization`);
 }
 
+// GraphQL answers a project-field read with HTTP 200 and an errors array. The
+// bound client must translate each cause into the REST status the hydration
+// classifier already understands, so a permission denial degrades an optional
+// source while a throttle or a server fault is retried and then fails closed.
+function projectFieldClient(payload) {
+  return createBoundBuilderClient({
+    ...base,
+    prNumber: null,
+    issueNumber: 147,
+    allowedOperations: ["get_issue_project_items"],
+    fetchImpl: async (url, options = {}) => {
+      const requestPath = new URL(url).pathname;
+      assert.equal(requestPath, "/graphql", "project field reads must use the GraphQL endpoint");
+      assert.equal(options.method, "POST");
+      return json(payload);
+    },
+  });
+}
+
+for (const [scenario, errors, expectedStatus] of [
+  ["scope denial", [{ type: "INSUFFICIENT_SCOPES", message: "Your token has not been granted the required scopes." }], 403],
+  ["forbidden without a type", [{ message: "Resource not accessible by integration" }], 403],
+  ["invisible project", [{ type: "NOT_FOUND", message: "Could not resolve to a node with the global id." }], 403],
+  ["unsupported schema", [{ type: "GRAPHQL_VALIDATION_FAILED", message: "Field 'projectItems' doesn't exist on type 'Issue'" }], 422],
+  ["rate limit", [{ type: "RATE_LIMITED", message: "API rate limit exceeded" }], 429],
+  ["secondary rate limit without a type", [{ message: "You have exceeded a secondary rate limit" }], 429],
+  ["server fault", [{ type: "SERVICE_UNAVAILABLE", message: "Service unavailable, try again later" }], 500],
+  ["unknown cause", [{ message: "an unclassified failure" }], 500],
+  // A mixed response resolves toward the more retryable reading: a transient
+  // fault must never be downgraded into a degradable permanent answer.
+  ["mixed throttle and denial", [{ type: "FORBIDDEN", message: "forbidden" }, { type: "RATE_LIMITED", message: "API rate limit exceeded" }], 429],
+  ["mixed fault and validation", [{ type: "GRAPHQL_VALIDATION_FAILED", message: "cannot query field" }, { type: "INTERNAL", message: "internal error" }], 500],
+]) {
+  await assert.rejects(
+    projectFieldClient({ errors }).getIssueProjectItems(147),
+    (error) => {
+      assert.equal(error.status, expectedStatus, `${scenario}: expected HTTP ${expectedStatus}, received ${error.status}`);
+      assert.match(error.message, /GitHub project field query failed/);
+      return true;
+    },
+    `${scenario}: project field errors must classify by cause`,
+  );
+}
+
+const projectItems = await projectFieldClient({
+  data: { repository: { issue: { projectItems: { nodes: [{ project: { title: "Roadmap", number: 3 }, fieldValues: { nodes: [] } }] } } } },
+}).getIssueProjectItems(147);
+assert.equal(projectItems.length, 1);
+assert.equal(projectItems[0].project.title, "Roadmap");
+
+// An empty project set is an authoritative answer, not a degradation.
+assert.deepEqual(await projectFieldClient({ data: { repository: { issue: { projectItems: { nodes: [] } } } } }).getIssueProjectItems(147), []);
+
+// The read stays bound to its issue and to its authorized operation.
+await assert.rejects(projectFieldClient({ data: {} }).getIssueProjectItems(148), /bound to issue 147/);
+await assert.rejects(
+  createBoundBuilderClient({ ...base, prNumber: null, issueNumber: 147, allowedOperations: [], fetchImpl: async () => json({}) }).getIssueProjectItems(147),
+  /not authorized: get_issue_project_items/,
+);
+
 cleanup();
 clearTimeout(watchdog);
-console.log("Bound GitHub builder tests passed: PR lifecycle, exact head, trusted latest review gate, merge paths, bounded no-shell transport, create_branch, fast-forward push_branch, guarded replace_branch, canonical contract derivation, delivery-outcome mapping, and durable restart reconciliation.");
+console.log("Bound GitHub builder tests passed: PR lifecycle, exact head, trusted latest review gate, merge paths, bounded no-shell transport, create_branch, fast-forward push_branch, guarded replace_branch, canonical contract derivation, delivery-outcome mapping, durable restart reconciliation, and GraphQL project-field error classification.");

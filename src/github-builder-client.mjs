@@ -223,6 +223,33 @@ async function requestPages({ fetchImpl, apiUrl, token, path, maxPages = 20 }) {
   throw new Error(`GitHub pagination exceeded the ${maxPages}-page safety limit.`);
 }
 
+// GraphQL reports authorization, validation, throttling, and server faults all
+// with HTTP 200 and an errors array. Map each cause onto the REST status its
+// caller already knows how to classify, ordered so that the more retryable
+// reading wins a mixed response: a transient fault must never be downgraded
+// into a permanent answer that a caller could treat as authoritative.
+const GRAPHQL_ERROR_CLASSES = [
+  [429, /^RATE_LIMITED$/i, /\brate limit|secondary rate|abuse detection/i],
+  [500, /^(INTERNAL|SERVER_ERROR|SERVICE_UNAVAILABLE|UNAVAILABLE|TIMEOUT)$/i, /internal error|timed? ?out|temporarily unavailable|service unavailable|try again later|something went wrong/i],
+  [403, /^(FORBIDDEN|UNAUTHORIZED|INSUFFICIENT_SCOPES|NOT_FOUND)$/i, /permission|scope|forbidden|not authorized|resource not accessible|could not resolve to/i],
+  [422, /^(UNPROCESSABLE|BAD_USER_INPUT|GRAPHQL_VALIDATION_FAILED|ARGUMENT_LITERALS_INCOMPATIBLE|VARIABLE_MISMATCH)$/i, /does(n't| not) exist on type|cannot query field|unknown (field|argument|type)|unsupported/i],
+];
+
+export function classifyGraphQLErrorStatus(errors) {
+  const entries = Array.isArray(errors) ? errors : [];
+  for (const [status, typePattern, messagePattern] of GRAPHQL_ERROR_CLASSES) {
+    const matched = entries.some((entry) => {
+      const type = String(entry?.type || entry?.extensions?.code || "");
+      return (type && typePattern.test(type)) || messagePattern.test(String(entry?.message || ""));
+    });
+    if (matched) return status;
+  }
+  // An unrecognized cause is treated as transient until proven otherwise: the
+  // caller retries and then fails closed, rather than degrading on a fault it
+  // never actually understood.
+  return 500;
+}
+
 function assertRepository(repository) {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository || "")) {
     throw new Error("repository must be owner/name.");
@@ -1281,10 +1308,7 @@ export function createBoundBuilderClient({
     });
     if (result?.errors?.length) {
       const error = new Error(`GitHub project field query failed: ${result.errors.map((entry) => entry.message).join("; ")}`);
-      // GraphQL reports authorization and unsupported-feature failures with a
-      // 200 status; surface a status so the hydration classifier can treat a
-      // scope denial exactly like its REST equivalent.
-      error.status = result.errors.some((entry) => /permission|scope|forbidden|not authorized/i.test(entry?.message || "")) ? 403 : 422;
+      error.status = classifyGraphQLErrorStatus(result.errors);
       throw error;
     }
     return result?.data?.repository?.issue?.projectItems?.nodes || [];
