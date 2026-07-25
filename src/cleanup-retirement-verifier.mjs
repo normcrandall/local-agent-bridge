@@ -127,6 +127,7 @@ export async function verifyCollaborationGitHubOutcome(state, {
       path: `/repos/${binding.repository}/pulls/${binding.prNumber}`,
     });
     const githubHeadSha = SHA_PATTERN.test(pull?.head?.sha || "") ? pull.head.sha : null;
+    const mergedSha = SHA_PATTERN.test(pull?.merge_commit_sha || "") ? pull.merge_commit_sha : null;
     const merged = Boolean(pull?.merged_at || pull?.merged);
     const closed = String(pull?.state || "").toLowerCase() === "closed";
     if (!merged && !closed) {
@@ -147,6 +148,7 @@ export async function verifyCollaborationGitHubOutcome(state, {
         : (closedHeadRecoverable ? "pull_request_closed" : "pull_request_closed_head_unrecoverable"),
       outcome: merged ? "merged" : "closed",
       githubHeadSha,
+      mergedSha,
       remoteHeadSha,
       url: pull?.html_url || null,
       ...binding,

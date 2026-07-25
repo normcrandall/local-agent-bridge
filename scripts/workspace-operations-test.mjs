@@ -41,6 +41,16 @@ try {
   assert.equal(recipeEnvironment.GITHUB_TOKEN, undefined);
   assert.equal(recipeEnvironment.BRIDGE_GITHUB_APP_PRIVATE_KEY, undefined);
 
+  const failingCommand = `node -e "process.exit(7)"`;
+  await writeFile(join(repository, ".agent-bridge/workspace-recipes.json"), `${JSON.stringify({ version: 1, phases: { preRetire: [failingCommand] } }, null, 2)}\n`);
+  await writeFile(approvalsPath, `${JSON.stringify({ version: 1, workspaces: { [repository]: { preRetire: [failingCommand] } } }, null, 2)}\n`);
+  const failedRecipe = runWorkspaceRecipe(repository, "preRetire", { home, approvalsPath });
+  assert.equal(failedRecipe.applied, true);
+  assert.equal(failedRecipe.ok, false);
+  assert.equal(failedRecipe.results[0].exitCode, 7);
+  await writeFile(join(repository, ".agent-bridge/workspace-recipes.json"), `${JSON.stringify({ version: 1, phases: { postCreate: [command] } }, null, 2)}\n`);
+  await writeFile(approvalsPath, `${JSON.stringify({ version: 1, workspaces: { [repository]: { postCreate: [command] } } }, null, 2)}\n`);
+
   // The delivery policy reads recipes through the same approval gate rather than reading
   // the project file directly, so an unapproved recipe can never reach a consumer.
   const policy = await resolveDeliveryPolicy({

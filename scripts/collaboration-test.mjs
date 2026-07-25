@@ -151,6 +151,7 @@ try {
     "refresh_portfolio_target",
     "release_issue_claim",
     "replay_incident",
+    "retire_writer_checkout",
     "start_collaboration",
     "update_portfolio_item",
     "wait_for_portfolio_lane",

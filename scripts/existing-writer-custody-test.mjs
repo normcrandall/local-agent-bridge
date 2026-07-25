@@ -29,6 +29,7 @@ async function initializeRepository(path) {
   await writeFile(join(path, "README.md"), "fixture\n");
   git(path, "add", "README.md");
   git(path, "commit", "-m", "Initial fixture");
+  git(path, "remote", "add", "origin", "https://example.invalid/owner/fixture.git");
 }
 
 async function waitForStop(client, collaborationId) {
@@ -60,6 +61,7 @@ await mkdir(stateDirectory, { recursive: true });
 await initializeRepository(standalone);
 await mkdir(unborn, { recursive: true });
 git(unborn, "init", "--initial-branch=main");
+git(unborn, "remote", "add", "origin", "https://example.invalid/owner/unborn.git");
 await initializeRepository(source);
 git(source, "worktree", "add", "-b", "codex/linked-writer", linked, "HEAD");
 await writeFile(fakeCodex, `#!/bin/sh\nexec "${process.execPath}" "${resolve(root, "scripts/fixtures/fake-codex-progress.mjs")}" "$@"\n`);

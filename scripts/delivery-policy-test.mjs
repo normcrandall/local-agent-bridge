@@ -112,7 +112,15 @@ try {
     version: 1,
     productFacts: { productName: "repo-product", defaultBranch: "develop", labels: ["autonomously-built"] },
     lifecycleMappings: { claimLabel: "in-progress", prTitlePrefixes: { feat: "feat:" } },
-    verificationRoles: { requiredGates: ["npm run smoke"], reviewerRoles: ["codex"] },
+    verificationRoles: {
+      quick: ["npm run test:talk"],
+      full: ["npm test"],
+      prePublish: ["git diff --check"],
+      integration: ["npm run smoke"],
+      preRetire: ["npm run test:cleanup"],
+      requiredGates: ["npm run smoke"],
+      reviewerRoles: ["codex"],
+    },
     pathRules: { protectedPaths: ["docs/generated/**"], writableRoots: ["src"] },
     resourceRules: { maxParallelLanes: 3 },
     providerConcurrency: {
@@ -147,6 +155,11 @@ try {
   // An unmentioned field keeps its default rather than being blanked out.
   assert.equal(policy.lifecycleMappings.branchPrefix, null);
   assert.equal(policy.verificationRoles.requiredGates[0], "npm run smoke");
+  assert.deepEqual(policy.verificationRoles.quick, ["npm run test:talk"]);
+  assert.deepEqual(policy.verificationRoles.full, ["npm test"]);
+  assert.deepEqual(policy.verificationRoles.prePublish, ["git diff --check"]);
+  assert.deepEqual(policy.verificationRoles.integration, ["npm run smoke"]);
+  assert.deepEqual(policy.verificationRoles.preRetire, ["npm run test:cleanup"]);
   assert.equal(policy.resourceRules.maxParallelLanes, 3);
 
   // Concurrency narrows through repository then per-run, and never broadens.

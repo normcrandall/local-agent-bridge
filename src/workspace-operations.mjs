@@ -4,7 +4,8 @@ import { isAbsolute, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { queryControlPlane } from "./collaboration-store.mjs";
 
-const PHASES = new Set(["postCreate", "prePublish", "preRetire"]);
+export const WORKSPACE_RECIPE_PHASES = Object.freeze(["postCreate", "prePublish", "preRetire"]);
+const PHASES = new Set(WORKSPACE_RECIPE_PHASES);
 const RECIPE_ENVIRONMENT_KEYS = ["HOME", "PATH", "TMPDIR", "LANG", "LC_ALL", "TERM", "XDG_CACHE_HOME", "NVM_DIR"];
 const DEFAULT_RECIPE_TIMEOUT_MS = 10 * 60 * 1_000;
 

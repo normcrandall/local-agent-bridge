@@ -16,6 +16,11 @@
     }
   },
   "verificationRoles": {
+    "quick": ["npm run test:talk"],
+    "full": ["npm test"],
+    "prePublish": ["git diff --check"],
+    "integration": ["npm run smoke"],
+    "preRetire": ["npm run test:cleanup"],
     "requiredGates": ["npm run smoke"],
     "reviewerRoles": ["codex", "antigravity"],
     "verificationCommands": ["npm test"]
