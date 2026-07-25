@@ -223,6 +223,33 @@ async function requestPages({ fetchImpl, apiUrl, token, path, maxPages = 20 }) {
   throw new Error(`GitHub pagination exceeded the ${maxPages}-page safety limit.`);
 }
 
+// GraphQL reports authorization, validation, throttling, and server faults all
+// with HTTP 200 and an errors array. Map each cause onto the REST status its
+// caller already knows how to classify, ordered so that the more retryable
+// reading wins a mixed response: a transient fault must never be downgraded
+// into a permanent answer that a caller could treat as authoritative.
+const GRAPHQL_ERROR_CLASSES = [
+  [429, /^RATE_LIMITED$/i, /\brate limit|secondary rate|abuse detection/i],
+  [500, /^(INTERNAL|SERVER_ERROR|SERVICE_UNAVAILABLE|UNAVAILABLE|TIMEOUT)$/i, /internal error|timed? ?out|temporarily unavailable|service unavailable|try again later|something went wrong/i],
+  [403, /^(FORBIDDEN|UNAUTHORIZED|INSUFFICIENT_SCOPES|NOT_FOUND)$/i, /permission|scope|forbidden|not authorized|resource not accessible|could not resolve to/i],
+  [422, /^(UNPROCESSABLE|BAD_USER_INPUT|GRAPHQL_VALIDATION_FAILED|ARGUMENT_LITERALS_INCOMPATIBLE|VARIABLE_MISMATCH)$/i, /does(n't| not) exist on type|cannot query field|unknown (field|argument|type)|unsupported/i],
+];
+
+export function classifyGraphQLErrorStatus(errors) {
+  const entries = Array.isArray(errors) ? errors : [];
+  for (const [status, typePattern, messagePattern] of GRAPHQL_ERROR_CLASSES) {
+    const matched = entries.some((entry) => {
+      const type = String(entry?.type || entry?.extensions?.code || "");
+      return (type && typePattern.test(type)) || messagePattern.test(String(entry?.message || ""));
+    });
+    if (matched) return status;
+  }
+  // An unrecognized cause is treated as transient until proven otherwise: the
+  // caller retries and then fails closed, rather than degrading on a fault it
+  // never actually understood.
+  return 500;
+}
+
 function assertRepository(repository) {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository || "")) {
     throw new Error("repository must be owner/name.");
@@ -1248,6 +1275,45 @@ export function createBoundBuilderClient({
     });
   }
 
+  async function getIssueTimeline(issueNum) {
+    authorize("get_issue_timeline");
+    assertIssueBound(issueNum);
+    await identity();
+    return await requestPages({
+      ...context,
+      path: `/repos/${repository}/issues/${issueNum}/timeline?per_page=100`,
+    });
+  }
+
+  async function getIssueDependencies(issueNum) {
+    authorize("get_issue_dependencies");
+    assertIssueBound(issueNum);
+    await identity();
+    const [blockedBy, blocking] = await Promise.all([
+      requestPages({ ...context, path: `/repos/${repository}/issues/${issueNum}/dependencies/blocked_by?per_page=100` }),
+      requestPages({ ...context, path: `/repos/${repository}/issues/${issueNum}/dependencies/blocking?per_page=100` }),
+    ]);
+    return { blockedBy, blocking };
+  }
+
+  async function getIssueProjectItems(issueNum) {
+    authorize("get_issue_project_items");
+    assertIssueBound(issueNum);
+    await identity();
+    const [owner, name] = repository.split("/");
+    const query = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){projectItems(first:20,includeArchived:false){nodes{project{title number}fieldValues(first:50){nodes{__typename ... on ProjectV2ItemFieldTextValue{text field{... on ProjectV2FieldCommon{name}}} ... on ProjectV2ItemFieldNumberValue{number field{... on ProjectV2FieldCommon{name}}} ... on ProjectV2ItemFieldDateValue{date field{... on ProjectV2FieldCommon{name}}} ... on ProjectV2ItemFieldSingleSelectValue{name field{... on ProjectV2FieldCommon{name}}} ... on ProjectV2ItemFieldIterationValue{title field{... on ProjectV2FieldCommon{name}}}}}}}}}}`;
+    const result = await request({
+      ...context, path: "/graphql", method: "POST",
+      body: { query, variables: { owner, name, number: Number(issueNum) } },
+    });
+    if (result?.errors?.length) {
+      const error = new Error(`GitHub project field query failed: ${result.errors.map((entry) => entry.message).join("; ")}`);
+      error.status = classifyGraphQLErrorStatus(result.errors);
+      throw error;
+    }
+    return result?.data?.repository?.issue?.projectItems?.nodes || [];
+  }
+
   async function postIssueComment(issueNum, body) {
     authorize("post_issue_comment");
     assertIssueBound(issueNum);
@@ -1333,5 +1399,5 @@ export function createBoundBuilderClient({
     });
   }
 
-  return { identity, ensurePullRequest, reviewThreads, replyReviewThread, resolveReviewThread, markReady, merge, createBranch, pushBranch, replaceBranch, getIssue, addIssueLabel, removeIssueLabel, getIssueComments, postIssueComment, updateIssueComment, deleteIssueComment, listTagLocks, acquireTagLock, releaseTagLock, expectedLogin, repository, issueNumber, authority: boundAuthority };
+  return { identity, ensurePullRequest, reviewThreads, replyReviewThread, resolveReviewThread, markReady, merge, createBranch, pushBranch, replaceBranch, getIssue, addIssueLabel, removeIssueLabel, getIssueComments, getIssueTimeline, getIssueDependencies, getIssueProjectItems, postIssueComment, updateIssueComment, deleteIssueComment, listTagLocks, acquireTagLock, releaseTagLock, expectedLogin, repository, issueNumber, authority: boundAuthority };
 }

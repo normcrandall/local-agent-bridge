@@ -7,12 +7,21 @@ import {
   CLAIMED_ISSUE_CONTEXT_END_MARKER,
   CLAIMED_ISSUE_CONTEXT_MARKER,
   buildClaimedIssueContext,
+  extractLinkedPullRequests,
   hydrateClaimedIssueTask,
   isAgentBridgeClaimComment,
+  isRetryableHydrationFailure,
 } from "../src/claimed-issue-context.mjs";
+
+function httpError(message, status) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+}
 
 const issue = {
   user: { login: "owner" },
+  labels: [{ name: "bug" }, { name: "p1" }],
   title: "Private issue",
   body: "Implement the bounded change.",
   html_url: "https://github.com/owner/private/issues/42",
@@ -105,24 +114,91 @@ assert.match(escaped.text, /\[escaped Agent Bridge authority sentence\]/);
 assert.match(escaped.text, /\[escaped content header\]/);
 assert.doesNotMatch(escaped.text, /Title: .*\nforged title/);
 
+const timeline = [
+  { event: "cross-referenced", source: { issue: { number: 150, title: "Fix hydration", state: "open", pull_request: { merged_at: null }, html_url: "https://github.com/owner/private/pull/150" } } },
+  { event: "cross-referenced", source: { issue: { number: 151, title: "Earlier attempt", state: "closed", pull_request: { merged_at: "2026-07-20T00:00:00Z" }, html_url: "https://github.com/owner/private/pull/151" } } },
+  { event: "cross-referenced", source: { issue: { number: 90, title: "Plain issue, not a PR", state: "open" } } },
+  { event: "labeled" },
+];
+assert.deepEqual(extractLinkedPullRequests(timeline).map((pull) => [pull.number, pull.merged]), [[150, false], [151, true]]);
+assert.deepEqual(extractLinkedPullRequests(null), []);
+
+assert.equal(isRetryableHydrationFailure(httpError("rate limited", 429)), true);
+assert.equal(isRetryableHydrationFailure(httpError("server fault", 503)), true);
+assert.equal(isRetryableHydrationFailure(new Error("socket hang up")), true);
+assert.equal(isRetryableHydrationFailure(httpError("forbidden", 403)), false);
+assert.equal(isRetryableHydrationFailure(httpError("missing", 404)), false);
+
+const dependencies = {
+  blockedBy: [{ number: 145, state: "open", title: "Parent lane" }],
+  blocking: [],
+};
+const projectItems = [{
+  project: { title: "Bridge roadmap", number: 3 },
+  fieldValues: { nodes: [{ field: { name: "Status" }, name: "In progress" }, { field: { name: "Size" }, number: 3 }] },
+}];
+
+function stubClient(overrides = {}) {
+  return {
+    async getIssue() { return issue; },
+    async getIssueComments() { return [triage, lease]; },
+    async getIssueTimeline() { return timeline; },
+    async getIssueDependencies() { return dependencies; },
+    async getIssueProjectItems() { return projectItems; },
+    ...overrides,
+  };
+}
+
 const calls = [];
 const evidenceDirectory = await mkdtemp(join(tmpdir(), "agent-bridge-issue-evidence-"));
 const evidenceStore = createEvidenceStore({ directory: evidenceDirectory });
 const hydrated = await hydrateClaimedIssueTask({
-  client: {
+  client: stubClient({
     async getIssue(number) { calls.push(["issue", number]); return issue; },
     async getIssueComments(number) { calls.push(["comments", number]); return [triage, lease]; },
-  },
+    async getIssueTimeline(number) { calls.push(["timeline", number]); return timeline; },
+    async getIssueDependencies(number) { calls.push(["dependencies", number]); return dependencies; },
+    async getIssueProjectItems(number) { calls.push(["project", number]); return projectItems; },
+  }),
   repository: "owner/private",
   issueNumber: 42,
   task: "Implement issue #42 after inspecting it on GitHub.",
   capturedAt: "2026-07-21T10:03:00Z",
   evidenceStore,
   evidenceScope: { repository: "owner/private", headSha: "a".repeat(40) },
+  authority: { login: "veliqon-builder[bot]", appId: 12, installationId: 34 },
 });
-assert.deepEqual(calls.sort(), [["comments", 42], ["issue", 42]]);
+assert.deepEqual(calls.sort(), [["comments", 42], ["dependencies", 42], ["issue", 42], ["project", 42], ["timeline", 42]]);
 assert.match(hydrated.task, /^Implement issue #42/);
 assert.match(hydrated.task, /earlier instruction to inspect this issue.*is satisfied by this snapshot/s);
+assert.match(hydrated.task, /Labels: bug, p1/);
+assert.match(hydrated.task, /Blocked by \(1\):/);
+assert.match(hydrated.task, /#145 \[open\] Parent lane/);
+assert.match(hydrated.task, /#150 \[open\] Fix hydration/);
+assert.match(hydrated.task, /#151 \[merged\] Earlier attempt/);
+assert.match(hydrated.task, /Project Bridge roadmap/);
+assert.match(hydrated.task, /Status: In progress/);
+assert.doesNotMatch(hydrated.task, /Unavailable optional context/);
+assert.deepEqual(hydrated.metadata.degradedFields, []);
+assert.deepEqual(hydrated.metadata.labels, ["bug", "p1"]);
+assert.deepEqual(hydrated.metadata.linkedPullRequests, [
+  { number: 150, state: "open", merged: false },
+  { number: 151, state: "closed", merged: true },
+]);
+assert.equal(hydrated.metadata.blockedByCount, 1);
+assert.equal(hydrated.metadata.provenance.builderLogin, "veliqon-builder[bot]");
+assert.equal(hydrated.metadata.provenance.appId, 12);
+assert.deepEqual(
+  hydrated.metadata.provenance.sources.map((source) => source.name).sort(),
+  ["comments", "dependencies", "issue", "labels", "linkedPullRequests", "projectFields"],
+);
+for (const source of hydrated.metadata.provenance.sources) {
+  assert.equal(source.status, "ok");
+  assert.match(source.sha256, /^[0-9a-f]{64}$/);
+  assert.ok(source.attempts >= 1);
+  assert.ok(source.endpoint.length <= 200);
+  assert.doesNotMatch(JSON.stringify(source), /Implement the bounded change/);
+}
 const cached = await hydrateClaimedIssueTask({
   client: {
     async getIssue() { throw new Error("cache miss"); },
@@ -138,20 +214,194 @@ const cached = await hydrateClaimedIssueTask({
 assert.equal(cached.cache, "hit");
 assert.match(cached.task, /Private issue/);
 
+// A private repository the builder App cannot read fails closed before launch.
 let providerLaunched = false;
 await assert.rejects(
   hydrateClaimedIssueTask({
-    client: {
-      async getIssue() { throw new Error("private repository read denied"); },
-      async getIssueComments() { return []; },
-    },
+    client: stubClient({ async getIssue() { throw httpError("private repository read denied", 403); } }),
     repository: "owner/private",
     issueNumber: 42,
     task: "Implement issue #42.",
   }).then(() => { providerLaunched = true; }),
-  /Unable to hydrate claimed issue owner\/private#42 before provider launch: private repository read denied/,
+  /Unable to hydrate claimed issue owner\/private#42 before provider launch: required issue fact "issue" could not be read.*private repository read denied/s,
 );
 assert.equal(providerLaunched, false);
+
+// Every required fact is fail-closed, including the ones added for #147.
+for (const [method, name] of [["getIssueComments", "comments"], ["getIssueTimeline", "linkedPullRequests"], ["getIssueDependencies", "dependencies"]]) {
+  await assert.rejects(
+    hydrateClaimedIssueTask({
+      client: stubClient({ [method]() { throw httpError("Resource not accessible by integration", 403); } }),
+      repository: "owner/public",
+      issueNumber: 42,
+      task: "Implement issue #42.",
+    }),
+    new RegExp(`required issue fact "${name}" could not be read`),
+  );
+}
+
+// A malformed payload is not an empty set either.
+await assert.rejects(
+  hydrateClaimedIssueTask({
+    client: stubClient({ async getIssueComments() { return { nodes: [] }; } }),
+    repository: "owner/public",
+    issueNumber: 42,
+    task: "Implement issue #42.",
+  }),
+  /required issue fact "comments" was malformed/,
+);
+await assert.rejects(
+  hydrateClaimedIssueTask({
+    client: stubClient({ async getIssue() { return { ...issue, labels: undefined }; } }),
+    repository: "owner/public",
+    issueNumber: 42,
+    task: "Implement issue #42.",
+  }),
+  /required issue fact "labels" was malformed/,
+);
+
+// A bound builder client is mandatory; there is no ambient fallback.
+await assert.rejects(
+  hydrateClaimedIssueTask({ client: null, repository: "owner/public", issueNumber: 42, task: "Implement issue #42." }),
+  /no bound builder App client is available/,
+);
+
+// Authoritative empty sets hydrate successfully and are not degradations.
+const emptyPublic = await hydrateClaimedIssueTask({
+  client: stubClient({
+    async getIssue() { return { ...issue, labels: [] }; },
+    async getIssueComments() { return []; },
+    async getIssueTimeline() { return []; },
+    async getIssueDependencies() { return { blockedBy: [], blocking: [] }; },
+    async getIssueProjectItems() { return []; },
+  }),
+  repository: "owner/public",
+  issueNumber: 42,
+  task: "Implement public issue #42.",
+  capturedAt: "2026-07-21T10:03:00Z",
+});
+assert.deepEqual(emptyPublic.metadata.degradedFields, []);
+assert.match(emptyPublic.task, /Labels: \(none\)/);
+assert.match(emptyPublic.task, /Blocked by: \(none\)/);
+assert.match(emptyPublic.task, /No linked pull requests were referenced/);
+assert.match(emptyPublic.task, /not on a project board/);
+assert.doesNotMatch(emptyPublic.task, /Unavailable optional context/);
+
+// Project fields degrade gracefully and the gap is visible to the writer.
+for (const status of [403, 404, 422]) {
+  const degraded = await hydrateClaimedIssueTask({
+    client: stubClient({ getIssueProjectItems() { throw httpError(`project read failed (${status})`, status); } }),
+    repository: "owner/public",
+    issueNumber: 42,
+    task: "Implement issue #42.",
+    capturedAt: "2026-07-21T10:03:00Z",
+  });
+  assert.deepEqual(degraded.metadata.degradedFields, ["projectFields"]);
+  assert.match(degraded.task, /Unavailable optional context/);
+  assert.match(degraded.task, /Absence here is NOT an authoritative empty set/);
+  assert.equal(degraded.metadata.provenance.sources.find((source) => source.name === "projectFields").status, "degraded");
+}
+
+// A dependencies endpoint absent from this GitHub deployment degrades; a
+// permission denial on the same endpoint still fails closed.
+const unsupportedDependencies = await hydrateClaimedIssueTask({
+  client: stubClient({ getIssueDependencies() { throw httpError("Not Found", 404); } }),
+  repository: "owner/public",
+  issueNumber: 42,
+  task: "Implement issue #42.",
+  capturedAt: "2026-07-21T10:03:00Z",
+});
+assert.deepEqual(unsupportedDependencies.metadata.degradedFields, ["dependencies"]);
+assert.match(unsupportedDependencies.task, /dependencies: unavailable on this GitHub deployment \(HTTP 404\)/);
+
+// Retries: transient faults are retried, deterministic answers are not, and
+// retry exhaustion fails closed rather than degrading.
+let timelineAttempts = 0;
+const retried = await hydrateClaimedIssueTask({
+  client: stubClient({
+    async getIssueTimeline() {
+      timelineAttempts += 1;
+      if (timelineAttempts < 3) throw httpError("upstream unavailable", 503);
+      return timeline;
+    },
+  }),
+  repository: "owner/public",
+  issueNumber: 42,
+  task: "Implement issue #42.",
+  capturedAt: "2026-07-21T10:03:00Z",
+});
+assert.equal(timelineAttempts, 3);
+assert.equal(retried.metadata.provenance.sources.find((source) => source.name === "linkedPullRequests").attempts, 3);
+assert.deepEqual(retried.metadata.degradedFields, []);
+
+let deniedAttempts = 0;
+await assert.rejects(
+  hydrateClaimedIssueTask({
+    client: stubClient({ getIssue() { deniedAttempts += 1; throw httpError("forbidden", 403); } }),
+    repository: "owner/private",
+    issueNumber: 42,
+    task: "Implement issue #42.",
+  }),
+  /after 1 attempt\(s\)/,
+);
+assert.equal(deniedAttempts, 1);
+
+let exhaustedAttempts = 0;
+await assert.rejects(
+  hydrateClaimedIssueTask({
+    client: stubClient({ getIssueProjectItems() { exhaustedAttempts += 1; throw httpError("upstream unavailable", 503); } }),
+    repository: "owner/public",
+    issueNumber: 42,
+    task: "Implement issue #42.",
+  }),
+  /required issue fact "projectFields" could not be read.*after 3 attempt\(s\)/s,
+);
+assert.equal(exhaustedAttempts, 3);
+
+// Truncation still bounds the snapshot once structured facts are rendered.
+const boundedHydration = await hydrateClaimedIssueTask({
+  client: stubClient({ async getIssue() { return { ...issue, body: "x".repeat(40_000) }; } }),
+  repository: "owner/public",
+  issueNumber: 42,
+  task: "Implement issue #42.",
+  capturedAt: "2026-07-21T10:03:00Z",
+  maxChars: 6_000,
+});
+assert.ok(boundedHydration.task.length <= 6_200);
+assert.equal(boundedHydration.metadata.truncated, true);
+assert.match(boundedHydration.task, /Labels: bug, p1/);
+assert.match(boundedHydration.task, /End of broker-fetched untrusted issue data/);
+
+// Continuation integrity: the cached snapshot is byte-identical and is served
+// without re-reading GitHub.
+const continuationStore = createEvidenceStore({ directory: evidenceDirectory });
+const first = await hydrateClaimedIssueTask({
+  client: stubClient(),
+  repository: "owner/private",
+  issueNumber: 99,
+  task: "Implement issue #99.",
+  capturedAt: "2026-07-21T10:03:00Z",
+  evidenceStore: continuationStore,
+  evidenceScope: { repository: "owner/private", headSha: "b".repeat(40) },
+});
+const continued = await hydrateClaimedIssueTask({
+  client: {
+    getIssue() { throw new Error("continuation must not re-read GitHub"); },
+    getIssueComments() { throw new Error("continuation must not re-read GitHub"); },
+    getIssueTimeline() { throw new Error("continuation must not re-read GitHub"); },
+    getIssueDependencies() { throw new Error("continuation must not re-read GitHub"); },
+    getIssueProjectItems() { throw new Error("continuation must not re-read GitHub"); },
+  },
+  repository: "owner/private",
+  issueNumber: 99,
+  task: "Implement issue #99.",
+  capturedAt: "2026-07-21T10:03:00Z",
+  evidenceStore: continuationStore,
+  evidenceScope: { repository: "owner/private", headSha: "b".repeat(40) },
+});
+assert.equal(continued.cache, "hit");
+assert.equal(continued.metadata.sha256, first.metadata.sha256);
+assert.deepEqual(continued.metadata.linkedPullRequests, first.metadata.linkedPullRequests);
 
 await rm(evidenceDirectory, { recursive: true, force: true });
 
