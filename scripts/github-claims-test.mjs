@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createBoundBuilderClient } from "../src/github-builder-client.mjs";
 import {
   acquireClaimLease,
+  createIssueClaimClient,
   refreshClaimLease,
   releaseClaimLease,
   recoverIssueClaim,
@@ -261,7 +262,24 @@ async function runTests() {
     fetchImpl: mock.fetchImpl
   };
 
-  const client = createBoundBuilderClient(baseClientConfig);
+  const client = createIssueClaimClient({
+    credential: {
+      token: baseClientConfig.token,
+      verifiedLogin: baseClientConfig.verifiedLogin,
+      expectedLogin: baseClientConfig.expectedLogin,
+      appId: baseClientConfig.authority.appId,
+      installationId: baseClientConfig.authority.installationId,
+      permissions: baseClientConfig.authority.permissions,
+    },
+    repository: baseClientConfig.repository,
+    expectedLogin: baseClientConfig.expectedLogin,
+    headSha: baseClientConfig.headSha,
+    issueNumber: baseClientConfig.issueNumber,
+    workspace: baseClientConfig.workspace,
+    apiUrl: baseClientConfig.apiUrl,
+    fetchImpl: mock.fetchImpl,
+  });
+  assert.deepEqual(client.authority, baseClientConfig.authority);
 
   console.log("1. Testing target-bound check & wrong target validation...");
   await client.getIssue(42);

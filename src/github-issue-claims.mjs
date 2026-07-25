@@ -122,27 +122,61 @@ export function getHeadShaFromWorkspace(workspacePath) {
   throw new Error(`Unable to retrieve HEAD SHA from workspace: ${workspacePath}`);
 }
 
-export async function getBuilderClientForWorkspace(workspace, issueNum, fetchImpl = fetch) {
-  const repository = getRepositoryFromWorkspace(workspace);
-  if (!repository) return null;
-  const credential = await createInstallationToken({ role: "builder", repository });
-  const headSha = getHeadShaFromWorkspace(workspace);
+const ISSUE_CLAIM_OPERATIONS = [
+  "get_issue",
+  "add_issue_label",
+  "remove_issue_label",
+  "get_issue_comments",
+  "post_issue_comment",
+  "update_issue_comment",
+  "delete_issue_comment",
+  "list_tag_locks",
+  "acquire_tag_lock",
+  "release_tag_lock",
+];
+
+export function createIssueClaimClient({
+  credential,
+  repository,
+  expectedLogin = credential?.expectedLogin,
+  headSha,
+  issueNumber,
+  workspace,
+  apiUrl = process.env.GITHUB_BUILDER_API_URL || "https://api.github.com",
+  fetchImpl = fetch,
+}) {
   return createBoundBuilderClient({
-    apiUrl: process.env.GITHUB_BUILDER_API_URL || "https://api.github.com",
+    apiUrl,
     token: credential.token,
     verifiedLogin: credential.verifiedLogin,
     repository,
-    expectedLogin: credential.expectedLogin,
+    expectedLogin,
     authority: {
-      login: credential.expectedLogin,
+      login: credential.verifiedLogin,
       appId: credential.appId,
       installationId: credential.installationId,
       repository,
       permissions: credential.permissions,
     },
     headSha,
+    issueNumber,
+    allowedOperations: ISSUE_CLAIM_OPERATIONS,
+    workspace,
+    fetchImpl,
+  });
+}
+
+export async function getBuilderClientForWorkspace(workspace, issueNum, fetchImpl = fetch) {
+  const repository = getRepositoryFromWorkspace(workspace);
+  if (!repository) return null;
+  const credential = await createInstallationToken({ role: "builder", repository });
+  const headSha = getHeadShaFromWorkspace(workspace);
+  return createIssueClaimClient({
+    credential,
+    repository,
+    expectedLogin: credential.expectedLogin,
+    headSha,
     issueNumber: issueNum,
-    allowedOperations: ["get_issue", "add_issue_label", "remove_issue_label", "get_issue_comments", "post_issue_comment", "update_issue_comment", "delete_issue_comment", "list_tag_locks", "acquire_tag_lock", "release_tag_lock"],
     workspace,
     fetchImpl,
   });
