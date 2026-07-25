@@ -463,8 +463,10 @@ export async function resolveDeliveryPolicy({
   });
 
   // --- Workspace recipe layer ---------------------------------------------
+  // The recipe layer governs approval-gated phase commands only. It deliberately authors no
+  // policy values: the recipes file is not passed through the credential sanitizer, so letting
+  // it set delivery authority would open an unaudited path around the repository layer.
   const recipe = loadWorkspaceRecipe(absWorkspace, { home });
-  const recipePolicy = {};
   ledger.record("workspaceRecipe", {
     value: {
       projectPath: recipe.projectPath,
@@ -484,13 +486,17 @@ export async function resolveDeliveryPolicy({
     available,
     layers: [
       { level: "repository_policy", value: repoPolicy.deliveryProfile },
-      { level: "workspace_recipe", value: recipePolicy.deliveryProfile },
       { level: "per_run_narrowing", value: perRun.deliveryProfile },
     ],
     rejections,
   });
 
-  // --- Provider and model allowlists (machine-owned, narrowable) -----------
+  // --- Provider and model allowlists --------------------------------------
+  // The machine owns the roster itself. `providerAllowlist` and `enabledModels` are therefore
+  // hard-rejected above: a repository may not name who is allowed to write or which models are
+  // permitted. What a repository may author is the deny direction — `deniedProviders` and
+  // `deniedModels` only ever remove candidates from the machine roster, so widening those lists
+  // narrows effective authority and can never restore something the machine denied.
   const machineProviders = PROVIDER_NAMES.filter((provider) => provider !== "ollama" && provider !== "docker");
   const providerLayers = definedLayers([
     { level: "repository_policy", value: repoPolicy.deniedProviders },

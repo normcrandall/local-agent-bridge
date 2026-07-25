@@ -32,5 +32,6 @@
   },
   "deniedModels": {
     "claude": ["claude-fable-5"]
-  }
+  },
+  "deniedProviders": []
 }

@@ -15,8 +15,10 @@ Weakest to strongest authority:
 5. `per_run_narrowing` — the `options` passed to `resolveDeliveryPolicy`.
 
 A later layer may only **narrow** authority. A concurrency value may be lowered, never raised;
-delivery may move from `github-governed` to `local-only`, never the other way; a model deny list
-may grow, never shrink. Every ignored attempt is recorded in that decision's `considered` list and
+delivery may move from `github-governed` to `local-only`, never the other way; the `deniedModels`
+and `deniedProviders` lists may grow, never shrink. Those two are the only roster keys a
+repository may author, because they only ever remove candidates from the machine roster —
+`providerAllowlist` and `enabledModels` are rejected outright. Every ignored attempt is recorded in that decision's `considered` list and
 printed by the explain report, so a silently dropped override is always visible.
 
 ## Ownership
