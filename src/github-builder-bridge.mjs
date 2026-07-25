@@ -2,12 +2,12 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { createInstallationToken, GITHUB_LOGIN_PATTERN, inspectGitHubAppRoles } from "./github-app-auth.mjs";
+import { canonicalGitHubAppLogin, createInstallationToken, GITHUB_LOGIN_PATTERN, inspectGitHubAppRoles } from "./github-app-auth.mjs";
 import { createBoundBuilderClient } from "./github-builder-client.mjs";
 import { builderMcpInputSchema } from "./builder-contract.mjs";
 
 const repository = process.env.GITHUB_BUILDER_REPOSITORY;
-const expectedLogin = process.env.GITHUB_BUILDER_EXPECTED_LOGIN;
+const configuredExpectedLogin = process.env.GITHUB_BUILDER_EXPECTED_LOGIN;
 const headSha = process.env.GITHUB_BUILDER_HEAD_SHA;
 const prNumber = process.env.GITHUB_BUILDER_PR_NUMBER
   ? Number.parseInt(process.env.GITHUB_BUILDER_PR_NUMBER, 10)
@@ -21,7 +21,8 @@ const allowedOperations = (process.env.GITHUB_BUILDER_ALLOWED_OPERATIONS || "ens
   .split(",").map((value) => value.trim()).filter(Boolean);
 
 if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository || "")) throw new Error("GITHUB_BUILDER_REPOSITORY must be owner/name.");
-if (!GITHUB_LOGIN_PATTERN.test(expectedLogin || "")) throw new Error("GITHUB_BUILDER_EXPECTED_LOGIN is invalid.");
+if (!GITHUB_LOGIN_PATTERN.test(configuredExpectedLogin || "")) throw new Error("GITHUB_BUILDER_EXPECTED_LOGIN is invalid.");
+const expectedLogin = canonicalGitHubAppLogin(configuredExpectedLogin);
 if (!/^[0-9a-f]{40}$/i.test(headSha || "")) throw new Error("GITHUB_BUILDER_HEAD_SHA must be a full SHA.");
 if (baseSha !== null && !/^[0-9a-f]{40}$/i.test(baseSha)) throw new Error("GITHUB_BUILDER_BASE_SHA must be a full SHA.");
 

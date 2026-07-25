@@ -6,7 +6,7 @@ import { basename, delimiter, isAbsolute, relative, resolve, sep } from "node:pa
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { GITHUB_LOGIN_PATTERN } from "./github-app-auth.mjs";
+import { canonicalGitHubAppLogin, GITHUB_LOGIN_PATTERN, sameGitHubAppLogin } from "./github-app-auth.mjs";
 import { mergePullRequestWithBuilder } from "./native-github-builder.mjs";
 import {
   appendEvent,
@@ -757,11 +757,14 @@ server.registerTool(
     }
     if (writer && !delegatedAgents.includes(writer)) throw new Error("writer must be included in delegated agents.");
     const requestedWorkspace = projectDirectory(input.workspace);
+    const canonicalIssueClaim = input.issueClaim
+      ? { ...input.issueClaim, expectedLogin: canonicalGitHubAppLogin(input.issueClaim.expectedLogin) }
+      : null;
     const identityKey = collaborationIdentity({
       workspace: requestedWorkspace,
       mode: effectiveMode,
       writer,
-      issueClaim: input.issueClaim,
+      issueClaim: canonicalIssueClaim,
       githubReview: input.githubReview,
       githubBuilder: input.githubBuilder,
       resumeKey: input.resumeKey,
@@ -784,7 +787,7 @@ server.registerTool(
     let claimClient = null;
     let claimHeadSha = null;
     let claimBaseSha = null;
-    let resolvedIssueClaim = input.issueClaim ? { ...input.issueClaim } : null;
+    let resolvedIssueClaim = canonicalIssueClaim;
     let resolvedTask = input.task;
     let issueContext = null;
     let repositoryEvidence = null;
@@ -796,8 +799,21 @@ server.registerTool(
       const { createInstallationToken } = await import("./github-app-auth.mjs");
       const { createBoundBuilderClient } = await import("./github-builder-client.mjs");
       const repository = input.issueClaim.repository;
-      const expectedLogin = input.issueClaim.expectedLogin;
       const credential = await createInstallationToken({ role: "builder", repository });
+      if (!sameGitHubAppLogin(input.issueClaim.expectedLogin, credential.expectedLogin)) {
+        throw new Error(`Issue claim builder identity mismatch: requested ${input.issueClaim.expectedLogin}, verified ${credential.expectedLogin}.`);
+      }
+      resolvedIssueClaim = {
+        ...resolvedIssueClaim,
+        expectedLogin: credential.expectedLogin,
+        authority: {
+          login: credential.expectedLogin,
+          appId: credential.appId,
+          installationId: credential.installationId,
+          repository,
+          permissions: credential.permissions,
+        },
+      };
       const revisions = resolveIssueClaimRevisions({
         workspace: requestedWorkspace,
         headSha: input.issueClaim.headSha,
@@ -812,7 +828,8 @@ server.registerTool(
         token: credential.token,
         verifiedLogin: credential.verifiedLogin,
         repository,
-        expectedLogin,
+        expectedLogin: credential.expectedLogin,
+        authority: resolvedIssueClaim.authority,
         headSha,
         issueNumber: input.issueClaim.issueNumber,
         allowedOperations: ["get_issue", "add_issue_label", "remove_issue_label", "get_issue_comments", "post_issue_comment", "update_issue_comment", "delete_issue_comment", "list_tag_locks", "acquire_tag_lock", "release_tag_lock"],
@@ -2016,13 +2033,23 @@ server.registerTool(
       }
       if (issueClaim.repository !== current.issueClaim.repository
         || issueClaim.issueNumber !== current.issueClaim.issueNumber
-        || issueClaim.expectedLogin !== current.issueClaim.expectedLogin) {
+        || !sameGitHubAppLogin(issueClaim.expectedLogin, current.issueClaim.expectedLogin)) {
         throw new Error("Continuation cannot change the repository, issue number, or builder identity of an existing claim.");
       }
-      resolvedContinuationIssueClaim = { ...current.issueClaim, ...issueClaim };
-      const { getBuilderClientForWorkspace, refreshClaimLease } = await import("./github-issue-claims.mjs");
+      resolvedContinuationIssueClaim = {
+        ...current.issueClaim,
+        ...issueClaim,
+        expectedLogin: canonicalGitHubAppLogin(current.issueClaim.expectedLogin),
+      };
+      const { getBuilderClientForWorkspace, rebindIssueClaim, refreshClaimLease } = await import("./github-issue-claims.mjs");
       const claimClient = await getBuilderClientForWorkspace(current.workspace, current.issueClaim.issueNumber);
       if (!claimClient) throw new Error(`No builder App client is configured for claimed issue #${current.issueClaim.issueNumber}.`);
+      await rebindIssueClaim({
+        client: claimClient,
+        issueNumber: current.issueClaim.issueNumber,
+        collaborationId: id,
+        workspaceRoot: WORKSPACE_ROOT,
+      });
       await refreshClaimLease({
         client: claimClient,
         issueNumber: current.issueClaim.issueNumber,
@@ -2291,6 +2318,33 @@ server.registerTool(
       throw new Error(`Collaboration ${id} was cancelled, but its GitHub issue claim remains held: ${claimReleaseError.message}`, { cause: claimReleaseError });
     }
     return toolResponse({ ...state, turns: [] });
+  },
+);
+
+server.registerTool(
+  "rebind_issue_claim",
+  {
+    title: "Safely rebind an inspected issue claim identity",
+    description: "Canonicalize a target-bound claim login only when the verified App ID, installation, repository, and collaboration authority are unchanged.",
+    inputSchema: {
+      repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
+      issueNumber: z.number().int().min(1),
+      expectedLogin: z.string().regex(GITHUB_LOGIN_PATTERN),
+      collaborationId: z.string().min(1),
+    },
+  },
+  async ({ repository, issueNumber, expectedLogin, collaborationId }) => {
+    blockNestedCollaboration();
+    const { getBuilderClientForWorkspace, rebindIssueClaim } = await import("./github-issue-claims.mjs");
+    const claimClient = await getBuilderClientForWorkspace(WORKSPACE_ROOT, issueNumber);
+    if (!claimClient) throw new Error(`No builder App client is configured for claimed issue #${issueNumber}.`);
+    if (claimClient.repository !== repository || !sameGitHubAppLogin(claimClient.expectedLogin, expectedLogin)) {
+      throw new Error("Inspected rebind target does not match the bound repository and builder App identity.");
+    }
+    return toolResponse({
+      ok: true,
+      ...(await rebindIssueClaim({ client: claimClient, issueNumber, collaborationId, workspaceRoot: WORKSPACE_ROOT })),
+    });
   },
 );
 
