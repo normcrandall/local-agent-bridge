@@ -10,7 +10,7 @@ import {
   reconcileClaimsAndPortfolios,
   parseClaims
 } from "../src/github-issue-claims.mjs";
-import { createCollaboration, collaborationDirectory } from "../src/collaboration-store.mjs";
+import { createCollaboration, collaborationDirectory, readCollaboration } from "../src/collaboration-store.mjs";
 import { updatePortfolio } from "../src/portfolio-store.mjs";
 import fs from "node:fs";
 import path from "node:path";
@@ -29,6 +29,7 @@ function createPausableMockGitHub() {
   let labels = new Set();
   let repoLabels = new Set();
   let gitRefs = new Map();
+  let issue = { number: 42, state: "open", state_reason: null };
 
   let pausePromise = null;
   let pauseResolver = null;
@@ -73,9 +74,13 @@ function createPausableMockGitHub() {
 
     if (pathname.match(/^\/repos\/[^/]+\/[^/]+\/issues\/\d+$/) && method === "GET") {
       return json({
-        number: 42,
+        ...issue,
         labels: Array.from(labels).map(l => ({ name: l }))
       });
+    }
+
+    if (pathname.match(/^\/repos\/[^/]+\/[^/]+\/issues\/\d+\/timeline$/) && method === "GET") {
+      return json([]);
     }
 
     if (pathname.match(/^\/repos\/[^/]+\/[^/]+\/issues\/\d+\/labels$/) && method === "POST") {
@@ -185,6 +190,10 @@ function createPausableMockGitHub() {
       gitRefs.clear();
       nextCommentId = 5003486000;
       refPostObserved = false;
+      issue = { number: 42, state: "open", state_reason: null };
+    },
+    setIssue: (value) => {
+      issue = { ...issue, ...value };
     },
     setComments: (c) => {
       comments = c.map((comment) => ({
@@ -967,6 +976,20 @@ async function runTests() {
   reconciledPortfolio = JSON.parse(fs.readFileSync(portfolioPath, "utf8"));
   assert.equal(reconciledPortfolio.items[0].collaborationId, "bridge-11111111-2222-3333-4444-555555555555");
   assert.equal(reconciledPortfolio.items[0].status, "failed");
+
+  console.log("13c. Testing authoritative closed outcome reconciliation...");
+  mock.setIssue({ state: "closed", state_reason: "not_planned" });
+  await reconcileClaimsAndPortfolios(tempWorkspaceRoot, mock.fetchImpl, client);
+  reconciledPortfolio = JSON.parse(fs.readFileSync(portfolioPath, "utf8"));
+  assert.equal(reconciledPortfolio.items[0].status, "obsolete");
+  assert.equal(reconciledPortfolio.items[0].semanticLifecycle.state, "obsolete");
+  const reconciledCollaboration = await readCollaboration(
+    tempWorkspaceRoot,
+    "bridge-11111111-2222-3333-4444-555555555555",
+  );
+  assert.equal(reconciledCollaboration.status, "obsolete");
+  assert.equal(reconciledCollaboration.semanticLifecycle.state, "obsolete");
+  assert.equal((await parseClaims(client, 42))[0].data.phase, "obsolete");
 
   console.log("14. Testing fail-closed behavior for ref without comment...");
   mock.clear();

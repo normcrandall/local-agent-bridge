@@ -1,7 +1,16 @@
-import { readCollaboration } from "./collaboration-store.mjs";
+import { readCollaboration, updateCollaboration } from "./collaboration-store.mjs";
 import { listPortfolios, readPortfolio, updatePortfolio } from "./portfolio-store.mjs";
 import { createBoundBuilderClient } from "./github-builder-client.mjs";
 import { createInstallationToken, sameGitHubAppLogin } from "./github-app-auth.mjs";
+import {
+  createProductionGitHubLifecycleAdapter,
+  loadRepositoryLifecyclePolicy,
+  portfolioStatusForSemanticState,
+  reconcileGitHubLifecycle,
+  semanticStateForPhase,
+  handleLifecycleWebhook,
+  transitionSemanticLifecycle,
+} from "./github-lifecycle.mjs";
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 
@@ -124,9 +133,11 @@ export function getHeadShaFromWorkspace(workspacePath) {
 
 const ISSUE_CLAIM_OPERATIONS = Object.freeze([
   "get_issue",
+  "update_issue_project_single_select",
   "add_issue_label",
   "remove_issue_label",
   "get_issue_comments",
+  "get_issue_timeline",
   "post_issue_comment",
   "update_issue_comment",
   "delete_issue_comment",
@@ -475,7 +486,6 @@ export async function acquireClaimLease({
       authority: canonicalAuthority(authority),
       history,
     };
-
     const commentBody = generateCommentBody(payload);
     let canonicalCommentId = publicationCanonical?.commentId || null;
     if (canonicalCommentId) {
@@ -485,6 +495,21 @@ export async function acquireClaimLease({
       canonicalCommentId = newComment.id;
     }
     canonicalPublished = true;
+    const lifecycle = await transitionSemanticLifecycle({
+      adapter: createProductionGitHubLifecycleAdapter(client),
+      issueNumber,
+      policy: loadRepositoryLifecyclePolicy(workspaceRoot),
+      record: payload.lifecycle,
+      history: payload.history,
+      state: "queued",
+      collaborationId,
+      writer,
+      writerReason: event,
+      at: now,
+    });
+    payload.lifecycle = lifecycle.record;
+    payload.history = lifecycle.history;
+    await client.updateIssueComment(canonicalCommentId, generateCommentBody(payload));
 
     await client.addIssueLabel(issueNumber, "agent:in-progress");
     for (const duplicate of publicationClaims.filter((claim) => claim.commentId !== canonicalCommentId)) {
@@ -510,7 +535,24 @@ export async function acquireClaimLease({
   }
 }
 
-export async function refreshClaimLease({ client, issueNumber, collaborationId, phase, headSha, branch, worktree, writer, writerFailover, summary, ttlMs = 300_000 }) {
+export async function refreshClaimLease({
+  client,
+  issueNumber,
+  collaborationId,
+  phase,
+  headSha,
+  branch,
+  worktree,
+  writer,
+  writerFailover,
+  summary,
+  ttlMs = 300_000,
+  workspaceRoot = null,
+  lifecyclePolicy = null,
+  semanticState = null,
+  transitionId = null,
+  deliveryId = null,
+}) {
   const claims = await parseClaims(client, issueNumber);
   const ours = canonicalClaim(claims.filter(c => c.data.collaboration === collaborationId));
   if (!ours) {
@@ -542,8 +584,12 @@ export async function refreshClaimLease({ client, issueNumber, collaborationId, 
   const sameSummary = normalizedSummary === undefined || ours.data.summary === normalizedSummary;
   const lastUpdated = ours.data.timestamps?.updated;
   const ageMs = lastUpdated ? Date.now() - Date.parse(lastUpdated) : Infinity;
+  const targetSemanticState = semanticState || semanticStateForPhase(targetPhase);
+  const sameSemanticState = ours.data.lifecycle?.state === targetSemanticState;
+  const sameLifecycleWriter = !writer || ours.data.lifecycle?.activeWriter === writer;
 
-  if (samePhase && sameHead && sameBranch && sameWorktree && sameWriter && sameSummary && ageMs < 60_000) {
+  if (samePhase && sameHead && sameBranch && sameWorktree && sameWriter && sameSummary
+    && sameSemanticState && sameLifecycleWriter && !transitionId && !deliveryId && ageMs < 60_000) {
     return;
   }
 
@@ -579,12 +625,44 @@ export async function refreshClaimLease({ client, issueNumber, collaborationId, 
   if (normalizedSummary !== undefined) ours.data.summary = normalizedSummary;
   ours.data.timestamps.updated = new Date().toISOString();
   ours.data.leaseExpiresAt = new Date(Date.now() + ttlMs).toISOString();
+  const lifecycle = await transitionSemanticLifecycle({
+    adapter: createProductionGitHubLifecycleAdapter(client),
+    issueNumber,
+    policy: lifecyclePolicy || loadRepositoryLifecyclePolicy(workspaceRoot || worktree || process.cwd()),
+    record: ours.data.lifecycle,
+    history: ours.data.history,
+    state: targetSemanticState,
+    collaborationId,
+    writer: writer || ours.data.writer,
+    writerReason: writerFailover ? "provider_failover" : "assigned",
+    transitionId,
+    deliveryId,
+  });
+  ours.data.lifecycle = lifecycle.record;
+  ours.data.history = lifecycle.history;
 
   const commentBody = generateCommentBody(ours.data);
   await client.updateIssueComment(ours.commentId, commentBody);
+  if (workspaceRoot) {
+    try {
+      await updateCollaboration(workspaceRoot, collaborationId, (current) => ({
+        ...current,
+        semanticLifecycle: lifecycle.record,
+      }));
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
 }
 
-export async function releaseClaimLease({ client, issueNumber, collaborationId, outcome }) {
+export async function releaseClaimLease({
+  client,
+  issueNumber,
+  collaborationId,
+  outcome,
+  workspaceRoot = process.cwd(),
+  lifecyclePolicy = null,
+}) {
   const allowedOutcomes = ["merged", "cancelled", "obsolete", "rolled_back", "taken_over", "recovered"];
   if (!allowedOutcomes.includes(outcome)) {
     throw new Error(`Invalid claim lease release outcome: ${outcome}.`);
@@ -608,6 +686,19 @@ export async function releaseClaimLease({ client, issueNumber, collaborationId, 
     { event: "release", collaboration: collaborationId, writer: ours.data.writer, phase: outcome, at: new Date().toISOString() },
     ...(ours.data.history || [])
   ].slice(0, 10);
+  const lifecycle = await transitionSemanticLifecycle({
+    adapter: createProductionGitHubLifecycleAdapter(client),
+    issueNumber,
+    policy: lifecyclePolicy || loadRepositoryLifecyclePolicy(workspaceRoot),
+    record: ours.data.lifecycle,
+    history: ours.data.history,
+    state: outcome === "rolled_back" || outcome === "taken_over" || outcome === "recovered" ? "obsolete" : outcome,
+    collaborationId,
+    writer: ours.data.writer,
+    transitionId: `claim-release:${collaborationId}:${outcome}`,
+  });
+  ours.data.lifecycle = lifecycle.record;
+  ours.data.history = lifecycle.history;
 
   const commentBody = generateCommentBody(ours.data);
   await client.updateIssueComment(ours.commentId, commentBody);
@@ -664,6 +755,45 @@ export async function recoverIssueClaim({ client, issueNumber, collaborationId, 
   return { recovered: true, generation, canonical: false, previousCanonicalGeneration: canonical?.data.generation || null };
 }
 
+export async function handleIssueLifecycleWebhook({
+  client,
+  issueNumber,
+  collaborationId,
+  deliveryId,
+  observedState,
+  workspaceRoot = process.cwd(),
+  lifecyclePolicy = null,
+}) {
+  const claims = await parseClaims(client, issueNumber);
+  const ours = canonicalClaim(claims.filter((claim) => claim.data.collaboration === collaborationId));
+  if (!ours) throw new Error(`No issue claim found for collaboration ${collaborationId}.`);
+  const transition = await handleLifecycleWebhook({
+    adapter: createProductionGitHubLifecycleAdapter(client),
+    issueNumber,
+    policy: lifecyclePolicy || loadRepositoryLifecyclePolicy(workspaceRoot),
+    record: ours.data.lifecycle,
+    history: ours.data.history,
+    collaborationId,
+    writer: ours.data.writer,
+    deliveryId,
+    observedState,
+  });
+  if (!transition.applied) return transition;
+  ours.data.lifecycle = transition.record;
+  ours.data.history = transition.history;
+  ours.data.timestamps.updated = new Date().toISOString();
+  await client.updateIssueComment(ours.commentId, generateCommentBody(ours.data));
+  try {
+    await updateCollaboration(workspaceRoot, collaborationId, (current) => ({
+      ...current,
+      semanticLifecycle: transition.record,
+    }));
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  return transition;
+}
+
 async function updatePortfolioWithRetry(portfoliosPath, pId, updater, maxAttempts = 5) {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
@@ -702,6 +832,57 @@ export async function reconcileClaimsAndPortfolios(workspaceRoot, fetchImpl = fe
       if (!client) throw new Error(`No builder App client is configured for claimed issue #${issueNum}.`);
       const claim = canonicalClaim(await parseClaims(client, issueNum));
       const claimIsHeld = claim && !RELEASED_PHASES.has(normalizePhase(claim.data.phase));
+      const lifecycleReconciliation = await reconcileGitHubLifecycle({
+        adapter: createProductionGitHubLifecycleAdapter(client),
+        issueNumber: issueNum,
+        policy: loadRepositoryLifecyclePolicy(portfolioState.workspace || collab?.workspace || workspaceRoot),
+        record: claim?.data.lifecycle || collab?.semanticLifecycle,
+        history: claim?.data.history || [],
+        collaborationId: item.collaborationId || claim?.data.collaboration || null,
+        writer: collab?.writer || claim?.data.writer || item.writer || null,
+      });
+      if (lifecycleReconciliation.outcome) {
+        const semanticState = lifecycleReconciliation.outcome;
+        if (claim && lifecycleReconciliation.applied) {
+          claim.data.lifecycle = lifecycleReconciliation.record;
+          claim.data.history = lifecycleReconciliation.history;
+          claim.data.phase = semanticState;
+          claim.data.summary = `GitHub ${semanticState} outcome reconciled into Agent Bridge state.`;
+          claim.data.timestamps.updated = new Date().toISOString();
+          await client.updateIssueComment(claim.commentId, generateCommentBody(claim.data));
+        }
+        await updatePortfolioWithRetry(portfoliosPath, p.id, async (current) => {
+          const targetItem = current.items.find((candidate) => candidate.id === item.id);
+          if (targetItem) {
+            targetItem.status = portfolioStatusForSemanticState(semanticState);
+            targetItem.semanticLifecycle = lifecycleReconciliation.record;
+            targetItem.summary = `Authoritative GitHub outcome reconciled as ${semanticState}.`;
+          }
+          return current;
+        });
+        if (collab) {
+          await updateCollaboration(workspaceRoot, collab.id, (current) => ({
+            ...current,
+            status: semanticState,
+            semanticLifecycle: lifecycleReconciliation.record,
+            completion: {
+              ...(current.completion || {}),
+              githubOutcome: semanticState,
+              reconciledAt: new Date().toISOString(),
+            },
+          }));
+        }
+        if (claimIsHeld && claim.data.collaboration === item.collaborationId) {
+          await releaseClaimLease({
+            client,
+            issueNumber: issueNum,
+            collaborationId: item.collaborationId,
+            outcome: semanticState,
+            workspaceRoot: portfolioState.workspace || workspaceRoot,
+          });
+        }
+        continue;
+      }
 
       if (["cancelled", "obsolete"].includes(collab?.status)) {
         if (claimIsHeld && claim.data.collaboration === item.collaborationId) {

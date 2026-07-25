@@ -1314,6 +1314,60 @@ export function createBoundBuilderClient({
     return result?.data?.repository?.issue?.projectItems?.nodes || [];
   }
 
+  async function updateIssueProjectSingleSelect(issueNum, {
+    projectNumber = null,
+    projectTitle = null,
+    fieldName,
+    optionName,
+  }) {
+    authorize("update_issue_project_single_select");
+    assertIssueBound(issueNum);
+    await identity();
+    const [owner, name] = repository.split("/");
+    const query = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){projectItems(first:20,includeArchived:false){nodes{id project{id title number fields(first:100){nodes{__typename ... on ProjectV2SingleSelectField{id name options{id name}}}}}}}}}}}`;
+    const inspected = await request({
+      ...context,
+      path: "/graphql",
+      method: "POST",
+      body: { query, variables: { owner, name, number: Number(issueNum) } },
+    });
+    if (inspected?.errors?.length) {
+      const error = new Error(`GitHub project field query failed: ${inspected.errors.map((entry) => entry.message).join("; ")}`);
+      error.status = classifyGraphQLErrorStatus(inspected.errors);
+      throw error;
+    }
+    const items = inspected?.data?.repository?.issue?.projectItems?.nodes || [];
+    const item = items.find((candidate) => (
+      (projectNumber === null || candidate.project?.number === projectNumber)
+      && (!projectTitle || candidate.project?.title === projectTitle)
+    ));
+    const field = item?.project?.fields?.nodes?.find((candidate) => (
+      candidate.__typename === "ProjectV2SingleSelectField" && candidate.name === fieldName
+    ));
+    const option = field?.options?.find((candidate) => candidate.name === optionName);
+    if (!item || !field || !option) {
+      const error = new Error(`Configured GitHub Project mapping was not found for field ${fieldName} and option ${optionName}.`);
+      error.status = 404;
+      throw error;
+    }
+    const mutation = `mutation($project:ID!,$item:ID!,$field:ID!,$option:String!){updateProjectV2ItemFieldValue(input:{projectId:$project,itemId:$item,fieldId:$field,value:{singleSelectOptionId:$option}}){projectV2Item{id}}}`;
+    const updated = await request({
+      ...context,
+      path: "/graphql",
+      method: "POST",
+      body: {
+        query: mutation,
+        variables: { project: item.project.id, item: item.id, field: field.id, option: option.id },
+      },
+    });
+    if (updated?.errors?.length) {
+      const error = new Error(`GitHub project field update failed: ${updated.errors.map((entry) => entry.message).join("; ")}`);
+      error.status = classifyGraphQLErrorStatus(updated.errors);
+      throw error;
+    }
+    return updated?.data?.updateProjectV2ItemFieldValue?.projectV2Item || null;
+  }
+
   async function postIssueComment(issueNum, body) {
     authorize("post_issue_comment");
     assertIssueBound(issueNum);
@@ -1399,5 +1453,5 @@ export function createBoundBuilderClient({
     });
   }
 
-  return { identity, ensurePullRequest, reviewThreads, replyReviewThread, resolveReviewThread, markReady, merge, createBranch, pushBranch, replaceBranch, getIssue, addIssueLabel, removeIssueLabel, getIssueComments, getIssueTimeline, getIssueDependencies, getIssueProjectItems, postIssueComment, updateIssueComment, deleteIssueComment, listTagLocks, acquireTagLock, releaseTagLock, expectedLogin, repository, issueNumber, authority: boundAuthority };
+  return { identity, ensurePullRequest, reviewThreads, replyReviewThread, resolveReviewThread, markReady, merge, createBranch, pushBranch, replaceBranch, getIssue, addIssueLabel, removeIssueLabel, getIssueComments, getIssueTimeline, getIssueDependencies, getIssueProjectItems, updateIssueProjectSingleSelect, postIssueComment, updateIssueComment, deleteIssueComment, listTagLocks, acquireTagLock, releaseTagLock, expectedLogin, repository, issueNumber, authority: boundAuthority };
 }

@@ -1824,6 +1824,59 @@ await assert.rejects(
   /not authorized: get_issue_project_items/,
 );
 
+const projectMutationCalls = [];
+const projectMutationClient = createBoundBuilderClient({
+  ...base,
+  prNumber: null,
+  issueNumber: 147,
+  allowedOperations: ["update_issue_project_single_select"],
+  fetchImpl: async (url, options = {}) => {
+    const body = JSON.parse(options.body);
+    projectMutationCalls.push(body);
+    if (projectMutationCalls.length === 1) {
+      return json({
+        data: {
+          repository: {
+            issue: {
+              projectItems: {
+                nodes: [{
+                  id: "ITEM_1",
+                  project: {
+                    id: "PROJECT_1",
+                    title: "Roadmap",
+                    number: 3,
+                    fields: {
+                      nodes: [{
+                        __typename: "ProjectV2SingleSelectField",
+                        id: "FIELD_1",
+                        name: "Status",
+                        options: [{ id: "OPTION_1", name: "In progress" }],
+                      }],
+                    },
+                  },
+                }],
+              },
+            },
+          },
+        },
+      });
+    }
+    assert.equal(new URL(url).pathname, "/graphql");
+    return json({ data: { updateProjectV2ItemFieldValue: { projectV2Item: { id: "ITEM_1" } } } });
+  },
+});
+assert.deepEqual(await projectMutationClient.updateIssueProjectSingleSelect(147, {
+  projectNumber: 3,
+  fieldName: "Status",
+  optionName: "In progress",
+}), { id: "ITEM_1" });
+assert.deepEqual(projectMutationCalls[1].variables, {
+  project: "PROJECT_1",
+  item: "ITEM_1",
+  field: "FIELD_1",
+  option: "OPTION_1",
+});
+
 // ---------------------------------------------------------------------------
 // (8) Issue #40 regression fixtures (observed 2026-07-25, collaboration
 // bridge-d7adbfc4). Antigravity completed issue #146 at commit 74d2f02 and then

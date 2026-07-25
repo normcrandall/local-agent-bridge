@@ -29,6 +29,7 @@ import { acquireProviderCapacity, assertNoProviderPoolReentry, loadProviderConcu
 import { activeVerificationCommand, capacityWaitNarrative, deliveryRepairSummary, verificationNarrative } from "../src/collaboration-narrative.mjs";
 import { enqueueCoordinatorWake } from "../src/coordinator-wake.mjs";
 import { createIssueClaimClient } from "../src/github-issue-claims.mjs";
+import { recordLifecycleAssignment } from "../src/github-lifecycle.mjs";
 import { createInstallationToken } from "../src/github-app-auth.mjs";
 import { providerPermissionDecisionForRequest } from "../src/verification-allowlist.mjs";
 import {
@@ -237,6 +238,7 @@ try {
       client: claimClient,
       issueNumber: state.issueClaim.issueNumber,
       collaborationId: id,
+      workspaceRoot,
       phase: "running",
       summary: "Starting provider work.",
       writer: state.writer,
@@ -352,6 +354,11 @@ try {
     ...current,
     writer,
     issueClaim: current.issueClaim ? { ...current.issueClaim, writer: writer || current.issueClaim.writer } : current.issueClaim,
+    semanticLifecycle: recordLifecycleAssignment(current.semanticLifecycle || {}, {
+      writer,
+      at: preflightFailover?.at,
+      reason: preflightFailover ? "provider_failover" : "assigned",
+    }),
     providerFailoverState: preflightFailover
       ? {
         status: "transferred",
@@ -381,6 +388,7 @@ try {
         client: claimClient,
         issueNumber: state.issueClaim.issueNumber,
         collaborationId: id,
+        workspaceRoot,
         phase: "running",
         writer,
         writerFailover: preflightFailover,
@@ -940,6 +948,11 @@ try {
         issueClaim: current.issueClaim && failure.writer
           ? { ...current.issueClaim, writer: failure.writer }
           : current.issueClaim,
+        semanticLifecycle: recordLifecycleAssignment(current.semanticLifecycle || {}, {
+          writer: failure.writer,
+          at: failover?.at,
+          reason: failover ? "provider_failover" : "assigned",
+        }),
         providerFailoverState: failover
           ? {
             status: "transferred",
@@ -978,6 +991,7 @@ try {
           client: claimClient,
           issueNumber: state.issueClaim.issueNumber,
           collaborationId: id,
+          workspaceRoot,
           phase: "running",
           writer: failure.writer,
           writerFailover: failover,
@@ -1006,6 +1020,7 @@ try {
           client: claimClient,
           issueNumber: state.issueClaim.issueNumber,
           collaborationId: id,
+          workspaceRoot,
           phase: runtime.activeCall?.phase || "running",
           summary: runtime.activeCall?.summary || "Provider work is active.",
           writer: runtime.writer,
@@ -1045,6 +1060,7 @@ try {
           client: claimClient,
           issueNumber: state.issueClaim.issueNumber,
           collaborationId: id,
+          workspaceRoot,
           phase: "completed",
           summary: "Provider work completed; the claim remains held through review and merge.",
           writer: outcome.state.writer,
@@ -1057,6 +1073,7 @@ try {
           issueNumber: state.issueClaim.issueNumber,
           collaborationId: id,
           outcome: outcome.reason,
+          workspaceRoot,
         });
       } else if (["failed", "indeterminate"].includes(outcome.reason)) {
         const { refreshClaimLease } = await import("../src/github-issue-claims.mjs");
@@ -1064,6 +1081,7 @@ try {
           client: claimClient,
           issueNumber: state.issueClaim.issueNumber,
           collaborationId: id,
+          workspaceRoot,
           phase: outcome.reason,
           summary: outcome.error || `Provider work stopped with ${outcome.reason}; the claim remains held.`,
           writer: outcome.state.writer,
@@ -1085,6 +1103,7 @@ try {
           client: claimClient,
           issueNumber: state.issueClaim.issueNumber,
           collaborationId: id,
+          workspaceRoot,
           phase: error?.indeterminate ? "indeterminate" : "failed",
           summary: error.message,
           writer: state.writer,
