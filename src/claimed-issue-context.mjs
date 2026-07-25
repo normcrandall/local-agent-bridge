@@ -66,11 +66,99 @@ function triageRank(comment, issueAuthor) {
   return issueAuthor && author === issueAuthor ? 1 : 0;
 }
 
+function inlineText(value, fallback) {
+  return sanitizeUntrustedText(text(value, fallback)).replace(/[\r\n]+/g, " ").slice(0, 200);
+}
+
+function renderLabels(labels) {
+  if (!labels.length) return "Labels: (none)";
+  return `Labels: ${labels.map((label) => inlineText(typeof label === "string" ? label : label?.name, "(unnamed)")).join(", ")}`;
+}
+
+function issueReferenceLine(entry) {
+  const number = Number(entry?.number);
+  const state = inlineText(entry?.state, "unknown");
+  const repositoryName = inlineText(entry?.repository?.full_name || entry?.repositoryFullName, "");
+  const title = inlineText(entry?.title, "(untitled)");
+  return `- ${repositoryName ? `${repositoryName}` : ""}#${Number.isInteger(number) ? number : "?"} [${state}] ${title}`;
+}
+
+function renderDependencies(dependencies) {
+  const blockedBy = Array.isArray(dependencies?.blockedBy) ? dependencies.blockedBy : [];
+  const blocking = Array.isArray(dependencies?.blocking) ? dependencies.blocking : [];
+  const lines = ["### Dependency state", ""];
+  lines.push(blockedBy.length ? `Blocked by (${blockedBy.length}):` : "Blocked by: (none)");
+  lines.push(...blockedBy.slice(0, 25).map(issueReferenceLine));
+  lines.push(blocking.length ? `Blocking (${blocking.length}):` : "Blocking: (none)");
+  lines.push(...blocking.slice(0, 25).map(issueReferenceLine));
+  return lines.join("\n");
+}
+
+export function extractLinkedPullRequests(timeline = []) {
+  const linked = new Map();
+  for (const event of Array.isArray(timeline) ? timeline : []) {
+    const candidate = event?.source?.issue || event?.source?.pull_request || null;
+    if (!candidate?.pull_request) continue;
+    const number = Number(candidate.number);
+    if (!Number.isInteger(number)) continue;
+    linked.set(number, {
+      number,
+      title: candidate.title || "",
+      state: candidate.state || "unknown",
+      merged: Boolean(candidate.pull_request?.merged_at),
+      draft: Boolean(candidate.draft),
+      url: candidate.html_url || candidate.pull_request?.html_url || "",
+      repositoryFullName: candidate.repository?.full_name || "",
+    });
+  }
+  return [...linked.values()].sort((left, right) => left.number - right.number);
+}
+
+function renderLinkedPullRequests(pulls) {
+  if (!pulls.length) return "### Linked pull request state\n\nNo linked pull requests were referenced from this issue.";
+  const lines = ["### Linked pull request state", ""];
+  for (const pull of pulls.slice(0, 25)) {
+    const status = pull.merged ? "merged" : `${inlineText(pull.state, "unknown")}${pull.draft ? ", draft" : ""}`;
+    lines.push(`- ${inlineText(pull.repositoryFullName, "")}#${pull.number} [${status}] ${inlineText(pull.title, "(untitled)")}`);
+  }
+  return lines.join("\n");
+}
+
+function renderProjectFields(projectItems) {
+  if (!projectItems.length) return "### Project fields\n\nThis issue is not on a project board.";
+  const lines = ["### Project fields", ""];
+  for (const item of projectItems.slice(0, 10)) {
+    lines.push(`- Project ${inlineText(item?.project?.title, "(untitled project)")}:`);
+    for (const value of (item?.fieldValues?.nodes || []).slice(0, 25)) {
+      const field = inlineText(value?.field?.name, "");
+      if (!field) continue;
+      const rendered = value?.text ?? value?.name ?? value?.title ?? value?.date ?? value?.number;
+      if (rendered === undefined || rendered === null) continue;
+      lines.push(`  - ${field}: ${inlineText(String(rendered), "")}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+function renderDegradations(degradations) {
+  if (!degradations.length) return "";
+  const lines = ["### Unavailable optional context", "", "These optional sources could not be read through the builder App. Absence here is NOT an authoritative empty set; do not assume the field is unset."];
+  for (const entry of degradations) {
+    lines.push(`- ${inlineText(entry.source, "unknown")}: ${inlineText(entry.reason, "unavailable")}`);
+  }
+  return lines.join("\n");
+}
+
 export function buildClaimedIssueContext({
   repository,
   issueNumber,
   issue,
   comments = [],
+  dependencies = null,
+  timeline = null,
+  linkedPullRequests = null,
+  projectItems = null,
+  degradations = [],
   capturedAt = new Date().toISOString(),
   maxChars = DEFAULT_CLAIMED_ISSUE_CONTEXT_MAX_CHARS,
 }) {
@@ -100,7 +188,23 @@ export function buildClaimedIssueContext({
     `Issue updated: ${text(issue.updated_at || issue.updatedAt, "unknown")}`,
     `Snapshot captured: ${capturedAt}`,
   ].join("\n");
-  const fixed = `${header}${instructions}\n\n${issueHeader}\n\n### Issue body\n\n`;
+  const labels = Array.isArray(issue.labels) ? issue.labels : [];
+  const resolvedLinkedPulls = Array.isArray(linkedPullRequests)
+    ? linkedPullRequests
+    : extractLinkedPullRequests(timeline || []);
+  // Structured issue facts are small, high-signal, and must never be crowded
+  // out by a long body or comment thread: render them ahead of the body and
+  // cap them so they cannot starve the narrative sections either.
+  const factSections = [
+    renderLabels(labels),
+    renderDependencies(dependencies || {}),
+    renderLinkedPullRequests(resolvedLinkedPulls),
+    projectItems === null ? "" : renderProjectFields(Array.isArray(projectItems) ? projectItems : []),
+    renderDegradations(Array.isArray(degradations) ? degradations : []),
+  ].filter(Boolean).join("\n\n");
+  const factsBudget = Math.max(600, Math.min(6_000, Math.floor((maxChars - FOOTER_RESERVE_CHARS) * 0.2)));
+  const facts = truncate(factSections, factsBudget);
+  const fixed = `${header}${instructions}\n\n${issueHeader}\n\n${facts.value}\n\n### Issue body\n\n`;
   // Triage comments often contain the executable acceptance boundary. Reserve
   // meaningful space for them instead of allowing a long issue body to crowd
   // every comment out of the immutable snapshot.
@@ -109,7 +213,7 @@ export function buildClaimedIssueContext({
   const bodyBudget = Math.max(1_000, contentBudget - fixed.length - minimumCommentReserve);
   const issueBody = truncate(sanitizeUntrustedText(text(issue.body, "(empty issue body)")), bodyBudget);
   let rendered = `${fixed}${issueBody.value}`;
-  let truncated = issueBody.truncated;
+  let truncated = issueBody.truncated || facts.truncated;
   let commentsIncluded = 0;
 
   for (const comment of sourceComments) {
@@ -149,10 +253,67 @@ export function buildClaimedIssueContext({
       issueUpdatedAt: issue.updated_at || issue.updatedAt || null,
       commentsAvailable: sourceComments.length,
       commentsIncluded,
+      labels: labels.map((label) => (typeof label === "string" ? label : String(label?.name || ""))).filter(Boolean).slice(0, 50),
+      blockedByCount: Array.isArray(dependencies?.blockedBy) ? dependencies.blockedBy.length : 0,
+      blockingCount: Array.isArray(dependencies?.blocking) ? dependencies.blocking.length : 0,
+      linkedPullRequests: resolvedLinkedPulls.slice(0, 25).map((pull) => ({ number: pull.number, state: pull.state, merged: pull.merged })),
+      projectItemCount: Array.isArray(projectItems) ? projectItems.length : 0,
+      degradedFields: (Array.isArray(degradations) ? degradations : []).map((entry) => entry.source),
       truncated,
       sha256: createHash("sha256").update(rendered).digest("hex"),
     },
   };
+}
+
+export const REQUIRED_ISSUE_SOURCES = ["issue", "comments", "labels", "dependencies", "linkedPullRequests"];
+export const OPTIONAL_ISSUE_SOURCES = ["projectFields"];
+export const DEFAULT_ISSUE_HYDRATION_ATTEMPTS = 3;
+
+// A deterministic HTTP answer is authoritative and must not be retried. Only a
+// rate limit, a server fault, or a transport failure without a status can be
+// the same request tried again.
+export function isRetryableHydrationFailure(error) {
+  const status = Number(error?.status);
+  if (!Number.isFinite(status)) return true;
+  return status === 429 || (status >= 500 && status <= 599);
+}
+
+// Retry exhaustion, a server fault, and a transport failure are never an empty
+// set: they fail the whole hydration closed. Only a permission denial or an
+// absent endpoint may degrade, and only for a source declared optional.
+function degradationReason(error) {
+  const status = Number(error?.status);
+  if (status === 403 || status === 401) return `permission denied (HTTP ${status})`;
+  if (status === 404 || status === 410) return `unavailable on this GitHub deployment (HTTP ${status})`;
+  if (status === 422) return "unsupported for this issue (HTTP 422)";
+  return null;
+}
+
+async function readSource({ name, endpoint, required, unsupportedIsDegraded = false, read, attempts, degradations }) {
+  const record = { name, endpoint, status: "ok", attempts: 0, itemCount: 0, sha256: null };
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    record.attempts = attempt;
+    try {
+      const value = await read();
+      record.itemCount = Array.isArray(value) ? value.length : value === null || value === undefined ? 0 : 1;
+      record.sha256 = createHash("sha256").update(JSON.stringify(value ?? null)).digest("hex");
+      return { value, record };
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableHydrationFailure(error)) break;
+    }
+  }
+  const reason = degradationReason(lastError);
+  const mayDegrade = reason
+    && (!required || (unsupportedIsDegraded && /HTTP (404|410)\)$/.test(reason)));
+  if (!mayDegrade) {
+    throw new Error(`required issue fact "${name}" could not be read from ${endpoint} after ${record.attempts} attempt(s): ${lastError?.message || "unknown failure"}`, { cause: lastError });
+  }
+  record.status = "degraded";
+  record.reason = reason;
+  degradations.push({ source: name, reason });
+  return { value: null, record };
 }
 
 export async function hydrateClaimedIssueTask({
@@ -165,14 +326,62 @@ export async function hydrateClaimedIssueTask({
   evidenceStore = null,
   evidenceScope = null,
   cacheMaxAgeMs = DEFAULT_CLAIMED_ISSUE_CACHE_MAX_AGE_MS,
+  attempts = DEFAULT_ISSUE_HYDRATION_ATTEMPTS,
+  authority = null,
 }) {
   try {
+    if (!client) throw new Error("no bound builder App client is available for this repository");
     const loaded = async () => {
+      const degradations = [];
+      const records = [];
+      const collect = async (options) => {
+        const { value, record } = await readSource({ ...options, attempts, degradations });
+        records.push(record);
+        return value;
+      };
+      const missing = (method) => async () => {
+        const error = new Error(`the bound builder client does not expose ${method}`);
+        error.status = 404;
+        throw error;
+      };
       const [issue, comments] = await Promise.all([
-        client.getIssue(issueNumber),
-        client.getIssueComments(issueNumber),
+        collect({
+          name: "issue", required: true,
+          endpoint: `GET /repos/${repository}/issues/${issueNumber}`,
+          read: () => client.getIssue(issueNumber),
+        }),
+        collect({
+          name: "comments", required: true,
+          endpoint: `GET /repos/${repository}/issues/${issueNumber}/comments`,
+          read: () => client.getIssueComments(issueNumber),
+        }),
       ]);
-      return { issue, comments };
+      if (!issue || typeof issue !== "object") throw new Error("required issue fact \"issue\" was malformed");
+      if (!Array.isArray(comments)) throw new Error("required issue fact \"comments\" was malformed");
+      if (!Array.isArray(issue.labels)) throw new Error("required issue fact \"labels\" was malformed");
+      records.push({
+        name: "labels", endpoint: `derived from GET /repos/${repository}/issues/${issueNumber}`,
+        status: "ok", attempts: 1, itemCount: issue.labels.length,
+        sha256: createHash("sha256").update(JSON.stringify(issue.labels)).digest("hex"),
+      });
+      const [dependencies, timeline, projectItems] = await Promise.all([
+        collect({
+          name: "dependencies", required: true, unsupportedIsDegraded: true,
+          endpoint: `GET /repos/${repository}/issues/${issueNumber}/dependencies`,
+          read: client.getIssueDependencies ? () => client.getIssueDependencies(issueNumber) : missing("getIssueDependencies"),
+        }),
+        collect({
+          name: "linkedPullRequests", required: true,
+          endpoint: `GET /repos/${repository}/issues/${issueNumber}/timeline`,
+          read: client.getIssueTimeline ? () => client.getIssueTimeline(issueNumber) : missing("getIssueTimeline"),
+        }),
+        collect({
+          name: "projectFields", required: false,
+          endpoint: `POST /graphql (projectItems for ${repository}#${issueNumber})`,
+          read: client.getIssueProjectItems ? () => client.getIssueProjectItems(issueNumber) : missing("getIssueProjectItems"),
+        }),
+      ]);
+      return { issue, comments, dependencies, timeline, projectItems, degradations, records };
     };
     const snapshot = evidenceStore
       ? await evidenceStore.getOrLoad({
@@ -184,11 +393,37 @@ export async function hydrateClaimedIssueTask({
         load: loaded,
       })
       : { value: await loaded(), cache: "disabled", digest: null };
-    const { issue, comments } = snapshot.value;
-    const context = buildClaimedIssueContext({ repository, issueNumber, issue, comments, capturedAt, maxChars });
+    const { issue, comments, dependencies, timeline, projectItems, degradations = [], records = [] } = snapshot.value;
+    const context = buildClaimedIssueContext({
+      repository, issueNumber, issue, comments, dependencies, timeline,
+      projectItems: projectItems ?? null, degradations, capturedAt, maxChars,
+    });
     return {
       task: `${String(task || "").trim()}\n\n${context.text}`.trim(),
-      metadata: { ...context.metadata, evidenceDigest: snapshot.digest, cache: snapshot.cache },
+      metadata: {
+        ...context.metadata,
+        evidenceDigest: snapshot.digest,
+        cache: snapshot.cache,
+        // Bounded provenance: a fixed source table plus the verified App
+        // identity. No fetched payload is echoed back into collaboration state.
+        provenance: {
+          method: "github_app",
+          builderLogin: authority?.login || null,
+          appId: authority?.appId ?? null,
+          installationId: authority?.installationId ?? null,
+          capturedAt,
+          cache: snapshot.cache,
+          sources: records.map((record) => ({
+            name: record.name,
+            endpoint: String(record.endpoint).slice(0, 200),
+            status: record.status,
+            attempts: record.attempts,
+            itemCount: record.itemCount,
+            sha256: record.sha256,
+            ...(record.reason ? { reason: String(record.reason).slice(0, 200) } : {}),
+          })),
+        },
+      },
       cache: snapshot.cache,
     };
   } catch (error) {

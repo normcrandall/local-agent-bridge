@@ -581,6 +581,12 @@ const issueClaimSchema = z.object({
 }).strict().optional().describe(
   "Durable issue claim lease configuration.",
 );
+const issueTargetSchema = z.object({
+  repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
+  issueNumber: z.number().int().min(1),
+}).strict().optional().describe(
+  "Explicit GitHub issue this lane implements. Required issue facts are hydrated through the bound builder App before claim publication and provider launch. taskNumber remains provider rotation only and is never read as an issue reference.",
+);
 const budgetSchema = z.object({
   maxCostUsd: z.number().positive().optional(),
   maxTokens: z.number().int().positive().optional(),
@@ -701,7 +707,8 @@ server.registerTool(
       githubReview: githubReviewSchema,
       githubBuilder: githubBuilderSchema,
       issueClaim: issueClaimSchema,
-      taskNumber: z.number().int().nonnegative().optional().describe("When supplied, rotate the writer deterministically across the selected agents unless writer is explicit."),
+      issueTarget: issueTargetSchema,
+      taskNumber: z.number().int().nonnegative().optional().describe("Provider rotation seed only. It never identifies a GitHub issue; use issueTarget for that."),
       rotationOffset: z.number().int().default(0),
       worktree: worktreeSchema,
       budget: budgetSchema,
@@ -794,6 +801,17 @@ server.registerTool(
     let verificationPlan = { reusable: [], pendingCommands: input.verificationCommands || [], avoidedCommands: 0, estimatedAvoidedMs: 0 };
     const evidenceStore = createEvidenceStore({ directory: EVIDENCE_ROOT });
 
+    // The explicit issue target is authoritative for what this lane implements.
+    // A claim always implies its own target; when both are supplied they must
+    // agree exactly rather than silently preferring one binding.
+    if (input.issueTarget && input.issueClaim
+      && (input.issueTarget.repository !== input.issueClaim.repository
+        || input.issueTarget.issueNumber !== input.issueClaim.issueNumber)) {
+      throw new Error(`issueTarget ${input.issueTarget.repository}#${input.issueTarget.issueNumber} does not match issueClaim ${input.issueClaim.repository}#${input.issueClaim.issueNumber}.`);
+    }
+    let resolvedIssueTarget = input.issueTarget
+      || (input.issueClaim ? { repository: input.issueClaim.repository, issueNumber: input.issueClaim.issueNumber } : null);
+
     if (input.issueClaim) {
       const { acquireClaimLease } = await import("./github-issue-claims.mjs");
       const { createInstallationToken } = await import("./github-app-auth.mjs");
@@ -832,7 +850,7 @@ server.registerTool(
         authority: resolvedIssueClaim.authority,
         headSha,
         issueNumber: input.issueClaim.issueNumber,
-        allowedOperations: ["get_issue", "add_issue_label", "remove_issue_label", "get_issue_comments", "post_issue_comment", "update_issue_comment", "delete_issue_comment", "list_tag_locks", "acquire_tag_lock", "release_tag_lock"],
+        allowedOperations: ["get_issue", "add_issue_label", "remove_issue_label", "get_issue_comments", "get_issue_timeline", "get_issue_dependencies", "get_issue_project_items", "post_issue_comment", "update_issue_comment", "delete_issue_comment", "list_tag_locks", "acquire_tag_lock", "release_tag_lock"],
         workspace: requestedWorkspace,
         fetchImpl: fetch,
       });
@@ -844,6 +862,7 @@ server.registerTool(
         task: input.task,
         evidenceStore,
         evidenceScope: { repository, headSha },
+        authority: resolvedIssueClaim.authority,
       });
       resolvedTask = hydrated.task;
       issueContext = hydrated.metadata;
@@ -884,6 +903,48 @@ server.registerTool(
         workspaceRoot: WORKSPACE_ROOT,
       });
       leaseAcquired = true;
+    } else if (resolvedIssueTarget) {
+      // Target without a claim: hydrate read-only through the same builder App.
+      // There is no ambient-credential or unauthenticated public fallback; a
+      // missing bound client fails closed before any provider launches.
+      const { createInstallationToken } = await import("./github-app-auth.mjs");
+      const { createBoundBuilderClient } = await import("./github-builder-client.mjs");
+      const repository = resolvedIssueTarget.repository;
+      const credential = await createInstallationToken({ role: "builder", repository }).catch((error) => {
+        throw new Error(`Unable to hydrate issue ${repository}#${resolvedIssueTarget.issueNumber} before provider launch: no bound builder App client is available (${error.message}).`, { cause: error });
+      });
+      const revisions = resolveIssueClaimRevisions({
+        workspace: requestedWorkspace,
+        headSha: input.githubBuilder?.headSha,
+        baseRef: input.worktree?.base || "HEAD",
+      });
+      const readClient = createBoundBuilderClient({
+        apiUrl: process.env.GITHUB_BUILDER_API_URL || "https://api.github.com",
+        token: credential.token,
+        verifiedLogin: credential.verifiedLogin,
+        repository,
+        expectedLogin: credential.expectedLogin,
+        headSha: revisions.headSha,
+        issueNumber: resolvedIssueTarget.issueNumber,
+        allowedOperations: ["get_issue", "get_issue_comments", "get_issue_timeline", "get_issue_dependencies", "get_issue_project_items"],
+        workspace: requestedWorkspace,
+        fetchImpl: fetch,
+      });
+      const hydrated = await hydrateClaimedIssueTask({
+        client: readClient,
+        repository,
+        issueNumber: resolvedIssueTarget.issueNumber,
+        task: input.task,
+        evidenceStore,
+        evidenceScope: { repository, headSha: revisions.headSha },
+        authority: {
+          login: credential.expectedLogin,
+          appId: credential.appId,
+          installationId: credential.installationId,
+        },
+      });
+      resolvedTask = hydrated.task;
+      issueContext = hydrated.metadata;
     }
 
     try {
@@ -1013,6 +1074,7 @@ server.registerTool(
         githubReview: input.githubReview || null,
         githubBuilder: effectiveGithubBuilder,
         issueClaim: resolvedIssueClaim,
+        issueTarget: resolvedIssueTarget,
         issueContext,
         evidence: {
           repository: repositoryEvidence,
@@ -1950,6 +2012,7 @@ server.registerTool(
       githubReview: githubReviewSchema,
       githubBuilder: githubBuilderSchema,
       issueClaim: issueClaimSchema,
+      issueTarget: issueTargetSchema,
       budget: budgetSchema,
       providerRecovery: providerRecoverySchema,
       ciTracking: ciTrackingSchema,
@@ -1974,6 +2037,7 @@ server.registerTool(
     githubReview,
     githubBuilder,
     issueClaim,
+    issueTarget,
     budget,
     providerRecovery,
     ciTracking,
@@ -2026,6 +2090,18 @@ server.registerTool(
         ),
       })
       : current.providerConcurrency || await loadProviderConcurrency();
+    // Continuation preserves the hydrated snapshot verbatim; it may neither
+    // retarget the lane nor silently re-fetch a different issue's facts.
+    if (issueTarget) {
+      const existingTarget = current.issueTarget
+        || (current.issueClaim ? { repository: current.issueClaim.repository, issueNumber: current.issueClaim.issueNumber } : null);
+      if (!existingTarget) {
+        throw new Error("An explicit issue target cannot be added during continuation; bind it with start_collaboration.");
+      }
+      if (issueTarget.repository !== existingTarget.repository || issueTarget.issueNumber !== existingTarget.issueNumber) {
+        throw new Error(`Continuation cannot change the issue target from ${existingTarget.repository}#${existingTarget.issueNumber} to ${issueTarget.repository}#${issueTarget.issueNumber}.`);
+      }
+    }
     let resolvedContinuationIssueClaim = current.issueClaim || null;
     if (issueClaim) {
       if (!current.issueClaim) {

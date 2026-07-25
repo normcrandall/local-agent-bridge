@@ -1248,6 +1248,48 @@ export function createBoundBuilderClient({
     });
   }
 
+  async function getIssueTimeline(issueNum) {
+    authorize("get_issue_timeline");
+    assertIssueBound(issueNum);
+    await identity();
+    return await requestPages({
+      ...context,
+      path: `/repos/${repository}/issues/${issueNum}/timeline?per_page=100`,
+    });
+  }
+
+  async function getIssueDependencies(issueNum) {
+    authorize("get_issue_dependencies");
+    assertIssueBound(issueNum);
+    await identity();
+    const [blockedBy, blocking] = await Promise.all([
+      requestPages({ ...context, path: `/repos/${repository}/issues/${issueNum}/dependencies/blocked_by?per_page=100` }),
+      requestPages({ ...context, path: `/repos/${repository}/issues/${issueNum}/dependencies/blocking?per_page=100` }),
+    ]);
+    return { blockedBy, blocking };
+  }
+
+  async function getIssueProjectItems(issueNum) {
+    authorize("get_issue_project_items");
+    assertIssueBound(issueNum);
+    await identity();
+    const [owner, name] = repository.split("/");
+    const query = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){projectItems(first:20,includeArchived:false){nodes{project{title number}fieldValues(first:50){nodes{__typename ... on ProjectV2ItemFieldTextValue{text field{... on ProjectV2FieldCommon{name}}} ... on ProjectV2ItemFieldNumberValue{number field{... on ProjectV2FieldCommon{name}}} ... on ProjectV2ItemFieldDateValue{date field{... on ProjectV2FieldCommon{name}}} ... on ProjectV2ItemFieldSingleSelectValue{name field{... on ProjectV2FieldCommon{name}}} ... on ProjectV2ItemFieldIterationValue{title field{... on ProjectV2FieldCommon{name}}}}}}}}}}`;
+    const result = await request({
+      ...context, path: "/graphql", method: "POST",
+      body: { query, variables: { owner, name, number: Number(issueNum) } },
+    });
+    if (result?.errors?.length) {
+      const error = new Error(`GitHub project field query failed: ${result.errors.map((entry) => entry.message).join("; ")}`);
+      // GraphQL reports authorization and unsupported-feature failures with a
+      // 200 status; surface a status so the hydration classifier can treat a
+      // scope denial exactly like its REST equivalent.
+      error.status = result.errors.some((entry) => /permission|scope|forbidden|not authorized/i.test(entry?.message || "")) ? 403 : 422;
+      throw error;
+    }
+    return result?.data?.repository?.issue?.projectItems?.nodes || [];
+  }
+
   async function postIssueComment(issueNum, body) {
     authorize("post_issue_comment");
     assertIssueBound(issueNum);
@@ -1333,5 +1375,5 @@ export function createBoundBuilderClient({
     });
   }
 
-  return { identity, ensurePullRequest, reviewThreads, replyReviewThread, resolveReviewThread, markReady, merge, createBranch, pushBranch, replaceBranch, getIssue, addIssueLabel, removeIssueLabel, getIssueComments, postIssueComment, updateIssueComment, deleteIssueComment, listTagLocks, acquireTagLock, releaseTagLock, expectedLogin, repository, issueNumber, authority: boundAuthority };
+  return { identity, ensurePullRequest, reviewThreads, replyReviewThread, resolveReviewThread, markReady, merge, createBranch, pushBranch, replaceBranch, getIssue, addIssueLabel, removeIssueLabel, getIssueComments, getIssueTimeline, getIssueDependencies, getIssueProjectItems, postIssueComment, updateIssueComment, deleteIssueComment, listTagLocks, acquireTagLock, releaseTagLock, expectedLogin, repository, issueNumber, authority: boundAuthority };
 }
