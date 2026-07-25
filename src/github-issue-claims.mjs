@@ -579,6 +579,7 @@ export async function releaseClaimLease({ client, issueNumber, collaborationId, 
     throw new Error(`Invalid claim lease release outcome: ${outcome}.`);
   }
 
+  requireBoundAuthority(client);
   const claims = await parseClaims(client, issueNumber);
   const ours = canonicalClaim(claims.filter(c => c.data.collaboration === collaborationId));
   if (!ours) throw new Error(`No claim lease found for collaboration ${collaborationId} on issue #${issueNumber}.`);
@@ -612,6 +613,7 @@ export async function releaseClaimLease({ client, issueNumber, collaborationId, 
 }
 
 export async function recoverIssueClaim({ client, issueNumber, collaborationId, generation, workspaceRoot, ttlMs = 300_000 }) {
+  requireBoundAuthority(client);
   const claims = await parseClaims(client, issueNumber);
   const canonical = canonicalClaim(claims);
   const ours = canonicalClaim(claims.filter((claim) => claim.data.collaboration === collaborationId));

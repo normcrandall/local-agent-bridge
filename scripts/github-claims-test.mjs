@@ -293,6 +293,10 @@ async function runTests() {
     ...baseClientConfig,
     allowedOperations: ["get_issue"]
   });
+  const unboundClient = createBoundBuilderClient({
+    ...baseClientConfig,
+    authority: undefined,
+  });
   await assert.rejects(
     unauthorizedClient.addIssueLabel(42, "agent:in-progress"),
     /GitHub builder operation is not authorized/
@@ -988,6 +992,15 @@ async function runTests() {
   });
   await refreshClaimLease({ client, issueNumber: 42, collaborationId: "bridge-44444444-3333-4444-5555-666666666666", phase: "completed" });
   await assert.rejects(
+    releaseClaimLease({
+      client: unboundClient,
+      issueNumber: 42,
+      collaborationId: "bridge-44444444-3333-4444-5555-666666666666",
+      outcome: "cancelled",
+    }),
+    /Claim mutation requires a verified GitHub App authority binding/,
+  );
+  await assert.rejects(
     acquireClaimLease({
       client: client2,
       issueNumber: 42,
@@ -1070,6 +1083,10 @@ async function runTests() {
   mock.clear();
   mock.getLabels().add("agent:in-progress");
   mock.getRefs().set("refs/tags/claims/issue-42-generation-3", "1111111111111111111111111111111111111111");
+  await assert.rejects(
+    recoverIssueClaim({ client: unboundClient, issueNumber: 42, collaborationId: "bridge-orphan", generation: 3 }),
+    /Claim mutation requires a verified GitHub App authority binding/,
+  );
   await assert.rejects(
     recoverIssueClaim({ client, issueNumber: 42, collaborationId: "bridge-orphan", generation: 2 }),
     /Generation 2 does not exist/,
