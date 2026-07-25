@@ -200,7 +200,7 @@ switch (command) {
   case "policy": {
     const subcommand = args.find((arg) => !arg.startsWith("-")) || "explain";
     if (subcommand !== "explain") throw new Error("policy supports explain.");
-    const policy = await resolveDeliveryPolicy({ workspace: resolve(value("--workspace", process.cwd())) });
+    const policy = await resolveDeliveryPolicy({ workspace: resolve(value("--workspace", process.cwd())), diagnostic: true });
     const format = args.includes("--json") ? "json" : value("--format", "human");
     if (format === "json") {
       json(deliveryPolicyExplainDocument(policy));

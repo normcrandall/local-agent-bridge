@@ -42,7 +42,7 @@ async function main() {
     }
   }
 
-  const policy = await resolveDeliveryPolicy({ workspace: resolve(workspace) });
+  const policy = await resolveDeliveryPolicy({ workspace: resolve(workspace), diagnostic: true });
   process.stdout.write(asJson
     ? `${JSON.stringify(deliveryPolicyExplainDocument(policy), null, 2)}\n`
     : `${explainDeliveryPolicy(policy, { format: "human" })}\n`);

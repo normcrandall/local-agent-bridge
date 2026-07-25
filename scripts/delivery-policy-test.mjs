@@ -18,7 +18,7 @@ const root = resolve(import.meta.dirname, "..");
 const temporary = await mkdtemp(resolve(tmpdir(), "bridge-delivery-policy-"));
 
 /** Build an isolated machine layer so the suite never reads the developer's own config. */
-async function machineLayer(name, { apps = true, concurrency = {}, disabledModels = {} } = {}) {
+async function machineLayer(name, { apps = true, concurrency = {}, disabledModels = {}, mergeEnforcement = "broker" } = {}) {
   const home = resolve(temporary, name, "home");
   const configDir = resolve(home, ".config/local-agent-bridge");
   await mkdir(configDir, { recursive: true });
@@ -39,6 +39,7 @@ async function machineLayer(name, { apps = true, concurrency = {}, disabledModel
     await chmod(keyPath, 0o600);
     await writeFile(appsPath, JSON.stringify({
       version: 1,
+      github: { mergeEnforcement },
       mergePolicy: { trustedHumanReviewers: ["a-human"], autonomousMergeRepositories: ["owner/*"] },
       roles: {
         builder: { appId: "1", expectedLogin: "test-builder[bot]", privateKeyPath: keyPath, installations: { owner: 1 } },
@@ -175,6 +176,77 @@ try {
   // Review-only providers are never writers.
   assert.deepEqual(policy.writerProviders, ["claude", "codex", "antigravity"]);
 
+  const runDeniedWriter = await resolveDeliveryPolicy({
+    workspace,
+    home: governed.home,
+    environment: governed.environment,
+    options: { deniedProviders: ["codex"] },
+  });
+  assert.deepEqual(runDeniedWriter.writerProviders, ["claude", "antigravity"]);
+  assert.equal(runDeniedWriter.decisions.writerProviders.source, "per_run_narrowing");
+
+  // Per-run verification input can add requirements and narrow reviewers, but cannot erase
+  // a repository gate by replacing the containing object.
+  const narrowedVerification = await resolveDeliveryPolicy({
+    workspace,
+    home: governed.home,
+    environment: governed.environment,
+    options: {
+      verificationRoles: {
+        requiredGates: [],
+        verificationCommands: ["git diff --check"],
+        reviewerRoles: ["codex", "claude"],
+      },
+    },
+  });
+  assert.deepEqual(narrowedVerification.verificationRoles.requiredGates, ["npm run smoke"]);
+  assert.deepEqual(narrowedVerification.verificationRoles.verificationCommands, ["git diff --check"]);
+  assert.deepEqual(narrowedVerification.verificationRoles.reviewerRoles, ["codex"]);
+
+  // Merge enforcement is a monotonic floor. Repository/per-run layers may strengthen it but
+  // may not downgrade the machine setting, and uninspected GitHub capability is explicit.
+  const rulesetMachine = await machineLayer("ruleset-machine", { mergeEnforcement: "organization-ruleset" });
+  const rulesetWorkspace = await repositoryWorkspace("ruleset-machine", {
+    version: 1,
+    mergeEnforcement: "branch-protection",
+  });
+  const uninspectedRuleset = await resolveDeliveryPolicy({
+    workspace: rulesetWorkspace,
+    home: rulesetMachine.home,
+    environment: rulesetMachine.environment,
+    options: { mergeEnforcement: "broker" },
+  });
+  assert.equal(uninspectedRuleset.merge.configuredMode, "organization-ruleset");
+  assert.equal(uninspectedRuleset.merge.blocked, true);
+  assert.equal(uninspectedRuleset.merge.verificationSource, "not-inspected");
+  assert.equal(uninspectedRuleset.decisions.mergeEnforcement.source, "machine_default");
+  assert.equal(uninspectedRuleset.rejections.filter((entry) => entry.field === "mergeEnforcement").length, 2);
+  assert.match(uninspectedRuleset.rejections[0].origin, /delivery-policy\.json$/);
+  assert.equal(uninspectedRuleset.rejections[1].origin, "per_run_narrowing");
+
+  const verifiedRuleset = await resolveDeliveryPolicy({
+    workspace: rulesetWorkspace,
+    home: rulesetMachine.home,
+    environment: rulesetMachine.environment,
+    mergeCapabilities: {
+      organizationRuleset: { verified: true, source: "test:ruleset", reason: "Trusted App-bound ruleset verified." },
+    },
+  });
+  assert.equal(verifiedRuleset.merge.effectiveMode, "organization-ruleset");
+  assert.equal(verifiedRuleset.merge.verificationSource, "test:ruleset");
+
+  const strongerRepository = await repositoryWorkspace("stronger-repository", {
+    version: 1,
+    mergeEnforcement: "branch-protection",
+  });
+  const strengthened = await resolveDeliveryPolicy({
+    workspace: strongerRepository,
+    home: governed.home,
+    environment: governed.environment,
+  });
+  assert.equal(strengthened.merge.configuredMode, "branch-protection");
+  assert.equal(strengthened.decisions.mergeEnforcement.source, "repository_policy");
+
   // Workspace recipes stay preview-only until the machine approves the exact list.
   assert.equal(policy.workspaceRecipe.phases.preRetire.commandCount, 1);
   assert.equal(policy.workspaceRecipe.phases.preRetire.approved, false);
@@ -241,6 +313,22 @@ try {
   // --- Consumers ------------------------------------------------------------
   const config = await effectiveBridgeConfig({ workspace, home: governed.home, environment: governed.environment });
   assert.equal(config.deliveryPolicy.productFacts.productName, "repo-product");
+
+  // Operational resolvers fail closed on malformed repository policy, while diagnostics retain
+  // an empty repository layer and report the parse rejection.
+  const malformedWorkspace = await repositoryWorkspace("malformed", null);
+  await writeFile(resolve(malformedWorkspace, ".agent-bridge/delivery-policy.json"), "{not-json");
+  await assert.rejects(
+    () => resolveDeliveryPolicy({ workspace: malformedWorkspace, home: governed.home, environment: governed.environment }),
+    /Failed to parse JSON file/,
+  );
+  const malformedDiagnostic = await effectiveBridgeConfig({
+    workspace: malformedWorkspace,
+    home: governed.home,
+    environment: governed.environment,
+  });
+  assert.equal(malformedDiagnostic.deliveryPolicy.productFacts.defaultBranch, "main");
+  assert.match(malformedDiagnostic.deliveryPolicy.rejections[0].reason, /Failed to parse JSON file/);
 
   const cli = execFileSync(process.execPath, [
     resolve(root, "scripts/bridge-ops.mjs"), "policy", "explain", "--workspace", workspace, "--json",

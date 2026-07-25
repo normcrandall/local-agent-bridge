@@ -32,6 +32,14 @@ export const DELIVERY_PROFILES = Object.freeze(["local-only", "github-governed"]
 /** Delivery authority rank. Narrowing moves down this ladder; nothing may move up. */
 const PROFILE_AUTHORITY = Object.freeze({ "local-only": 0, "github-governed": 1 });
 
+/** Stronger merge enforcement removes local merge authority, so lower layers may only move up. */
+const MERGE_ENFORCEMENT_STRENGTH = Object.freeze({
+  broker: 0,
+  auto: 1,
+  "branch-protection": 2,
+  "organization-ruleset": 3,
+});
+
 export const REPOSITORY_POLICY_FILE = ".agent-bridge/delivery-policy.json";
 
 /** Rules no configuration layer may relax. */
@@ -196,12 +204,24 @@ function readJsonFile(path) {
 }
 
 /** Load and sanitize `.agent-bridge/delivery-policy.json` for one workspace. */
-export function loadRepositoryDeliveryPolicy(workspace) {
+export function loadRepositoryDeliveryPolicy(workspace, { diagnostic = false } = {}) {
   const path = resolve(workspace, REPOSITORY_POLICY_FILE);
-  const raw = readJsonFile(path);
+  let raw;
+  try {
+    raw = readJsonFile(path);
+  } catch (error) {
+    if (!diagnostic) throw error;
+    return {
+      path,
+      policy: {},
+      rejections: [{ origin: path, field: "$", reason: error.message }],
+    };
+  }
   if (!raw) return { path: null, policy: {}, rejections: [] };
   if (raw.version !== undefined && raw.version !== DELIVERY_POLICY_VERSION) {
-    throw new Error(`Unsupported repository delivery policy version in ${path}.`);
+    const message = `Unsupported repository delivery policy version in ${path}.`;
+    if (!diagnostic) throw new Error(message);
+    return { path, policy: {}, rejections: [{ origin: path, field: "version", reason: message }] };
   }
   const { sanitized, rejections } = auditRepositoryPolicyContent(raw, { origin: path });
   delete sanitized.version;
@@ -319,6 +339,100 @@ function resolveOwnedValue(ledger, key, { machineDefault, layers = [], detailFor
   return ledger.record(key, { value, source, detail, considered });
 }
 
+function normalizedStringList(value) {
+  return [...new Set((Array.isArray(value) ? value : []).map((entry) => String(entry).trim()).filter(Boolean))];
+}
+
+/** Verification gates accumulate; a per-run request may narrow reviewers but never erase repository gates. */
+function resolveVerificationRoles(ledger, { repositoryValue, perRunValue, repositoryOrigin, rejections }) {
+  const repository = isPlainObject(repositoryValue) ? repositoryValue : {};
+  const run = isPlainObject(perRunValue) ? perRunValue : {};
+  const requiredGates = normalizedStringList([
+    ...normalizedStringList(repository.requiredGates),
+    ...normalizedStringList(run.requiredGates),
+  ]);
+  const verificationCommands = normalizedStringList([
+    ...normalizedStringList(repository.verificationCommands),
+    ...normalizedStringList(run.verificationCommands),
+  ]);
+  const repositoryReviewers = normalizedStringList(repository.reviewerRoles);
+  const requestedReviewers = normalizedStringList(run.reviewerRoles);
+  const reviewerRoles = repositoryReviewers.length && requestedReviewers.length
+    ? repositoryReviewers.filter((role) => requestedReviewers.includes(role))
+    : repositoryReviewers.length ? repositoryReviewers : requestedReviewers;
+
+  if (repositoryReviewers.length && requestedReviewers.length && !reviewerRoles.length) {
+    rejections.push({
+      origin: "per_run_narrowing",
+      field: "verificationRoles.reviewerRoles",
+      reason: `Per-run reviewer roles do not intersect the repository-authorized roles from ${repositoryOrigin}; no reviewer role is eligible.`,
+    });
+  }
+
+  const considered = [
+    { level: "machine_default", value: { requiredGates: [], reviewerRoles: [], verificationCommands: [] }, applied: true },
+    ...(repositoryValue === undefined ? [] : [{ level: "repository_policy", value: repositoryValue, applied: true }]),
+    ...(perRunValue === undefined ? [] : [{ level: "per_run_narrowing", value: perRunValue, applied: true }]),
+  ];
+  const source = perRunValue !== undefined ? "per_run_narrowing" : repositoryValue !== undefined ? "repository_policy" : "machine_default";
+  return ledger.record("verificationRoles", {
+    value: { requiredGates, reviewerRoles, verificationCommands },
+    source,
+    detail: perRunValue !== undefined
+      ? "Per-run verification gates were added and reviewer roles were intersected with the repository policy."
+      : repositoryValue !== undefined
+        ? `Verification roles and required gates come from ${repositoryOrigin}.`
+        : "No repository verification policy supplied; using the bridge default.",
+    considered,
+  });
+}
+
+function resolveMergeEnforcementMode(ledger, { machineValue, machineOrigin, repositoryValue, perRunValue, repositoryOrigin, rejections }) {
+  const considered = [];
+  let value = "broker";
+  let source = "machine_default";
+  let origin = machineOrigin;
+
+  for (const candidate of [
+    { level: "machine_default", origin: machineOrigin, value: machineValue || "broker" },
+    { level: "repository_policy", origin: repositoryOrigin, value: repositoryValue },
+    { level: "per_run_narrowing", origin: "per_run_narrowing", value: perRunValue },
+  ]) {
+    if (candidate.value === undefined || candidate.value === null || candidate.value === "") continue;
+    const mode = typeof candidate.value === "string" ? candidate.value.trim() : candidate.value;
+    if (!GITHUB_MERGE_ENFORCEMENT_MODES.includes(mode)) {
+      considered.push({ level: candidate.level, value: candidate.value, applied: false });
+      rejections.push({
+        origin: candidate.origin,
+        field: "mergeEnforcement",
+        reason: `Unknown merge enforcement mode ${JSON.stringify(candidate.value)}; keeping ${value}.`,
+      });
+      continue;
+    }
+    const applied = considered.length === 0 || MERGE_ENFORCEMENT_STRENGTH[mode] > MERGE_ENFORCEMENT_STRENGTH[value];
+    considered.push({ level: candidate.level, value: mode, applied });
+    if (applied) {
+      value = mode;
+      source = candidate.level;
+      origin = candidate.origin;
+    } else if (MERGE_ENFORCEMENT_STRENGTH[mode] < MERGE_ENFORCEMENT_STRENGTH[value]) {
+      rejections.push({
+        origin: candidate.origin,
+        field: "mergeEnforcement",
+        reason: `${candidate.level} requested ${mode}, which would weaken the ${value} enforcement floor from ${origin}; ignored.`,
+      });
+    }
+  }
+
+  ledger.record("configuredMergeEnforcement", {
+    value,
+    source,
+    detail: `${source} selected the strongest configured merge-enforcement floor: ${value}.`,
+    considered,
+  });
+  return { value, source };
+}
+
 /** Record an attempt to author a machine-owned domain from a lower layer. */
 function rejectMachineOwnedAttempts({ policy, origin, keys, rejections }) {
   for (const key of keys) {
@@ -414,6 +528,8 @@ function resolveDeliveryProfile(ledger, { available, layers, rejections }) {
  * @param {object} input
  * @param {string} [input.workspace] Exact repository worktree.
  * @param {object} [input.options] Per-run narrowing (alias: `input.run`).
+ * @param {object} [input.mergeCapabilities] Observed GitHub enforcement capabilities.
+ * @param {boolean} [input.diagnostic] Report malformed repository policy instead of granting from it.
  * @returns {Promise<object>} Effective values, provenance, rejections, and per-surface views.
  */
 export async function resolveDeliveryPolicy({
@@ -422,6 +538,8 @@ export async function resolveDeliveryPolicy({
   environment = process.env,
   options,
   run,
+  mergeCapabilities,
+  diagnostic = false,
 } = {}) {
   const absWorkspace = resolve(workspace);
   const perRun = options || run || {};
@@ -451,7 +569,7 @@ export async function resolveDeliveryPolicy({
   });
 
   // --- Repository layer ----------------------------------------------------
-  const repository = loadRepositoryDeliveryPolicy(absWorkspace);
+  const repository = loadRepositoryDeliveryPolicy(absWorkspace, { diagnostic });
   rejections.push(...repository.rejections);
   const repoPolicy = repository.policy;
   const repoOrigin = repository.path || REPOSITORY_POLICY_FILE;
@@ -511,9 +629,9 @@ export async function resolveDeliveryPolicy({
   const writerProviders = machineProviders.filter((provider) => !deniedProviders.includes(provider));
   ledger.record("writerProviders", {
     value: writerProviders,
-    source: deniedProviders.length > PROTECTED_INVARIANTS.localOnlyProvidersAreReviewOnly.length
-      ? "repository_policy"
-      : "protected_invariant",
+    source: ledger.decisions.deniedWriterProviders.source === "machine_default"
+      ? "protected_invariant"
+      : ledger.decisions.deniedWriterProviders.source,
     detail: "Ollama and Docker Model Runner are review-only; remaining providers come from the machine roster minus narrowing.",
   });
 
@@ -594,15 +712,11 @@ export async function resolveDeliveryPolicy({
     detailFor: () => `Issue and pull-request lifecycle mappings come from ${repoOrigin}.`,
   });
 
-  const verificationRoles = resolveOwnedValue(ledger, "verificationRoles", {
-    machineDefault: { requiredGates: [], reviewerRoles: [], verificationCommands: [] },
-    layers: [
-      { level: "repository_policy", value: repoPolicy.verificationRoles },
-      { level: "per_run_narrowing", value: perRun.verificationRoles },
-    ],
-    detailFor: (layer) => (layer.level === "repository_policy"
-      ? `Verification roles and required gates come from ${repoOrigin}.`
-      : "Per-run input restricted verification roles for this run."),
+  const verificationRoles = resolveVerificationRoles(ledger, {
+    repositoryValue: repoPolicy.verificationRoles,
+    perRunValue: perRun.verificationRoles,
+    repositoryOrigin: repoOrigin,
+    rejections,
   });
 
   const repoPaths = Array.isArray(repoPolicy.pathRules?.protectedPaths) ? repoPolicy.pathRules.protectedPaths : [];
@@ -627,26 +741,28 @@ export async function resolveDeliveryPolicy({
   });
 
   // --- Merge enforcement ---------------------------------------------------
-  const configuredMergeMode = [perRun.mergeEnforcement, repoPolicy.mergeEnforcement, apps?.github?.mergeEnforcement]
-    .find((value) => typeof value === "string" && value.trim()) || "broker";
-  let merge;
-  if (!GITHUB_MERGE_ENFORCEMENT_MODES.includes(configuredMergeMode)) {
-    rejections.push({
-      origin: repoOrigin,
-      field: "mergeEnforcement",
-      reason: `Unknown merge enforcement mode ${JSON.stringify(configuredMergeMode)}; falling back to broker enforcement.`,
-    });
-    merge = resolveGitHubMergeEnforcement({ configuredMode: "broker" });
-  } else {
-    merge = resolveGitHubMergeEnforcement({ configuredMode: configuredMergeMode });
-  }
+  const configuredMerge = resolveMergeEnforcementMode(ledger, {
+    machineValue: apps?.github?.mergeEnforcement,
+    machineOrigin: identities.configPath || "machine GitHub App configuration",
+    repositoryValue: repoPolicy.mergeEnforcement,
+    perRunValue: perRun.mergeEnforcement,
+    repositoryOrigin: repoOrigin,
+    rejections,
+  });
+  const merge = configuredMerge.value !== "broker" && mergeCapabilities === undefined
+    ? {
+        configuredMode: configuredMerge.value,
+        effectiveMode: null,
+        verified: false,
+        blocked: true,
+        downgraded: false,
+        verificationSource: "not-inspected",
+        reason: `GitHub ${configuredMerge.value} enforcement is configured but repository capabilities were not inspected.`,
+      }
+    : resolveGitHubMergeEnforcement({ configuredMode: configuredMerge.value, capabilities: mergeCapabilities || {} });
   ledger.record("mergeEnforcement", {
     value: merge,
-    source: perRun.mergeEnforcement
-      ? "per_run_narrowing"
-      : repoPolicy.mergeEnforcement
-        ? "repository_policy"
-        : "machine_default",
+    source: configuredMerge.source,
     detail: merge.reason,
   });
 

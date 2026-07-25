@@ -14,7 +14,7 @@ export async function effectiveBridgeConfig({ workspace = process.cwd(), home = 
     try { fallbacks[provider] = loadConfiguredFallbackModels(provider, { configPath: fallbackPath }); }
     catch (error) { fallbacks[provider] = { error: error.message }; }
   }
-  const deliveryPolicy = await resolveDeliveryPolicy({ workspace, home, environment });
+  const deliveryPolicy = await resolveDeliveryPolicy({ workspace, home, environment, diagnostic: true });
   return {
     version: 1,
     workspace: resolve(workspace),

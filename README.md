@@ -211,6 +211,8 @@ Choose one machine-local mode:
 
 Explicit GitHub modes fail closed when their App-bound check cannot be verified. `auto` is the only mode that downgrades, and it never treats an unbound check name as trusted. A selected reviewer App must have **Commit statuses: Read and write** to publish the required `agent-review` context. These modes inspect existing GitHub configuration only; the bridge never creates or changes branch protection or rulesets.
 
+The machine-local mode is an enforcement floor. A repository policy or per-run narrowing may require a stricter mode (for example, moving from `broker` or `auto` to `organization-ruleset`), but it cannot downgrade the machine setting. Offline policy inspection reports stronger GitHub modes as `not-inspected` and blocked until live capability evidence is supplied; it never interprets missing evidence as a failed GitHub check. `bridge config effective` and `bridge policy explain` remain diagnostic when a repository policy is malformed: they report the parse/version rejection and ignore that repository layer, while delivery resolution fails closed.
+
 Produce a credential-free verification snapshot and give it to the read-only policy doctor:
 
 ```bash
