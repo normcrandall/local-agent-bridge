@@ -16,6 +16,18 @@ export function canPublishReviewStatus(permissions = {}) {
   return permissions.statuses === "write";
 }
 
+export function canonicalGitHubAppLogin(login) {
+  if (!GITHUB_LOGIN_PATTERN.test(login || "")) {
+    throw new Error(`GitHub App login is invalid: ${login || "unknown"}.`);
+  }
+  return `${String(login).toLowerCase().replace(/\[bot\]$/i, "")}[bot]`;
+}
+
+export function sameGitHubAppLogin(left, right) {
+  if (!left || !right) return false;
+  return canonicalGitHubAppLogin(left) === canonicalGitHubAppLogin(right);
+}
+
 export function assertGitHubAppPermissions(role, permissions = {}) {
   const permissionRole = role.startsWith("reviewer") ? "reviewer" : role;
   const required = GITHUB_APP_ROLE_PERMISSIONS[permissionRole];
@@ -40,9 +52,12 @@ function configuredRole(config, { role, reviewerProvider, expectedLogin }) {
   if (role !== "reviewer") return { selected: config?.roles?.[role], label: role };
   const reviewers = reviewerEntries(config);
   if (expectedLogin) {
-    const match = reviewers.find(([, selected]) => selected?.expectedLogin === expectedLogin);
+    const match = reviewers.find(([, selected]) => (
+      selected?.expectedLogin && sameGitHubAppLogin(selected.expectedLogin, expectedLogin)
+    ));
     if (match) return { selected: match[1], label: `reviewer:${match[0]}` };
-    if (config?.roles?.reviewer?.expectedLogin === expectedLogin) {
+    if (config?.roles?.reviewer?.expectedLogin
+      && sameGitHubAppLogin(config.roles.reviewer.expectedLogin, expectedLogin)) {
       return { selected: config.roles.reviewer, label: "reviewer" };
     }
   }
@@ -108,12 +123,14 @@ export async function inspectGitHubAppRoles({ configPath = DEFAULT_GITHUB_APPS_C
       await securePrivateKey(resolveConfiguredPath(selected.privateKeyPath, configPath));
       keySecure = true;
     } catch (error) { keyError = error.message; }
+    const expectedLoginValid = GITHUB_LOGIN_PATTERN.test(selected.expectedLogin || "");
     roles[role] = {
       configured: true,
       appId: String(selected.appId || ""),
       appIdValid: /^\d+$/.test(String(selected.appId || "")),
-      expectedLogin: selected.expectedLogin || null,
-      expectedLoginValid: GITHUB_LOGIN_PATTERN.test(selected.expectedLogin || ""),
+      configuredLogin: selected.expectedLogin || null,
+      expectedLogin: expectedLoginValid ? canonicalGitHubAppLogin(selected.expectedLogin) : selected.expectedLogin || null,
+      expectedLoginValid,
       installations: Object.keys(selected.installations || {}),
       privateKeySecure: keySecure,
       privateKeyError: keyError,
@@ -127,12 +144,14 @@ export async function inspectGitHubAppRoles({ configPath = DEFAULT_GITHUB_APPS_C
       await securePrivateKey(resolveConfiguredPath(selected.privateKeyPath, configPath));
       keySecure = true;
     } catch (error) { keyError = error.message; }
+    const expectedLoginValid = GITHUB_LOGIN_PATTERN.test(selected.expectedLogin || "");
     roles.reviewers[provider] = {
       configured: true,
       appId: String(selected.appId || ""),
       appIdValid: /^\d+$/.test(String(selected.appId || "")),
-      expectedLogin: selected.expectedLogin || null,
-      expectedLoginValid: GITHUB_LOGIN_PATTERN.test(selected.expectedLogin || ""),
+      configuredLogin: selected.expectedLogin || null,
+      expectedLogin: expectedLoginValid ? canonicalGitHubAppLogin(selected.expectedLogin) : selected.expectedLogin || null,
+      expectedLoginValid,
       installations: Object.keys(selected.installations || {}),
       privateKeySecure: keySecure,
       privateKeyError: keyError,
@@ -236,7 +255,8 @@ export async function loadGitHubAppRole({ role, repository, reviewerProvider, ex
   }
   return {
     appId: String(selected.appId),
-    expectedLogin: selected.expectedLogin || null,
+    configuredLogin: selected.expectedLogin || null,
+    expectedLogin: canonicalGitHubAppLogin(selected.expectedLogin),
     installationId,
     privateKeyPath: resolveConfiguredPath(selected.privateKeyPath, configPath),
     roleLabel,
@@ -247,12 +267,12 @@ export async function configuredReviewerLogin({ provider, configPath = DEFAULT_G
   const { config, exists } = await readConfig(configPath);
   if (!exists) throw new Error(`GitHub Apps config does not exist: ${expandHome(configPath)}`);
   if (!provider || !config?.roles?.reviewers?.[provider]) {
-    if (config?.roles?.reviewer?.expectedLogin) return config.roles.reviewer.expectedLogin;
+    if (config?.roles?.reviewer?.expectedLogin) return canonicalGitHubAppLogin(config.roles.reviewer.expectedLogin);
     throw new Error(`GitHub reviewer App is not configured for provider: ${provider || "unknown"}`);
   }
   const login = config.roles.reviewers[provider].expectedLogin;
   if (!GITHUB_LOGIN_PATTERN.test(login || "")) throw new Error(`GitHub reviewer expectedLogin is invalid for provider: ${provider}`);
-  return login;
+  return canonicalGitHubAppLogin(login);
 }
 
 export async function createInstallationToken({
@@ -270,8 +290,8 @@ export async function createInstallationToken({
   const jwt = createAppJwt({ appId: selected.appId, privateKey });
   const app = await githubJson(`${apiUrl}/app`, { token: jwt, fetchImpl });
   const verifiedLogin = app?.slug ? `${app.slug}[bot]` : null;
-  if (!verifiedLogin || verifiedLogin !== selected.expectedLogin) {
-    throw new Error(`GitHub App identity mismatch: configured ${selected.expectedLogin || "unknown"}, received ${verifiedLogin || "unknown"}.`);
+  if (!verifiedLogin || !sameGitHubAppLogin(verifiedLogin, selected.expectedLogin)) {
+    throw new Error(`GitHub App identity mismatch: configured ${selected.configuredLogin || selected.expectedLogin || "unknown"}, received ${verifiedLogin || "unknown"}.`);
   }
   const result = await githubJson(`${apiUrl}/app/installations/${selected.installationId}/access_tokens`, {
     token: jwt,
@@ -291,7 +311,8 @@ export async function createInstallationToken({
   return {
     token: result.token,
     expiresAt: result.expires_at,
-    expectedLogin: selected.expectedLogin,
+    configuredLogin: selected.configuredLogin,
+    expectedLogin: canonicalGitHubAppLogin(verifiedLogin),
     verifiedLogin,
     installationId: selected.installationId,
     appId: selected.appId,

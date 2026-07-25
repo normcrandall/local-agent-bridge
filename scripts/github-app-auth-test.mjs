@@ -121,6 +121,26 @@ try {
   });
   assert.equal(builder.token, "builder-installation-token");
   assert.equal(builder.expectedLogin, "example-builder[bot]");
+  assert.equal(builder.appId, "123456");
+  assert.equal(builder.installationId, 222);
+  assert.equal(builder.configuredLogin, "example-builder[bot]");
+
+  const bareLoginConfig = join(temporary, "github-apps-bare-login.json");
+  const bareConfig = JSON.parse(await (await import("node:fs/promises")).readFile(configPath, "utf8"));
+  bareConfig.roles.builder.expectedLogin = "Example-Builder";
+  await writeFile(bareLoginConfig, JSON.stringify(bareConfig), { mode: 0o600 });
+  const canonicalBuilder = await createInstallationToken({
+    role: "builder",
+    repository: "ExampleOrg/repo",
+    configPath: bareLoginConfig,
+    apiUrl: "https://github.test",
+    fetchImpl,
+  });
+  assert.equal(canonicalBuilder.configuredLogin, "Example-Builder");
+  assert.equal(canonicalBuilder.expectedLogin, "example-builder[bot]");
+  const canonicalInspection = await inspectGitHubAppRoles({ configPath: bareLoginConfig });
+  assert.equal(canonicalInspection.roles.builder.configuredLogin, "Example-Builder");
+  assert.equal(canonicalInspection.roles.builder.expectedLogin, "example-builder[bot]");
   const readOnlyBuilder = await createInstallationToken({
     role: "builder",
     repository: "exampleorg/repo",

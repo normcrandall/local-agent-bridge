@@ -269,6 +269,7 @@ export function createBoundBuilderClient({
   repository,
   expectedLogin,
   verifiedLogin = null,
+  authority = null,
   headSha,
   prNumber = null,
   issueNumber = null,
@@ -303,6 +304,22 @@ export function createBoundBuilderClient({
     }
   }
   if (!expectedLogin) throw new Error("expectedLogin is required.");
+  const boundAuthority = authority ? Object.freeze({
+    login: String(authority.login || expectedLogin),
+    appId: String(authority.appId || ""),
+    installationId: Number(authority.installationId),
+    repository: String(authority.repository || repository),
+    permissions: Object.freeze({ ...(authority.permissions || {}) }),
+  }) : null;
+  if (boundAuthority) {
+    const normalizeAppLogin = (login) => String(login || "").toLowerCase().replace(/\[bot\]$/, "");
+    if (!/^\d+$/.test(boundAuthority.appId)
+      || !Number.isInteger(boundAuthority.installationId) || boundAuthority.installationId < 1
+      || boundAuthority.repository !== repository
+      || normalizeAppLogin(boundAuthority.login) !== normalizeAppLogin(expectedLogin)) {
+      throw new Error("GitHub builder authority does not match the bound repository and App identity.");
+    }
+  }
   if (prNumber !== null && (!Number.isInteger(prNumber) || prNumber < 1)) throw new Error("prNumber is invalid.");
   if (trustedHumanReviewLogins.includes(expectedLogin)) {
     throw new Error("The builder identity cannot be a trusted human reviewer.");
@@ -1313,5 +1330,5 @@ export function createBoundBuilderClient({
     });
   }
 
-  return { identity, ensurePullRequest, reviewThreads, replyReviewThread, resolveReviewThread, markReady, merge, createBranch, pushBranch, replaceBranch, getIssue, addIssueLabel, removeIssueLabel, getIssueComments, postIssueComment, updateIssueComment, deleteIssueComment, listTagLocks, acquireTagLock, releaseTagLock, expectedLogin, repository, issueNumber };
+  return { identity, ensurePullRequest, reviewThreads, replyReviewThread, resolveReviewThread, markReady, merge, createBranch, pushBranch, replaceBranch, getIssue, addIssueLabel, removeIssueLabel, getIssueComments, postIssueComment, updateIssueComment, deleteIssueComment, listTagLocks, acquireTagLock, releaseTagLock, expectedLogin, repository, issueNumber, authority: boundAuthority };
 }

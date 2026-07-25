@@ -140,6 +140,7 @@ try {
     "merge_pull_request",
     "plan_portfolio",
     "prune_collaborations",
+    "rebind_issue_claim",
     "record_decision",
     "record_native_chair_turn",
     "record_portfolio_merge",

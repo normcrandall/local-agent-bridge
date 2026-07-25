@@ -1,7 +1,7 @@
 import { readCollaboration } from "./collaboration-store.mjs";
 import { listPortfolios, readPortfolio, updatePortfolio } from "./portfolio-store.mjs";
 import { createBoundBuilderClient } from "./github-builder-client.mjs";
-import { inspectGitHubAppRoles, createInstallationToken } from "./github-app-auth.mjs";
+import { createInstallationToken } from "./github-app-auth.mjs";
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 
@@ -125,9 +125,6 @@ export function getHeadShaFromWorkspace(workspacePath) {
 export async function getBuilderClientForWorkspace(workspace, issueNum, fetchImpl = fetch) {
   const repository = getRepositoryFromWorkspace(workspace);
   if (!repository) return null;
-  const appRoles = await inspectGitHubAppRoles();
-  const expectedLogin = appRoles.roles?.builder?.expectedLogin;
-  if (!expectedLogin) return null;
   const credential = await createInstallationToken({ role: "builder", repository });
   const headSha = getHeadShaFromWorkspace(workspace);
   return createBoundBuilderClient({
@@ -135,13 +132,77 @@ export async function getBuilderClientForWorkspace(workspace, issueNum, fetchImp
     token: credential.token,
     verifiedLogin: credential.verifiedLogin,
     repository,
-    expectedLogin,
+    expectedLogin: credential.expectedLogin,
+    authority: {
+      login: credential.expectedLogin,
+      appId: credential.appId,
+      installationId: credential.installationId,
+      repository,
+      permissions: credential.permissions,
+    },
     headSha,
     issueNumber: issueNum,
     allowedOperations: ["get_issue", "add_issue_label", "remove_issue_label", "get_issue_comments", "post_issue_comment", "update_issue_comment", "delete_issue_comment", "list_tag_locks", "acquire_tag_lock", "release_tag_lock"],
     workspace,
     fetchImpl,
   });
+}
+
+function requireBoundAuthority(client) {
+  const authority = client.authority;
+  if (!authority) {
+    throw new Error("Claim mutation requires a verified GitHub App authority binding.");
+  }
+  return authority;
+}
+
+function authorityMismatch(existing, expected) {
+  if (!existing) return "claim has no stable authority metadata";
+  if (String(existing.appId || "") !== String(expected.appId)) return "GitHub App ID changed";
+  if (Number(existing.installationId) !== Number(expected.installationId)) return "GitHub App installation changed";
+  if (existing.repository !== expected.repository) return "repository changed";
+  if (normalizeLogin(existing.login) !== normalizeLogin(expected.login)) return "GitHub App login changed";
+  return null;
+}
+
+function repairableAuthorityError(issueNumber, collaborationId, reason) {
+  return new Error(
+    `Issue #${issueNumber} claim identity cannot be safely rebound for collaboration ${collaborationId}: ${reason}. `
+    + "Release the inspected claim before mutation, then reacquire it with the verified builder App.",
+  );
+}
+
+export async function rebindIssueClaim({ client, issueNumber, collaborationId, workspaceRoot, ttlMs = 300_000 }) {
+  const authority = requireBoundAuthority(client);
+  const claims = await parseClaims(client, issueNumber);
+  const canonical = canonicalClaim(claims);
+  const ours = canonicalClaim(claims.filter((claim) => claim.data.collaboration === collaborationId));
+  if (!ours || canonical?.commentId !== ours.commentId) {
+    throw repairableAuthorityError(issueNumber, collaborationId, "the active collaboration does not own the canonical claim");
+  }
+  if (!await isClaimActive(ours, workspaceRoot, ttlMs)) {
+    throw repairableAuthorityError(issueNumber, collaborationId, "the canonical claim is no longer active");
+  }
+  const mismatch = authorityMismatch(ours.data.authority, authority);
+  if (mismatch) throw repairableAuthorityError(issueNumber, collaborationId, mismatch);
+
+  const canonicalAuthority = {
+    login: authority.login,
+    appId: authority.appId,
+    installationId: authority.installationId,
+    repository: authority.repository,
+    permissions: { ...authority.permissions },
+  };
+  if (JSON.stringify(ours.data.authority) === JSON.stringify(canonicalAuthority)) return { rebound: false, authority: canonicalAuthority };
+  const now = new Date().toISOString();
+  ours.data.authority = canonicalAuthority;
+  ours.data.timestamps.updated = now;
+  ours.data.history = [
+    { event: "identity_rebound", collaboration: collaborationId, writer: ours.data.writer, phase: ours.data.phase, at: now },
+    ...(ours.data.history || []),
+  ].slice(0, 10);
+  await client.updateIssueComment(ours.commentId, generateCommentBody(ours.data));
+  return { rebound: true, authority: canonicalAuthority };
 }
 
 function generateCommentBody(payload) {
@@ -268,6 +329,7 @@ export async function acquireClaimLease({
   ttlMs = 300_000,
   workspaceRoot,
 }) {
+  const authority = requireBoundAuthority(client);
   // The canonical comment determines the current generation. A ref newer
   // than that comment is an in-flight or orphaned publication and blocks.
   const claims = await parseClaims(client, issueNumber);
@@ -277,6 +339,7 @@ export async function acquireClaimLease({
     throw new Error(`Issue #${issueNumber} is already claimed by active collaboration ${canonical.data.collaboration} (writer: ${canonical.data.writer}).`);
   }
   if (canonicalIsActive && canonical.data.collaboration === collaborationId) {
+    await rebindIssueClaim({ client, issueNumber, collaborationId, workspaceRoot, ttlMs });
     await refreshClaimLease({ client, issueNumber, collaborationId, phase: "claiming", headSha, branch, worktree });
     await client.addIssueLabel(issueNumber, "agent:in-progress");
     const refs = await client.listTagLocks();
@@ -356,6 +419,13 @@ export async function acquireClaimLease({
         updated: now,
       },
       leaseExpiresAt: new Date(Date.now() + ttlMs).toISOString(),
+      authority: {
+        login: authority.login,
+        appId: authority.appId,
+        installationId: authority.installationId,
+        repository: authority.repository,
+        permissions: { ...authority.permissions },
+      },
       history,
     };
 
@@ -399,6 +469,9 @@ export async function refreshClaimLease({ client, issueNumber, collaborationId, 
   if (!ours) {
     throw new Error(`No active claim lease found on GitHub for collaboration ${collaborationId}.`);
   }
+  const authority = requireBoundAuthority(client);
+  const mismatch = authorityMismatch(ours.data.authority, authority);
+  if (mismatch) throw repairableAuthorityError(issueNumber, collaborationId, mismatch);
 
   // Clean up duplicate comments
   const duplicates = claims.filter(c => c.data.collaboration === collaborationId && c.commentId !== ours.commentId);

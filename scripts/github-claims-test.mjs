@@ -5,6 +5,7 @@ import {
   refreshClaimLease,
   releaseClaimLease,
   recoverIssueClaim,
+  rebindIssueClaim,
   reconcileClaimsAndPortfolios,
   parseClaims
 } from "../src/github-issue-claims.mjs";
@@ -235,6 +236,13 @@ async function runTests() {
     verifiedLogin: "builder-app[bot]",
     repository: "owner/repo",
     expectedLogin: "builder-app[bot]",
+    authority: {
+      login: "builder-app[bot]",
+      appId: "123456",
+      installationId: 789,
+      repository: "owner/repo",
+      permissions: { contents: "write", pull_requests: "write", issues: "write", metadata: "read" },
+    },
     headSha: "1111111111111111111111111111111111111111",
     issueNumber: 42,
     allowedOperations: [
@@ -292,6 +300,38 @@ async function runTests() {
   assert.ok(mock.getLabels().has("agent:in-progress"));
   assert.ok(mock.getRefs().has("refs/tags/claims/issue-42-generation-1"));
   assert.ok(mock.getComments()[0].body.includes("Summary: Claim acquired before provider work starts."));
+  let acquired = (await parseClaims(client, 42))[0];
+  assert.deepEqual(acquired.data.authority, baseClientConfig.authority);
+  assert.equal(mock.getComments()[0].body.includes("ghs_test-token"), false);
+
+  const malformedAuthorityBody = mock.getComments()[0].body.replace(
+    '"login": "builder-app[bot]"',
+    '"login": "builder-app"',
+  );
+  mock.setComments([{ ...mock.getComments()[0], body: malformedAuthorityBody }]);
+  const rebound = await rebindIssueClaim({
+    client,
+    issueNumber: 42,
+    collaborationId: "bridge-11111111-2222-3333-4444-555555555555",
+  });
+  assert.equal(rebound.rebound, true);
+  acquired = (await parseClaims(client, 42))[0];
+  assert.equal(acquired.data.authority.login, "builder-app[bot]");
+
+  const missingAuthority = { ...acquired.data };
+  delete missingAuthority.authority;
+  mock.setComments([{
+    ...mock.getComments()[0],
+    body: `### Agent Bridge Issue Claim Lease\n<!-- agent-bridge-issue-claim\n${JSON.stringify(missingAuthority, null, 2)}\n-->`,
+  }]);
+  await assert.rejects(
+    rebindIssueClaim({ client, issueNumber: 42, collaborationId: "bridge-11111111-2222-3333-4444-555555555555" }),
+    /Release the inspected claim before mutation/,
+  );
+  mock.setComments([{
+    ...mock.getComments()[0],
+    body: `### Agent Bridge Issue Claim Lease\n<!-- agent-bridge-issue-claim\n${JSON.stringify(acquired.data, null, 2)}\n-->`,
+  }]);
 
   await acquireClaimLease({
     client,
@@ -376,7 +416,11 @@ async function runTests() {
   const clientNormalized = createBoundBuilderClient({
     ...baseClientConfig,
     expectedLogin: "VELIQON-builder",
-    verifiedLogin: "veliqon-builder[bot]"
+    verifiedLogin: "veliqon-builder[bot]",
+    authority: {
+      ...baseClientConfig.authority,
+      login: "veliqon-builder[bot]",
+    },
   });
   mock.setComments([{
     id: 1000,
