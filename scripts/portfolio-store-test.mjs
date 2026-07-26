@@ -76,7 +76,7 @@ try {
     objective: "Disjoint lane",
     workspace: "/tmp/example-c",
     maxParallel: 2,
-    items: [{ id: "c", priority: 80, status: "ready", footprint: { paths: ["src/web"] } }],
+    items: [{ id: "c", priority: 80, status: "ready", footprint: { paths: ["src/web"], resources: ["web-slot"] } }],
   });
   const reservedDisjoint = await updatePortfolioItemWithFootprintReservation(
     root,
@@ -98,11 +98,17 @@ try {
   );
   assert.equal(reconciled.parked, true, "the newer lower-priority lane must be parked when its actual diff reveals a hard conflict");
   assert.equal(reconciled.item.status, "blocked");
-  assert.equal(reconciled.item.footprintReservation.status, "reserved", "parked work retains its reservation until inspected retirement");
+  assert.equal(reconciled.item.footprintReservation.status, "parked", "parked work retains custody without blocking unrelated reservations");
+  assert.deepEqual(reconciled.item.actualFootprint.resources, ["web-slot"], "Git path capture must not narrow predicted resource or contract custody");
   assert.equal(reconciled.item.footprintReconciliation.accuracy.precision, 0);
   assert.equal((await readPortfolio(root, disjointLane.id)).items[0].actualFootprint.paths[0], "src/api/new-route.mjs", "actual footprints survive restart reads");
   const inspectedReservations = await listRepositoryFootprintReservations(root, reservedFirst);
   assert.equal(inspectedReservations.find((entry) => entry.itemId === "c").stale, true, "paused reservations remain visible instead of silently expiring");
+  await assert.rejects(
+    updatePortfolioItemWithFootprintReservation(root, disjointLane.id, reconciled.portfolio.revision, "c", { status: "implementing" }, patchItem("c", { status: "implementing" })),
+    (error) => error.code === "FOOTPRINT_CONFLICT",
+    "resuming a parked lane must re-check its actual footprint against live peers",
+  );
 
   const integrationFirst = await updatePortfolioItemWithFootprintReservation(
     root,
@@ -122,6 +128,29 @@ try {
     patchItem("a", { status: "merged" }),
   );
   assert.equal(releasedFirst.items[0].footprintReservation.status, "released", "verified terminal delivery releases the reservation");
+  const resumedDisjoint = await updatePortfolioItemWithFootprintReservation(
+    root,
+    disjointLane.id,
+    reconciled.portfolio.revision,
+    "c",
+    { status: "implementing" },
+    patchItem("c", { status: "implementing" }),
+  );
+  assert.equal(resumedDisjoint.items[0].footprintReservation.status, "reserved");
+  assert.equal(resumedDisjoint.items[0].footprintReservation.id, reconciled.item.footprintReservation.id, "resume retains the durable reservation identity");
+
+  const expandedPeer = await createPortfolio(root, {
+    repository: "veliqon/example",
+    objective: "Actual footprint peer",
+    workspace: "/tmp/example-expanded-peer",
+    maxParallel: 2,
+    items: [{ id: "expanded-peer", priority: 1, status: "ready", footprint: { paths: ["src/api"] } }],
+  });
+  await assert.rejects(
+    updatePortfolioItemWithFootprintReservation(root, expandedPeer.id, expandedPeer.revision, "expanded-peer", { status: "implementing" }, patchItem("expanded-peer", { status: "implementing" })),
+    (error) => error.code === "FOOTPRINT_CONFLICT",
+    "a reconciled actual footprint must constrain later peer reservations",
+  );
 
   const samePortfolio = await createPortfolio(root, {
     repository: "veliqon/same-portfolio",
@@ -137,6 +166,18 @@ try {
   const sameBoth = await updatePortfolioItemWithFootprintReservation(root, samePortfolio.id, sameHigh.revision, "low", { status: "implementing" }, patchItem("low", { status: "implementing" }));
   const sameReconciled = await reconcilePortfolioItemFootprint(root, samePortfolio.id, sameBoth.revision, "high", { paths: ["src/low/new.mjs"] });
   assert.equal(sameReconciled.portfolio.items.find((item) => item.id === "low").status, "blocked", "same-portfolio conflicts are parked in one revision-fenced write");
+
+  const accuracyPortfolio = await createPortfolio(root, {
+    repository: "veliqon/accuracy",
+    objective: "Measure prediction accuracy",
+    workspace: "/tmp/example-accuracy",
+    maxParallel: 1,
+    items: [{ id: "accuracy", status: "ready", footprint: { paths: ["src/a", "src/b"] } }],
+  });
+  const accuracyReserved = await updatePortfolioItemWithFootprintReservation(root, accuracyPortfolio.id, accuracyPortfolio.revision, "accuracy", { status: "implementing" }, patchItem("accuracy", { status: "implementing" }));
+  const accuracyReconciled = await reconcilePortfolioItemFootprint(root, accuracyPortfolio.id, accuracyReserved.revision, "accuracy", { paths: ["src/a"] });
+  assert.equal(accuracyReconciled.item.footprintReconciliation.accuracy.precision, 0.5);
+  assert.equal(accuracyReconciled.item.footprintReconciliation.accuracy.recall, 1);
 
   const created = await createPortfolio(root, {
     objective: "Deliver the milestone",

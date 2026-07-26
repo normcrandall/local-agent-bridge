@@ -33,7 +33,7 @@ import { clearTerminalRuntime, legacyWorkerCommandMatches, reconciliationAction,
 import { acknowledgeCompletion } from "./handoff-protocol.mjs";
 import { readContextCapsule } from "./context-capsule.mjs";
 import { createEvidenceStore } from "./evidence-store.mjs";
-import { assertRepositoryEvidenceHead, captureActualRepositoryFootprint, captureRepositoryEvidence, formatRepositoryEvidence, readRepositoryHead } from "./repository-evidence.mjs";
+import { assertRepositoryEvidenceHead, captureActualRepositoryFootprint, captureRepositoryEvidence, formatRepositoryEvidence, readRepositoryHead, readRepositoryIdentity } from "./repository-evidence.mjs";
 import { formatReusableVerification, resolveVerificationPlan } from "./verification-receipts.mjs";
 import {
   createPerformanceTimeline,
@@ -681,6 +681,7 @@ const portfolioItemSchema = z.object({
   paths: z.array(z.string().min(1).max(1_000)).max(500).default([]),
   resources: z.array(z.string().min(1).max(500)).max(200).default([]),
   footprint: portfolioFootprintSchema.optional(),
+  triageStatus: z.enum(["untriaged", "triaging", "triaged"]).optional(),
   verificationCommands: verificationCommandsSchema.default([]),
   issueNumber: z.number().int().min(1).optional(),
 }).strict();
@@ -1749,10 +1750,14 @@ server.registerTool(
   async ({ objective, repository, workspace: requestedWorkspace, items, maxParallel, targetBranch, targetSha }) => {
     blockNestedCollaboration();
     const workspace = projectDirectory(requestedWorkspace);
+    const resolvedRepository = repository || await readRepositoryIdentity(workspace);
+    if (!resolvedRepository) {
+      throw new Error("create_portfolio requires repository OWNER/REPO when the workspace origin is not a GitHub remote.");
+    }
     const normalized = normalizePortfolioItems(items);
     const initial = refreshPortfolioState({
       objective,
-      repository,
+      repository: resolvedRepository,
       workspace,
       maxParallel,
       items: normalized,
@@ -1853,6 +1858,7 @@ server.registerTool(
       prNumber: z.number().int().min(1).optional(),
       headSha: z.string().regex(/^[0-9a-f]{40}$/i).optional(),
       summary: z.string().max(20_000).optional(),
+      triageStatus: z.enum(["untriaged", "triaging", "triaged"]).optional(),
     },
   },
   async ({ portfolioId: id, expectedRevision, itemId, status, ...details }) => {
@@ -1889,7 +1895,7 @@ server.registerTool(
       expectedRevision: z.number().int().min(1),
       itemId: z.string().min(1).max(200),
       phase: z.enum(["work", "pre_publish"]).default("work"),
-      actual: portfolioFootprintSchema.optional(),
+      actual: portfolioFootprintSchema.partial().optional(),
     },
   },
   async ({ portfolioId: id, expectedRevision, itemId, phase, actual }) => {
@@ -1905,6 +1911,10 @@ server.registerTool(
       ...captured,
       ...(actual || {}),
       paths: captured.paths,
+      symbols: actual?.symbols ?? item.actualFootprint?.symbols ?? item.footprint?.symbols ?? [],
+      contracts: actual?.contracts ?? item.actualFootprint?.contracts ?? item.footprint?.contracts ?? [],
+      resources: actual?.resources ?? item.actualFootprint?.resources ?? item.footprint?.resources ?? item.resources ?? [],
+      blockers: actual?.blockers ?? item.actualFootprint?.blockers ?? item.footprint?.blockers ?? item.blockedBy ?? [],
       evidence: { ...captured.evidence, ...(actual?.evidence || {}) },
     };
     return toolResponse(await reconcilePortfolioItemFootprint(

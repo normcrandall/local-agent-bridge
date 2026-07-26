@@ -76,7 +76,7 @@ function reservedItems(portfolios, key, { exceptPortfolioId = null, exceptItemId
     ? portfolio.items
       .filter((item) => item.footprintReservation?.status === "reserved")
       .filter((item) => portfolio.id !== exceptPortfolioId || item.id !== String(exceptItemId))
-      .map((item) => ({ portfolio, item }))
+      .map((item) => ({ portfolio, item: { ...item, footprint: item.actualFootprint || item.footprint } }))
     : []);
 }
 
@@ -101,8 +101,8 @@ function accuracy(predicted, actual) {
     predicted: predictedValues.size,
     actual: actualValues.size,
     matched: matched.length,
-    precision: actualValues.size ? matched.length / actualValues.size : 1,
-    recall: predictedValues.size ? matched.length / predictedValues.size : 1,
+    precision: predictedValues.size ? matched.length / predictedValues.size : 1,
+    recall: actualValues.size ? matched.length / actualValues.size : 1,
     unexpected: [...actualValues].filter((value) => !predictedValues.has(value)),
     unused: [...predictedValues].filter((value) => !actualValues.has(value)),
   };
@@ -169,7 +169,11 @@ export async function listPortfolios(root) {
 export async function listRepositoryFootprintReservations(root, portfolio) {
   const portfolios = await listPortfolios(root);
   const key = repositoryKey(portfolio);
-  return reservedItems(portfolios, key).map(({ portfolio: owner, item }) => ({
+  return portfolios.flatMap((owner) => repositoryKey(owner) === key
+    ? owner.items
+      .filter((item) => ["reserved", "parked"].includes(item.footprintReservation?.status))
+      .map((item) => ({ owner, item }))
+    : []).map(({ owner, item }) => ({
     repository: key,
     portfolioId: owner.id,
     itemId: item.id,
@@ -195,7 +199,7 @@ export async function updatePortfolioItemWithFootprintReservation(root, id, expe
     const terminal = PORTFOLIO_STATUS_GROUPS.terminal.includes(patch.status);
     let reservation = item.footprintReservation || null;
     if (active && reservation?.status !== "reserved") {
-      const footprint = normalizePortfolioFootprint(item.footprint || {}, item);
+      const footprint = normalizePortfolioFootprint(item.actualFootprint || item.footprint || {}, item);
       const candidate = { ...item, portfolioId: id, footprint };
       const conflicts = reservationConflicts(candidate, reservedItems(portfolios, repositoryKey(current), {
         exceptPortfolioId: id,
@@ -208,13 +212,15 @@ export async function updatePortfolioItemWithFootprintReservation(root, id, expe
         throw error;
       }
       reservation = {
-        id: randomUUID(),
+        ...(reservation || {}),
+        id: reservation?.id || randomUUID(),
         version: footprint.version,
         repository: repositoryKey(current),
         status: "reserved",
         mode: "shadow",
         enforcement: "deterministic_hard_conflicts",
-        reservedAt: new Date().toISOString(),
+        reservedAt: reservation?.reservedAt || new Date().toISOString(),
+        ...(reservation?.status === "parked" ? { resumedAt: new Date().toISOString() } : {}),
       };
     } else if (terminal && reservation?.status === "reserved") {
       reservation = {
@@ -276,6 +282,11 @@ export async function reconcilePortfolioItemFootprint(root, id, expectedRevision
           ...other,
           status: "blocked",
           summary: `Parked after a newer actual footprint conflicted with higher-priority ${id}/${itemId}; work preserved.`,
+          footprintReservation: {
+            ...other.footprintReservation,
+            status: "parked",
+            parkedAt: new Date().toISOString(),
+          },
           footprintConflict: { withPortfolioId: id, withItemId: String(itemId), detectedAt: new Date().toISOString(), phase },
         } : other),
       }));
@@ -288,6 +299,11 @@ export async function reconcilePortfolioItemFootprint(root, id, expectedRevision
           ...candidateItem,
           status: "blocked",
           summary: `Parked after a newer actual footprint conflicted with higher-priority ${id}/${itemId}; work preserved.`,
+          footprintReservation: {
+            ...candidateItem.footprintReservation,
+            status: "parked",
+            parkedAt: reconciledAt,
+          },
           footprintConflict: { withPortfolioId: id, withItemId: String(itemId), detectedAt: reconciledAt, phase },
         };
         return candidateItem.id === String(itemId) ? {
@@ -295,6 +311,11 @@ export async function reconcilePortfolioItemFootprint(root, id, expectedRevision
           ...(currentLoses ? {
             status: "blocked",
             summary: "Parked because its actual footprint conflicts with an older or higher-priority reserved lane; work preserved.",
+            footprintReservation: {
+              ...candidateItem.footprintReservation,
+              status: "parked",
+              parkedAt: reconciledAt,
+            },
           } : {}),
           actualFootprint,
           footprintReconciliation: {

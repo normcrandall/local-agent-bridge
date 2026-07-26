@@ -60,13 +60,18 @@ export function isMissingRepositoryHead(error) {
   return /ambiguous argument ['"]?HEAD|unknown revision or path not in the working tree|bad revision ['"]?HEAD|Needed a single revision/i.test(message);
 }
 
-function repositoryFromRemote(remote) {
+export function repositoryFromRemote(remote) {
   const value = String(remote || "").trim().replace(/\.git$/, "");
   const https = value.match(/^https:\/\/github\.com\/([^/]+\/[^/]+)$/i);
   if (https) return https[1];
   const ssh = value.match(/^git@github\.com:([^/]+\/[^/]+)$/i);
   if (ssh) return ssh[1];
   return null;
+}
+
+export async function readRepositoryIdentity(workspace) {
+  const remote = await git(workspace, ["remote", "get-url", "origin"]).catch(() => "");
+  return repositoryFromRemote(remote);
 }
 
 function sha256(value) {

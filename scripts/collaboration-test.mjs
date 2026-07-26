@@ -206,6 +206,18 @@ try {
     },
   })).structuredContent;
   assert.match(portfolio.id, /^helm-/);
+  assert.equal(portfolio.repository, "normcrandall/local-agent-bridge", "create_portfolio must derive one stable GitHub repository identity from the workspace remote");
+  portfolio = (await firstClient.callTool({
+    name: "update_portfolio_item",
+    arguments: {
+      portfolioId: portfolio.id,
+      expectedRevision: portfolio.revision,
+      itemId: "102",
+      status: "ready",
+      triageStatus: "triaged",
+    },
+  })).structuredContent;
+  assert.equal(portfolio.items.find((item) => item.id === "102").triageStatus, "triaged", "triage-ahead completion must be writable through the control plane");
   const timingLane = await createCollaboration(root, {
     task: "Track the complete portfolio merge path",
     workspace: root,
