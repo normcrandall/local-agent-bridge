@@ -5,12 +5,28 @@ import { spawnSync } from "node:child_process";
 import { GITHUB_LOGIN_PATTERN } from "../src/github-app-auth.mjs";
 import {
   computeRuntimeDigest,
-  containsCommit,
+  locateCommitOnMain,
   readInstalledProvenance,
 } from "../src/runtime-provenance.mjs";
 import { DEFAULT_OLLAMA_CONFIG, DEFAULT_OLLAMA_MODEL } from "../src/ollama-review.mjs";
 
 const root = resolve(import.meta.dirname, "..");
+const selectedChecks = new Set(String(process.env.AGENT_BRIDGE_DOCTOR_CHECKS || "")
+  .split(",")
+  .map((label) => label.trim())
+  .filter(Boolean));
+const explicitProjectRoot = String(process.env.AGENT_BRIDGE_WORKSPACE || "").trim();
+const requestedProjectRoot = resolve(explicitProjectRoot || process.cwd());
+const resolvedProjectRoot = explicitProjectRoot
+  ? null
+  : spawnSync("git", ["-c", "core.fsmonitor=false", "rev-parse", "--show-toplevel"], {
+      cwd: requestedProjectRoot,
+      encoding: "utf8",
+      env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0" },
+    });
+const projectRoot = resolvedProjectRoot?.status === 0
+  ? resolve(resolvedProjectRoot.stdout.trim())
+  : requestedProjectRoot;
 let failed = false;
 
 function configuredOllamaModel() {
@@ -20,6 +36,7 @@ function configuredOllamaModel() {
 }
 
 function check(label, test, detail = "") {
+  if (selectedChecks.size && !selectedChecks.has(label)) return;
   try {
     if (!test()) throw new Error(detail || "check failed");
     console.log(`OK   ${label}`);
@@ -111,8 +128,8 @@ check("Docker Model Runner local reviewer", () => {
 
 check("Bridge dependencies", () => existsSync(resolve(root, "node_modules/@modelcontextprotocol/sdk")), "run npm install");
 check("Playwright MCP", () => existsSync(resolve(root, "node_modules/@playwright/mcp/cli.js")), "run npm install");
-check("Codex project config", () => existsSync(resolve(root, ".codex/config.toml")));
-check("Claude project config", () => existsSync(resolve(root, ".mcp.json")));
+check("Codex project config", () => existsSync(resolve(projectRoot, ".codex/config.toml")), `missing ${resolve(projectRoot, ".codex/config.toml")}`);
+check("Claude project config", () => existsSync(resolve(projectRoot, ".mcp.json")), `missing ${resolve(projectRoot, ".mcp.json")}`);
 check("Antigravity global MCP config", () => {
   const config = JSON.parse(readFileSync(resolve(homedir(), ".gemini/config/mcp_config.json"), "utf8"));
   return Boolean(config.mcpServers?.codex && config.mcpServers?.claude_code && config.mcpServers?.ollama && config.mcpServers?.docker && config.mcpServers?.collaboration);
@@ -335,13 +352,17 @@ check("Global user attention signalling", () => {
   return resolve(parsed.stateRoot) === expectedStateRoot && Array.isArray(parsed.pending);
 }, "run npm run install:global to install the needs_user notification and attention CLI");
 
-const installedRuntimeRoot = resolve(homedir(), ".local/share/agent-bridge/runtime");
+const installedRuntimeRoot = resolve(process.env.AGENT_BRIDGE_INSTALLED_RUNTIME_ROOT
+  || resolve(homedir(), ".local/share/agent-bridge/runtime"));
 const installedProvenance = await readInstalledProvenance(installedRuntimeRoot);
 const observedDigest = installedProvenance
   ? await computeRuntimeDigest(installedRuntimeRoot).catch(() => null)
   : null;
-const mainContainsInstalled = installedProvenance?.commit
-  ? await containsCommit({ sourceRoot: root, ancestor: installedProvenance.commit, candidate: "main" })
+const mainComparison = installedProvenance?.commit
+  ? await locateCommitOnMain({
+      ancestor: installedProvenance.commit,
+      sourceRoots: [installedProvenance.installerWorkspace, projectRoot],
+    })
   : null;
 
 if (installedProvenance) {
@@ -364,16 +385,18 @@ check("Global runtime integrity", () => {
   if (!installedProvenance) throw new Error("no provenance recorded to compare against");
   if (!observedDigest) throw new Error(`cannot read ${installedRuntimeRoot}`);
   if (observedDigest !== installedProvenance.digest) {
-    throw new Error("installed runtime no longer matches the digest recorded at install time; it was modified in place");
+    throw new Error("installed runtime payload no longer matches its self-attested install digest; tracked source or script files changed in place");
   }
   return true;
-}, "redeploy with npm run install:global; never edit or copy files into the installed runtime");
+}, "redeploy with npm run install:global; this payload digest detects accidental drift but does not attest node_modules or resist a same-user rewrite of the provenance record");
 
 check("Global runtime drift from main", () => {
   if (!installedProvenance?.commit) throw new Error("no installed commit recorded");
-  if (mainContainsInstalled === null) throw new Error(`cannot compare ${installedProvenance.commit} against main from ${root}`);
-  if (!mainContainsInstalled) {
-    throw new Error(`installed ${installedProvenance.commit} is not contained in main; the global runtime is running unmerged code`);
+  if (mainComparison?.contains === null) {
+    throw new Error(`cannot compare ${installedProvenance.commit} against main from ${mainComparison.checkedRoots.join(", ") || "any checkout"}`);
+  }
+  if (!mainComparison?.contains) {
+    throw new Error(`installed ${installedProvenance.commit} is not contained in ${mainComparison.candidate} from ${mainComparison.sourceRoot}; the global runtime is running unmerged code`);
   }
   return true;
 }, "fetch main and redeploy from a commit that main contains, or accept the drift deliberately");

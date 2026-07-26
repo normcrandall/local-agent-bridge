@@ -11,6 +11,7 @@ import {
   computeRuntimeDigest,
   evaluateDeployment,
   inspectSource,
+  locateCommitOnMain,
   readInstalledProvenance,
   writeInstalledProvenance,
 } from "../src/runtime-provenance.mjs";
@@ -76,6 +77,67 @@ try {
   const unversioned = await inspectSource({ sourceRoot, runGit: stubGit({}).runGit });
   assert.equal(unversioned.commit, null, "a checkout with no commit must not masquerade as clean and current");
   assert.equal(unversioned.dirty, false);
+
+  // An installed runtime has no .git directory. Drift checks must use the
+  // recorded installer checkout, then the caller's current checkout as a
+  // recovery source when the recorded path has moved.
+  const recordedCheckout = join(temporary, "recorded-checkout");
+  const currentCheckout = join(temporary, "current-checkout");
+  const missingCheckout = join(temporary, "moved-checkout");
+  const ancestryCalls = [];
+  const ancestryGit = async (args, { cwd }) => {
+    ancestryCalls.push({ args, cwd });
+    if (cwd === missingCheckout) throw Object.assign(new Error("not a git repository"), { code: 128 });
+    if (args[0] === "cat-file") {
+      const selected = args.at(-1);
+      if (cwd === recordedCheckout && selected === "origin/main^{commit}") {
+        throw Object.assign(new Error("unknown remote ref"), { code: 128 });
+      }
+      return "";
+    }
+    if (args[0] === "merge-base") {
+      const candidate = args.at(-1);
+      if (cwd === currentCheckout && candidate === "origin/main") {
+        throw Object.assign(new Error("not an ancestor"), { code: 1 });
+      }
+      return "";
+    }
+    throw Object.assign(new Error(`unexpected git ${args.join(" ")}`), { code: 1 });
+  };
+  const located = await locateCommitOnMain({
+    ancestor: "installed123",
+    sourceRoots: [recordedCheckout, currentCheckout],
+    runGit: ancestryGit,
+  });
+  assert.deepEqual(
+    { contains: located.contains, sourceRoot: located.sourceRoot, candidate: located.candidate },
+    { contains: false, sourceRoot: currentCheckout, candidate: "origin/main" },
+    "origin/main in the fallback checkout must outrank a containing local main in the recorded checkout",
+  );
+  const recoveryCalls = [];
+  const recoveryGit = async (args, { cwd }) => {
+    recoveryCalls.push({ args, cwd });
+    if (cwd === missingCheckout) throw Object.assign(new Error("not a git repository"), { code: 128 });
+    if (args[0] === "cat-file") return "";
+    if (args[0] === "merge-base") return "";
+    throw Object.assign(new Error(`unexpected git ${args.join(" ")}`), { code: 1 });
+  };
+  const recovered = await locateCommitOnMain({
+    ancestor: "installed123",
+    sourceRoots: [missingCheckout, currentCheckout],
+    runGit: recoveryGit,
+  });
+  assert.equal(recovered.contains, true);
+  assert.equal(recovered.sourceRoot, currentCheckout,
+    "the caller checkout must recover ancestry verification when the recorded installer path moved");
+  assert.ok(recoveryCalls.some((call) => call.cwd === missingCheckout),
+    "recovery must first inspect the recorded installer checkout before falling back to the caller checkout");
+  const unknown = await locateCommitOnMain({
+    ancestor: "installed123",
+    sourceRoots: [missingCheckout],
+    runGit: recoveryGit,
+  });
+  assert.equal(unknown.contains, null, "no usable checkout must remain explicitly unverifiable");
 
   // --- deployment policy ---------------------------------------------------
   const clean = (commit) => ({ root: "/checkout", commit, ref: "main", dirty: false, dirtyEntries: [], committedAt: "2026-07-24T13:00:00Z" });

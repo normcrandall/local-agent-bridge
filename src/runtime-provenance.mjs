@@ -14,7 +14,17 @@ const LOCK_STALE_MS = 30 * 60 * 1000;
 const DIGEST_SKIPPED = new Set(["node_modules", ".git", PROVENANCE_FILENAME]);
 
 export async function defaultGitRunner(args, { cwd }) {
-  const { stdout } = await run("git", args, { cwd, encoding: "utf8", maxBuffer: 32 * 1024 * 1024 });
+  const { stdout } = await run("git", ["-c", "core.fsmonitor=false", ...args], {
+    cwd,
+    encoding: "utf8",
+    maxBuffer: 32 * 1024 * 1024,
+    env: {
+      ...process.env,
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_OPTIONAL_LOCKS: "0",
+      GIT_TERMINAL_PROMPT: "0",
+    },
+  });
   return stdout;
 }
 
@@ -74,6 +84,32 @@ export async function containsCommit({ sourceRoot, ancestor, candidate, runGit =
   } catch (error) {
     return error?.code === 1 ? false : null;
   }
+}
+
+/**
+ * Locate a real checkout that can prove whether the installed commit belongs
+ * to main. Installed runtimes intentionally contain no Git metadata, so
+ * callers provide durable provenance and current-workspace candidates instead
+ * of attempting ancestry checks in the copied runtime itself.
+ */
+export async function locateCommitOnMain({
+  ancestor,
+  sourceRoots = [],
+  candidates = ["origin/main", "main"],
+  runGit = defaultGitRunner,
+} = {}) {
+  const roots = [...new Set(sourceRoots
+    .filter((root) => typeof root === "string" && root.trim())
+    .map((root) => resolve(root)))];
+  for (const candidate of candidates) {
+    for (const sourceRoot of roots) {
+      const contains = await containsCommit({ sourceRoot, ancestor, candidate, runGit });
+      // A real answer from the preferred checkout/ref is authoritative. Only
+      // an unavailable ref/root may fall through to a less durable source.
+      if (contains !== null) return { contains, sourceRoot, candidate, checkedRoots: roots };
+    }
+  }
+  return { contains: null, sourceRoot: null, candidate: null, checkedRoots: roots };
 }
 
 /**
