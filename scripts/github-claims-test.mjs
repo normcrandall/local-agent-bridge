@@ -297,10 +297,24 @@ async function runTests() {
   assert.deepStrictEqual(hydrationClient.authority, baseClientConfig.authority);
   await hydrationClient.getIssue(42);
   await hydrationClient.getIssueComments(42);
-  await assert.rejects(
-    hydrationClient.addIssueLabel(42, "agent:in-progress"),
-    /GitHub builder operation is not authorized/,
-  );
+  const forbiddenHydrationMutations = [
+    ["update_issue_project_single_select", () => hydrationClient.updateIssueProjectSingleSelect(42, "Status", "Working")],
+    ["add_issue_label", () => hydrationClient.addIssueLabel(42, "agent:in-progress")],
+    ["remove_issue_label", () => hydrationClient.removeIssueLabel(42, "agent:in-progress")],
+    ["post_issue_comment", () => hydrationClient.postIssueComment(42, "not permitted")],
+    ["update_issue_comment", () => hydrationClient.updateIssueComment(1, "not permitted")],
+    ["delete_issue_comment", () => hydrationClient.deleteIssueComment(1)],
+    ["list_tag_locks", () => hydrationClient.listTagLocks()],
+    ["acquire_tag_lock", () => hydrationClient.acquireTagLock(1, baseClientConfig.headSha)],
+    ["release_tag_lock", () => hydrationClient.releaseTagLock(1)],
+  ];
+  for (const [operation, invoke] of forbiddenHydrationMutations) {
+    await assert.rejects(
+      invoke,
+      new RegExp(`GitHub builder operation is not authorized: ${operation}`),
+      `hydration clients must reject mutation operation ${operation}`,
+    );
+  }
   const hydrationCannotWiden = createIssueClaimHydrationClient({
     ...claimClientArgs,
     allowedOperations: ["merge", "add_issue_label"],
