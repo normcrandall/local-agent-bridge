@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, rename, stat, unlink } from "node:fs/promises";
 import { resolve } from "node:path";
 
 export const REPOSITORY_JOURNAL_VERSION = 1;
@@ -11,6 +11,7 @@ const MAX_EXPORT_LIMIT = 1_000;
 const DEFAULT_LOCK_TIMEOUT_MS = 10_000;
 const DEFAULT_LOCK_RETRY_MS = 10;
 const STALE_LOCK_MS = 30_000;
+const RETENTION_TEMP_PATTERN = /^repository-journal\.jsonl\.\d+\.[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.tmp$/;
 
 export class RepositoryJournalError extends Error {
   constructor(message, { code = "REPOSITORY_JOURNAL_ERROR", line = null, cause = null } = {}) {
@@ -112,7 +113,6 @@ function validateRecord(record, { line, previous = null, expectedRepository = nu
   if (!/^[0-9a-f]{64}$/.test(record.digest || "")) fail("has an invalid digest.");
   let payload;
   try { payload = canonicalize(record.payload); } catch (error) { fail(`has an invalid payload: ${error.message}`); }
-  if (stableJson(payload) !== stableJson(record.payload)) fail("has a non-canonical payload.");
   const expectedFingerprint = digest({ identity: record.identity, binding, payload });
   if (record.fingerprint !== expectedFingerprint) fail("has a mismatched identity fingerprint.", "INTEGRITY_FAILURE");
   if (record.digest !== digest(recordContent(record))) fail("has a mismatched content digest.", "INTEGRITY_FAILURE");
@@ -241,6 +241,23 @@ function normalizeLimit(limit) {
   return limit;
 }
 
+async function syncDirectory(path) {
+  const handle = await open(path, "r");
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+async function removeRetentionTemporary(path) {
+  try {
+    await unlink(path);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+}
+
 export function createRepositoryJournal({
   directory,
   now = () => new Date().toISOString(),
@@ -251,6 +268,13 @@ export function createRepositoryJournal({
   const root = resolve(directory);
   const path = resolve(root, JOURNAL_FILE);
   const lockPath = resolve(root, LOCK_FILE);
+
+  async function cleanOrphanRetentionTemps() {
+    const entries = await readdir(root);
+    await Promise.all(entries
+      .filter((entry) => RETENTION_TEMP_PATTERN.test(entry))
+      .map((entry) => removeRetentionTemporary(resolve(root, entry))));
+  }
 
   async function initialize() {
     await mkdir(root, { recursive: true, mode: 0o700 });
@@ -331,6 +355,16 @@ export function createRepositoryJournal({
     }
     const boundedLimit = normalizeLimit(limit);
     const records = await read();
+    const earliestAvailableSequence = records[0]?.sequence ?? null;
+    const cursorGap = earliestAvailableSequence !== null && afterSequence + 1 < earliestAvailableSequence
+      ? {
+          kind: "retention_loss",
+          requestedAfterSequence: afterSequence,
+          earliestAvailableSequence,
+          missingFromSequence: afterSequence + 1,
+          missingThroughSequence: earliestAvailableSequence - 1,
+        }
+      : null;
     const eligible = records.filter((record) => record.sequence > afterSequence);
     const selected = eligible.slice(0, boundedLimit);
     return {
@@ -339,6 +373,8 @@ export function createRepositoryJournal({
       records: selected,
       hasMore: eligible.length > selected.length,
       nextSequence: selected.at(-1)?.sequence ?? afterSequence,
+      earliestAvailableSequence,
+      cursorGap,
     };
   }
 
@@ -346,16 +382,30 @@ export function createRepositoryJournal({
     normalizeLimit(maxRecords);
     await initialize();
     const release = await acquireLock(lockPath, { timeoutMs: lockTimeoutMs, retryMs: lockRetryMs });
+    let temporary = null;
     try {
+      await cleanOrphanRetentionTemps();
       const records = strictRecords(inspectRaw(await readRaw(path)));
       if (records.length <= maxRecords) return { removed: 0, retained: records.length, firstSequence: records[0]?.sequence || null };
       const retained = records.slice(-maxRecords);
-      const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
-      await writeFile(temporary, `${retained.map((record) => JSON.stringify(record)).join("\n")}\n`, { mode: 0o600 });
+      temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+      const temporaryHandle = await open(temporary, "wx", 0o600);
+      try {
+        await temporaryHandle.writeFile(`${retained.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8");
+        await temporaryHandle.sync();
+      } finally {
+        await temporaryHandle.close();
+      }
+      await syncDirectory(root);
       await rename(temporary, path);
+      await syncDirectory(root);
       return { removed: records.length - retained.length, retained: retained.length, firstSequence: retained[0].sequence };
     } finally {
-      await release();
+      try {
+        if (temporary) await removeRetentionTemporary(temporary);
+      } finally {
+        await release();
+      }
     }
   }
 

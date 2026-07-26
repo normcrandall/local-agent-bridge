@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRepositoryJournal, REPOSITORY_JOURNAL_VERSION } from "../src/repository-journal.mjs";
@@ -57,7 +57,8 @@ try {
     (error) => error.code === "REPOSITORY_MISMATCH",
   );
 
-  const concurrent = createRepositoryJournal({ directory: join(root, "concurrent") });
+  const concurrentDirectory = join(root, "concurrent");
+  const concurrent = createRepositoryJournal({ directory: concurrentDirectory });
   const results = await Promise.all(Array.from({ length: 30 }, (_, index) => concurrent.append({
     identity: `event-${index}`,
     repository: "veliqon/example",
@@ -92,9 +93,26 @@ try {
   assert.equal(pageTwo.records.every((record) => record.binding.headSha === head), true, "export must preserve binding metadata");
   await assert.rejects(concurrent.export({ limit: 1_001 }), (error) => error.code === "INVALID_LIMIT");
 
+  const orphanTemporary = join(concurrentDirectory, "repository-journal.jsonl.999.11111111-1111-4111-8111-111111111111.tmp");
+  const unrelatedTemporary = join(concurrentDirectory, "repository-journal.jsonl.keep.tmp");
+  await writeFile(orphanTemporary, "orphaned retention rewrite");
+  await writeFile(unrelatedTemporary, "must not be removed");
   const retained = await concurrent.retain({ maxRecords: 8 });
   assert.deepEqual(retained, { removed: 22, retained: 8, firstSequence: 23 });
+  await assert.rejects(stat(orphanTemporary), (error) => error.code === "ENOENT", "recognized orphan retention temps must be removed under lock");
+  assert.equal((await readFile(unrelatedTemporary, "utf8")), "must not be removed", "cleanup must not remove unrelated temp files");
   assert.deepEqual((await concurrent.read()).map((record) => record.sequence), [23, 24, 25, 26, 27, 28, 29, 30]);
+  const reclaimedCursor = await concurrent.export({ afterSequence: 0, limit: 8 });
+  assert.equal(reclaimedCursor.earliestAvailableSequence, 23);
+  assert.deepEqual(reclaimedCursor.cursorGap, {
+    kind: "retention_loss",
+    requestedAfterSequence: 0,
+    earliestAvailableSequence: 23,
+    missingFromSequence: 1,
+    missingThroughSequence: 22,
+  });
+  const retainedCursor = await concurrent.export({ afterSequence: 22, limit: 8 });
+  assert.equal(retainedCursor.cursorGap, null, "a cursor immediately before retained history has no loss gap");
   const afterRetention = await concurrent.append({
     identity: "event-after-retention",
     repository: "veliqon/example",
