@@ -169,6 +169,16 @@ try {
     updatedAt: "2026-07-23T11:59:59.000Z",
     task: "Implement repository-aware mission control",
     githubBuilder: { repository: "veliqon/control-plane", headRef: "codex/mission-control", headSha: "a".repeat(40) },
+    writerAuthority: {
+      login: "veliqon-codex-writer[bot]",
+      resolvedLogin: "veliqon-codex-writer[bot]",
+      requestedLogin: "veliqon-builder[bot]",
+      rebindReason: "provider_writer_selection",
+      removedOperations: ["merge"],
+      appId: "4390293",
+      provider: "codex",
+      permissions: { contents: "write", issues: "write", metadata: "read", pull_requests: "write" },
+    },
     runtime: {
       turnCount: 2,
       activeCall: {
@@ -733,6 +743,10 @@ try {
   assert.match(rendered, /UPDATED.*2026/);
   assert.match(rendered, /SUMMARY STALE.*heartbeat remains live/);
   assert.match(rendered, /ACTIVITY.*3 events.*412 bytes/);
+  const authorityRendered = renderSnapshot(attention, { selectedIndex, timeline, width: 200, height: 40, now, detailExpanded: true });
+  assert.match(authorityRendered, /REBIND.*veliqon-builder\[bot\].*veliqon-codex-writer\[bot\].*provider_writer_selection/);
+  assert.match(authorityRendered, /AUTH.*stripped merge/);
+  assert.match(authorityRendered, /PERMS.*contents:write.*pull_requests:write/);
   const selectedLane = attention.lanes[selectedIndex];
   assert.deepEqual(missionControlActionAvailability(selectedLane), { openPr: false, copy: true, continue: false, cancel: true, archive: false, acknowledgeWake: false });
   const needsUserLane = attention.lanes.find((lane) => lane.id === needsUserId);

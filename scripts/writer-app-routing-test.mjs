@@ -135,10 +135,28 @@ function fakeProviderClient(message = "work complete") {
   await pool.send({ agent: "antigravity", prompt: "deliver", mode: "work", browser: false });
   assert.equal(builderOptions.token, undefined, "the in-process builder must not retain a static installation token");
   assert.equal(typeof builderOptions.getToken, "function");
-  const first = await builderOptions.getToken();
-  const second = await builderOptions.getToken();
-  assert.notEqual(first.token, second.token, "each builder client token request must mint a fresh installation token");
-  assert.equal(mints, 3, "one metadata mint plus two fresh operation mints are expected");
+  assert.equal(mints, 1, "binding preflight mints only the metadata credential");
+  await pool.close();
+}
+
+{
+  const client = fakeProviderClient();
+  const pool = createAgentPool({
+    root: process.cwd(), workspace: process.cwd(),
+    githubBuilder: {
+      ...baseBuilder,
+      writerProvider: "claude",
+      requestedLogin: "compat-builder[bot]",
+      expectedLogin: "claude-writer[bot]",
+      expectedLogins: { codex: "codex-writer[bot]" },
+    },
+    createCredential: ({ writerProvider }) => credential(writerProvider),
+    inspectAppRoles: async () => roles,
+    clientFactory: () => client, transportFactory: () => ({}),
+  });
+  const result = await pool.send({ agent: "codex", prompt: "fail over", mode: "work", browser: false });
+  assert.equal(result.metadata.writerAuthority.rebindReason, "explicit_provider_pin",
+    "an explicit provider pin must win over an unrelated prior writer when recording the audit reason");
   await pool.close();
 }
 

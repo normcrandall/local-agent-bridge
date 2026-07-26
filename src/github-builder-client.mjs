@@ -338,15 +338,14 @@ export function createBoundBuilderClient({
     }
   }
   if (!expectedLogin) throw new Error("expectedLogin is required.");
-  const sortedPermissions = Object.fromEntries(
+  let observedPermissions = Object.fromEntries(
     Object.entries(authority?.permissions || {}).sort(([left], [right]) => left.localeCompare(right)),
   );
-  const boundAuthority = authority ? Object.freeze({
+  const authorityMetadata = authority ? Object.freeze({
     login: String(authority.login || expectedLogin),
     appId: String(authority.appId || ""),
     installationId: Number(authority.installationId),
     repository: String(authority.repository || repository),
-    permissions: Object.freeze(sortedPermissions),
     ...(authority.provider ? { provider: authority.provider } : {}),
     ...(authority.roleLabel ? { roleLabel: authority.roleLabel } : {}),
     ...(authority.requestedLogin ? { requestedLogin: authority.requestedLogin } : {}),
@@ -356,12 +355,16 @@ export function createBoundBuilderClient({
       ? { removedOperations: Object.freeze([...authority.removedOperations]) }
       : {}),
   }) : null;
-  if (boundAuthority) {
+  const currentBoundAuthority = () => authorityMetadata ? Object.freeze({
+    ...authorityMetadata,
+    permissions: Object.freeze({ ...observedPermissions }),
+  }) : null;
+  if (authorityMetadata) {
     const normalizeAppLogin = (login) => String(login || "").toLowerCase().replace(/\[bot\]$/, "");
-    if (!/^\d+$/.test(boundAuthority.appId)
-      || !Number.isInteger(boundAuthority.installationId) || boundAuthority.installationId < 1
-      || boundAuthority.repository !== repository
-      || normalizeAppLogin(boundAuthority.login) !== normalizeAppLogin(expectedLogin)) {
+    if (!/^\d+$/.test(authorityMetadata.appId)
+      || !Number.isInteger(authorityMetadata.installationId) || authorityMetadata.installationId < 1
+      || authorityMetadata.repository !== repository
+      || normalizeAppLogin(authorityMetadata.login) !== normalizeAppLogin(expectedLogin)) {
       throw new Error("GitHub builder authority does not match the bound repository and App identity.");
     }
   }
@@ -396,7 +399,7 @@ export function createBoundBuilderClient({
   };
 
   async function ensureToken() {
-    if (cachedToken) {
+    if (!getToken && cachedToken) {
       return { token: cachedToken, verifiedLogin: cachedVerifiedLogin };
     }
     if (!getToken) {
@@ -408,6 +411,11 @@ export function createBoundBuilderClient({
     }
     cachedToken = credential.token;
     cachedVerifiedLogin = credential.verifiedLogin;
+    if (credential.permissions && typeof credential.permissions === "object") {
+      observedPermissions = Object.fromEntries(
+        Object.entries(credential.permissions).sort(([left], [right]) => left.localeCompare(right)),
+      );
+    }
     context.token = cachedToken;
     context.verifiedLogin = cachedVerifiedLogin;
     return credential;
@@ -880,6 +888,7 @@ export function createBoundBuilderClient({
   }
 
   function appIdentity(receiptLogin) {
+    const boundAuthority = currentBoundAuthority();
     return {
       expectedLogin,
       verifiedLogin: receiptLogin || cachedVerifiedLogin || expectedLogin,
@@ -887,6 +896,7 @@ export function createBoundBuilderClient({
         appId: boundAuthority.appId,
         installationId: boundAuthority.installationId,
         repository: boundAuthority.repository,
+        permissions: boundAuthority.permissions,
         ...(boundAuthority.provider ? { provider: boundAuthority.provider } : {}),
         ...(boundAuthority.roleLabel ? { roleLabel: boundAuthority.roleLabel } : {}),
         ...(boundAuthority.requestedLogin ? { requestedLogin: boundAuthority.requestedLogin } : {}),
@@ -1561,6 +1571,7 @@ export function createBoundBuilderClient({
   }
 
   function binding() {
+    const boundAuthority = currentBoundAuthority();
     return {
       repository,
       prNumber,
@@ -1570,5 +1581,11 @@ export function createBoundBuilderClient({
     };
   }
 
-  return { identity, binding, ensurePullRequest, reviewThreads, replyReviewThread, resolveReviewThread, markReady, merge, createBranch, pushBranch, replaceBranch, getIssue, addIssueLabel, removeIssueLabel, getIssueComments, getIssueTimeline, getIssueDependencies, getIssueProjectItems, updateIssueProjectSingleSelect, postIssueComment, updateIssueComment, deleteIssueComment, listTagLocks, acquireTagLock, releaseTagLock, expectedLogin, repository, issueNumber, authority: boundAuthority };
+  return {
+    identity, binding, ensurePullRequest, reviewThreads, replyReviewThread, resolveReviewThread, markReady, merge,
+    createBranch, pushBranch, replaceBranch, getIssue, addIssueLabel, removeIssueLabel, getIssueComments, getIssueTimeline,
+    getIssueDependencies, getIssueProjectItems, updateIssueProjectSingleSelect, postIssueComment, updateIssueComment,
+    deleteIssueComment, listTagLocks, acquireTagLock, releaseTagLock, expectedLogin, repository, issueNumber,
+    get authority() { return currentBoundAuthority(); },
+  };
 }

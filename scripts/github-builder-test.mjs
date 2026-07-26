@@ -330,6 +330,48 @@ assert.equal((await createAndContinue.reviewThreads())[0].id, "thread-1");
 assert.equal(createAndContinue.binding().prNumber, 42);
 const threads = await builder.reviewThreads();
 assert.equal(threads[0].id, "thread-1");
+
+// A bound client backed by a token factory refreshes once for each authorized
+// operation, and its authority receipt learns the permissions observed on the
+// minted installation token. This pins the token lifecycle at the client seam,
+// so hoisting a client cannot silently turn a per-operation credential into a
+// pool-lifetime credential.
+{
+  let tokenMints = 0;
+  const refreshApi = fakeGitHub();
+  const refreshReceiptPath = path.join(tmpDir, "refresh-token-receipts.jsonl");
+  const refreshClient = createBoundBuilderClient({
+    ...base,
+    token: null,
+    verifiedLogin: null,
+    fetchImpl: refreshApi.fetchImpl,
+    getToken: async () => ({
+      token: `ghs_refresh_${++tokenMints}`,
+      verifiedLogin: "builder[bot]",
+      permissions: { contents: "write", issues: "write", metadata: "read", pull_requests: "write" },
+    }),
+    authority: {
+      login: "builder[bot]",
+      appId: "1",
+      installationId: 101,
+      repository: "owner/repo",
+      permissions: {},
+    },
+    receiptPath: refreshReceiptPath,
+  });
+  await refreshClient.reviewThreads();
+  await refreshClient.reviewThreads();
+  assert.equal(tokenMints, 2, "two client operations must mint two short-lived credentials");
+  assert.deepEqual(refreshClient.binding().writerAuthority.permissions, {
+    contents: "write", issues: "write", metadata: "read", pull_requests: "write",
+  });
+  await refreshClient.ensurePullRequest({ title: "Refresh receipt", body: "Observed permissions" });
+  assert.equal(tokenMints, 3, "a third client operation must mint a third credential");
+  const refreshReceipts = fs.readFileSync(refreshReceiptPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(refreshReceipts.at(-1).appIdentity.permissions, {
+    contents: "write", issues: "write", metadata: "read", pull_requests: "write",
+  }, "durable mutation receipts must carry the permissions observed on the operation token");
+}
 const replied = await builder.replyReviewThread({ threadId: "thread-1", body: "Fixed." });
 assert.equal(replied.url, "https://github.test/comment/1");
 assert.match(api.calls.find((call) => call.body?.variables?.body)?.body.variables.body, /agent-bridge-builder:reply/);

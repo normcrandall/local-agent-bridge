@@ -57,11 +57,17 @@ const authority = {
 };
 
 const getToken = async () => {
-  const credential = await createInstallationToken({ role: "builder", writerProvider, repository });
-  if (!sameGitHubAppLogin(credential.expectedLogin, expectedLogin)) {
-    throw new Error(`Configured builder identity ${credential.expectedLogin} does not match authorized identity ${expectedLogin}.`);
+  const credential = await createInstallationToken({ role: "builder", writerProvider, expectedLogin, repository });
+  if (!sameGitHubAppLogin(credential.expectedLogin, expectedLogin)
+    || String(credential.appId) !== String(configuredRole.appId)
+    || Number(credential.installationId) !== Number(configuredRole.installationId)) {
+    throw new Error(`Configured builder authority changed while the bound bridge was running: expected ${expectedLogin} App ${configuredRole.appId} installation ${configuredRole.installationId}.`);
   }
-  return { token: credential.token, verifiedLogin: credential.verifiedLogin };
+  return {
+    token: credential.token,
+    verifiedLogin: credential.verifiedLogin,
+    permissions: credential.permissions,
+  };
 };
 
 const client = createBoundBuilderClient({

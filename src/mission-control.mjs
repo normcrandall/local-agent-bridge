@@ -1072,6 +1072,22 @@ function detailPane(lane, timeline, width, now, snapshot, expanded = false) {
       lane.writerAuthority.provider,
     ].filter(Boolean).join(" · ");
     rows.push(paneLine(`WRITER  ${writerIdentity}`, "36"));
+    const requestedLogin = lane.writerAuthority.requestedLogin;
+    const resolvedLogin = lane.writerAuthority.resolvedLogin || lane.writerAuthority.login;
+    if (requestedLogin && resolvedLogin
+      && requestedLogin.toLowerCase().replace(/\[bot\]$/, "") !== resolvedLogin.toLowerCase().replace(/\[bot\]$/, "")) {
+      rows.push(paneLine(
+        `REBIND  ${requestedLogin} -> ${resolvedLogin}${lane.writerAuthority.rebindReason ? ` · ${lane.writerAuthority.rebindReason}` : ""}`,
+        "33;1",
+      ));
+    }
+    const removedOperations = lane.writerAuthority.removedOperations || [];
+    if (removedOperations.length) rows.push(paneLine(`AUTH  stripped ${removedOperations.join(", ")}`, "33"));
+    const permissions = Object.entries(lane.writerAuthority.permissions || {})
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([name, level]) => `${name}:${level}`)
+      .join(" · ");
+    if (permissions) rows.push(paneLine(`PERMS  ${permissions}`, "36"));
   }
   if (!deliveryStatus && lane.nextAction && lane.nextAction !== "none") rows.push(paneLine(`NEXT  ${friendlyPhase(lane)}`, "33"));
   const blockingReason = deliveryStatus ? "" : blockedReason(lane);
