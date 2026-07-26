@@ -378,20 +378,122 @@ export function createRepositoryJournal({
     };
   }
 
-  async function retain({ maxRecords }) {
+  async function retain({ maxRecords, prepare = null }) {
     normalizeLimit(maxRecords);
+    if (prepare !== null && typeof prepare !== "function") {
+      throw new RepositoryJournalError("prepare must be a function when supplied.", { code: "INVALID_RETENTION_PLAN" });
+    }
     await initialize();
     const release = await acquireLock(lockPath, { timeoutMs: lockTimeoutMs, retryMs: lockRetryMs });
     let temporary = null;
     try {
       await cleanOrphanRetentionTemps();
-      const records = strictRecords(inspectRaw(await readRaw(path)));
-      if (records.length <= maxRecords) return { removed: 0, retained: records.length, firstSequence: records[0]?.sequence || null };
-      const retained = records.slice(-maxRecords);
+      const originalRecords = strictRecords(inspectRaw(await readRaw(path)));
+      const plan = prepare ? await prepare(structuredClone(originalRecords)) : {};
+      const additions = plan?.append || [];
+      const discardedOutboxKeys = new Set(plan?.discardOutboxKeys || []);
+      if (!Array.isArray(additions) || [...discardedOutboxKeys].some((key) => typeof key !== "string" || !key)) {
+        throw new RepositoryJournalError("Retention preparation returned an invalid plan.", { code: "INVALID_RETENTION_PLAN" });
+      }
+      const records = [...originalRecords];
+      let appendedCount = 0;
+      for (const addition of additions) {
+        const normalizedIdentity = validateIdentity(addition.identity);
+        const binding = normalizeBinding(addition);
+        const normalizedPayload = canonicalize(addition.payload);
+        const fingerprint = digest({ identity: normalizedIdentity, binding, payload: normalizedPayload });
+        if (records.length && records[0].binding.repository !== binding.repository) {
+          throw new RepositoryJournalError(
+            `Journal is bound to ${records[0].binding.repository}; refusing record for ${binding.repository}.`,
+            { code: "REPOSITORY_MISMATCH" },
+          );
+        }
+        const existing = records.find((record) => record.identity === normalizedIdentity);
+        if (existing) {
+          if (existing.fingerprint !== fingerprint) {
+            throw new RepositoryJournalError(
+              `Identity ${normalizedIdentity} is already bound to different repository metadata or payload.`,
+              { code: "IDENTITY_CONFLICT" },
+            );
+          }
+          continue;
+        }
+        const previous = records.at(-1) || null;
+        const recordedAt = now();
+        if (!Number.isFinite(Date.parse(recordedAt))) {
+          throw new RepositoryJournalError("Journal clock returned an invalid timestamp.", { code: "INVALID_TIMESTAMP" });
+        }
+        const content = {
+          version: REPOSITORY_JOURNAL_VERSION,
+          sequence: (previous?.sequence || 0) + 1,
+          identity: normalizedIdentity,
+          binding,
+          recordedAt,
+          payload: normalizedPayload,
+          fingerprint,
+          previousDigest: previous?.digest || null,
+        };
+        records.push({ ...content, digest: digest(content) });
+        appendedCount += 1;
+      }
+      const outboxKeys = new Set();
+      const latestOutboxCheckpoint = new Map();
+      let lastDiscardedOutboxIndex = -1;
+      for (let index = 0; index < records.length; index += 1) {
+        const event = records[index]?.payload?.repositoryOutbox;
+        if (event === undefined || event === null) continue;
+        if (!event || typeof event !== "object" || Array.isArray(event) || typeof event.keyDigest !== "string" || !event.keyDigest) {
+          throw new RepositoryJournalError(
+            "Repository journal retention encountered a malformed outbox record.",
+            { code: "RETENTION_UNSAFE" },
+          );
+        }
+        if (discardedOutboxKeys.has(event.keyDigest)) {
+          lastDiscardedOutboxIndex = index;
+        } else {
+          outboxKeys.add(event.keyDigest);
+          if (event.event === "checkpoint") latestOutboxCheckpoint.set(event.keyDigest, index);
+        }
+      }
+      if (records.length <= maxRecords && additions.length === 0 && discardedOutboxKeys.size === 0) {
+        return {
+          removed: 0,
+          retained: records.length,
+          firstSequence: records[0]?.sequence || null,
+          requestedMaxRecords: maxRecords,
+          bounded: true,
+          protectedOutboxItems: latestOutboxCheckpoint.size,
+        };
+      }
+      const uncoveredOutboxKeys = [...outboxKeys].filter((key) => !latestOutboxCheckpoint.has(key));
+      if (uncoveredOutboxKeys.length) {
+        throw new RepositoryJournalError(
+          "Repository journal retention would discard outbox history without a reconstruction checkpoint.",
+          { code: "RETENTION_UNSAFE" },
+        );
+      }
+      const requestedStart = Math.max(0, records.length - maxRecords);
+      const protectedStart = latestOutboxCheckpoint.size
+        ? Math.min(...latestOutboxCheckpoint.values())
+        : requestedStart;
+      const retentionStart = latestOutboxCheckpoint.size
+        ? (requestedStart <= 0 && lastDiscardedOutboxIndex < 0
+            ? 0
+            : Math.max(protectedStart, lastDiscardedOutboxIndex + 1))
+        : Math.max(requestedStart, lastDiscardedOutboxIndex + 1);
+      const retained = records.slice(retentionStart);
+      if (retained.length > maxRecords) {
+        throw new RepositoryJournalError(
+          `Repository journal retention requires ${retained.length} protected records, exceeding maxRecords ${maxRecords}.`,
+          { code: "RETENTION_FLOOR_EXCEEDED" },
+        );
+      }
       temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
       const temporaryHandle = await open(temporary, "wx", 0o600);
       try {
-        await temporaryHandle.writeFile(`${retained.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8");
+        await temporaryHandle.writeFile(retained.length
+          ? `${retained.map((record) => JSON.stringify(record)).join("\n")}\n`
+          : "", "utf8");
         await temporaryHandle.sync();
       } finally {
         await temporaryHandle.close();
@@ -399,7 +501,18 @@ export function createRepositoryJournal({
       await syncDirectory(root);
       await rename(temporary, path);
       await syncDirectory(root);
-      return { removed: records.length - retained.length, retained: retained.length, firstSequence: retained[0].sequence };
+      const receipt = {
+        removed: originalRecords.length + appendedCount - retained.length,
+        retained: retained.length,
+        firstSequence: retained[0]?.sequence || null,
+        requestedMaxRecords: maxRecords,
+        bounded: true,
+        protectedOutboxItems: latestOutboxCheckpoint.size,
+      };
+      if (plan?.metadata && typeof plan.metadata === "object" && !Array.isArray(plan.metadata)) {
+        Object.assign(receipt, canonicalize(plan.metadata, "retention.metadata"));
+      }
+      return receipt;
     } finally {
       try {
         if (temporary) await removeRetentionTemporary(temporary);

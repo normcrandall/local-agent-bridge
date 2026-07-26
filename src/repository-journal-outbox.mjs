@@ -7,6 +7,7 @@ const DEFAULT_MAX_ATTEMPTS = 5;
 const DEFAULT_BASE_BACKOFF_MS = 1_000;
 const DEFAULT_MAX_BACKOFF_MS = 15 * 60_000;
 const DEFAULT_MAX_PAYLOAD_BYTES = 64 * 1024;
+const DEFAULT_TERMINAL_HORIZON_MS = 30 * 24 * 60 * 60_000;
 const MAX_CLAIM_LIMIT = 100;
 const SECRET_FIELD = /(authorization|credential|password|passwd|secret|token|apikey|privatekey)/i;
 
@@ -124,6 +125,53 @@ function reconstruct(records, nowMs) {
   for (const record of records) {
     const event = outboxEvent(record);
     if (!event) continue;
+    if (event.event === "checkpoint") {
+      if (!event.item || typeof event.item !== "object" || Array.isArray(event.item)) {
+        fail("Repository outbox checkpoint is malformed.", "CORRUPT_CHECKPOINT");
+      }
+      if (!/^[0-9a-f]{64}$/.test(event.stateDigest || "") || hash(event.item) !== event.stateDigest) {
+        fail("Repository outbox checkpoint has a mismatched state digest.", "CORRUPT_CHECKPOINT");
+      }
+      const checkpointItem = canonicalize(event.item, "checkpoint.item");
+      requiredString(checkpointItem.idempotencyKey, "checkpoint.item.idempotencyKey", 256);
+      requiredString(checkpointItem.operation, "checkpoint.item.operation", 128);
+      if (!/^[0-9a-f]{64}$/.test(checkpointItem.payloadDigest || "") || hash(checkpointItem.payload) !== checkpointItem.payloadDigest) {
+        fail("Repository outbox checkpoint has a mismatched payload digest.", "CORRUPT_CHECKPOINT");
+      }
+      if (!Number.isInteger(checkpointItem.enqueueSequence) || checkpointItem.enqueueSequence <= 0
+        || !Number.isInteger(checkpointItem.claimCount) || checkpointItem.claimCount < 0
+        || typeof checkpointItem.terminal !== "boolean"
+        || !Number.isFinite(Date.parse(checkpointItem.enqueuedAt))) {
+        fail("Repository outbox checkpoint has invalid lifecycle fields.", "CORRUPT_CHECKPOINT");
+      }
+      for (const timestamp of [checkpointItem.acknowledgedAt, checkpointItem.retryAt]) {
+        if (timestamp !== null && !Number.isFinite(Date.parse(timestamp))) {
+          fail("Repository outbox checkpoint has an invalid lifecycle timestamp.", "CORRUPT_CHECKPOINT");
+        }
+      }
+      if (checkpointItem.lease !== null) {
+        const lease = checkpointItem.lease;
+        if (!lease || typeof lease !== "object" || Array.isArray(lease)
+          || !Number.isInteger(lease.claimOrdinal) || lease.claimOrdinal <= 0
+          || typeof lease.leaseId !== "string" || !lease.leaseId
+          || typeof lease.workerId !== "string" || !lease.workerId
+          || !Number.isFinite(Date.parse(lease.claimedAt))
+          || !Number.isFinite(Date.parse(lease.expiresAt))) {
+          fail("Repository outbox checkpoint has an invalid lease.", "CORRUPT_CHECKPOINT");
+        }
+      }
+      const expectedKeyDigest = hash({ repository: record.binding.repository, idempotencyKey: checkpointItem.idempotencyKey });
+      if (event.keyDigest !== expectedKeyDigest) {
+        fail("Repository outbox checkpoint is bound to the wrong idempotency key.", "CORRUPT_CHECKPOINT");
+      }
+      items.set(event.keyDigest, {
+        ...checkpointItem,
+        keyDigest: event.keyDigest,
+        binding: record.binding,
+        lastSequence: record.sequence,
+      });
+      continue;
+    }
     if (event.event === "enqueued") {
       if (!items.has(event.keyDigest)) {
         items.set(event.keyDigest, {
@@ -141,6 +189,7 @@ function reconstruct(records, nowMs) {
           failure: null,
           retryAt: null,
           terminal: false,
+          lastSequence: record.sequence,
         });
       }
       continue;
@@ -149,6 +198,7 @@ function reconstruct(records, nowMs) {
     if (!item) {
       fail("Repository outbox history is missing the enqueue record required to reconstruct an item.", "OUTBOX_HISTORY_GAP");
     }
+    item.lastSequence = record.sequence;
     if (event.event === "claimed") {
       item.claimCount = Math.max(item.claimCount, event.claimOrdinal);
       item.lease = {
@@ -209,6 +259,7 @@ export function createRepositoryJournalOutbox({
   baseBackoffMs = DEFAULT_BASE_BACKOFF_MS,
   maxBackoffMs = DEFAULT_MAX_BACKOFF_MS,
   maxPayloadBytes = DEFAULT_MAX_PAYLOAD_BYTES,
+  terminalHorizonMs = DEFAULT_TERMINAL_HORIZON_MS,
 } = {}) {
   if (!journal || typeof journal.append !== "function" || typeof journal.read !== "function") {
     fail("A repository journal with append() and read() is required.", "INVALID_JOURNAL");
@@ -218,6 +269,7 @@ export function createRepositoryJournalOutbox({
   millis(baseBackoffMs, "baseBackoffMs");
   millis(maxBackoffMs, "maxBackoffMs");
   millis(maxPayloadBytes, "maxPayloadBytes");
+  millis(terminalHorizonMs, "terminalHorizonMs", { minimum: 0 });
   if (baseBackoffMs > maxBackoffMs) fail("baseBackoffMs must not exceed maxBackoffMs.", "INVALID_CONFIGURATION");
 
   async function state() {
@@ -238,6 +290,19 @@ export function createRepositoryJournalOutbox({
       headSha: exactHead(headSha),
     };
     const keyDigest = hash({ repository: binding.repository, idempotencyKey: normalizedKey });
+    const current = await state();
+    const currentItem = current.items.get(keyDigest);
+    if (currentItem) {
+      const equivalent = currentItem.operation === normalizedOperation
+        && currentItem.idempotencyKey === normalizedKey
+        && currentItem.payloadDigest === hash(normalizedPayload)
+        && stableJson(currentItem.payload) === stableJson(normalizedPayload)
+        && stableJson(currentItem.binding) === stableJson(binding);
+      if (!equivalent) {
+        fail(`Idempotency key ${normalizedKey} is already bound to a different operation, binding, or payload.`, "IDEMPOTENCY_CONFLICT");
+      }
+      return { entry: publicItem(currentItem, current.nowMs, maxAttempts), idempotent: true };
+    }
     const event = {
       version: REPOSITORY_JOURNAL_OUTBOX_VERSION,
       event: "enqueued",
@@ -287,6 +352,7 @@ export function createRepositoryJournalOutbox({
     if (!Number.isInteger(limit) || limit <= 0 || limit > MAX_CLAIM_LIMIT) fail(`limit must be from 1 through ${MAX_CLAIM_LIMIT}.`, "INVALID_LIMIT");
     millis(leaseDurationMs, "leaseDurationMs");
     const claimed = [];
+    const attemptedKeys = new Set();
     while (claimed.length < limit) {
       const snapshot = await state();
       const candidates = [...snapshot.items.values()]
@@ -294,8 +360,10 @@ export function createRepositoryJournalOutbox({
         .sort((left, right) => (left.retryAt || left.enqueuedAt).localeCompare(right.retryAt || right.enqueuedAt)
           || left.enqueueSequence - right.enqueueSequence
           || left.idempotencyKey.localeCompare(right.idempotencyKey));
-      const candidate = candidates.find((item) => !claimed.some((entry) => entry.idempotencyKey === item.idempotencyKey));
+      const candidate = candidates.find((item) => !attemptedKeys.has(item.keyDigest)
+        && !claimed.some((entry) => entry.idempotencyKey === item.idempotencyKey));
       if (!candidate) break;
+      attemptedKeys.add(candidate.keyDigest);
       const claimOrdinal = candidate.claimCount + 1;
       const leaseId = randomUUID();
       const at = snapshot.nowAt;
@@ -381,5 +449,76 @@ export function createRepositoryJournalOutbox({
     };
   }
 
-  return Object.freeze({ enqueue, claim, acknowledge, ack: acknowledge, fail: recordFailure, inspect });
+  async function retain({ maxRecords }) {
+    if (typeof journal.retain !== "function") fail("The repository journal does not support retention.", "INVALID_JOURNAL");
+    millis(maxRecords, "maxRecords");
+    return journal.retain({
+      maxRecords,
+      prepare(records) {
+        const nowAt = isoNow(now);
+        const nowMs = Date.parse(nowAt);
+        const snapshot = reconstruct(records, nowMs);
+        const dropped = [];
+        const droppedDeadLetter = [];
+        const kept = [];
+        for (const item of snapshot.values()) {
+          const exhausted = !item.acknowledgedAt && !item.lease && item.claimCount >= maxAttempts;
+          const deadLetter = !item.acknowledgedAt && (item.terminal || exhausted);
+          const terminalAt = item.acknowledgedAt
+            || (deadLetter ? (item.failure?.failedAt || item.enqueuedAt) : null);
+          const terminalAgeMs = terminalAt === null ? null : nowMs - Date.parse(terminalAt);
+          if (terminalAgeMs !== null && terminalAgeMs >= terminalHorizonMs) {
+            dropped.push(item);
+            if (deadLetter) droppedDeadLetter.push(item);
+          } else {
+            kept.push(item);
+          }
+        }
+        const append = kept.map((item) => {
+          const checkpointItem = canonicalize({
+            idempotencyKey: item.idempotencyKey,
+            operation: item.operation,
+            payload: item.payload,
+            payloadDigest: item.payloadDigest,
+            enqueuedAt: item.enqueuedAt,
+            enqueueSequence: item.enqueueSequence,
+            claimCount: item.claimCount,
+            lease: item.lease,
+            acknowledgedAt: item.acknowledgedAt,
+            failure: item.failure,
+            retryAt: item.retryAt,
+            terminal: item.terminal,
+          }, "checkpoint.item");
+          const checkpointDigest = hash(checkpointItem);
+          const event = {
+            version: REPOSITORY_JOURNAL_OUTBOX_VERSION,
+            event: "checkpoint",
+            keyDigest: item.keyDigest,
+            stateDigest: checkpointDigest,
+            item: checkpointItem,
+          };
+          return {
+            // Retention is already atomic under the journal lock, so every
+            // generation needs a fresh identity. Reusing a prior checkpoint
+            // can leave its only surviving copy below a later discard floor.
+            identity: eventIdentity(item.keyDigest, "checkpoint", randomUUID()),
+            ...item.binding,
+            payload: { repositoryOutbox: event },
+          };
+        });
+        return {
+          append,
+          discardOutboxKeys: dropped.map((item) => item.keyDigest),
+          metadata: {
+            checkpointedItems: kept.length,
+            droppedTerminalItems: dropped.length,
+            droppedDeadLetterItems: droppedDeadLetter.length,
+            terminalHorizonMs,
+          },
+        };
+      },
+    });
+  }
+
+  return Object.freeze({ enqueue, claim, acknowledge, ack: acknowledge, fail: recordFailure, inspect, retain });
 }
