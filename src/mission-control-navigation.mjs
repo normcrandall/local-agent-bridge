@@ -17,6 +17,7 @@ const DEFAULT_PANE = "work";
 const DEFAULT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
 const MAX_SERIALIZED_BYTES = 64 * 1_024;
 const MAX_ORDER_ENTRIES = 256;
+const MAX_LANE_ORDER_ENTRIES = 256;
 const MAX_RECEIPTS = 512;
 const MAX_LANE_KEY_LENGTH = (512 * 2) + 1;
 const MAX_TOKEN_LENGTH = 2_048;
@@ -50,7 +51,16 @@ function cleanToken(value) {
 
 function cleanScope(value) {
   if (typeof value !== "string" || !value || value.length > MAX_SCOPE_LENGTH || /[\0\r\n]/u.test(value)) return null;
-  return value;
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed) || parsed.length !== 3 || !MISSION_CONTROL_NAVIGATION_VIEWS.includes(parsed[0])) return null;
+    const repository = parsed[1] == null ? null : cleanIdentifier(parsed[1]);
+    const portfolio = parsed[2] == null ? null : cleanIdentifier(parsed[2]);
+    if ((parsed[1] != null && !repository) || (parsed[2] != null && !portfolio)) return null;
+    return JSON.stringify([parsed[0], repository, portfolio]);
+  } catch {
+    return null;
+  }
 }
 
 function laneKey(lane) {
@@ -89,7 +99,7 @@ function stableOrder(previousOrder, currentIds, normalize) {
   const current = new Set(currentIds);
   const retained = bounded(previousOrder, normalize).filter((id) => current.has(id));
   const retainedSet = new Set(retained);
-  return [...retained, ...currentIds.filter((id) => !retainedSet.has(id))].slice(0, MAX_ORDER_ENTRIES);
+  return [...retained, ...currentIds.filter((id) => !retainedSet.has(id))];
 }
 
 function collection(model, view) {
@@ -143,7 +153,7 @@ function safeReceipts(receipts) {
 function safeOrders(orders) {
   if (!orders || typeof orders !== "object" || Array.isArray(orders)) return {};
   return Object.fromEntries(Object.entries(orders)
-    .map(([key, values]) => [cleanScope(key), bounded(values, cleanLaneKey)])
+    .map(([key, values]) => [cleanScope(key), bounded(values, cleanLaneKey, MAX_LANE_ORDER_ENTRIES)])
     .filter(([key, values]) => key && values.length)
     .slice(-MAX_ORDER_ENTRIES));
 }
@@ -199,11 +209,11 @@ export function reconcileMissionControlNavigation(previous, model) {
     state: {
       ...scoped,
       lane,
-      repositoryOrder: repositories,
-      portfolioOrder: portfolioIds,
+      repositoryOrder: repositories.slice(0, MAX_ORDER_ENTRIES),
+      portfolioOrder: portfolioIds.slice(0, MAX_ORDER_ENTRIES),
       laneOrderByScope: Object.fromEntries([
         ...Object.entries(state.laneOrderByScope).filter(([key]) => key !== scope),
-        [scope, laneOrder],
+        [scope, laneOrder.slice(0, MAX_LANE_ORDER_ENTRIES)],
       ]),
     },
     repositories,
@@ -266,11 +276,19 @@ export function serializeMissionControlNavigation(state, { now = Date.now() } = 
     delete record[oldest];
     return true;
   };
+  const shedOldestInactiveScope = () => {
+    const activeScope = scopeKey(safe);
+    const oldest = Object.keys(safe.laneOrderByScope).find((key) => key !== activeScope);
+    if (!oldest) return false;
+    delete safe.laneOrderByScope[oldest];
+    return true;
+  };
   while (Buffer.byteLength(serialized, "utf8") > MAX_SERIALIZED_BYTES) {
-    if (!shedOldest(safe.laneOrderByScope)
-      && !shedOldest(safe.seenCompletions)
+    if (!shedOldestInactiveScope()
       && !safe.repositoryOrder.shift()
-      && !safe.portfolioOrder.shift()) {
+      && !safe.portfolioOrder.shift()
+      && !shedOldest(safe.laneOrderByScope)
+      && !shedOldest(safe.seenCompletions)) {
       throw new Error("Mission Control navigation state exceeds the persistence limit.");
     }
     serialized = render();

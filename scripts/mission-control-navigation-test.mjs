@@ -145,6 +145,32 @@ const identityModel = {
 assert.deepEqual(reconcileMissionControlNavigation(createMissionControlNavigationState({ repository: "veliqon/alpha" }), identityModel).lanes.map((entry) => entry.id), ["tab\tidentifier"]);
 assert.equal(reconcileMissionControlNavigation(createMissionControlNavigationState({ repository: longRepository, lane: longLane.key }), identityModel).state.lane, longLane.key);
 
+// Persistence bounds must never truncate the rendered lane collection. Once a
+// scope has filled its stored order, later arrivals still render immediately.
+const firstWave = Array.from({ length: 256 }, (_, index) => ({
+  id: `lane-${index}`,
+  repository: "veliqon/large",
+  key: missionControlLaneKey("veliqon/large", `lane-${index}`),
+}));
+const largeModel = (lanes) => ({
+  repositories: [{ id: "veliqon/large" }],
+  portfolios: [],
+  collections: { active: lanes, needsYou: [], queue: [], reviews: [], mergeTrain: [], history: [] },
+});
+const filledScope = reconcileMissionControlNavigation(
+  createMissionControlNavigationState({ repository: "veliqon/large" }),
+  largeModel(firstWave),
+);
+const laterArrivals = Array.from({ length: 44 }, (_, index) => ({
+  id: `lane-${index + 256}`,
+  repository: "veliqon/large",
+  key: missionControlLaneKey("veliqon/large", `lane-${index + 256}`),
+}));
+const expandedScope = reconcileMissionControlNavigation(filledScope.state, largeModel([...firstWave, ...laterArrivals]));
+assert.equal(expandedScope.lanes.length, 300, "all lanes render after the persisted order reaches its cap");
+assert.equal(expandedScope.lanes.at(-1).id, "lane-299", "new lanes are not permanently starved by the persisted order cap");
+assert.equal(Object.values(expandedScope.state.laneOrderByScope)[0].length, 256, "only persisted lane order metadata is capped");
+
 const now = Date.parse("2026-07-26T18:00:00.000Z");
 const serialized = serializeMissionControlNavigation({
   ...seen,
@@ -176,6 +202,18 @@ assert.deepEqual(restoreMissionControlNavigation(hostile, { now }), createMissio
   lane: missionControlLaneKey("repo", "x".repeat(512)),
   seenCompletions: { [safeKey]: "safe-token", [missionControlLaneKey("repo", "z".repeat(512))]: "also-safe" },
 }));
+
+const invalidScope = JSON.stringify({
+  version: 1,
+  savedAt: new Date(now).toISOString(),
+  laneOrderByScope: {
+    "not-a-navigation-scope": [safeKey],
+    [JSON.stringify(["active", "safe-repo", null])]: [safeKey],
+  },
+});
+assert.deepEqual(Object.keys(restoreMissionControlNavigation(invalidScope, { now }).laneOrderByScope), [
+  JSON.stringify(["active", "safe-repo", null]),
+], "restored scope keys must be canonical navigation scopes");
 
 // Oversized optional history is shed instead of making persistence unusable.
 const oversized = createMissionControlNavigationState({
