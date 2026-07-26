@@ -48,6 +48,32 @@ try {
   assert.equal(serialized.includes("github_pat_abcdefghijklmnopqrstuvwxyz123456"), false);
   assert.equal(first.records[0].payload.nested.result, "safe");
 
+  const unsafeMetadataJournal = {
+    export: async () => ({
+      repository,
+      records: [{
+        sequence: 1,
+        identity: "deploy-ghp_abcdefghijklmnopqrstuvwxyz1234567890",
+        recordedAt: new Date().toISOString(),
+        binding: { repository, credentialData: "short-secret" },
+        payload: {
+          tokenValue: "short-secret",
+          apiKeyPayload: "short-key",
+          assistantMessages: ["private transcript"],
+          summary: "safe",
+        },
+      }],
+      hasMore: false,
+      cursorGap: null,
+    }),
+    read: async () => [],
+  };
+  const unsafeMetadata = await readRepositoryContextDelta({ journal: unsafeMetadataJournal, repository, collaborationId, laneId });
+  assert.equal(JSON.stringify(unsafeMetadata).includes("ghp_abcdefghijklmnopqrstuvwxyz1234567890"), false, "identity must be sanitized");
+  assert.equal(JSON.stringify(unsafeMetadata).includes("short-secret"), false, "substring secret fields must be removed");
+  assert.equal(JSON.stringify(unsafeMetadata).includes("short-key"), false, "embedded api-key field names must be removed");
+  assert.equal(JSON.stringify(unsafeMetadata).includes("private transcript"), false, "embedded private field names must be removed");
+
   const second = await kernel.read({ cursor: first.cursor });
   assert.deepEqual(second.records.map((record) => record.sequence), [3]);
   assert.equal(second.hasMore, false);
@@ -65,6 +91,11 @@ try {
 
   const corrupted = { ...first.cursor, afterSequence: 999 };
   assert.equal(inspectRepositoryContextCursor(corrupted, { repository, collaborationId, laneId }).resync.reason, "corrupt_cursor");
+  const rejected = await kernel.read({ cursor: corrupted });
+  assert.equal(rejected.cursor, null, "a rejected cursor must never be echoed back for persistence");
+  const unsupported = await kernel.read({ cursor: { ...first.cursor, version: 999 } });
+  assert.equal(unsupported.resyncRequired.reason, "unsupported_cursor_version");
+  assert.equal(unsupported.cursor, null);
   const foreignRepo = await kernel.read({ cursor: createRepositoryContextCursor({ repository: "veliqon/other", collaborationId, laneId, afterSequence: 1 }) });
   assert.equal(foreignRepo.resyncRequired.reason, "foreign_repository");
   const foreignLane = await kernel.read({ cursor: createRepositoryContextCursor({ repository, collaborationId, laneId: "issue-999", afterSequence: 1 }) });
@@ -78,7 +109,7 @@ try {
   assert.equal(retainedOut.eventCount, 0);
 
   const duplicateJournal = {
-    export: async () => ({ repository, records: [{ sequence: 2 }, { sequence: 2 }], hasMore: false, cursorGap: null }),
+    export: async () => ({ repository, records: [{ sequence: 1 }, { sequence: 1 }], hasMore: false, cursorGap: null }),
     read: async () => [],
   };
   const duplicate = await readRepositoryContextDelta({ journal: duplicateJournal, repository, collaborationId, laneId });
@@ -100,8 +131,57 @@ try {
     read: async () => [],
   };
   const oversized = await readRepositoryContextDelta({ journal: oversizedJournal, repository, collaborationId, laneId, maxBytes: 256 });
-  assert.equal(oversized.resyncRequired.reason, "record_exceeds_bounds");
-  assert.equal(oversized.eventCount, 0);
+  assert.equal(oversized.resyncRequired, null);
+  assert.equal(oversized.eventCount, 1);
+  assert.equal(oversized.records[0].skipped, true);
+  assert.equal(oversized.records[0].reason, "record_exceeds_bounds");
+  assert.equal(oversized.skipped[0].sequence, 1);
+  assert.equal(oversized.cursor.afterSequence, 1, "an oversized record must advance the cursor");
+  assert.ok(oversized.byteCount <= oversized.bounds.maxBytes);
+
+  const circular = { summary: "circular" };
+  circular.self = circular;
+  const unverifiableJournal = {
+    export: async () => ({
+      repository,
+      records: [{ sequence: 1, identity: "bad", recordedAt: new Date().toISOString(), binding: { repository }, payload: circular }],
+      hasMore: false,
+      cursorGap: null,
+    }),
+    read: async () => [],
+  };
+  const unverifiable = await readRepositoryContextDelta({ journal: unverifiableJournal, repository, collaborationId, laneId, maxBytes: 256 });
+  assert.equal(unverifiable.resyncRequired, null);
+  assert.deepEqual(unverifiable.records[0], {
+    sequence: 1,
+    skipped: true,
+    reason: "record_unverifiable",
+    recordCode: "INVALID_RECORD",
+    evidenceRetained: true,
+  });
+  assert.equal(unverifiable.cursor.afterSequence, 1, "an unverifiable record must advance the cursor");
+  assert.ok(unverifiable.byteCount <= unverifiable.bounds.maxBytes);
+
+  const failedJournal = {
+    export: async () => { throw Object.assign(new Error("unreadable"), { code: "EIO" }); },
+    read: async () => [],
+  };
+  const failed = await readRepositoryContextDelta({ journal: failedJournal, repository, collaborationId, laneId });
+  assert.equal(failed.resyncRequired.reason, "journal_unverifiable");
+  assert.equal(failed.resyncRequired.journalCode, "EIO");
+
+  await assert.rejects(
+    readRepositoryContextDelta({ journal, repository, collaborationId, laneId, maxEvents: 0 }),
+    (error) => error.code === "INVALID_BOUNDS",
+  );
+  await assert.rejects(
+    readRepositoryContextDelta({ journal, repository, collaborationId, laneId, maxBytes: 191 }),
+    (error) => error.code === "INVALID_BOUNDS",
+  );
+  await assert.rejects(
+    readRepositoryContextDelta({ journal, repository, collaborationId, laneId, maxBytes: 256 * 1024 + 1 }),
+    (error) => error.code === "INVALID_BOUNDS",
+  );
 } finally {
   await rm(root, { recursive: true, force: true });
 }

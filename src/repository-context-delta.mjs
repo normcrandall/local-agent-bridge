@@ -4,13 +4,16 @@ import { redactSecretsAndInjectionFromText } from "./context-capsule.mjs";
 /**
  * Repository context deltas are an optimization and evidence-transport format.
  * They deliberately carry no authority to read or mutate GitHub, approve a
- * review, or merge a pull request.
+ * review, or merge a pull request. Cursor checksums detect accidental
+ * corruption only; they are not keyed and must not be treated as tamper
+ * evidence or an authorization boundary.
  */
 export const REPOSITORY_CONTEXT_DELTA_VERSION = 1;
 export const DEFAULT_CONTEXT_DELTA_MAX_EVENTS = 25;
 export const DEFAULT_CONTEXT_DELTA_MAX_BYTES = 32 * 1024;
 export const MAX_CONTEXT_DELTA_EVENTS = 250;
 export const MAX_CONTEXT_DELTA_BYTES = 256 * 1024;
+export const MIN_CONTEXT_DELTA_MAX_BYTES = 192;
 
 const PRIVATE_FIELD_NAMES = new Set([
   "reasoning", "privatereasoning", "chainofthought", "scratchpad", "internalthought", "internalthoughts",
@@ -70,8 +73,8 @@ function normalizeBounds({ maxEvents = DEFAULT_CONTEXT_DELTA_MAX_EVENTS, maxByte
   if (!Number.isInteger(maxEvents) || maxEvents <= 0 || maxEvents > MAX_CONTEXT_DELTA_EVENTS) {
     throw new RepositoryContextDeltaError(`maxEvents must be an integer from 1 through ${MAX_CONTEXT_DELTA_EVENTS}.`, { code: "INVALID_BOUNDS" });
   }
-  if (!Number.isInteger(maxBytes) || maxBytes <= 0 || maxBytes > MAX_CONTEXT_DELTA_BYTES) {
-    throw new RepositoryContextDeltaError(`maxBytes must be an integer from 1 through ${MAX_CONTEXT_DELTA_BYTES}.`, { code: "INVALID_BOUNDS" });
+  if (!Number.isInteger(maxBytes) || maxBytes < MIN_CONTEXT_DELTA_MAX_BYTES || maxBytes > MAX_CONTEXT_DELTA_BYTES) {
+    throw new RepositoryContextDeltaError(`maxBytes must be an integer from ${MIN_CONTEXT_DELTA_MAX_BYTES} through ${MAX_CONTEXT_DELTA_BYTES}.`, { code: "INVALID_BOUNDS" });
   }
   return { maxEvents, maxBytes };
 }
@@ -82,7 +85,12 @@ function normalizedFieldName(key) {
 
 function isSecretField(key) {
   const normalized = normalizedFieldName(key);
-  return SECRET_FIELD_PARTS.some((part) => normalized === part || normalized.endsWith(part));
+  return SECRET_FIELD_PARTS.some((part) => normalized.includes(part));
+}
+
+function isPrivateField(key) {
+  const normalized = normalizedFieldName(key);
+  return [...PRIVATE_FIELD_NAMES].some((part) => normalized.includes(part));
 }
 
 function cursorContent({ repository, collaborationId, laneId, afterSequence }) {
@@ -112,12 +120,7 @@ function resync(reason, details = {}) {
 }
 
 export function inspectRepositoryContextCursor(cursor, binding) {
-  let expected;
-  try {
-    expected = cursorContent({ ...binding, afterSequence: 0 });
-  } catch (error) {
-    throw error;
-  }
+  const expected = cursorContent({ ...binding, afterSequence: 0 });
   if (cursor === null || cursor === undefined) {
     return { valid: true, afterSequence: 0, cursor: createRepositoryContextCursor(expected), resync: null };
   }
@@ -170,6 +173,9 @@ function sanitize(value, redactions, path = "payload", seen = new Set()) {
     return result;
   }
   if (value && typeof value === "object") {
+    if (Object.getPrototypeOf(value) !== Object.prototype) {
+      throw new RepositoryContextDeltaError("Journal payload contains non-JSON data.", { code: "INVALID_RECORD" });
+    }
     if (seen.has(value)) throw new RepositoryContextDeltaError("Journal payload contains a circular value.", { code: "INVALID_RECORD" });
     seen.add(value);
     const recordType = normalizedFieldName(value.type || value.kind || "");
@@ -180,7 +186,7 @@ function sanitize(value, redactions, path = "payload", seen = new Set()) {
     }
     const result = {};
     for (const key of Object.keys(value).sort()) {
-      if (PRIVATE_FIELD_NAMES.has(normalizedFieldName(key))) {
+      if (isPrivateField(key)) {
         redactions.push({ path: `${path}.${key}`, reason: "private_reasoning_or_transcript" });
         continue;
       }
@@ -198,16 +204,29 @@ function sanitize(value, redactions, path = "payload", seen = new Set()) {
 
 export function redactRepositoryContextRecord(record) {
   const redactions = [];
-  const payload = sanitize(record.payload, redactions);
-  const compact = {
+  const compact = sanitize({
     sequence: record.sequence,
     identity: record.identity,
     recordedAt: record.recordedAt,
     binding: record.binding,
-    payload,
-  };
+    payload: record.payload,
+  }, redactions, "record");
   if (redactions.length) compact.redactions = redactions;
   return stableValue(compact);
+}
+
+function skippedRecord(record, reason, recordCode = null) {
+  const sequence = Number.isSafeInteger(record?.sequence) ? record.sequence : null;
+  const normalizedCode = recordCode
+    ? String(recordCode).replace(/[^a-z0-9_-]/gi, "_").slice(0, 64)
+    : null;
+  return stableValue({
+    sequence,
+    skipped: true,
+    reason,
+    ...(normalizedCode ? { recordCode: normalizedCode } : {}),
+    evidenceRetained: true,
+  });
 }
 
 function validateSequence(records, expectedFirst = null) {
@@ -236,11 +255,11 @@ export async function readRepositoryContextDelta({
   const binding = { repository, collaborationId, laneId };
   const bounds = normalizeBounds({ maxEvents, maxBytes });
   const inspected = inspectRepositoryContextCursor(cursor, binding);
-  if (!inspected.valid) return deltaEnvelope({ binding, cursor, bounds, resyncRequired: inspected.resync });
+  if (!inspected.valid) return deltaEnvelope({ binding, cursor: null, bounds, resyncRequired: inspected.resync });
 
   let page;
   try {
-    page = await journal.export({ afterSequence: inspected.afterSequence, limit: MAX_CONTEXT_DELTA_EVENTS });
+    page = await journal.export({ afterSequence: inspected.afterSequence, limit: bounds.maxEvents });
   } catch (cause) {
     return deltaEnvelope({ binding, cursor: inspected.cursor, bounds, resyncRequired: resync("journal_unverifiable", { journalCode: cause?.code || null }) });
   }
@@ -270,21 +289,27 @@ export async function readRepositoryContextDelta({
   }
 
   const records = [];
+  const skipped = [];
   let bytes = 0;
   for (const record of page.records) {
     if (record.sequence <= inspected.afterSequence) continue;
     let compact;
+    let skip = null;
     try {
       compact = redactRepositoryContextRecord(record);
     } catch (cause) {
-      return deltaEnvelope({ binding, cursor: inspected.cursor, bounds, resyncRequired: resync("record_unverifiable", { sequence: record.sequence, recordCode: cause?.code || null }) });
+      skip = skippedRecord(record, "record_unverifiable", cause?.code || null);
+      compact = skip;
     }
-    const recordBytes = byteLength(compact);
-    if (!records.length && recordBytes > bounds.maxBytes) {
-      return deltaEnvelope({ binding, cursor: inspected.cursor, bounds, resyncRequired: resync("record_exceeds_bounds", { sequence: record.sequence, recordBytes }) });
+    let recordBytes = byteLength(compact);
+    if (!skip && recordBytes > bounds.maxBytes) {
+      skip = skippedRecord(record, "record_exceeds_bounds");
+      compact = skip;
+      recordBytes = byteLength(compact);
     }
     if (records.length >= bounds.maxEvents || bytes + recordBytes > bounds.maxBytes) break;
     records.push(compact);
+    if (skip) skipped.push(skip);
     bytes += recordBytes;
   }
   const afterSequence = records.at(-1)?.sequence ?? inspected.afterSequence;
@@ -294,12 +319,13 @@ export async function readRepositoryContextDelta({
     cursor: nextCursor,
     bounds,
     records,
+    skipped,
     bytes,
     hasMore: Boolean(page.hasMore || page.records.some((record) => record.sequence > afterSequence)),
   });
 }
 
-function deltaEnvelope({ binding, cursor, bounds, records = [], bytes = 0, hasMore = false, resyncRequired = null }) {
+function deltaEnvelope({ binding, cursor, bounds, records = [], skipped = [], bytes = 0, hasMore = false, resyncRequired = null }) {
   return {
     version: REPOSITORY_CONTEXT_DELTA_VERSION,
     kind: "repository_context_delta",
@@ -311,6 +337,7 @@ function deltaEnvelope({ binding, cursor, bounds, records = [], bytes = 0, hasMo
     },
     cursor: cursor || null,
     records,
+    skipped,
     eventCount: records.length,
     byteCount: bytes,
     bounds,
