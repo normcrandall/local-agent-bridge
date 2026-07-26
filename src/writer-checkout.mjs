@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 const SAFE_BRANCH = /^[A-Za-z0-9._/-]+$/;
@@ -69,12 +69,16 @@ export function adoptExistingWriterCheckout({ workspace }) {
   return {
     path: actualWorkspace,
     workspace: actualWorkspace,
+    sourceWorkspace: actualWorkspace,
     gitMetadataRoot,
     branch: optionalGit(actualWorkspace, ["branch", "--show-current"]),
     base: optionalGit(actualWorkspace, ["rev-parse", "--verify", "HEAD^{commit}"]),
     strategy: "self-contained",
     managed: false,
     cleanup: null,
+    remote: optionalGit(actualWorkspace, ["remote", "get-url", "origin"])
+      ? { name: "origin", url: optionalGit(actualWorkspace, ["remote", "get-url", "origin"]) }
+      : null,
   };
 }
 
@@ -93,7 +97,21 @@ export function prepareWriterCheckout({
   const source = realpathSync(resolve(workspace));
   const root = resolve(checkoutRoot || join(source, ".bridge/writer-checkouts"));
   const path = resolve(root, taskId);
-  if (existsSync(path)) throw new Error(`Writer checkout already exists: ${path}`);
+  if (existsSync(path)) {
+    const hydrationPath = join(path, ".git", "agent-bridge-hydration.json");
+    if (existsSync(hydrationPath)) {
+      let receipt;
+      try {
+        receipt = JSON.parse(readFileSync(hydrationPath, "utf8"));
+      } catch {
+        throw new Error(`Writer checkout has an unreadable interrupted hydration receipt at ${hydrationPath}; diagnose it before retrying.`);
+      }
+      if (["reserved", "failed"].includes(receipt.status)) {
+        throw new Error(`Writer checkout has an interrupted hydration receipt (${receipt.status} at ${receipt.stage || "unknown"}); inspect and recover or retire ${path} before retrying.`);
+      }
+    }
+    throw new Error(`Writer checkout already exists: ${path}`);
+  }
   mkdirSync(root, { recursive: true });
 
   const originResult = spawnSync("git", ["remote", "get-url", "origin"], {
@@ -132,16 +150,27 @@ export function prepareWriterCheckout({
     if (!statSync(gitMetadataRoot).isDirectory()) {
       throw new Error("Writer Git metadata root is not a directory.");
     }
+    writeFileSync(join(gitMetadataRoot, "agent-bridge-hydration.json"), `${JSON.stringify({
+      status: "reserved",
+      stage: "checkout_created",
+      workspace: actualPath,
+      sourceWorkspace: source,
+      branch,
+      baseSha,
+      startedAt: new Date().toISOString(),
+    }, null, 2)}\n`);
 
     return {
       path: actualPath,
       workspace: actualPath,
+      sourceWorkspace: source,
       gitMetadataRoot,
       branch,
       base: baseSha,
       strategy: "self-contained",
       managed: true,
       cleanup: { strategy: "remove-directory", path: actualPath },
+      remote: canonicalOrigin ? { name: "origin", url: canonicalOrigin } : null,
     };
   } catch (error) {
     rmSync(path, { recursive: true, force: true });

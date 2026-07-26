@@ -55,6 +55,24 @@ try {
   assert.equal(git(checkout.path, "branch", "--show-current"), "codex/issue-82-private-writer-checkouts");
   assert.equal(git(checkout.path, "rev-parse", "HEAD"), sourceHead);
   assert.deepEqual(checkout.cleanup, { strategy: "remove-directory", path: checkout.path });
+  assert.throws(() => prepareWriterCheckout({
+    workspace: repository,
+    taskId: "issue-82",
+    branch: "codex/issue-82-private-writer-checkouts",
+    base: sourceHead,
+    checkoutRoot,
+  }), /interrupted hydration receipt \(reserved at checkout_created\)/);
+  writeFileSync(join(checkout.path, ".git", "agent-bridge-hydration.json"), `${JSON.stringify({
+    status: "complete",
+    stage: "complete",
+  })}\n`);
+  assert.throws(() => prepareWriterCheckout({
+    workspace: repository,
+    taskId: "issue-82",
+    branch: "codex/issue-82-private-writer-checkouts",
+    base: sourceHead,
+    checkoutRoot,
+  }), /Writer checkout already exists/);
 
   const writableRoots = [checkout.gitMetadataRoot];
   const codexRequest = codexToolRequest({

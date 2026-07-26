@@ -76,6 +76,17 @@ import { startSupervisedWorker } from "./worker-supervisor-client.mjs";
 import { collaborationAlias, collaborationIdentity } from "./collaboration-identity.mjs";
 import { runWorkspaceRecipe, workspaceRecipePlan } from "./workspace-operations.mjs";
 import {
+  inspectWriterRetirement,
+  inspectLocalDefaultBranchUpdate,
+  preflightWriterHydration,
+  recordWriterHydrationFailure,
+  recoverExactSha,
+  retirementFailureState,
+  updateLocalDefaultBranch,
+} from "./writer-lifecycle.mjs";
+import { verifyCollaborationRetirement } from "./state-cleanup.mjs";
+import { resolveDeliveryPolicy } from "./delivery-policy.mjs";
+import {
   resolveProviderFailoverRoster,
 } from "./provider-failover.mjs";
 
@@ -517,6 +528,9 @@ const verificationCommandsSchema = z.array(
 ).max(20).optional().describe(
   "Exact shell gates delegated reviewers should run when their provider sandbox permits them.",
 );
+const verificationRoleSchema = z.enum(["quick", "full", "prePublish", "integration", "preRetire"]).optional().describe(
+  "Repository-owned named verification role whose resolved commands are added to this phase.",
+);
 const workCommandsSchema = z.array(
   z.string().trim().min(1).max(500).refine((command) => !/[\r\n]/.test(command), "Commands must be single-line."),
 ).max(50).optional().describe(
@@ -699,6 +713,7 @@ server.registerTool(
       modelFallbacks: modelFallbacksSchema,
       allowClaudeFable: allowClaudeFableSchema,
       providerConcurrency: providerConcurrencySchema,
+      verificationRole: verificationRoleSchema,
       verificationCommands: verificationCommandsSchema,
       workCommands: workCommandsSchema,
       workProfile: workProfileSchema,
@@ -764,6 +779,17 @@ server.registerTool(
     }
     if (writer && !delegatedAgents.includes(writer)) throw new Error("writer must be included in delegated agents.");
     const requestedWorkspace = projectDirectory(input.workspace);
+    const selectedVerificationRole = input.verificationRole || null;
+    const policyVerificationCommands = selectedVerificationRole
+      ? (await resolveDeliveryPolicy({ workspace: requestedWorkspace })).verificationRoles[selectedVerificationRole]
+      : [];
+    const requestedVerificationCommands = [...new Set([
+      ...policyVerificationCommands,
+      ...(input.verificationCommands || []),
+    ])];
+    if (requestedVerificationCommands.length > 20) {
+      throw new Error("Resolved verification role and explicit commands exceed the 20-command phase limit.");
+    }
     const canonicalIssueClaim = input.issueClaim
       ? { ...input.issueClaim, expectedLogin: canonicalGitHubAppLogin(input.issueClaim.expectedLogin) }
       : null;
@@ -798,7 +824,7 @@ server.registerTool(
     let resolvedTask = input.task;
     let issueContext = null;
     let repositoryEvidence = null;
-    let verificationPlan = { reusable: [], pendingCommands: input.verificationCommands || [], avoidedCommands: 0, estimatedAvoidedMs: 0 };
+    let verificationPlan = { reusable: [], pendingCommands: requestedVerificationCommands, avoidedCommands: 0, estimatedAvoidedMs: 0 };
     const evidenceStore = createEvidenceStore({ directory: EVIDENCE_ROOT });
 
     // The explicit issue target is authoritative for what this lane implements.
@@ -982,13 +1008,24 @@ server.registerTool(
         ? runWorkspaceRecipe(workspace, "postCreate", recipeOptions)
         : postCreatePlan;
       if (postCreateRecipe.applied && !postCreateRecipe.ok) {
-        throw new Error(`Workspace postCreate recipe failed: ${postCreateRecipe.results.find((result) => result.exitCode !== 0)?.command || "unknown command"}`);
+        const error = new Error(`Workspace postCreate recipe failed: ${postCreateRecipe.results.find((result) => result.exitCode !== 0)?.command || "unknown command"}`);
+        if (effectiveMode === "work" && worktree) {
+          recordWriterHydrationFailure({ workspace, stage: "postCreate", error });
+        }
+        throw error;
       }
       const effectiveGithubBuilder = workspaceHeadBuilderBinding({
         githubBuilder: input.githubBuilder,
         mode: effectiveMode,
         worktree,
       });
+      const writerHydration = effectiveMode === "work"
+        ? preflightWriterHydration({
+          workspace,
+          expectedRemoteUrl: worktree?.remote?.url || null,
+          githubBuilder: effectiveGithubBuilder,
+        })
+        : null;
       if (input.chair?.workspace && projectDirectory(input.chair.workspace) !== realpathSync(workspace)) {
         throw new Error("Native chair workspace must match the collaboration workspace.");
       }
@@ -1038,7 +1075,7 @@ server.registerTool(
       verificationPlan = await resolveVerificationPlan({
         store: evidenceStore,
         repositoryEvidence,
-        commands: input.verificationCommands || [],
+        commands: requestedVerificationCommands,
       });
       if (verificationPlan.reusable.length) {
         resolvedTask = `${resolvedTask}\n\n${formatReusableVerification(verificationPlan.reusable)}`;
@@ -1063,7 +1100,8 @@ server.registerTool(
         modelFallbacks: input.modelFallbacks || {},
         allowClaudeFable: input.allowClaudeFable === true,
         providerConcurrency: await loadProviderConcurrency({ overrides: input.providerConcurrency || {} }),
-        requestedVerificationCommands: input.verificationCommands || [],
+        verificationRole: selectedVerificationRole,
+        requestedVerificationCommands,
         verificationCommands: verificationPlan.pendingCommands,
         verificationReceipts: verificationPlan.reusable,
         workCommands: input.workCommands || [],
@@ -1086,6 +1124,7 @@ server.registerTool(
         worktree,
         preflight: readiness,
         workspaceRecipe: postCreateRecipe,
+        writerHydration,
         capabilities: readiness.capabilities,
         budget: input.budget || {},
         providerRecovery: input.providerRecovery || { enabled: true, maxAttempts: 3, backoffSeconds: [15, 60, 180] },
@@ -1337,10 +1376,256 @@ server.registerTool(
 );
 
 server.registerTool(
+  "retire_writer_checkout",
+  {
+    title: "Safely retire a merged writer checkout",
+    description: "Verify stopped ownership, clean published work, merged exact-SHA recovery, safe local-main update, and the approved preRetire recipe before removing a bridge-managed checkout. Interrupted stages remain resumable.",
+    inputSchema: {
+      collaborationId,
+      expectedWorkspace: z.string().min(1),
+      expectedHeadSha: z.string().regex(/^[0-9a-f]{40}$/i),
+    },
+  },
+  async ({ collaborationId: id, expectedWorkspace, expectedHeadSha }) => {
+    blockNestedCollaboration();
+    let current = await readCollaboration(WORKSPACE_ROOT, id);
+    const resuming = current.workspaceOperation?.type === "retire_writer_checkout";
+    const stoppedStatuses = ["agreed", "completed", "failed", "cancelled", "needs_user", "turn_limit", "budget"];
+    const previousStatus = resuming ? current.workspaceOperation.previousStatus : current.status;
+    if (current.mode !== "work" || current.worktree?.strategy !== "self-contained" || current.worktree?.managed === false) {
+      throw new Error("Writer retirement requires a bridge-managed work-mode checkout with private Git custody.");
+    }
+    if ((!resuming && !stoppedStatuses.includes(current.status))
+      || current.runtime?.activeCall
+      || (isSafeWorkerPid(current.workerPid) && processAlive(current.workerPid))) {
+      throw new Error("Writer retirement refuses active or indeterminate execution ownership.");
+    }
+    const recordedWorkspace = resolve(current.workspace);
+    if (resolve(expectedWorkspace) !== recordedWorkspace
+      || current.workspaceOperation?.workspace && current.workspaceOperation.workspace !== recordedWorkspace) {
+      throw new Error("Writer retirement workspace changed after inspection.");
+    }
+
+    if (resuming && !existsSync(recordedWorkspace)) {
+      if (current.workspaceOperation.stage !== "removing") {
+        throw new Error(`Writer retirement checkout is missing after stage ${current.workspaceOperation.stage}; manual diagnosis is required.`);
+      }
+      const completedAt = new Date().toISOString();
+      const receipt = {
+        ...current.workspaceOperation.receipt,
+        cleanedPath: recordedWorkspace,
+        completedAt,
+        status: "complete",
+      };
+      current = await updateCollaboration(WORKSPACE_ROOT, id, (latest) => ({
+        ...latest,
+        status: previousStatus,
+        workspaceOperation: null,
+        worktree: { ...latest.worktree, cleanup: null, cleanedAt: completedAt },
+        workspaceRetirement: receipt,
+      }));
+      return toolResponse({ collaborationId: id, status: current.status, retirementReceipt: receipt, resumed: true });
+    }
+
+    const actualWorkspace = realpathSync(recordedWorkspace);
+    if (realpathSync(expectedWorkspace) !== actualWorkspace) {
+      throw new Error("Writer retirement workspace changed after inspection.");
+    }
+    const observedHead = resolveClaimedWorktreeHead(actualWorkspace);
+    if (observedHead !== expectedHeadSha) {
+      throw new Error(`Writer retirement HEAD changed after inspection: expected ${expectedHeadSha}, observed ${observedHead}.`);
+    }
+    const cleanupDescriptor = current.worktree.cleanup;
+    if (cleanupDescriptor?.strategy !== "remove-directory"
+      || realpathSync(cleanupDescriptor.path) !== actualWorkspace) {
+      throw new Error("Writer retirement cleanup descriptor does not match the recorded workspace.");
+    }
+
+    let operation = current.workspaceOperation;
+    if (!resuming) {
+      const retirement = await verifyCollaborationRetirement(current);
+      if (!retirement.safe) {
+        throw new Error(`Writer retirement verification failed: ${retirement.reasons.join(", ")}.`);
+      }
+      if (retirement.github?.outcome !== "merged" || !retirement.github.mergedSha) {
+        throw new Error("Writer retirement requires a merged pull request with an exact merged SHA.");
+      }
+      const sourceWorkspace = realpathSync(current.worktree.sourceWorkspace || actualWorkspace);
+      const deliveryPolicy = await resolveDeliveryPolicy({ workspace: sourceWorkspace });
+      const recipeOptions = { approvalWorkspace: sourceWorkspace };
+      const preRetirePlan = workspaceRecipePlan(actualWorkspace, "preRetire", recipeOptions);
+      if (preRetirePlan.commands.length && !preRetirePlan.executable) {
+        throw new Error("Writer retirement preRetire recipe is configured but not machine-approved.");
+      }
+      const namedPreRetire = deliveryPolicy.verificationRoles.preRetire || [];
+      if (namedPreRetire.length && JSON.stringify(namedPreRetire) !== JSON.stringify(preRetirePlan.commands)) {
+        throw new Error("Writer retirement verificationRoles.preRetire must exactly match the approved preRetire workspace recipe.");
+      }
+      operation = {
+        id: `writer-retirement-${randomUUID()}`,
+        type: "retire_writer_checkout",
+        stage: "reserved",
+        workspace: actualWorkspace,
+        expectedHeadSha,
+        previousStatus,
+        reservedAt: new Date().toISOString(),
+        github: retirement.github,
+        sourceWorkspace,
+        retirementPolicy: {
+          updateLocalDefaultBranch: deliveryPolicy.retirement.updateLocalDefaultBranch,
+          source: deliveryPolicy.decisions.retirement.source,
+        },
+        preRetirePlan: {
+          commands: preRetirePlan.commands,
+          approved: preRetirePlan.approved,
+          projectPath: preRetirePlan.projectPath,
+          approvalsPath: preRetirePlan.approvalsPath,
+        },
+      };
+      current = await updateCollaboration(WORKSPACE_ROOT, id, (latest) => {
+        if (latest.workspaceOperation || latest.runtime?.activeCall
+          || (isSafeWorkerPid(latest.workerPid) && processAlive(latest.workerPid))) {
+          throw new Error("Writer retirement lost stopped ownership before reservation.");
+        }
+        return { ...latest, status: "indeterminate", workspaceOperation: operation };
+      });
+    }
+
+    const advance = async (stage, additions = {}) => {
+      current = await updateCollaboration(WORKSPACE_ROOT, id, (latest) => {
+        if (latest.workspaceOperation?.id !== operation.id) {
+          throw new Error("Writer retirement lost its durable operation reservation.");
+        }
+        return {
+          ...latest,
+          workspaceOperation: { ...latest.workspaceOperation, stage, ...additions },
+        };
+      });
+      operation = current.workspaceOperation;
+    };
+
+    try {
+      if (operation.stage === "reserved") {
+        const headRecovery = recoverExactSha({ workspace: actualWorkspace, sha: expectedHeadSha });
+        const mergedRecovery = recoverExactSha({ workspace: actualWorkspace, sha: operation.github.mergedSha });
+        const inspection = inspectWriterRetirement({
+          workspace: actualWorkspace,
+          expectedHeadSha,
+          expectedRemoteUrl: current.worktree.remote?.url || null,
+          mergedSha: operation.github.mergedSha,
+          branch: current.worktree.branch,
+        });
+        await advance("verified", {
+          recovery: { head: headRecovery, merged: mergedRecovery },
+          inspection,
+        });
+      }
+      if (operation.stage === "verified") {
+        const recipeOptions = { approvalWorkspace: operation.sourceWorkspace };
+        const plan = workspaceRecipePlan(actualWorkspace, "preRetire", recipeOptions);
+        if (JSON.stringify(plan.commands) !== JSON.stringify(operation.preRetirePlan.commands)
+          || plan.executable !== (operation.preRetirePlan.commands.length > 0)) {
+          throw new Error("Writer retirement preRetire recipe or approval changed after reservation; restart retirement after inspection.");
+        }
+        const preRetire = plan.executable
+          ? runWorkspaceRecipe(actualWorkspace, "preRetire", recipeOptions)
+          : { ...plan, applied: false, ok: true, results: [] };
+        if (!preRetire.ok) {
+          throw new Error(`Writer retirement preRetire recipe failed: ${preRetire.results.find((result) => result.exitCode !== 0)?.command || "unknown command"}.`);
+        }
+        const postRecipeInspection = inspectWriterRetirement({
+          workspace: actualWorkspace,
+          expectedHeadSha,
+          expectedRemoteUrl: current.worktree.remote?.url || null,
+          mergedSha: operation.github.mergedSha,
+          branch: current.worktree.branch,
+        });
+        await advance("pre_retire_passed", { preRetire, postRecipeInspection });
+      }
+      if (operation.stage === "pre_retire_passed") {
+        if (operation.retirementPolicy.updateLocalDefaultBranch) {
+          const deliveryPolicy = await resolveDeliveryPolicy({ workspace: operation.sourceWorkspace });
+          const defaultBranch = deliveryPolicy.productFacts.defaultBranch || "main";
+          const localMainPlan = inspectLocalDefaultBranchUpdate({
+            workspace: operation.sourceWorkspace,
+            defaultBranch,
+            mergedSha: operation.github.mergedSha,
+          });
+          await advance("main_update_reserved", { localMain: localMainPlan });
+        } else {
+          await advance("main_updated", {
+            localMain: {
+              disposition: "skipped_policy_disabled",
+              policySource: operation.retirementPolicy.source,
+              updatedSha: operation.github.mergedSha,
+            },
+          });
+        }
+      }
+      if (operation.stage === "main_update_reserved") {
+        const localMain = updateLocalDefaultBranch({
+          workspace: operation.sourceWorkspace,
+          defaultBranch: operation.localMain.branch,
+          mergedSha: operation.github.mergedSha,
+          expectedPreviousSha: operation.localMain.previousSha,
+        });
+        await advance("main_updated", { localMain });
+      }
+      if (operation.stage === "main_updated") {
+        const receipt = {
+          status: "removing",
+          cleanedPath: actualWorkspace,
+          branchDisposition: {
+            writerBranch: current.worktree.branch || null,
+            disposition: "removed_with_checkout",
+            localDefaultBranch: operation.localMain,
+          },
+          mergedSha: operation.github.mergedSha,
+          recoverySource: operation.recovery,
+          preRetire: operation.preRetire,
+        };
+        await advance("removing", { receipt });
+      }
+      cleanupWriterCheckout({
+        workspace: actualWorkspace,
+        expectedPath: expectedWorkspace,
+        discardChanges: false,
+      });
+      const completedAt = new Date().toISOString();
+      const receipt = { ...operation.receipt, status: "complete", completedAt };
+      current = await updateCollaboration(WORKSPACE_ROOT, id, (latest) => ({
+        ...latest,
+        status: previousStatus,
+        workspaceOperation: null,
+        worktree: { ...latest.worktree, cleanup: null, cleanedAt: completedAt },
+        workspaceRetirement: receipt,
+      }));
+      await appendEvent(WORKSPACE_ROOT, id, {
+        type: "writer_checkout_retired",
+        at: completedAt,
+        path: actualWorkspace,
+        mergedSha: receipt.mergedSha,
+        recoverySource: receipt.recoverySource,
+        branchDisposition: receipt.branchDisposition,
+      });
+      return toolResponse({ collaborationId: id, status: current.status, retirementReceipt: receipt, resumed: resuming });
+    } catch (error) {
+      await updateCollaboration(WORKSPACE_ROOT, id, (latest) => retirementFailureState(latest, {
+        operationId: operation.id,
+        previousStatus,
+        workspaceExists: existsSync(actualWorkspace),
+        error: error.message,
+      }));
+      throw error;
+    }
+  },
+);
+
+server.registerTool(
   "cleanup_writer_checkout",
   {
-    title: "Clean up a private writer checkout",
-    description: "Remove one stopped self-contained writer checkout after exact workspace and HEAD inspection. Dirty changes are preserved unless discardChanges is explicitly true.",
+    title: "Legacy writer cleanup compatibility check",
+    description: "Validate legacy cleanup input without removing work. Safe post-merge removal is performed only by retire_writer_checkout.",
     inputSchema: {
       collaborationId,
       expectedWorkspace: z.string().min(1),
@@ -1348,7 +1633,7 @@ server.registerTool(
       discardChanges: z.boolean().default(false),
     },
   },
-  async ({ collaborationId: id, expectedWorkspace, expectedHeadSha, discardChanges }) => {
+  async ({ collaborationId: id }) => {
     blockNestedCollaboration();
     const current = await readCollaboration(WORKSPACE_ROOT, id);
     if (current.mode !== "work" || current.worktree?.strategy !== "self-contained") {
@@ -1364,94 +1649,7 @@ server.registerTool(
       || (isSafeWorkerPid(current.workerPid) && processAlive(current.workerPid))) {
       throw new Error("Writer checkout cleanup refuses active or indeterminate execution ownership.");
     }
-    const actualWorkspace = realpathSync(current.workspace);
-    if (realpathSync(expectedWorkspace) !== actualWorkspace) {
-      throw new Error("Writer checkout cleanup workspace changed after inspection.");
-    }
-    const cleanupDescriptor = current.worktree.cleanup;
-    if (cleanupDescriptor?.strategy !== "remove-directory"
-      || realpathSync(cleanupDescriptor.path) !== actualWorkspace) {
-      throw new Error("Writer checkout cleanup descriptor does not match the recorded workspace.");
-    }
-    const observedHead = resolveClaimedWorktreeHead(actualWorkspace);
-    if (observedHead !== expectedHeadSha) {
-      throw new Error(`Writer checkout cleanup HEAD changed after inspection: expected ${expectedHeadSha}, observed ${observedHead}.`);
-    }
-    const operationId = `writer-cleanup-${randomUUID()}`;
-    const previousStatus = current.status;
-    const reservedAt = new Date().toISOString();
-    await updateCollaboration(WORKSPACE_ROOT, id, (latest) => {
-      if (!["completed", "failed", "cancelled", "needs_user", "turn_limit"].includes(latest.status)
-        || latest.workspaceOperation || latest.runtime?.activeCall
-        || (isSafeWorkerPid(latest.workerPid) && processAlive(latest.workerPid))) {
-        throw new Error("Writer checkout cleanup lost stopped execution ownership before reservation.");
-      }
-      if (realpathSync(latest.workspace) !== actualWorkspace
-        || resolveClaimedWorktreeHead(actualWorkspace) !== expectedHeadSha) {
-        throw new Error("Writer checkout cleanup workspace or HEAD changed before reservation.");
-      }
-      return {
-        ...latest,
-        status: "indeterminate",
-        workspaceOperation: {
-          id: operationId,
-          type: "cleanup_writer_checkout",
-          status: "reserved",
-          workspace: actualWorkspace,
-          expectedHeadSha,
-          discardChanges,
-          previousStatus,
-          reservedAt,
-        },
-      };
-    });
-    let receipt;
-    let state;
-    try {
-      receipt = cleanupWriterCheckout({
-        workspace: actualWorkspace,
-        expectedPath: expectedWorkspace,
-        discardChanges,
-      });
-      state = await updateCollaboration(WORKSPACE_ROOT, id, (latest) => {
-        if (latest.status !== "indeterminate" || latest.workspaceOperation?.id !== operationId) {
-          throw new Error("Writer checkout cleanup lost its reserved workspace operation before commit.");
-        }
-        return {
-          ...latest,
-          status: previousStatus,
-          worktree: { ...latest.worktree, cleanup: null, cleanedAt: receipt.cleanedAt },
-          workspaceOperation: null,
-          workspaceCleanup: receipt,
-        };
-      });
-    } catch (error) {
-      await updateCollaboration(WORKSPACE_ROOT, id, (latest) => latest.workspaceOperation?.id === operationId
-        ? {
-          ...latest,
-          status: existsSync(actualWorkspace) ? previousStatus : "indeterminate",
-          workspaceOperation: existsSync(actualWorkspace) ? null : {
-            ...latest.workspaceOperation,
-            status: "reconciliation_required",
-            failedAt: new Date().toISOString(),
-            error: error.message,
-          },
-          workspaceOperationFailure: { operationId, failedAt: new Date().toISOString(), error: error.message },
-        }
-        : latest);
-      throw error;
-    }
-    await appendEvent(WORKSPACE_ROOT, id, {
-      type: "writer_checkout_cleaned",
-      at: receipt.cleanedAt,
-      path: receipt.path,
-      discardedChanges: receipt.discardedChanges,
-    });
-    return toolResponse({
-      collaborationId: state.id,
-      status: state.status,
-      cleanupReceipt: receipt,
-    });
+    throw new Error("Direct writer checkout cleanup is retired; call retire_writer_checkout so publication, exact-SHA recovery, local-main update, and preRetire are proven before removal.");
   },
 );
 
@@ -2004,6 +2202,7 @@ server.registerTool(
       modelFallbacks: modelFallbacksSchema,
       allowClaudeFable: allowClaudeFableSchema.optional(),
       providerConcurrency: providerConcurrencySchema,
+      verificationRole: verificationRoleSchema,
       verificationCommands: verificationCommandsSchema,
       workCommands: workCommandsSchema,
       workProfile: workProfileSchema.optional(),
@@ -2029,6 +2228,7 @@ server.registerTool(
     modelFallbacks,
     allowClaudeFable,
     providerConcurrency,
+    verificationRole,
     verificationCommands,
     workCommands,
     workProfile,
@@ -2138,10 +2338,19 @@ server.registerTool(
         worktree: resolvedContinuationIssueClaim.worktree || current.workspace,
       });
     }
-    const requestedContinuationCommands = verificationCommands
-      || current.requestedVerificationCommands
-      || current.verificationCommands
-      || [];
+    const selectedVerificationRole = verificationRole || current.verificationRole || null;
+    const roleChanged = verificationRole !== undefined && verificationRole !== current.verificationRole;
+    const requestedContinuationCommands = roleChanged || verificationCommands
+      ? [...new Set([
+        ...(selectedVerificationRole
+          ? (await resolveDeliveryPolicy({ workspace: current.worktree?.sourceWorkspace || current.workspace })).verificationRoles[selectedVerificationRole]
+          : []),
+        ...(verificationCommands || []),
+      ])]
+      : current.requestedVerificationCommands || current.verificationCommands || [];
+    if (requestedContinuationCommands.length > 20) {
+      throw new Error("Resolved verification role and explicit commands exceed the 20-command phase limit.");
+    }
     const continuationStore = createEvidenceStore({ directory: EVIDENCE_ROOT });
     const activeGithubReview = githubReview || current.githubReview || null;
     const activeGithubBuilder = githubBuilder
@@ -2210,6 +2419,7 @@ server.registerTool(
           : previous.modelFallbacks || {},
         allowClaudeFable: allowClaudeFable === true,
         providerConcurrency: resolvedProviderConcurrency,
+        verificationRole: selectedVerificationRole,
         requestedVerificationCommands: requestedContinuationCommands,
         verificationCommands: continuationVerificationPlan.pendingCommands,
         verificationReceipts: continuationVerificationPlan.reusable,

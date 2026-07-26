@@ -112,9 +112,18 @@ try {
     version: 1,
     productFacts: { productName: "repo-product", defaultBranch: "develop", labels: ["autonomously-built"] },
     lifecycleMappings: { claimLabel: "in-progress", prTitlePrefixes: { feat: "feat:" } },
-    verificationRoles: { requiredGates: ["npm run smoke"], reviewerRoles: ["codex"] },
+    verificationRoles: {
+      quick: ["npm run test:talk"],
+      full: ["npm test"],
+      prePublish: ["git diff --check"],
+      integration: ["npm run smoke"],
+      preRetire: ["npm run test:cleanup"],
+      requiredGates: ["npm run smoke"],
+      reviewerRoles: ["codex"],
+    },
     pathRules: { protectedPaths: ["docs/generated/**"], writableRoots: ["src"] },
     resourceRules: { maxParallelLanes: 3 },
+    retirement: { updateLocalDefaultBranch: true },
     providerConcurrency: {
       claude: { work: 2 },   // narrower than the machine ceiling of 4
       codex: { work: 50 },   // broadening attempt: must be ignored
@@ -147,7 +156,15 @@ try {
   // An unmentioned field keeps its default rather than being blanked out.
   assert.equal(policy.lifecycleMappings.branchPrefix, null);
   assert.equal(policy.verificationRoles.requiredGates[0], "npm run smoke");
+  assert.deepEqual(policy.verificationRoles.quick, ["npm run test:talk"]);
+  assert.deepEqual(policy.verificationRoles.full, ["npm test"]);
+  assert.deepEqual(policy.verificationRoles.prePublish, ["git diff --check"]);
+  assert.deepEqual(policy.verificationRoles.integration, ["npm run smoke"]);
+  assert.deepEqual(policy.verificationRoles.preRetire, ["npm run test:cleanup"]);
   assert.equal(policy.resourceRules.maxParallelLanes, 3);
+  assert.equal(policy.retirement.updateLocalDefaultBranch, true);
+  assert.equal(policy.surfaces.cleanup.updateLocalDefaultBranch, true);
+  assert.equal(policy.decisions.retirement.source, "repository_policy");
 
   // Concurrency narrows through repository then per-run, and never broadens.
   assert.equal(policy.concurrency.claude.work, 1);
@@ -211,6 +228,7 @@ try {
     environment: governed.environment,
     options: {
       productFacts: { defaultBranch: "attacker-controlled" },
+      retirement: { updateLocalDefaultBranch: false },
       resourceRules: { maxParallelLanes: 100, timeouts: { review: 999999 } },
     },
   });
@@ -218,6 +236,7 @@ try {
   assert.equal(narrowedResources.resourceRules.maxParallelLanes, 3);
   assert.deepEqual(narrowedResources.resourceRules.timeouts, {});
   assert.ok(rejectionFor(narrowedResources, "productFacts"));
+  assert.ok(rejectionFor(narrowedResources, "retirement"));
   assert.ok(rejectionFor(narrowedResources, "resourceRules.timeouts"));
 
   const lowerLaneLimit = await resolveDeliveryPolicy({

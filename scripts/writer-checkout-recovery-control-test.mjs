@@ -135,13 +135,13 @@ try {
     },
   });
   assert.equal(dirtyCleanup.isError, true);
-  assert.match(dirtyCleanup.content[0].text, /uncommitted changes/);
+  assert.match(dirtyCleanup.content[0].text, /Direct writer checkout cleanup is retired/);
   const afterRefusedCleanup = JSON.parse(await readFile(join(stateDirectory, `${collaborationId}.json`), "utf8"));
   assert.equal(afterRefusedCleanup.status, "needs_user");
   assert.equal(afterRefusedCleanup.workspaceOperation, null);
-  assert.equal(afterRefusedCleanup.workspaceOperationFailure.operationId.startsWith("writer-cleanup-"), true);
+  assert.equal(afterRefusedCleanup.workspaceOperationFailure, undefined);
 
-  const cleanup = await client.callTool({
+  const discardCleanup = await client.callTool({
     name: "cleanup_writer_checkout",
     arguments: {
       collaborationId,
@@ -150,12 +150,12 @@ try {
       discardChanges: true,
     },
   });
-  assert.notEqual(cleanup.isError, true);
-  assert.equal(cleanup.structuredContent.cleanupReceipt.discardedChanges, true);
-  await assert.rejects(access(recovered.structuredContent.workspace));
+  assert.equal(discardCleanup.isError, true);
+  assert.match(discardCleanup.content[0].text, /Direct writer checkout cleanup is retired/);
+  await access(recovered.structuredContent.workspace);
 } finally {
   await client?.close().catch(() => {});
   await rm(temporary, { recursive: true, force: true });
 }
 
-console.log("Writer recovery control test passed: exact inspection gates migration and cleanup preserves dirty changes by default.");
+console.log("Writer recovery control test passed: exact inspection gates migration and legacy cleanup cannot bypass safe retirement.");

@@ -74,6 +74,7 @@ export const REPOSITORY_OWNED_DOMAINS = Object.freeze([
   "pathRules",
   "resourceRules",
   "concurrencyNarrowing",
+  "retirement",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -344,6 +345,14 @@ function normalizedStringList(value) {
   return [...new Set((Array.isArray(value) ? value : []).map((entry) => String(entry).trim()).filter(Boolean))];
 }
 
+export const VERIFICATION_ROLE_NAMES = Object.freeze([
+  "quick",
+  "full",
+  "prePublish",
+  "integration",
+  "preRetire",
+]);
+
 /** Verification gates accumulate; a per-run request may narrow reviewers but never erase repository gates. */
 function resolveVerificationRoles(ledger, { repositoryValue, perRunValue, repositoryOrigin, rejections }) {
   const repository = isPlainObject(repositoryValue) ? repositoryValue : {};
@@ -361,6 +370,13 @@ function resolveVerificationRoles(ledger, { repositoryValue, perRunValue, reposi
   const reviewerRoles = repositoryReviewers.length && requestedReviewers.length
     ? repositoryReviewers.filter((role) => requestedReviewers.includes(role))
     : repositoryReviewers.length ? repositoryReviewers : requestedReviewers;
+  const named = Object.fromEntries(VERIFICATION_ROLE_NAMES.map((name) => [
+    name,
+    normalizedStringList([
+      ...normalizedStringList(repository[name]),
+      ...normalizedStringList(run[name]),
+    ]),
+  ]));
 
   if (repositoryReviewers.length && requestedReviewers.length && !reviewerRoles.length) {
     rejections.push({
@@ -371,13 +387,22 @@ function resolveVerificationRoles(ledger, { repositoryValue, perRunValue, reposi
   }
 
   const considered = [
-    { level: "machine_default", value: { requiredGates: [], reviewerRoles: [], verificationCommands: [] }, applied: true },
+    {
+      level: "machine_default",
+      value: {
+        requiredGates: [],
+        reviewerRoles: [],
+        verificationCommands: [],
+        ...Object.fromEntries(VERIFICATION_ROLE_NAMES.map((name) => [name, []])),
+      },
+      applied: true,
+    },
     ...(repositoryValue === undefined ? [] : [{ level: "repository_policy", value: repositoryValue, applied: true }]),
     ...(perRunValue === undefined ? [] : [{ level: "per_run_narrowing", value: perRunValue, applied: true }]),
   ];
   const source = perRunValue !== undefined ? "per_run_narrowing" : repositoryValue !== undefined ? "repository_policy" : "machine_default";
   return ledger.record("verificationRoles", {
-    value: { requiredGates, reviewerRoles, verificationCommands },
+    value: { requiredGates, reviewerRoles, verificationCommands, ...named },
     source,
     detail: perRunValue !== undefined
       ? "Per-run verification gates were added and reviewer roles were intersected with the repository policy."
@@ -805,6 +830,20 @@ export async function resolveDeliveryPolicy({
     rejections,
   });
 
+  const retirement = resolveOwnedValue(ledger, "retirement", {
+    machineDefault: { updateLocalDefaultBranch: false },
+    layers: [{ level: "repository_policy", value: repoPolicy.retirement }],
+    detailFor: () => `Writer-retirement behavior comes from ${repoOrigin}.`,
+  });
+  retirement.updateLocalDefaultBranch = retirement.updateLocalDefaultBranch === true;
+  if (perRun.retirement !== undefined) {
+    rejections.push({
+      origin: "per_run_narrowing",
+      field: "retirement",
+      reason: "Writer-retirement behavior is repository-owned; per-run input cannot authorize mutation of a source checkout.",
+    });
+  }
+
   const repoPaths = Array.isArray(repoPolicy.pathRules?.protectedPaths) ? repoPolicy.pathRules.protectedPaths : [];
   let writableRoots = null;
   if (repoPolicy.pathRules?.writableRoots !== undefined) {
@@ -886,6 +925,7 @@ export async function resolveDeliveryPolicy({
     productFacts,
     lifecycleMappings,
     verificationRoles,
+    retirement,
     pathRules,
     resourceRules,
     workspaceRecipe: ledger.decisions.workspaceRecipe.value,
@@ -947,6 +987,7 @@ export function deliverySurfaces(policy) {
       preRetireRecipe: policy.workspaceRecipe.phases.preRetire,
       protectedPaths: policy.pathRules.protectedPaths,
       requiresGitHubRetirementCheck: githubGoverned,
+      updateLocalDefaultBranch: policy.retirement.updateLocalDefaultBranch,
     },
     missionControl: {
       deliveryProfile: policy.deliveryProfile,
