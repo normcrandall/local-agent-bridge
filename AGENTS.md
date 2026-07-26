@@ -6,6 +6,8 @@ Prefer the installed collaboration skills as the user-facing interface. Announce
 
 - Use `$ask-agent` for one bounded handoff or review.
 - Use Docker Model Runner and Ollama only for review. Always use Docker when its selected reviewer route is available; use Ollama only after Docker preflight fails. Explicitly naming Ollama does not override this machine policy. Never select either as a writer, give either verification commands, or treat an evaluation-period local approval as a merge gate.
+- Docker-first local review is machine-owner routing policy, not an adversarial security boundary. Inherited `DOCKER_MODEL_RUNNER_HOST`, `DOCKER_MODEL_RUNNER_MODEL`, and `AGENT_BRIDGE_DOCKER_MODEL_RUNNER_CONFIG` values may intentionally redirect or disable the selected Docker route; only trusted machine-owner configuration may set them.
+- Keep local-review preflight within the agent-pool deadline: the serial 1.5-second Docker priority probe and 5-second Ollama fallback probe must remain below the shared 7-second budget.
 - Use `$run-roundtable` for a persistent multi-agent collaboration.
 - Use `$show-collaboration` to inspect, monitor, or resume collaboration history.
 - Use `$replay-collaboration` to run a deterministic replay of collaboration incidents.

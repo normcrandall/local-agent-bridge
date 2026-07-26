@@ -22,6 +22,7 @@ import {
 } from "./verification-allowlist.mjs";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { LOCAL_REVIEW_PREFLIGHT_BUDGET_MS } from "./local-review-priority.mjs";
 
 function textFrom(result) {
   const structured = result.structuredContent || {};
@@ -438,14 +439,14 @@ export function createAgentPool({
           const health = await client.callTool({
             name: "get_ollama_status",
             arguments: models.ollama ? { model: models.ollama } : {},
-          }, undefined, { timeout: 7_000 });
+          }, undefined, { timeout: LOCAL_REVIEW_PREFLIGHT_BUDGET_MS });
           if (health.isError) throw new Error(textFrom(health));
         }
         if (agent === "docker") {
           const health = await client.callTool({
             name: "get_docker_status",
             arguments: models.docker ? { model: models.docker } : {},
-          }, undefined, { timeout: 7_000 });
+          }, undefined, { timeout: LOCAL_REVIEW_PREFLIGHT_BUDGET_MS });
           if (health.isError) throw new Error(textFrom(health));
         }
         const publication = await reviewPublicationFor(agent);

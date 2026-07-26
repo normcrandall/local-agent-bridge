@@ -8,6 +8,7 @@ import { resolveModelRoute } from "./model-policy.mjs";
 
 export const DEFAULT_OLLAMA_CONFIG = resolve(homedir(), ".config/local-agent-bridge/ollama.json");
 export const DEFAULT_OLLAMA_MODEL = "qwen3.6:latest";
+export const OLLAMA_PROBE_TIMEOUT_MS = 5_000;
 export const DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434";
 export const DEFAULT_LOCAL_MODEL_KEEP_ALIVE = "30m";
 
@@ -51,7 +52,7 @@ export async function probeOllama({ model, baseUrl, fetchImpl = fetch } = {}) {
   const configuration = await loadOllamaConfig();
   const selectedModel = model || configuration.model;
   const selectedBaseUrl = normalizedBaseUrl(baseUrl || configuration.baseUrl);
-  const response = await fetchImpl(`${selectedBaseUrl}/api/tags`, { signal: AbortSignal.timeout(5_000) });
+  const response = await fetchImpl(`${selectedBaseUrl}/api/tags`, { signal: AbortSignal.timeout(OLLAMA_PROBE_TIMEOUT_MS) });
   if (!response.ok) throw new Error(`Ollama health check returned HTTP ${response.status}.`);
   const payload = await response.json();
   const models = (payload.models || []).map((entry) => entry.name || entry.model).filter(Boolean);
