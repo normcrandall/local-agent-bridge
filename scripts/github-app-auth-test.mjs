@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createInstallationToken,
+  configuredWriterLogin,
   configuredReviewerLogin,
   assertGitHubAppPermissions,
   canPublishReviewStatus,
@@ -46,6 +47,20 @@ try {
         privateKeyPath,
         installations: { ExampleOrg: 222 },
       },
+      writers: {
+        claude: {
+          appId: "123457", expectedLogin: "example-claude-writer[bot]", privateKeyPath,
+          installations: { ExampleOrg: 223 },
+        },
+        codex: {
+          appId: "123458", expectedLogin: "example-codex-writer[bot]", privateKeyPath,
+          installations: { ExampleOrg: 224 },
+        },
+        antigravity: {
+          appId: "123459", expectedLogin: "example-gemini-writer[bot]", privateKeyPath,
+          installations: { ExampleOrg: 225 },
+        },
+      },
       reviewers: {
         claude: {
           appId: "654321", expectedLogin: "example-claude-reviewer[bot]", privateKeyPath,
@@ -79,6 +94,8 @@ try {
       const slugs = {
         123456: "example-builder", 654321: "example-claude-reviewer",
         777777: "example-codex-reviewer", 888888: "example-gemini-reviewer",
+        123457: "example-claude-writer", 123458: "example-codex-writer",
+        123459: "example-gemini-writer",
       };
       return json({ slug: slugs[jwtPayload.iss] });
     }
@@ -97,6 +114,10 @@ try {
     if (/\/app\/installations\/(333|444|555)\/access_tokens$/.test(url)) {
       const installation = url.match(/installations\/(\d+)/)[1];
       return json({ token: `reviewer-${installation}-installation-token`, expires_at: "2026-07-14T20:00:00Z", permissions: { contents: "read", pull_requests: "write", statuses: "write", metadata: "read" } }, 201);
+    }
+    if (/\/app\/installations\/(223|224|225)\/access_tokens$/.test(url)) {
+      const installation = url.match(/installations\/(\d+)/)[1];
+      return json({ token: `writer-${installation}-installation-token`, expires_at: "2026-07-14T20:00:00Z", permissions: { contents: "write", pull_requests: "write", issues: "write", metadata: "read" } }, 201);
     }
     return json({ message: `Unexpected URL ${url}` }, 404);
   };
@@ -124,6 +145,35 @@ try {
   assert.equal(builder.appId, "123456");
   assert.equal(builder.installationId, 222);
   assert.equal(builder.configuredLogin, "example-builder[bot]");
+  const codexWriter = await createInstallationToken({
+    role: "builder", writerProvider: "codex", repository: "ExampleOrg/repo",
+    configPath, apiUrl: "https://github.test", fetchImpl,
+  });
+  assert.equal(codexWriter.token, "writer-224-installation-token");
+  assert.equal(codexWriter.expectedLogin, "example-codex-writer[bot]");
+  assert.equal(codexWriter.appId, "123458");
+  assert.equal(codexWriter.roleLabel, "writer:codex");
+  assert.equal(codexWriter.provider, "codex");
+  assert.equal(await configuredWriterLogin({ provider: "antigravity", configPath }), "example-gemini-writer[bot]");
+  await assert.rejects(
+    createInstallationToken({
+      role: "builder", repository: "ExampleOrg/repo",
+      expectedLogin: "example-codex-reviewer[bot]",
+      configPath, apiUrl: "https://github.test", fetchImpl,
+    }),
+    /GitHub App role is not configured: builder/,
+  );
+
+  const compatibilityConfig = join(temporary, "github-apps-compatibility.json");
+  const compatibility = JSON.parse(await (await import("node:fs/promises")).readFile(configPath, "utf8"));
+  delete compatibility.roles.writers.codex;
+  await writeFile(compatibilityConfig, JSON.stringify(compatibility), { mode: 0o600 });
+  const compatibilityWriter = await createInstallationToken({
+    role: "builder", writerProvider: "codex", repository: "ExampleOrg/repo",
+    configPath: compatibilityConfig, apiUrl: "https://github.test", fetchImpl,
+  });
+  assert.equal(compatibilityWriter.expectedLogin, "example-builder[bot]");
+  assert.equal(compatibilityWriter.roleLabel, "builder");
 
   const bareLoginConfig = join(temporary, "github-apps-bare-login.json");
   const bareConfig = JSON.parse(await (await import("node:fs/promises")).readFile(configPath, "utf8"));
@@ -171,6 +221,7 @@ try {
   assert.equal(codexReviewer.token, "reviewer-444-installation-token");
   assert.equal(await configuredReviewerLogin({ provider: "antigravity", configPath }), "example-gemini-reviewer[bot]");
   assert.equal(assertGitHubAppPermissions("builder", { contents: "write", pull_requests: "write", issues: "write", metadata: "read" }), true);
+  assert.equal(assertGitHubAppPermissions("writer:codex", { contents: "write", pull_requests: "write", issues: "write", metadata: "read" }), true);
   assert.throws(() => assertGitHubAppPermissions("builder", { contents: "write", pull_requests: "write", metadata: "read" }), /issues:write/);
   assert.throws(() => assertGitHubAppPermissions("reviewer", { contents: "read", pull_requests: "read", metadata: "read" }), /pull_requests:write/);
   assert.equal(assertGitHubAppPermissions("reviewer", { contents: "read", pull_requests: "write", metadata: "read" }), true);
@@ -178,6 +229,8 @@ try {
   assert.equal(canPublishReviewStatus({ statuses: "write" }), true);
   const inspected = await inspectGitHubAppRoles({ configPath });
   assert.equal(inspected.roles.builder.privateKeySecure, true);
+  assert.equal(inspected.roles.writers.claude.privateKeySecure, true);
+  assert.equal(inspected.roles.writers.codex.expectedLogin, "example-codex-writer[bot]");
   assert.equal(inspected.roles.reviewers.claude.privateKeySecure, true);
   assert.equal(inspected.roles.reviewers.codex.expectedLogin, "example-codex-reviewer[bot]");
   assert.equal(inspected.roles.reviewers.codex.appId, "777777");

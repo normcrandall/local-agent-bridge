@@ -875,9 +875,13 @@ try {
         const observedWorkspaceHead = turn.metadata?.workspaceHeadSha;
         const adoptWorkspaceHead = current.githubBuilder?.allowWorkspaceHead === true
           && /^[0-9a-f]{40}$/i.test(observedWorkspaceHead || "");
-        const githubBuilder = adoptWorkspaceHead
-          ? { ...current.githubBuilder, headSha: observedWorkspaceHead }
-          : current.githubBuilder;
+        const githubBuilder = current.githubBuilder
+          ? {
+            ...current.githubBuilder,
+            ...(turn.metadata?.writerBinding || {}),
+            ...(adoptWorkspaceHead ? { headSha: observedWorkspaceHead } : {}),
+          }
+          : null;
         const issueClaim = adoptWorkspaceHead && current.issueClaim
           ? { ...current.issueClaim, headSha: observedWorkspaceHead }
           : current.issueClaim;
@@ -910,6 +914,7 @@ try {
         return {
           ...current, usage, budgetExceeded: decision.exceeded, ci, decisions, decisionEscalation,
           completion, handoffs, reviewPublication, githubBuilder, issueClaim,
+          writerAuthority: turn.metadata?.writerAuthority || current.writerAuthority || null,
         };
       });
       if (turn.handoff) {

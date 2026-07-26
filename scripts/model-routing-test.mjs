@@ -166,6 +166,7 @@ const codexWorkspaceHeadBuilder = codexToolRequest({
   githubBuilder: {
     repository: "owner/repo",
     expectedLogin: "builder[bot]",
+    writerProvider: "codex",
     baseSha: "a".repeat(40),
     headSha: "a".repeat(40),
     headRef: "codex/feature",
@@ -178,6 +179,10 @@ const codexWorkspaceHeadBuilder = codexToolRequest({
 assert.equal(
   codexWorkspaceHeadBuilder.arguments.config["mcp_servers.github_builder.env.GITHUB_BUILDER_ALLOW_WORKSPACE_HEAD"],
   "1",
+);
+assert.equal(
+  codexWorkspaceHeadBuilder.arguments.config["mcp_servers.github_builder.env.GITHUB_BUILDER_WRITER_PROVIDER"],
+  "codex",
 );
 const codexYolo = codexToolRequest({ prompt: "go", cwd: "/workspace", mode: "work", permissionProfile: "yolo" });
 assert.equal(codexYolo.arguments.sandbox, "danger-full-access");

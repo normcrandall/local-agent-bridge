@@ -41,6 +41,11 @@ async function githubJson(token, path) {
 
 const roles = [
   { label: "builder", role: "builder" },
+  ...["claude", "codex", "antigravity"].map((writerProvider) => ({
+    label: `writer:${writerProvider}`,
+    role: "builder",
+    writerProvider,
+  })),
   ...["claude", "codex", "antigravity", "docker", "ollama"].map((reviewerProvider) => ({
     label: `reviewer:${reviewerProvider}`,
     role: "reviewer",
@@ -48,7 +53,7 @@ const roles = [
   })),
 ];
 let failed = false;
-const report = { version: 1, repository, roles: { reviewers: {} }, enforcement: null };
+const report = { version: 1, repository, roles: { writers: {}, reviewers: {} }, enforcement: null };
 const reviewerAppIds = [];
 let builderCredential = null;
 for (const entry of roles) {
@@ -56,10 +61,11 @@ for (const entry of roles) {
     const credential = await createInstallationToken({
       role: entry.role,
       reviewerProvider: entry.reviewerProvider,
+      writerProvider: entry.writerProvider,
       repository,
     });
     const operations = entry.role === "builder"
-      ? ["create_branch", "push_branch", "ensure_pull_request", "merge"]
+      ? ["create_branch", "push_branch", "ensure_pull_request", ...(entry.writerProvider ? [] : ["merge"])]
       : ["submit_review", ...(canPublishReviewStatus(credential.permissions) ? ["publish_status"] : [])];
     const observed = {
       repository,
@@ -68,7 +74,9 @@ for (const entry of roles) {
       permissions: credential.permissions,
       operations,
     };
-    if (entry.role === "builder") {
+    if (entry.writerProvider) {
+      report.roles.writers[entry.writerProvider] = observed;
+    } else if (entry.role === "builder") {
       builderCredential = credential;
       report.roles.builder = observed;
     } else {

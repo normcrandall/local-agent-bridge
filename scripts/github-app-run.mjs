@@ -17,18 +17,23 @@ if (!roleArgument || !repository || !command.length) {
   process.exit(2);
 }
 
-const [role, reviewerProvider, ...extraRoleParts] = roleArgument.split(":");
+const [role, provider, ...extraRoleParts] = roleArgument.split(":");
 if (!["builder", "reviewer"].includes(role)
   || extraRoleParts.length
-  || (role === "builder" && reviewerProvider)
-  || (role === "reviewer" && reviewerProvider && !["claude", "codex", "antigravity", "docker", "ollama"].includes(reviewerProvider))) {
-  console.error("ROLE must be builder, reviewer, reviewer:claude, reviewer:codex, reviewer:antigravity, reviewer:ollama, or reviewer:docker.");
+  || (provider && !["claude", "codex", "antigravity", "docker", "ollama"].includes(provider))
+  || (role === "builder" && ["docker", "ollama"].includes(provider))) {
+  console.error("ROLE must be builder, builder:claude, builder:codex, builder:antigravity, reviewer, or reviewer:PROVIDER.");
   process.exit(2);
 }
 
 let credential;
 try {
-  credential = await createInstallationToken({ role, reviewerProvider, repository });
+  credential = await createInstallationToken({
+    role,
+    reviewerProvider: role === "reviewer" ? provider : undefined,
+    writerProvider: role === "builder" ? provider : undefined,
+    repository,
+  });
 } catch (error) {
   if (!isGitHubAppPermissionError(error.message)) throw error;
   const policy = patFallbackPolicy(command);

@@ -124,6 +124,9 @@ export function createAgentPool({
   autonomous = false,
   writableRoots = [],
   onTiming = async () => {},
+  createCredential = createInstallationToken,
+  inspectAppRoles = inspectGitHubAppRoles,
+  builderClientFactory = createBoundBuilderClient,
   // Test-only injection points. Production callers must use the default MCP
   // client and stdio transport so provider dispatch cannot bypass its boundary.
   clientFactory = ({ name, version }) => new Client({ name, version }),
@@ -153,6 +156,69 @@ export function createAgentPool({
 
   const clients = {};
   const reviewPublication = new Map();
+  const writerBindings = new Map();
+
+  async function writerBuilderContext(agent) {
+    if (!githubBuilder) return null;
+    if (writerBindings.has(agent)) return writerBindings.get(agent);
+    const promise = (async () => {
+      const mintedCredential = await createCredential({
+        role: "builder",
+        writerProvider: agent,
+        repository: githubBuilder.repository,
+      });
+      const { token: _discardedToken, ...credential } = mintedCredential;
+      const appRoles = await inspectAppRoles();
+      const explicitlyPinnedLogin = githubBuilder.expectedLogins?.[agent] || null;
+      const compatibilityLogin = appRoles.roles?.builder?.expectedLogin || null;
+      const priorWriterLogin = githubBuilder.writerProvider && githubBuilder.writerProvider !== agent
+        ? appRoles.roles?.writers?.[githubBuilder.writerProvider]?.expectedLogin || null
+        : null;
+      if (explicitlyPinnedLogin && !sameGitHubAppLogin(explicitlyPinnedLogin, credential.expectedLogin)) {
+        throw new Error(`Configured ${agent} writer identity ${credential.expectedLogin} does not match the bound authorization ${explicitlyPinnedLogin}.`);
+      }
+      if (!explicitlyPinnedLogin && githubBuilder.expectedLogin
+        && !sameGitHubAppLogin(githubBuilder.expectedLogin, credential.expectedLogin)
+        && !sameGitHubAppLogin(githubBuilder.expectedLogin, compatibilityLogin)
+        && !sameGitHubAppLogin(githubBuilder.expectedLogin, priorWriterLogin)) {
+        throw new Error(`Configured ${agent} writer identity ${credential.expectedLogin} is not authorized by the builder binding ${githubBuilder.expectedLogin}.`);
+      }
+      const { expectedLogins: _expectedLogins, requestedLogin, rebindReason, ...baseBinding } = githubBuilder;
+      const allowedOperations = (baseBinding.allowedOperations || []).filter((operation) => operation !== "merge");
+      if (!allowedOperations.length) {
+        throw new Error("Writer bindings cannot be authorized for merge alone; merge remains with the compatibility builder.");
+      }
+      return {
+        credential,
+        binding: {
+          ...baseBinding,
+          expectedLogin: credential.expectedLogin,
+          writerProvider: credential.provider || agent,
+          allowedOperations,
+        },
+        authority: {
+          provider: credential.provider || agent,
+          roleLabel: credential.roleLabel,
+          login: credential.expectedLogin,
+          requestedLogin: requestedLogin || githubBuilder.expectedLogin || null,
+          resolvedLogin: credential.expectedLogin,
+          rebindReason: priorWriterLogin
+            ? "provider_failover"
+            : rebindReason || (credential.provider ? "provider_writer_selection" : "compatibility_builder_fallback"),
+          removedOperations: (baseBinding.allowedOperations || []).filter((operation) => operation === "merge"),
+          appId: credential.appId,
+          installationId: credential.installationId,
+          repository: githubBuilder.repository,
+          permissions: credential.permissions,
+        },
+      };
+    })();
+    writerBindings.set(agent, promise);
+    promise.catch(() => {
+      if (writerBindings.get(agent) === promise) writerBindings.delete(agent);
+    });
+    return promise;
+  }
 
   async function reviewPublicationFor(agent) {
     if (reviewPublication.has(agent)) return reviewPublication.get(agent);
@@ -230,11 +296,12 @@ export function createAgentPool({
     });
   }
 
-  async function boundBuilderClient() {
+  async function boundBuilderClient(agent) {
     if (!githubBuilder) throw new Error("No bound GitHub builder authorization is configured.");
-    const credential = await createInstallationToken({ role: "builder", repository: githubBuilder.repository });
-    if (!sameGitHubAppLogin(credential.expectedLogin, githubBuilder.expectedLogin)) throw new Error("Configured builder identity does not match the bound authorization.");
-    const appRoles = await inspectGitHubAppRoles();
+    const context = await writerBuilderContext(agent);
+    const { credential } = context;
+    const activeGithubBuilder = context.binding;
+    const appRoles = await inspectAppRoles();
     const trustedReviewLogins = [
       appRoles.roles?.reviewer?.expectedLogin,
       ...Object.values(appRoles.roles?.reviewers || {}).map((reviewer) => reviewer.expectedLogin),
@@ -243,25 +310,38 @@ export function createAgentPool({
       appRoles.roles?.reviewer?.appId,
       ...Object.values(appRoles.roles?.reviewers || {}).map((reviewer) => reviewer.appId),
     ].filter(Boolean).map(Number);
-    return createBoundBuilderClient({
-      ...githubBuilder,
+    const getToken = async () => {
+      const fresh = await createCredential({
+        role: "builder",
+        writerProvider: agent,
+        repository: activeGithubBuilder.repository,
+      });
+      if (!sameGitHubAppLogin(fresh.expectedLogin, credential.expectedLogin)
+        || String(fresh.appId) !== String(credential.appId)
+        || Number(fresh.installationId) !== Number(credential.installationId)) {
+        throw new Error(`Configured ${agent} writer authority changed while the collaboration was running.`);
+      }
+      return { token: fresh.token, verifiedLogin: fresh.verifiedLogin };
+    };
+    return builderClientFactory({
+      ...activeGithubBuilder,
       expectedLogin: credential.expectedLogin,
-      token: credential.token,
-      verifiedLogin: credential.verifiedLogin,
+      getToken,
+      authority: context.authority,
       requiredReviewStatusContext: "agent-review",
       trustedReviewLogins,
       trustedReviewAppIds,
       trustedHumanReviewLogins: appRoles.mergePolicy?.trustedHumanReviewers || [],
       mergeEnforcement: appRoles.github?.mergeEnforcement || "broker",
-      workspace: githubBuilder.workspace || workspace,
-      receiptPath: githubBuilder.receiptPath || resolve(workspace, ".bridge", "github-builder-receipts.jsonl"),
-      allowWorkspaceHead: githubBuilder.allowWorkspaceHead === true,
+      workspace: activeGithubBuilder.workspace || workspace,
+      receiptPath: activeGithubBuilder.receiptPath || resolve(workspace, ".bridge", "github-builder-receipts.jsonl"),
+      allowWorkspaceHead: activeGithubBuilder.allowWorkspaceHead === true,
     });
   }
 
   async function publishAntigravityBuilder(envelope) {
     if (envelope.operations.length === 0) return [];
-    const builder = await boundBuilderClient();
+    const builder = await boundBuilderClient("antigravity");
     const receipts = [];
     const timingKey = `publication:antigravity-builder:${Date.now()}`;
     await emitTiming({ action: "start", name: "publication", key: timingKey, at: new Date().toISOString(), metadata: { agent: "antigravity", channel: "github_builder" } });
@@ -286,17 +366,17 @@ export function createAgentPool({
   // Validate, optionally repair, then publish exactly once. The bounded repair
   // loop itself lives in builder-delivery-repair.mjs so it stays independently
   // testable without live builder credentials.
-  async function deliverAntigravityBuilder({ message, conversationId, threads, requestRepair, onProgress }) {
+  async function deliverAntigravityBuilder({ message, conversationId, threads, requestRepair, onProgress, activeGithubBuilder }) {
     return deliverBuilderEnvelope({
       message,
       conversationId,
-      githubBuilder,
+      githubBuilder: activeGithubBuilder,
       threads,
       requestRepair,
       onProgress,
       emitTiming,
       publish: publishAntigravityBuilder,
-      readWorkspaceHead: () => (githubBuilder?.allowWorkspaceHead ? workspaceHead(workspace) : null),
+      readWorkspaceHead: () => (activeGithubBuilder?.allowWorkspaceHead ? workspaceHead(workspace) : null),
     });
   }
 
@@ -368,6 +448,10 @@ export function createAgentPool({
       }
     },
     async send({ agent, prompt, sessionId, mode, browser }, onProgress = () => {}) {
+      const writerContext = mode === "work" && githubBuilder
+        ? await writerBuilderContext(agent)
+        : null;
+      const activeGithubBuilder = writerContext?.binding || null;
       const requestedProviderCommands = agent === "claude" && mode === "review"
         ? [...new Set([...verificationCommands, ...reusableVerificationCommands])]
         : verificationCommands;
@@ -395,7 +479,7 @@ export function createAgentPool({
       const effectivePermissionProfile = permissionDecision.permissionProfile;
       // Autonomous work with a bound builder runs on an implement-equivalent
       // shell/network grant; the bound builder tools remain the delivery path.
-      const effectiveWorkProfile = autonomousWorkProfile({ autonomous, githubBuilder, mode, workProfile });
+      const effectiveWorkProfile = autonomousWorkProfile({ autonomous, githubBuilder: activeGithubBuilder, mode, workProfile });
       const publication = mode === "review" ? await reviewPublicationFor(agent) : { available: true, binding: null, reason: null };
       const effectiveGithubReview = publication.available ? publication.binding : null;
       let effectivePrompt = mode === "review" && githubReview && !publication.available
@@ -439,7 +523,7 @@ export function createAgentPool({
           permissionProfile: effectivePermissionProfile,
           handoffPath,
           githubReview: effectiveGithubReview,
-          githubBuilder: mode === "work" ? githubBuilder : null,
+          githubBuilder: activeGithubBuilder,
           timeoutSeconds: turnTimeoutSeconds,
           writableRoots,
         });
@@ -458,7 +542,7 @@ export function createAgentPool({
           handoffPath,
           githubReview: effectiveGithubReview,
           githubReviewBridgePath: resolve(root, "src/github-review-bridge.mjs"),
-          githubBuilder: mode === "work" ? githubBuilder : null,
+          githubBuilder: activeGithubBuilder,
           githubBuilderBridgePath: resolve(root, "src/github-builder-bridge.mjs"),
           playwrightBridgePath: resolve(root, "scripts/playwright-mcp.sh"),
           writableRoots,
@@ -467,10 +551,10 @@ export function createAgentPool({
         let antigravityPrompt = effectiveGithubReview
           ? `${effectivePrompt}${reviewEnvelopeInstructions({ githubReview: effectiveGithubReview, handoffPath })}`
           : effectivePrompt;
-        if (githubBuilder && mode === "work") {
-          const builder = await boundBuilderClient();
-          builderThreads = githubBuilder.prNumber ? await builder.reviewThreads() : [];
-          antigravityPrompt += builderEnvelopeInstructions({ githubBuilder, threads: builderThreads });
+        if (activeGithubBuilder) {
+          const builder = await boundBuilderClient(agent);
+          builderThreads = activeGithubBuilder.prNumber ? await builder.reviewThreads() : [];
+          antigravityPrompt += builderEnvelopeInstructions({ githubBuilder: activeGithubBuilder, threads: builderThreads });
         }
         request = antigravityRequestFor(antigravityPrompt, sessionId);
       } else if (agent === "ollama") {
@@ -533,12 +617,13 @@ export function createAgentPool({
       }
       let resolvedSessionId = sessionFrom(agent, result);
       let deliveryRepair = null;
-      if (agent === "antigravity" && githubBuilder && mode === "work") {
+      if (agent === "antigravity" && activeGithubBuilder) {
         const delivery = await deliverAntigravityBuilder({
           message,
           conversationId: resolvedSessionId,
           threads: builderThreads,
           onProgress,
+          activeGithubBuilder,
           requestRepair: async ({ prompt: repairPrompt, conversationId }) => {
             // A delivery-syntax correction may not run commands; only the
             // envelope is being rewritten.
@@ -587,10 +672,15 @@ export function createAgentPool({
             fallbackModels: routing.modelFallbacks || routing.fallbackModels || modelFallbacks[agent] || [],
             fallbackManagedBy: routing.fallbackManagedBy ?? null,
           } : null,
-          workspaceHeadSha: mode === "work" && githubBuilder?.allowWorkspaceHead
+          writerAuthority: writerContext?.authority || null,
+          writerBinding: activeGithubBuilder ? {
+            expectedLogin: activeGithubBuilder.expectedLogin,
+            writerProvider: activeGithubBuilder.writerProvider,
+          } : null,
+          workspaceHeadSha: mode === "work" && activeGithubBuilder?.allowWorkspaceHead
             ? workspaceHead(workspace)
             : null,
-          workspaceHeadShaSource: mode === "work" && githubBuilder?.allowWorkspaceHead
+          workspaceHeadShaSource: mode === "work" && activeGithubBuilder?.allowWorkspaceHead
             ? "post_turn_isolated_checkout"
             : null,
           reviewPublication: mode === "review" && githubReview ? {

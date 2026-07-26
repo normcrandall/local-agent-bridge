@@ -29,7 +29,9 @@ export function sameGitHubAppLogin(left, right) {
 }
 
 export function assertGitHubAppPermissions(role, permissions = {}) {
-  const permissionRole = role.startsWith("reviewer") ? "reviewer" : role;
+  const permissionRole = role.startsWith("reviewer")
+    ? "reviewer"
+    : role.startsWith("writer") ? "builder" : role;
   const required = GITHUB_APP_ROLE_PERMISSIONS[permissionRole];
   if (!required) throw new Error(`Unknown GitHub App role: ${role}`);
   return assertPermissionFloor(required, permissions, `${role} GitHub App`);
@@ -48,23 +50,46 @@ function reviewerEntries(config) {
   return Object.entries(config?.roles?.reviewers || {});
 }
 
-function configuredRole(config, { role, reviewerProvider, expectedLogin }) {
-  if (role !== "reviewer") return { selected: config?.roles?.[role], label: role };
+function writerEntries(config) {
+  return Object.entries(config?.roles?.writers || {});
+}
+
+function configuredRole(config, { role, reviewerProvider, writerProvider, expectedLogin }) {
+  if (role === "builder") {
+    const writers = writerEntries(config);
+    if (expectedLogin) {
+      const match = writers.find(([, selected]) => (
+        selected?.expectedLogin && sameGitHubAppLogin(selected.expectedLogin, expectedLogin)
+      ));
+      if (match) return { selected: match[1], label: `writer:${match[0]}`, provider: match[0] };
+      if (config?.roles?.builder?.expectedLogin
+        && sameGitHubAppLogin(config.roles.builder.expectedLogin, expectedLogin)) {
+        return { selected: config.roles.builder, label: "builder", provider: null };
+      }
+      return { selected: null, label: writerProvider ? `writer:${writerProvider}` : "builder", provider: writerProvider || null };
+    }
+    if (writerProvider && config?.roles?.writers?.[writerProvider]) {
+      return { selected: config.roles.writers[writerProvider], label: `writer:${writerProvider}`, provider: writerProvider };
+    }
+    return { selected: config?.roles?.builder, label: "builder", provider: null };
+  }
+  if (role !== "reviewer") return { selected: config?.roles?.[role], label: role, provider: null };
   const reviewers = reviewerEntries(config);
   if (expectedLogin) {
     const match = reviewers.find(([, selected]) => (
       selected?.expectedLogin && sameGitHubAppLogin(selected.expectedLogin, expectedLogin)
     ));
-    if (match) return { selected: match[1], label: `reviewer:${match[0]}` };
+    if (match) return { selected: match[1], label: `reviewer:${match[0]}`, provider: match[0] };
     if (config?.roles?.reviewer?.expectedLogin
       && sameGitHubAppLogin(config.roles.reviewer.expectedLogin, expectedLogin)) {
-      return { selected: config.roles.reviewer, label: "reviewer" };
+      return { selected: config.roles.reviewer, label: "reviewer", provider: null };
     }
+    return { selected: null, label: reviewerProvider ? `reviewer:${reviewerProvider}` : "reviewer", provider: reviewerProvider || null };
   }
   if (reviewerProvider && config?.roles?.reviewers?.[reviewerProvider]) {
-    return { selected: config.roles.reviewers[reviewerProvider], label: `reviewer:${reviewerProvider}` };
+    return { selected: config.roles.reviewers[reviewerProvider], label: `reviewer:${reviewerProvider}`, provider: reviewerProvider };
   }
-  return { selected: config?.roles?.reviewer, label: "reviewer" };
+  return { selected: config?.roles?.reviewer, label: "reviewer", provider: null };
 }
 
 function base64url(value) {
@@ -136,27 +161,32 @@ export async function inspectGitHubAppRoles({ configPath = DEFAULT_GITHUB_APPS_C
       privateKeyError: keyError,
     };
   }
-  roles.reviewers = {};
-  for (const [provider, selected] of reviewerEntries(config)) {
-    let keySecure = false;
-    let keyError = null;
-    try {
-      await securePrivateKey(resolveConfiguredPath(selected.privateKeyPath, configPath));
-      keySecure = true;
-    } catch (error) { keyError = error.message; }
-    const expectedLoginValid = GITHUB_LOGIN_PATTERN.test(selected.expectedLogin || "");
-    roles.reviewers[provider] = {
-      configured: true,
-      appId: String(selected.appId || ""),
-      appIdValid: /^\d+$/.test(String(selected.appId || "")),
-      configuredLogin: selected.expectedLogin || null,
-      expectedLogin: expectedLoginValid ? canonicalGitHubAppLogin(selected.expectedLogin) : selected.expectedLogin || null,
-      expectedLoginValid,
-      installations: Object.keys(selected.installations || {}),
-      privateKeySecure: keySecure,
-      privateKeyError: keyError,
-    };
-  }
+  const inspectProviderRoles = async (entries) => {
+    const inspected = {};
+    for (const [provider, selected] of entries) {
+      let keySecure = false;
+      let keyError = null;
+      try {
+        await securePrivateKey(resolveConfiguredPath(selected.privateKeyPath, configPath));
+        keySecure = true;
+      } catch (error) { keyError = error.message; }
+      const expectedLoginValid = GITHUB_LOGIN_PATTERN.test(selected.expectedLogin || "");
+      inspected[provider] = {
+        configured: true,
+        appId: String(selected.appId || ""),
+        appIdValid: /^\d+$/.test(String(selected.appId || "")),
+        configuredLogin: selected.expectedLogin || null,
+        expectedLogin: expectedLoginValid ? canonicalGitHubAppLogin(selected.expectedLogin) : selected.expectedLogin || null,
+        expectedLoginValid,
+        installations: Object.keys(selected.installations || {}),
+        privateKeySecure: keySecure,
+        privateKeyError: keyError,
+      };
+    }
+    return inspected;
+  };
+  roles.writers = await inspectProviderRoles(writerEntries(config));
+  roles.reviewers = await inspectProviderRoles(reviewerEntries(config));
   return {
     configured: true,
     configPath: expandHome(configPath),
@@ -230,7 +260,7 @@ export async function listGitHubAppInstallations({ appId, privateKeyPath, apiUrl
   }));
 }
 
-export async function loadGitHubAppRole({ role, repository, reviewerProvider, expectedLogin, configPath = DEFAULT_GITHUB_APPS_CONFIG }) {
+export async function loadGitHubAppRole({ role, repository, reviewerProvider, writerProvider, expectedLogin, configPath = DEFAULT_GITHUB_APPS_CONFIG }) {
   if (!/^[a-z][a-z0-9_-]*$/i.test(role || "")) throw new Error("GitHub App role is invalid.");
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository || "")) {
     throw new Error("repository must be owner/name.");
@@ -239,7 +269,7 @@ export async function loadGitHubAppRole({ role, repository, reviewerProvider, ex
   const { config, exists } = await readConfig(configPath);
   if (!exists) throw new Error(`GitHub Apps config does not exist: ${expandHome(configPath)}`);
   if (config.version !== 1) throw new Error("Unsupported GitHub Apps config version.");
-  const resolvedRole = configuredRole(config, { role, reviewerProvider, expectedLogin });
+  const resolvedRole = configuredRole(config, { role, reviewerProvider, writerProvider, expectedLogin });
   const selected = resolvedRole.selected;
   const roleLabel = resolvedRole.label;
   if (!selected) throw new Error(`GitHub App role is not configured: ${roleLabel}`);
@@ -260,7 +290,21 @@ export async function loadGitHubAppRole({ role, repository, reviewerProvider, ex
     installationId,
     privateKeyPath: resolveConfiguredPath(selected.privateKeyPath, configPath),
     roleLabel,
+    provider: resolvedRole.provider,
   };
+}
+
+export async function configuredWriterLogin({ provider, configPath = DEFAULT_GITHUB_APPS_CONFIG } = {}) {
+  const { config, exists } = await readConfig(configPath);
+  if (!exists) throw new Error(`GitHub Apps config does not exist: ${expandHome(configPath)}`);
+  const selected = config?.roles?.writers?.[provider] || config?.roles?.builder;
+  if (!selected?.expectedLogin) {
+    throw new Error(`GitHub writer App and compatibility builder are not configured for provider: ${provider || "unknown"}`);
+  }
+  if (!GITHUB_LOGIN_PATTERN.test(selected.expectedLogin)) {
+    throw new Error(`GitHub writer expectedLogin is invalid for provider: ${provider || "unknown"}`);
+  }
+  return canonicalGitHubAppLogin(selected.expectedLogin);
 }
 
 export async function configuredReviewerLogin({ provider, configPath = DEFAULT_GITHUB_APPS_CONFIG } = {}) {
@@ -279,13 +323,14 @@ export async function createInstallationToken({
   role,
   repository,
   reviewerProvider,
+  writerProvider,
   expectedLogin,
   tokenPermissions,
   configPath = DEFAULT_GITHUB_APPS_CONFIG,
   apiUrl = "https://api.github.com",
   fetchImpl = fetch,
 }) {
-  const selected = await loadGitHubAppRole({ role, repository, reviewerProvider, expectedLogin, configPath });
+  const selected = await loadGitHubAppRole({ role, repository, reviewerProvider, writerProvider, expectedLogin, configPath });
   const { privateKey } = await securePrivateKey(selected.privateKeyPath);
   const jwt = createAppJwt({ appId: selected.appId, privateKey });
   const app = await githubJson(`${apiUrl}/app`, { token: jwt, fetchImpl });
@@ -306,7 +351,7 @@ export async function createInstallationToken({
   if (tokenPermissions) {
     assertPermissionFloor(tokenPermissions, result.permissions || {}, "GitHub App installation token");
   } else {
-    assertGitHubAppPermissions(role, result.permissions || {});
+    assertGitHubAppPermissions(selected.roleLabel, result.permissions || {});
   }
   return {
     token: result.token,
@@ -318,6 +363,8 @@ export async function createInstallationToken({
     appId: selected.appId,
     permissions: result.permissions,
     credentialSource: "github-app",
+    roleLabel: selected.roleLabel,
+    provider: selected.provider,
   };
 }
 

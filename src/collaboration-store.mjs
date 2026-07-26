@@ -571,6 +571,7 @@ export async function queryControlPlane(stateRoot, options = {}) {
       coordinatorWake: cState.coordinatorWake || null,
       attentionRequestedAt: attentionRequestAt(cState),
       reviewPublication: cState.reviewPublication || null,
+      writerAuthority: cState.writerAuthority || null,
       performanceSummary: cState.performanceSummary || null,
       turnCount: cState.runtime?.turnCount || 0,
       model: activeCall?.model || activeCall?.selectedModel || null,

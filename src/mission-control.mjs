@@ -1065,6 +1065,14 @@ function detailPane(lane, timeline, width, now, snapshot, expanded = false) {
   if (summaryIsStale) rows.push(paneLine("SUMMARY STALE · process heartbeat remains live", "33;1"));
   const github = [lane.issueNumber && `issue #${lane.issueNumber}`, lane.prNumber && `PR #${lane.prNumber}`, lane.branch, lane.headSha && lane.headSha.slice(0, 10)].filter(Boolean).join(" · ");
   if (github) rows.push(paneLine(""), paneLine(`GITHUB  ${github}`, "35"));
+  if (lane.writerAuthority?.login) {
+    const writerIdentity = [
+      lane.writerAuthority.login,
+      lane.writerAuthority.appId && `App ${lane.writerAuthority.appId}`,
+      lane.writerAuthority.provider,
+    ].filter(Boolean).join(" · ");
+    rows.push(paneLine(`WRITER  ${writerIdentity}`, "36"));
+  }
   if (!deliveryStatus && lane.nextAction && lane.nextAction !== "none") rows.push(paneLine(`NEXT  ${friendlyPhase(lane)}`, "33"));
   const blockingReason = deliveryStatus ? "" : blockedReason(lane);
   if (blockingReason) {

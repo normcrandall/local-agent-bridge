@@ -347,6 +347,14 @@ export function createBoundBuilderClient({
     installationId: Number(authority.installationId),
     repository: String(authority.repository || repository),
     permissions: Object.freeze(sortedPermissions),
+    ...(authority.provider ? { provider: authority.provider } : {}),
+    ...(authority.roleLabel ? { roleLabel: authority.roleLabel } : {}),
+    ...(authority.requestedLogin ? { requestedLogin: authority.requestedLogin } : {}),
+    ...(authority.resolvedLogin ? { resolvedLogin: authority.resolvedLogin } : {}),
+    ...(authority.rebindReason ? { rebindReason: authority.rebindReason } : {}),
+    ...(authority.removedOperations?.length
+      ? { removedOperations: Object.freeze([...authority.removedOperations]) }
+      : {}),
   }) : null;
   if (boundAuthority) {
     const normalizeAppLogin = (login) => String(login || "").toLowerCase().replace(/\[bot\]$/, "");
@@ -872,7 +880,21 @@ export function createBoundBuilderClient({
   }
 
   function appIdentity(receiptLogin) {
-    return { expectedLogin, verifiedLogin: receiptLogin || cachedVerifiedLogin || expectedLogin };
+    return {
+      expectedLogin,
+      verifiedLogin: receiptLogin || cachedVerifiedLogin || expectedLogin,
+      ...(boundAuthority ? {
+        appId: boundAuthority.appId,
+        installationId: boundAuthority.installationId,
+        repository: boundAuthority.repository,
+        ...(boundAuthority.provider ? { provider: boundAuthority.provider } : {}),
+        ...(boundAuthority.roleLabel ? { roleLabel: boundAuthority.roleLabel } : {}),
+        ...(boundAuthority.requestedLogin ? { requestedLogin: boundAuthority.requestedLogin } : {}),
+        ...(boundAuthority.resolvedLogin ? { resolvedLogin: boundAuthority.resolvedLogin } : {}),
+        ...(boundAuthority.rebindReason ? { rebindReason: boundAuthority.rebindReason } : {}),
+        ...(boundAuthority.removedOperations?.length ? { removedOperations: boundAuthority.removedOperations } : {}),
+      } : {}),
+    };
   }
 
   function branchReceipt({ operation, ref, requestedSha, expectedOldSha = null, observedRemoteSha, outcome, idempotent, verifiedLogin: receiptLogin, reconciled = false }) {
@@ -1544,6 +1566,7 @@ export function createBoundBuilderClient({
       prNumber,
       headSha: activeHeadSha,
       authorizationHeadSha,
+      ...(boundAuthority ? { writerAuthority: boundAuthority } : {}),
     };
   }
 
