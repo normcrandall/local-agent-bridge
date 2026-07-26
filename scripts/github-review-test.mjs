@@ -330,6 +330,15 @@ try {
   assert.equal(durableTrust.headSha, nextHeadSha);
   assert.equal(durableTrust.signerNotTrusted[0].writerLogin, "claude-writer[bot]");
   assert.doesNotMatch(JSON.stringify(durableTrust), /private|secret|\.pem/i);
+  await assert.rejects(
+    readLatestReviewTrustEvidence({
+      repository: "owner/repo",
+      prNumber: 42,
+      headSha: nextHeadSha,
+      stateRoot: evidenceRoot,
+    }),
+    /requires a reviewer login/i,
+  );
 
   await appendReviewTrustEvidence({
     repository: "owner/repo",
@@ -372,6 +381,29 @@ try {
     stateRoot: evidenceRoot,
   });
   assert.deepEqual(concurrentReviewerB.evidence.configuredWriterLogins, ["codex-writer[bot]"]);
+
+  await appendReviewTrustEvidence({
+    repository: "owner/repo",
+    prNumber: 42,
+    headSha: nextHeadSha,
+    stateRoot: evidenceRoot,
+    evidence: {
+      reviewerLogin: "reviewer-a[bot]",
+      configuredWriterLogins: [],
+      rosterSource: "durable-review-evidence",
+      degraded: false,
+      unknown: true,
+      degradationReason: "publication evidence append was unavailable",
+    },
+  });
+  const unknownReviewerA = await readLatestReviewTrustEvidence({
+    repository: "owner/repo",
+    prNumber: 42,
+    headSha: nextHeadSha,
+    reviewerLogin: "reviewer-a[bot]",
+    stateRoot: evidenceRoot,
+  });
+  assert.equal(unknownReviewerA.evidence.unknown, true, "latest unknown evidence has conservative precedence alongside degraded evidence");
 
   const unreadablePath = reviewTrustEvidencePath({ repository: "owner/broken", prNumber: 7, headSha: nextHeadSha, stateRoot: evidenceRoot });
   await writeFile(unreadablePath, "not-json\n", { mode: 0o600 });
@@ -800,6 +832,7 @@ assert.equal(idempotentApi.calls.find((call) => call.options.method === "POST").
 
 const temporary = await mkdtemp(join(tmpdir(), "github-review-mcp-test-"));
 const tokenFile = join(temporary, "token");
+const reviewEvidenceRoot = join(temporary, "review-evidence");
 // Regression: the handoff lives under a nested parent directory that does not
 // exist yet, so write_handoff must create it recursively before writing.
 const handoffFile = join(temporary, "nested", "handoffs", "handoff.md");
@@ -867,7 +900,7 @@ const transport = new StdioClientTransport({
     GITHUB_REVIEW_TOKEN_FILE: tokenFile,
     GITHUB_APP_CONFIG: join(temporary, "not-configured.json"),
     GITHUB_REVIEW_API_URL: `http://127.0.0.1:${port}`,
-    GITHUB_REVIEW_EVIDENCE_ROOT: temporary,
+    GITHUB_REVIEW_EVIDENCE_ROOT: reviewEvidenceRoot,
   },
 });
 try {
@@ -900,9 +933,10 @@ try {
     prNumber: 42,
     headSha: base.headSha,
     reviewerLogin: "review-bot",
-    stateRoot: temporary,
+    stateRoot: reviewEvidenceRoot,
   });
   assert.equal(evidenceAfterFailure.status, "absent", "failed review publication must not leave durable success evidence");
+  await writeFile(reviewEvidenceRoot, "block evidence directory creation\n", { mode: 0o600 });
   const result = await mcpClient.callTool({
     name: "submit_pr_review",
     arguments: { event: "COMMENT", body: "Compatibility review comment.", comments: [] },
@@ -910,9 +944,10 @@ try {
   assert.notEqual(result.isError, true);
   assert.equal(result.structuredContent.login, "review-bot");
   assert.equal(result.structuredContent.gate, null);
-  assert.equal(result.structuredContent.reviewTrustRoster.degraded, true);
+  assert.equal(result.structuredContent.reviewTrustRoster.degraded, false);
   assert.equal(result.structuredContent.reviewTrustRoster.unknown, true);
-  assert.equal(result.structuredContent.reviewTrustRoster.rosterSource, "pat-compatibility");
+  assert.equal(result.structuredContent.reviewTrustRoster.rosterSource, "durable-review-evidence");
+  assert.match(result.structuredContent.reviewTrustRoster.degradationReason, /could not be recorded/i);
   assert.equal(reviewPayload.commit_id, base.headSha);
   assert.equal(reviewPayload.event, "COMMENT");
   assert.equal(statusPayload, null);

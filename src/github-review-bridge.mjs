@@ -254,12 +254,7 @@ server.registerTool(
     // Evidence describes an actual publication outcome. A failed GitHub
     // mutation must not leave a receipt that later appears successfully posted.
     const effectiveTrustRoster = readiness?.trustRoster || trustRoster;
-    const trustEvidence = await appendReviewTrustEvidence({
-      repository,
-      prNumber,
-      headSha,
-      stateRoot: reviewEvidenceStateRoot,
-      evidence: {
+    const evidence = {
         reviewerLogin: expectedLogin,
         readinessDigest: readiness?.digest || null,
         configuredWriterLogins: effectiveTrustRoster.configuredWriterLogins,
@@ -270,8 +265,38 @@ server.registerTool(
         unansweredCount: readiness?.unanswered.length || 0,
         signerNotTrusted: readiness?.signerNotTrusted || [],
         unresolvedCount: readiness?.unresolved.length || 0,
-      },
-    });
+    };
+    let trustEvidence;
+    try {
+      trustEvidence = await appendReviewTrustEvidence({
+        repository,
+        prNumber,
+        headSha,
+        stateRoot: reviewEvidenceStateRoot,
+        evidence,
+      });
+    } catch {
+      // GitHub already accepted the review. Preserve that publication receipt,
+      // but never let a failed local append erase the trust posture.
+      trustEvidence = {
+        version: 1,
+        type: "review_trust_roster",
+        at: new Date().toISOString(),
+        repository,
+        prNumber,
+        headSha: headSha.toLowerCase(),
+        reviewerLogin: expectedLogin,
+        readinessDigest: evidence.readinessDigest,
+        configuredWriterLogins: [],
+        rosterSource: "durable-review-evidence",
+        degraded: false,
+        unknown: true,
+        degradationReason: "GitHub review publication succeeded, but durable review trust evidence could not be recorded.",
+        unansweredCount: evidence.unansweredCount,
+        signerNotTrusted: [],
+        unresolvedCount: evidence.unresolvedCount,
+      };
+    }
     submittedReview = {
       ...result,
       reviewReadiness: readiness,

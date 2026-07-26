@@ -12,6 +12,7 @@ import {
   localReviewPrompt,
   republishValidatedReview,
   resolveReviewPublication,
+  reviewTrustRosterForPublication,
   submitReviewWithSummaryCompatibility,
 } from "./review-publication.mjs";
 import { resolveContainedHandoffPath } from "./handoff-path.mjs";
@@ -681,22 +682,14 @@ export function createAgentPool({
           notBefore: reviewEvidenceNotBefore,
         })
         : null;
-      const reviewTrustRoster = latestReviewTrustRoster?.status === "found"
-        ? latestReviewTrustRoster.evidence
-        : latestReviewTrustRoster?.status === "unreadable"
-          ? {
-            repository: effectiveGithubReview.repository,
-            prNumber: effectiveGithubReview.prNumber,
-            headSha: effectiveGithubReview.headSha,
-            reviewerLogin: effectiveGithubReview.expectedLogin,
-            rosterSource: "durable-review-evidence",
-            configuredWriterLogins: [],
-            degraded: false,
-            unknown: true,
-            degradationReason: latestReviewTrustRoster.reason,
-            signerNotTrusted: [],
-          }
-          : null;
+      const publicationSucceeded = Boolean(publishedReviewReceipt) || structured.reviewPublished === true;
+      const reviewTrustRoster = effectiveGithubReview
+        ? reviewTrustRosterForPublication({
+          latestEvidence: latestReviewTrustRoster,
+          githubReview: effectiveGithubReview,
+          publicationSucceeded,
+        })
+        : null;
       const routing = structured.modelRouting || structured;
       return {
         message,
@@ -730,7 +723,7 @@ export function createAgentPool({
             : null,
           reviewPublication: mode === "review" && githubReview ? {
             available: publication.available,
-            published: Boolean(publishedReviewReceipt) || structured.reviewPublished === true,
+            published: publicationSucceeded,
             receipt: publishedReviewReceipt,
             authorizing: publication.authorizing !== false,
             login: effectiveGithubReview?.expectedLogin || null,

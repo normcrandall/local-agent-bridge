@@ -449,6 +449,9 @@ export async function readLatestReviewTrustEvidence({
   notBefore = null,
   stateRoot,
 }) {
+  if (!/^[A-Za-z0-9-]+(?:\[bot\])?$/.test(reviewerLogin || "")) {
+    throw new Error("readLatestReviewTrustEvidence requires a reviewer login.");
+  }
   const path = reviewTrustEvidencePath({ repository, prNumber, headSha, stateRoot });
   try {
     const lines = (await readFile(path, "utf8")).trim().split("\n").filter(Boolean);
@@ -459,15 +462,15 @@ export async function readLatestReviewTrustEvidence({
         return { status: "unreadable", evidence: null, reason: "Durable review trust evidence is unreadable." };
       }
       if (record?.type !== "review_trust_roster") continue;
-      if (reviewerLogin && !sameBotLogin(record.reviewerLogin, reviewerLogin)) continue;
+      if (!sameBotLogin(record.reviewerLogin, reviewerLogin)) continue;
       if (notBefore && Date.parse(record.at) < Date.parse(notBefore)) continue;
       records.push(record);
     }
     if (!records.length) return { status: "absent", evidence: null, reason: null };
     // Within one bounded publication attempt, a degraded observation must not
     // be hidden by a concurrently appended healthy record for the same signer.
-    const degraded = records.filter((record) => record.degraded === true);
-    return { status: "found", evidence: (degraded.length ? degraded : records).at(-1), reason: null };
+    const conservative = records.filter((record) => record.degraded === true || record.unknown === true);
+    return { status: "found", evidence: (conservative.length ? conservative : records).at(-1), reason: null };
   } catch (error) {
     if (error.code === "ENOENT") return { status: "absent", evidence: null, reason: null };
     return { status: "unreadable", evidence: null, reason: "Durable review trust evidence is unreadable." };

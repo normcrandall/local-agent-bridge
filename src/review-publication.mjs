@@ -129,6 +129,28 @@ export function recordReviewPublicationResult(publication, {
   };
 }
 
+export function reviewTrustRosterForPublication({ latestEvidence, githubReview, publicationSucceeded = false }) {
+  if (latestEvidence?.status === "found") return latestEvidence.evidence;
+  const evidenceUnavailable = latestEvidence?.status === "unreadable"
+    || (latestEvidence?.status === "absent" && publicationSucceeded);
+  if (!evidenceUnavailable) return null;
+  const absentReason = "GitHub review publication succeeded, but no durable review trust evidence was recorded for this publication attempt.";
+  return {
+    repository: githubReview.repository,
+    prNumber: githubReview.prNumber,
+    headSha: githubReview.headSha,
+    reviewerLogin: githubReview.expectedLogin,
+    rosterSource: "durable-review-evidence",
+    configuredWriterLogins: [],
+    degraded: false,
+    unknown: true,
+    degradationReason: latestEvidence?.status === "unreadable"
+      ? latestEvidence.reason || "Durable review trust evidence is unreadable."
+      : absentReason,
+    signerNotTrusted: [],
+  };
+}
+
 // A publication failure is recoverable when it reflects a transient filesystem
 // or transport condition rather than a policy, identity, or authorization
 // rejection. Recoverable failures may be retried against the already-validated
