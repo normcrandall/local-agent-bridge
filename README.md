@@ -62,6 +62,8 @@ The machine supervisor keeps the selected local route warm. It preloads Docker w
 
 Docker receives only bounded repository-state, file-read, literal-search, and Git-diff tools. It receives no shell, browser, verification-command, source-write, builder, commit, push, or merge capability. Both `APPROVE` and `REQUEST_CHANGES` publish only as non-authorizing PR comments during evaluation, so Docker contributes review evidence without unlocking or blocking a merge gate. Configure fallbacks under `providers.docker.fallbackModels` and disable a model machine-wide with `bridge models disable docker <model>`.
 
+Reviewer quality is measured through the provider-independent [shadow review benchmark](docs/review-benchmark.md). Its redacted JSONL ledger, independent finding adjudication, cohort confidence labels, and CLI reports never authorize or delay a merge.
+
 ### Local Ollama reviewer (secondary)
 
 Ollama is a review-only availability fallback. Its status, start, and continuation tools first probe the configured Docker reviewer and fail closed while Docker is healthy; selecting Ollama explicitly does not bypass this machine policy. Qwen 3.6 is the primary local-review model on both runtimes; Gemma remains a later model fallback for comparative evaluation. Configure the model and loopback endpoint by copying [`config/ollama.example.json`](config/ollama.example.json) to `~/.config/local-agent-bridge/ollama.json`; if the file is absent, the bridge uses `qwen3.6:latest` at `http://127.0.0.1:11434`. `OLLAMA_MODEL` and `OLLAMA_HOST` are explicit machine overrides. This release rejects non-loopback endpoints.

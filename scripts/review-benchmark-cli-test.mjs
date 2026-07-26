@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { appendReviewBenchmarkRecord } from "../src/review-benchmark-ledger.mjs";
+import { normalizeFinding } from "../src/review-benchmark-model.mjs";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const cli = join(root, "scripts/review-benchmark-report.mjs");
@@ -26,6 +27,9 @@ function record(overrides = {}) {
     timestamp: "2026-07-26T12:00:00-04:00",
     latencyMs: 120,
     localProvider: true,
+    exactHeadComplete: true,
+    contractDigest: "c".repeat(64),
+    evidenceSurfaceDigest: "e".repeat(64),
     findings: [{ path: "src/a.mjs", line: 4, severity: "high", summary: "Possible loss" }],
     ...overrides,
   };
@@ -54,7 +58,7 @@ try {
   const jsonRun = run(["--ledger", ledger, "--repository", "VELIQON/EXAMPLE", "--head", head.toUpperCase(), "--json"]);
   assert.equal(jsonRun.status, 0, jsonRun.stderr);
   const report = JSON.parse(jsonRun.stdout);
-  assert.deepEqual(report.filters, { provider: null, repository: "veliqon/example", headSha: head });
+  assert.deepEqual(report.filters, { provider: null, model: null, cohort: null, repository: "veliqon/example", headSha: head });
   assert.deepEqual(report.sample, {
     state: "incomplete",
     runCount: 2,
@@ -73,11 +77,42 @@ try {
   const deterministicRun = run(["--ledger", ledger, "--repository", "veliqon/example", "--head", head, "--json"]);
   assert.equal(deterministicRun.stdout, jsonRun.stdout, "JSON is byte-for-byte deterministic for equivalent normalized filters");
 
+  const adjudications = join(scratch, "adjudications.json");
+  await writeFile(adjudications, JSON.stringify([{ repository: "veliqon/example", headSha: head, findingAdjudications: [{
+    findingKey: normalizeFinding(record().findings[0]).key, finding: record().findings[0], status: "accepted", evidence: ["fixed and re-reviewed"],
+  }] }]));
+  const adjudicatedRun = run(["--ledger", ledger, "--repository", "veliqon/example", "--adjudications", adjudications, "--json"]);
+  assert.equal(adjudicatedRun.status, 0, adjudicatedRun.stderr);
+  const adjudicated = JSON.parse(adjudicatedRun.stdout);
+  assert.equal(adjudicated.sample.state, "adjudicated");
+  assert.equal(adjudicated.targets[0].providers.find((row) => row.provider === "qwen3-coder").precision, 1);
+  assert.equal(adjudicated.targets[0].providers.find((row) => row.provider === "claude").recall, 0);
+  assert.equal(adjudicated.targets[0].confidence, "insufficient");
+
+  const findingKey = normalizeFinding(record().findings[0]).key;
+  await appendReviewBenchmarkRecord(ledger, {
+    schemaVersion: 1, recordType: "finding_adjudication", repository: "veliqon/example", headSha: head,
+    adjudicationId: "decision-1", timestamp: "2026-07-26T17:00:00Z", findingKey,
+    finding: record().findings[0], status: "accepted", evidence: ["regression test and exact-head re-review"],
+  });
+  await appendReviewBenchmarkRecord(ledger, {
+    schemaVersion: 1, recordType: "review_outcome", repository: "veliqon/example", headSha: head,
+    outcomeId: "outcome-1", provider: "qwen3-coder", runId: "qwen-1", timestamp: "2026-07-27T17:00:00Z",
+    outcomes: { postMergeDefects: 1 }, evidence: ["linked post-merge issue"],
+  });
+  const ledgerAdjudicatedRun = run(["--ledger", ledger, "--repository", "veliqon/example", "--json"]);
+  assert.equal(ledgerAdjudicatedRun.status, 0, ledgerAdjudicatedRun.stderr);
+  const ledgerAdjudicated = JSON.parse(ledgerAdjudicatedRun.stdout);
+  const qwenCohort = ledgerAdjudicated.targets[0].providers.find((row) => row.provider === "qwen3-coder");
+  assert.equal(ledgerAdjudicated.sample.state, "adjudicated");
+  assert.equal(qwenCohort.precision, 1);
+  assert.equal(qwenCohort.outcomes.postMergeDefects, 1);
+
   const providerRun = run(["--ledger", ledger, "--provider", "CLAUDE", "--repository", "veliqon/example"]);
   assert.equal(providerRun.status, 0, providerRun.stderr);
   assert.match(providerRun.stdout, /OFFLINE REVIEW BENCHMARK · OBSERVATIONAL ONLY/);
   assert.match(providerRun.stdout, /claude \(model n\/r\)/);
-  assert.match(providerRun.stdout, /INCOMPLETE: precision and recall require independent finding adjudication/);
+  assert.match(providerRun.stdout, /insufficient/);
   assert.match(providerRun.stdout, /cannot satisfy or bypass any review or merge gate/);
   assert.doesNotMatch(providerRun.stdout, /qwen3-coder/);
 
