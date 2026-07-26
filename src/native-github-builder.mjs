@@ -1,6 +1,7 @@
 import { createInstallationToken, inspectGitHubAppRoles } from "./github-app-auth.mjs";
 import { createBoundBuilderClient } from "./github-builder-client.mjs";
 import { resolveDeliveryPolicy } from "./delivery-policy.mjs";
+import { configuredTrustedWriterLogins } from "./github-review-threads.mjs";
 
 export function repositoryMatchesPolicy(repository, patterns = []) {
   const normalized = repository.toLowerCase();
@@ -48,9 +49,7 @@ export async function mergePullRequestWithBuilder({
     appRoles.roles?.reviewer?.appId,
     ...Object.values(appRoles.roles?.reviewers || {}).map((reviewer) => reviewer.appId),
   ].filter(Boolean).map(Number);
-  const trustedWriterLogins = Object.values(appRoles.roles?.writers || {})
-    .map((writer) => writer.expectedLogin)
-    .filter(Boolean);
+  const trustedWriterLogins = configuredTrustedWriterLogins({ appRoles });
   const builder = clientFactory({
     repository,
     prNumber,

@@ -96,6 +96,7 @@ import {
 import { verifyCollaborationRetirement } from "./state-cleanup.mjs";
 import { resolveDeliveryPolicy } from "./delivery-policy.mjs";
 import { assertGithubGovernedWorkStart, governedContinuationBuilder } from "./github-delivery-governance.mjs";
+import { readMergeDeliveryReceipt, recordMergeDeliveryReceipt } from "./merge-delivery-receipts.mjs";
 import {
   resolveProviderFailoverRoster,
 } from "./provider-failover.mjs";
@@ -104,6 +105,7 @@ const RUNTIME_ROOT = realpathSync(process.env.BRIDGE_RUNTIME_ROOT || process.env
 const WORKSPACE_ROOT = realpathSync(process.env.BRIDGE_WORKSPACE_ROOT || process.env.BRIDGE_ROOT || process.cwd());
 const PORTFOLIO_ROOT = resolve(process.env.BRIDGE_PORTFOLIO_DIR || collaborationDirectory(WORKSPACE_ROOT), "portfolios");
 const EVIDENCE_ROOT = resolve(collaborationDirectory(WORKSPACE_ROOT), "evidence");
+const MERGE_RECEIPT_ROOT = resolve(collaborationDirectory(WORKSPACE_ROOT), "merge-receipts");
 const TERMINAL_STATUSES = new Set(["agreed", "needs_user", "turn_limit", "failed", "cancelled", "budget"]);
 const STATUS_VALUES = ["queued", "running", "recovering", "cancelling", "indeterminate", ...TERMINAL_STATUSES];
 
@@ -686,6 +688,7 @@ const portfolioItemSchema = z.object({
   triageStatus: z.enum(["untriaged", "triaging", "triaged"]).optional(),
   verificationCommands: verificationCommandsSchema.default([]),
   issueNumber: z.number().int().min(1).optional(),
+  prNumber: z.number().int().min(1).optional(),
 }).strict();
 const arbitrationDossierSchema = z.object({
   itemId: z.string().min(1),
@@ -716,12 +719,24 @@ server.registerTool(
       prNumber: z.number().int().min(1),
       issueNumber: z.number().int().min(1),
       headSha: z.string().regex(/^[0-9a-f]{40}$/i),
+      workspace: z.string().min(1),
       method: z.enum(["merge", "squash", "rebase"]).default("squash"),
     },
   },
   async (input) => {
     blockNestedCollaboration();
-    const receipt = await mergePullRequestWithBuilder({ ...input, workspace: RUNTIME_ROOT });
+    const targetWorkspace = projectDirectory(input.workspace);
+    const identity = await readRepositoryIdentity(targetWorkspace);
+    if (identity !== input.repository) {
+      throw new Error(`Merge workspace repository ${identity || "unknown"} does not match ${input.repository}.`);
+    }
+    const receipt = await mergePullRequestWithBuilder({ ...input, workspace: targetWorkspace });
+    if (receipt.deliveryReceipt && receipt.issueRecording?.status === "recorded") {
+      await recordMergeDeliveryReceipt(MERGE_RECEIPT_ROOT, {
+        ...receipt.deliveryReceipt,
+        issueRecording: receipt.issueRecording,
+      });
+    }
     return toolResponse({
       ...receipt,
       deliveryComplete: receipt.deliveryReceipt ? receipt.issueRecording?.status === "recorded" : false,
@@ -2137,27 +2152,44 @@ server.registerTool(
       expectedTargetSha: z.string().regex(/^[0-9a-f]{40}$/i),
       expectedHeadSha: z.string().regex(/^[0-9a-f]{40}$/i),
       mergedSha: z.string().regex(/^[0-9a-f]{40}$/i),
-      issueRecordingStatus: z.enum(["recorded", "not_linked", "failed"]).optional(),
     },
   },
-  async ({ portfolioId: id, expectedRevision, itemId, expectedTargetSha, expectedHeadSha, mergedSha, issueRecordingStatus }) => {
+  async ({ portfolioId: id, expectedRevision, itemId, expectedTargetSha, expectedHeadSha, mergedSha }) => {
     blockNestedCollaboration();
     const inspectedPortfolio = await readPortfolio(PORTFOLIO_ROOT, id);
     const inspectedItem = inspectedPortfolio.items.find((item) => item.id === String(itemId));
     if (!inspectedItem) throw new Error(`Portfolio item ${itemId} does not exist.`);
     const policy = await resolveDeliveryPolicy({ workspace: inspectedPortfolio.workspace });
-    if (policy.deliveryProfile === "github-governed" && issueRecordingStatus !== "recorded") {
-      throw new Error("GitHub-governed portfolio merge cannot be recorded until merge_pull_request confirms issueRecording.status=recorded.");
+    if (policy.deliveryProfile === "github-governed" && !inspectedItem.issueNumber) {
+      throw new Error(`Portfolio item ${itemId} has no bound issueNumber; a lane id is not an issue reference.`);
+    }
+    if (policy.deliveryProfile === "github-governed" && !inspectedItem.prNumber) {
+      throw new Error(`Portfolio item ${itemId} has no bound prNumber from the merge train.`);
+    }
+    const mergeReceipt = policy.deliveryProfile === "github-governed"
+      ? await readMergeDeliveryReceipt(MERGE_RECEIPT_ROOT, {
+        repository: inspectedPortfolio.repository,
+        prNumber: inspectedItem.prNumber,
+        mergedSha,
+      })
+      : null;
+    if (policy.deliveryProfile === "github-governed" && (!mergeReceipt
+      || mergeReceipt.issueNumber !== inspectedItem.issueNumber
+      || mergeReceipt.approvedHeadSha !== expectedHeadSha.toLowerCase()
+      || mergeReceipt.mergedSha !== mergedSha.toLowerCase()
+      || mergeReceipt.issueRecording?.status !== "recorded")) {
+      throw new Error("GitHub-governed portfolio merge requires the broker's durable exact-head merge and issue-recording receipt.");
     }
     const deliveryReceipt = {
       version: 1,
-      profile: "github-governed",
+      profile: policy.deliveryProfile,
       repository: inspectedPortfolio.repository || null,
-      issueNumber: inspectedItem.issueNumber || (Number.parseInt(String(itemId), 10) || null),
+      issueNumber: inspectedItem.issueNumber || null,
       prNumber: inspectedItem.prNumber || null,
       approvedHeadSha: expectedHeadSha,
       mergedSha,
-      issueRecordingStatus: issueRecordingStatus || null,
+      issueRecordingStatus: mergeReceipt?.issueRecording?.status || null,
+      issueRecordingCommentUrl: mergeReceipt?.issueRecording?.commentUrl || null,
       recordedAt: new Date().toISOString(),
     };
     const patch = { status: "merged", summary: `Merged as ${mergedSha}`, deliveryReceipt };

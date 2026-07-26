@@ -3,6 +3,8 @@ name: goal-loop
 description: Build a feature, application, document, or other workspace artifact through bounded plan, implement, review, and verification cycles with Claude, Codex, and Antigravity. Use when the user says to keep working until a concrete goal is done, asks for an autonomous build loop, wants several models to plan and cross-review implementation, or needs a resumable collaboration with explicit completion criteria.
 ---
 
+For work-mode phases, use the machine-default `github-governed` profile when the goal is bound to a GitHub issue and PR; include the hydrated issue binding, self-contained checkout, and builder App. Pass `deliveryProfile: "local-only"` only for deliberately unpublished work and omit all GitHub bindings.
+
 # Goal Loop
 
 Drive one concrete objective to verified completion using the persistent collaboration broker. The collaboration ID is the portable goal ID; do not depend on a chair-specific goal feature that other apps cannot inspect.

@@ -25,8 +25,9 @@ const receipt = await mergePullRequestWithBuilder({
     github: { mergeEnforcement: "auto" },
     roles: {
       writers: {
-        claude: { expectedLogin: "claude-writer[bot]" },
-        antigravity: { expectedLogin: "gemini-writer[bot]" },
+        claude: { configured: true, expectedLoginValid: true, expectedLogin: "claude-writer[bot]" },
+        antigravity: { configured: true, expectedLoginValid: true, expectedLogin: "gemini-writer[bot]" },
+        invalid: { configured: true, expectedLoginValid: false, expectedLogin: "not trusted" },
       },
       reviewers: {
         claude: { appId: "654321", expectedLogin: "claude-reviewer[bot]" },

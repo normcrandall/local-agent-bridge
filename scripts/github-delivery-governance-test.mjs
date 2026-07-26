@@ -63,6 +63,12 @@ assert.throws(() => governedContinuationBuilder({
   replacementBuilder: { repository: "other/repo", headRef: "codex/152", baseRef: "main" },
   issueTarget: { repository: "owner/repo", issueNumber: 152 },
 }), /cannot change/);
+assert.throws(() => governedContinuationBuilder({
+  deliveryPolicy: { profile: "github-governed" },
+  currentBuilder: { repository: "owner/repo", issueNumber: 152, headRef: "codex/152", baseRef: "main" },
+  replacementBuilder: { repository: "owner/repo", issueNumber: 153, headRef: "codex/152", baseRef: "main" },
+  issueTarget: { repository: "owner/repo", issueNumber: 152 },
+}), /issue target/);
 
 assert.throws(
   () => assertGithubGovernedWorkStart({ policy: localPolicy, mode: "work" }),
@@ -95,6 +101,7 @@ assert.match(mergedDeliverySummary({ prNumber: 175, prUrl: "https://github.com/o
 
 for (const invalid of [
   body.replace("Closes #152", "Relates to a ticket"),
+  body.replace("Closes #152", "https://github.com/owner/repo/issues/152"),
   body.replace("## Scope", "## Details"),
   body.replace("`npm run test:delivery-policy` and `npm run test:collaboration` passed.", "Not run"),
   body.replace("https://github.com/owner/repo/issues/154", "Refactor this later"),

@@ -604,6 +604,19 @@ const providerWriterMerge = await createBoundBuilderClient({
 }).merge({ method: "squash" });
 assert.equal(providerWriterMerge.reviewReadiness.ready, true, "native merge must recognize dispositions from configured provider writer Apps");
 
+const untrustedProviderWriterApi = fakeGitHub({
+  reviewThreads: [dispositionComment({ writerLogin: "unknown-writer[bot]", isResolved: true })],
+});
+await assert.rejects(
+  createBoundBuilderClient({
+    ...base,
+    fetchImpl: untrustedProviderWriterApi.fetchImpl,
+    trustedWriterLogins: ["claude-writer[bot]"],
+  }).merge({ method: "squash" }),
+  /1 unanswered/i,
+  "a disposition from a writer outside the configured trust roster must not satisfy merge readiness",
+);
+
 const foreignProviderApi = fakeGitHub({
   reviewThreads: [{
     ...dispositionComment(),

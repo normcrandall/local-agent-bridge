@@ -496,17 +496,22 @@ export function createBoundBuilderClient({
     context.prNumber = pull.number;
     if (deliveryReceipt) {
       const marker = "<!-- agent-bridge-delivery:v1 -->";
-      const comments = await request({ ...context, path: `/repos/${repository}/issues/${issueNumber}/comments?per_page=100` });
+      const comments = await requestPages({ ...context, path: `/repos/${repository}/issues/${issueNumber}/comments?per_page=100` });
       const existingSummary = comments.find((comment) => sameGitHubAppLogin(comment.user?.login, expectedLogin) && String(comment.body || "").includes(marker));
       const summaryBody = deliveryIssueSummary(deliveryReceipt, { prNumber: pull.number, prUrl: pull.html_url });
-      await request({
-        ...context,
-        path: existingSummary
-          ? `/repos/${repository}/issues/comments/${existingSummary.id}`
-          : `/repos/${repository}/issues/${issueNumber}/comments`,
-        method: existingSummary ? "PATCH" : "POST",
-        body: { body: summaryBody },
-      });
+      try {
+        const comment = await request({
+          ...context,
+          path: existingSummary
+            ? `/repos/${repository}/issues/comments/${existingSummary.id}`
+            : `/repos/${repository}/issues/${issueNumber}/comments`,
+          method: existingSummary ? "PATCH" : "POST",
+          body: { body: summaryBody },
+        });
+        deliveryReceipt.issueRecording = { status: "recorded", commentUrl: comment?.html_url || null };
+      } catch (error) {
+        deliveryReceipt.issueRecording = { status: "failed", error: error.message };
+      }
     }
     return { operation: "ensure_pull_request", prNumber: pull.number, url: pull.html_url, headSha: activeHeadSha, authorizationHeadSha, login: expectedLogin, deliveryReceipt };
   }
@@ -695,16 +700,13 @@ export function createBoundBuilderClient({
     if (!prNumber) throw new Error("Merge requires a builder session bound to a pull request.");
     await identity();
     const pull = await boundPullRequest(context);
-    const linkedIssueNumber = issueNumber || (() => {
-      const match = String(pull.body || "").match(/(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#([1-9][0-9]*)\b/i);
-      return match ? Number.parseInt(match[1], 10) : null;
-    })();
+    const linkedIssueNumber = issueNumber;
     const prUrl = pull.html_url || `https://github.com/${repository}/pull/${prNumber}`;
     const recordMergedIssue = async (mergedSha) => {
       if (!linkedIssueNumber) return { status: "not_linked" };
       const marker = "<!-- agent-bridge-merge:v1 -->";
       try {
-        const comments = await request({ ...context, path: `/repos/${repository}/issues/${linkedIssueNumber}/comments?per_page=100` });
+        const comments = await requestPages({ ...context, path: `/repos/${repository}/issues/${linkedIssueNumber}/comments?per_page=100` });
         const existingSummary = comments.find((comment) => sameGitHubAppLogin(comment.user?.login, expectedLogin) && String(comment.body || "").includes(marker));
         const summaryBody = mergedDeliverySummary({ prNumber, prUrl, headSha: activeHeadSha, mergedSha });
         const comment = await request({
@@ -726,7 +728,13 @@ export function createBoundBuilderClient({
       const issueRecording = SHA_PATTERN.test(mergedSha || "")
         ? await recordMergedIssue(mergedSha)
         : { status: "failed", error: "GitHub did not return the merged SHA for the already-merged pull request." };
-      return { operation: "merge", prNumber, url: pull.html_url, sha: mergedSha || null, idempotent: true, login: expectedLogin, headSha: activeHeadSha, authorizationHeadSha, issueRecording };
+      return {
+        operation: "merge", prNumber, url: pull.html_url, sha: mergedSha || null, idempotent: true, login: expectedLogin, headSha: activeHeadSha, authorizationHeadSha, issueRecording,
+        deliveryReceipt: linkedIssueNumber && SHA_PATTERN.test(mergedSha || "") ? {
+          version: 1, profile: "github-governed", repository, issueNumber: linkedIssueNumber, prNumber, prUrl,
+          approvedHeadSha: activeHeadSha, mergedSha,
+        } : null,
+      };
     }
     if (!trustedReviewLogins.length && !trustedHumanReviewLogins.length) {
       throw new Error("No trusted reviewer App or human reviewer identities are configured for merge authorization.");

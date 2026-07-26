@@ -28,6 +28,11 @@ export function githubIssueUrl(repository, issueNumber) {
   return `https://github.com/${repository}/issues/${issueNumber}`;
 }
 
+export function closingIssueReference(repository, issueNumber) {
+  const issueUrl = githubIssueUrl(repository, issueNumber).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\s+(?:#${issueNumber}\\b|${issueUrl}\\b)`, "i");
+}
+
 export function assertGithubGovernedWorkStart({
   policy,
   requestedProfile = null,
@@ -67,6 +72,9 @@ export function assertGithubGovernedWorkStart({
   if (githubBuilder.repository !== target.repository) {
     throw new Error(`GitHub builder repository ${githubBuilder.repository} does not match hydrated issue ${target.repository}#${target.issueNumber}.`);
   }
+  if (githubBuilder.issueNumber && githubBuilder.issueNumber !== target.issueNumber) {
+    throw new Error(`GitHub builder issue #${githubBuilder.issueNumber} does not match hydrated issue ${target.repository}#${target.issueNumber}.`);
+  }
   if (worktree?.strategy !== "self-contained") {
     throw new Error("GitHub-governed implementation requires a self-contained writer checkout.");
   }
@@ -90,6 +98,9 @@ export function governedContinuationBuilder({ deliveryPolicy, currentBuilder, re
   if (candidate.repository !== currentBuilder.repository || candidate.repository !== issueTarget.repository) {
     throw new Error("GitHub-governed continuation cannot change the builder repository or issue target.");
   }
+  if (candidate.issueNumber && candidate.issueNumber !== issueTarget.issueNumber) {
+    throw new Error("GitHub-governed continuation cannot change its bound issue target.");
+  }
   if (replacementBuilder?.headRef && currentBuilder.headRef && replacementBuilder.headRef !== currentBuilder.headRef) {
     throw new Error("GitHub-governed continuation cannot change its bound publication branch.");
   }
@@ -109,7 +120,7 @@ export function validateGithubGovernedPullRequest({ repository, issueNumber, bod
   const issueUrl = githubIssueUrl(repository, issueNumber);
   if (!SHA_PATTERN.test(headSha || "")) throw new Error("GitHub-governed publication requires the exact 40-character published head SHA.");
   const text = normalized(body);
-  const issueReference = new RegExp(`(?:${issueUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}|(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\\s+#${issueNumber}\\b)`, "i");
+  const issueReference = closingIssueReference(repository, issueNumber);
   if (!issueReference.test(text)) {
     throw new Error(`GitHub-governed PR description must link and close ${repository}#${issueNumber}.`);
   }
