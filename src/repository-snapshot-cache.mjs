@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { isAbsolute, resolve } from "node:path";
 
 export const REPOSITORY_SNAPSHOT_CACHE_VERSION = 1;
 
@@ -23,6 +25,24 @@ export class RepositorySnapshotCacheError extends Error {
     this.name = "RepositorySnapshotCacheError";
     this.code = code;
   }
+}
+
+export function repositorySnapshotCacheDirectory(workspace) {
+  const root = resolve(String(workspace || ""));
+  let gitDirectory;
+  try {
+    gitDirectory = execFileSync("git", ["rev-parse", "--git-common-dir"], {
+      cwd: root,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  } catch (error) {
+    throw new RepositorySnapshotCacheError(`Cannot locate repository-local snapshot storage for ${root}.`, {
+      code: "INVALID_REPOSITORY",
+      cause: error,
+    });
+  }
+  return resolve(isAbsolute(gitDirectory) ? gitDirectory : resolve(root, gitDirectory), "agent-bridge", "repository-journal");
 }
 
 function fail(message, code = "INVALID_CACHE_ENTRY") {
@@ -131,6 +151,14 @@ function stableJson(value) {
 
 function digest(value) {
   return createHash("sha256").update(stableJson(value)).digest("hex");
+}
+
+function bestEffortDataDigest(value) {
+  try {
+    return digest(redactData(value).value);
+  } catch {
+    return null;
+  }
 }
 
 function normalizedRepository(repository) {
@@ -252,6 +280,17 @@ export function createRepositorySnapshotCache({
   integer(maxEntryBytes, "maxEntryBytes", { minimum: 1 });
   integer(maxEntries, "maxEntries", { minimum: 1 });
   integer(maxFutureSkewMs, "maxFutureSkewMs");
+  const counters = {
+    hits: 0,
+    misses: 0,
+    refreshes: 0,
+    liveLoads: 0,
+    avoidedLoads: 0,
+    coalescedLoads: 0,
+    writeSkips: 0,
+    corruptReads: 0,
+  };
+  const inFlightLoads = new Map();
 
   function clock() {
     return timestamp(now(), "cache clock");
@@ -418,6 +457,120 @@ export function createRepositorySnapshotCache({
     });
   }
 
+  async function getOrLoad({
+    repository,
+    kind,
+    subject,
+    headSha = null,
+    freshnessMs = defaultFreshnessMs,
+    trustClass = "github-live",
+    load: liveLoad,
+  } = {}) {
+    if (typeof liveLoad !== "function") fail("load must be a function.", "INVALID_LOADER");
+    const key = normalizeKey({ repository, kind, subject, headSha });
+    integer(freshnessMs, "freshnessMs", { minimum: 1, maximum: maxFreshnessMs });
+    const loadKey = keyString(key);
+    const existingLoad = inFlightLoads.get(loadKey);
+    if (existingLoad) {
+      counters.avoidedLoads += 1;
+      counters.coalescedLoads += 1;
+      return { ...(await existingLoad), cache: "coalesced" };
+    }
+    const operation = (async () => {
+      let cached;
+      let readDegradation = null;
+      try {
+        cached = await get(key);
+      } catch (error) {
+        readDegradation = {
+          code: error.code || "CACHE_READ_FAILED",
+          message: error.message,
+        };
+        cached = nonAuthoritative({
+          status: "corrupt",
+          key,
+          reason: readDegradation.code,
+          error: readDegradation.message,
+          entry: null,
+        });
+      }
+      if (cached.status === "fresh") {
+        counters.hits += 1;
+        counters.avoidedLoads += 1;
+        return nonAuthoritative({
+          value: structuredClone(cached.entry.data),
+          cache: "hit",
+          digest: cached.entry.dataDigest,
+          provenance: structuredClone(cached.entry),
+          degradation: null,
+        });
+      }
+      if (cached.status === "stale") counters.refreshes += 1;
+      else if (cached.status === "corrupt") counters.corruptReads += 1;
+      else counters.misses += 1;
+      counters.liveLoads += 1;
+      const loaded = await liveLoad();
+      if (!loaded || typeof loaded !== "object" || !("data" in loaded)) {
+        fail("load must return an object containing data.", "INVALID_LOADER_RESULT");
+      }
+      const priorRevision = Math.max(
+        cached.entry?.sourceRevision ?? -1,
+        cached.invalidatedThroughRevision ?? -1,
+      );
+      const proposedRevision = loaded.sourceRevision === undefined || loaded.sourceRevision === null
+        ? Math.max(clock().millis, priorRevision + 1)
+        : loaded.sourceRevision;
+      const loadedFetchedAt = loaded.fetchedAt ?? clock().value;
+      const loadedDigest = bestEffortDataDigest(loaded.data);
+      try {
+        const written = await put({
+          ...key,
+          sourceRevision: proposedRevision,
+          sourceEtag: loaded.sourceEtag ?? null,
+          sourceUpdatedAt: loaded.sourceUpdatedAt ?? null,
+          fetchedAt: loadedFetchedAt,
+          freshnessMs,
+          trustClass,
+          data: loaded.data,
+        });
+        return nonAuthoritative({
+          value: structuredClone(loaded.data),
+          cache: cached.status === "stale" ? "refresh" : "miss",
+          digest: written.dataDigest,
+          provenance: {
+            key,
+            sourceRevision: proposedRevision,
+            sourceEtag: loaded.sourceEtag ?? null,
+            sourceUpdatedAt: loaded.sourceUpdatedAt ?? null,
+            fetchedAt: loadedFetchedAt,
+            trustClass,
+          },
+          degradation: readDegradation || (cached.status === "corrupt"
+            ? { code: cached.reason, message: cached.error }
+            : null),
+        });
+      } catch (error) {
+        // The cache is an optimization and evidence surface. A live read that
+        // succeeded must remain usable when its cache record is corrupt,
+        // oversized, future-dated, or loses a concurrent revision race.
+        counters.writeSkips += 1;
+        return nonAuthoritative({
+          value: structuredClone(loaded.data),
+          cache: "live_uncached",
+          digest: loadedDigest,
+          provenance: null,
+          degradation: readDegradation || { code: error.code || "CACHE_WRITE_FAILED", message: error.message },
+        });
+      }
+    })();
+    inFlightLoads.set(loadKey, operation);
+    try {
+      return await operation;
+    } finally {
+      if (inFlightLoads.get(loadKey) === operation) inFlightLoads.delete(loadKey);
+    }
+  }
+
   async function invalidate({ repository, kind, subject, headSha = null, throughRevision = null } = {}) {
     const key = normalizeKey({ repository, kind, subject, headSha });
     const loaded = await load();
@@ -461,5 +614,12 @@ export function createRepositorySnapshotCache({
     return nonAuthoritative({ status: loaded.quarantined.length ? "degraded" : "clean", entries, quarantined: loaded.quarantined });
   }
 
-  return Object.freeze({ put, get, invalidate, inspect });
+  return Object.freeze({
+    put,
+    get,
+    getOrLoad,
+    invalidate,
+    inspect,
+    metrics: () => ({ ...counters }),
+  });
 }

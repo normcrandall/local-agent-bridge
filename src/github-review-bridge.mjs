@@ -29,6 +29,8 @@ import {
   reviewThreadReceiptPath,
 } from "./github-review-threads.mjs";
 import { inspectReviewTrustRoster } from "./review-trust-roster.mjs";
+import { createRepositoryJournal } from "./repository-journal.mjs";
+import { createRepositorySnapshotCache, repositorySnapshotCacheDirectory } from "./repository-snapshot-cache.mjs";
 
 const repository = process.env.GITHUB_REVIEW_REPOSITORY;
 const prNumber = Number.parseInt(process.env.GITHUB_REVIEW_PR_NUMBER || "", 10);
@@ -40,6 +42,12 @@ const apiUrl = process.env.GITHUB_REVIEW_API_URL || "https://api.github.com";
 const statusContext = process.env.GITHUB_REVIEW_STATUS_CONTEXT || "agent-review";
 const publishStatusGate = process.env.GITHUB_REVIEW_PUBLISH_STATUS_GATE !== "0";
 const reviewEvidenceStateRoot = process.env.GITHUB_REVIEW_EVIDENCE_ROOT || undefined;
+const reviewWorkspace = process.env.GITHUB_REVIEW_WORKSPACE || null;
+const snapshotCache = reviewWorkspace
+  ? createRepositorySnapshotCache({
+    journal: createRepositoryJournal({ directory: repositorySnapshotCacheDirectory(reviewWorkspace) }),
+  })
+  : null;
 
 if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository || "")) {
   throw new Error("GITHUB_REVIEW_REPOSITORY must be owner/name.");
@@ -288,6 +296,9 @@ server.registerTool(
           repository,
           context: statusContext,
         } : null,
+        snapshotCache,
+        repository,
+        prNumber,
       });
       submittedEvent = reconciled.submittedEvent;
       reviewResolution = reconciled.reviewResolution;

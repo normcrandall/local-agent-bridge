@@ -178,6 +178,43 @@ try {
     "journal races must preserve the cache error contract",
   );
 
+  let readFaultLoads = 0;
+  const readFaultCache = createRepositorySnapshotCache({
+    journal: {
+      inspect: async () => {
+        const error = new Error("cache directory is unavailable");
+        error.code = "EACCES";
+        throw error;
+      },
+      append: async () => assert.fail("an unreadable journal cannot accept a cache write"),
+    },
+    now,
+  });
+  const readFaultResult = await readFaultCache.getOrLoad({
+    repository,
+    kind: "issue",
+    subject: "issue:read-fault",
+    load: async () => {
+      readFaultLoads += 1;
+      return { data: { state: "open" } };
+    },
+  });
+  assert.equal(readFaultLoads, 1, "an optional cache read fault must not suppress the live loader");
+  assert.equal(readFaultResult.cache, "live_uncached");
+  assert.equal(readFaultResult.value.state, "open");
+  assert.equal(readFaultResult.degradation.code, "EACCES");
+  assert.match(readFaultResult.digest, /^[0-9a-f]{64}$/, "live uncached evidence retains a content digest");
+  assert.deepEqual(readFaultCache.metrics(), {
+    hits: 0,
+    misses: 0,
+    refreshes: 0,
+    liveLoads: 1,
+    avoidedLoads: 0,
+    coalescedLoads: 0,
+    writeSkips: 1,
+    corruptReads: 1,
+  }, "read faults are counted once as corrupt rather than also being counted as misses");
+
   const malformedDirectory = join(root, "malformed-cache-event");
   const malformedJournal = createRepositoryJournal({ directory: malformedDirectory, now });
   await malformedJournal.append({

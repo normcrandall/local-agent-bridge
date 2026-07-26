@@ -464,6 +464,7 @@ export async function hydrateClaimedIssueTask({
   capturedAt = new Date().toISOString(),
   maxChars = DEFAULT_CLAIMED_ISSUE_CONTEXT_MAX_CHARS,
   evidenceStore = null,
+  snapshotCache = null,
   evidenceScope = null,
   cacheMaxAgeMs = DEFAULT_CLAIMED_ISSUE_CACHE_MAX_AGE_MS,
   attempts = DEFAULT_ISSUE_HYDRATION_ATTEMPTS,
@@ -535,7 +536,24 @@ export async function hydrateClaimedIssueTask({
       ]);
       return { issue, comments, dependencies, timeline, projectItems, degradations, records };
     };
-    const snapshot = evidenceStore
+    const snapshot = snapshotCache
+      ? await snapshotCache.getOrLoad({
+        repository,
+        kind: "issue",
+        subject: `issue:${issueNumber}:hydrated`,
+        headSha: evidenceScope?.headSha || null,
+        freshnessMs: cacheMaxAgeMs,
+        trustClass: "github-live",
+        load: async () => {
+          const data = await loaded();
+          return {
+            data,
+            sourceUpdatedAt: data.issue?.updated_at || data.issue?.updatedAt || null,
+            fetchedAt: capturedAt,
+          };
+        },
+      })
+      : evidenceStore
       ? await evidenceStore.getOrLoad({
         kind: "issue_snapshot",
         key: `issue:${issueNumber}`,
@@ -546,9 +564,10 @@ export async function hydrateClaimedIssueTask({
       })
       : { value: await loaded(), cache: "disabled", digest: null };
     const { issue, comments, dependencies, timeline, projectItems, degradations = [], records = [] } = snapshot.value;
+    const effectiveCapturedAt = snapshot.provenance?.fetchedAt || capturedAt;
     const context = buildClaimedIssueContext({
       repository, issueNumber, issue, comments, dependencies, timeline,
-      projectItems: projectItems ?? null, degradations, capturedAt, maxChars,
+      projectItems: projectItems ?? null, degradations, capturedAt: effectiveCapturedAt, maxChars,
     });
     return {
       task: `${String(task || "").trim()}\n\n${context.text}`.trim(),
@@ -563,7 +582,7 @@ export async function hydrateClaimedIssueTask({
           builderLogin: authority?.login || null,
           appId: authority?.appId ?? null,
           installationId: authority?.installationId ?? null,
-          capturedAt,
+          capturedAt: effectiveCapturedAt,
           cache: snapshot.cache,
           sources: records.map((record) => ({
             name: record.name,
@@ -579,6 +598,8 @@ export async function hydrateClaimedIssueTask({
         },
       },
       cache: snapshot.cache,
+      cacheMetrics: snapshotCache?.metrics?.() || evidenceStore?.metrics?.() || null,
+      cacheDegradation: snapshot.degradation || null,
     };
   } catch (error) {
     throw new Error(`Unable to hydrate claimed issue ${repository}#${issueNumber} before provider launch: ${error.message}`, { cause: error });

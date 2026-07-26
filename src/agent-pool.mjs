@@ -268,6 +268,7 @@ export function createAgentPool({
         GITHUB_REVIEW_EXPECTED_LOGIN: reviewBinding.expectedLogin,
         GITHUB_REVIEW_PUBLISH_STATUS_GATE: reviewBinding.publishStatusGate ? "1" : "0",
         GITHUB_REVIEW_HANDOFF_PATH: absoluteHandoffPath,
+        GITHUB_REVIEW_WORKSPACE: workspace,
         GITHUB_REVIEW_TOKEN_FILE: resolve(process.env.HOME, ".config/ghtoken"),
       },
     });

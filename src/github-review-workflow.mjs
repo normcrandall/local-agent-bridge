@@ -13,8 +13,42 @@ export async function reconcilePublishedReview({
   resolveThread,
   assertCurrentHead,
   statusGate = null,
+  snapshotCache = null,
+  repository = null,
+  prNumber = null,
 }) {
   const submittedEvent = approvedSubmissionEvent(result.state);
+  // Exact-head assertions are authorization evidence, not reusable context.
+  // Caching them adds no information beyond the cache key and can collide with
+  // the lifecycle adapter's full pull-request detail snapshot.
+  const authoritativeHead = () => assertCurrentHead();
+  let reviewSnapshot = null;
+  let firstLiveReadiness = null;
+  if (snapshotCache && repository && Number.isInteger(prNumber) && prNumber > 0) {
+    reviewSnapshot = await snapshotCache.getOrLoad({
+      repository,
+      kind: "review_threads",
+      subject: `pr:${prNumber}:readiness`,
+      headSha,
+      trustClass: "github-live",
+      load: async () => ({ data: await readReadiness() }),
+    });
+    // A miss/refresh is live evidence and may satisfy the first workflow read,
+    // but only after a fresh exact-head assertion. A cache hit remains context
+    // only and is never used to resolve a thread or publish a merge gate.
+    if (!["hit", "coalesced"].includes(reviewSnapshot.cache)) {
+      firstLiveReadiness = reviewSnapshot.value;
+    }
+  }
+  const authoritativeReadiness = async () => {
+    if (firstLiveReadiness) {
+      const value = firstLiveReadiness;
+      firstLiveReadiness = null;
+      await authoritativeHead();
+      return value;
+    }
+    return readReadiness();
+  };
   let reviewResolution;
   try {
     reviewResolution = await reconcileApprovedReviewerBlockers({
@@ -22,15 +56,15 @@ export async function reconcilePublishedReview({
       submittedReviewState: result.state,
       expectedLogin,
       headSha,
-      readReadiness,
+      readReadiness: authoritativeReadiness,
       resolveThread,
-      assertCurrentHead,
+      assertCurrentHead: authoritativeHead,
     });
   } catch (error) {
     let observedReadiness = null;
     try {
-      await assertCurrentHead();
-      observedReadiness = await readReadiness();
+      await authoritativeHead();
+      observedReadiness = await authoritativeReadiness();
     } catch {}
     reviewResolution = {
       attempted: true,
@@ -49,7 +83,7 @@ export async function reconcilePublishedReview({
 
   if (statusGate && reviewResolution.complete && reviewResolution.readiness?.ready && submittedEvent === "APPROVE") {
     try {
-      await assertCurrentHead();
+      await authoritativeHead();
       result.gate = await publishBoundReviewGate({
         ...statusGate,
         headSha,
@@ -72,5 +106,17 @@ export async function reconcilePublishedReview({
       };
     }
   }
-  return { result, submittedEvent, reviewResolution };
+  return {
+    result,
+    submittedEvent,
+    reviewResolution,
+    reviewSnapshot: reviewSnapshot ? {
+      cache: reviewSnapshot.cache,
+      digest: reviewSnapshot.digest,
+      authoritative: false,
+      usableForAuthorization: false,
+      degradation: reviewSnapshot.degradation || null,
+    } : null,
+    pullRequestSnapshot: null,
+  };
 }

@@ -42,6 +42,8 @@ import {
 import { createVerificationTimingTracker } from "../src/verification-timing.mjs";
 import { assertRepositoryEvidenceHead, captureRepositoryEvidence } from "../src/repository-evidence.mjs";
 import { createEvidenceStore } from "../src/evidence-store.mjs";
+import { createRepositoryJournal } from "../src/repository-journal.mjs";
+import { createRepositorySnapshotCache, repositorySnapshotCacheDirectory } from "../src/repository-snapshot-cache.mjs";
 import { CLAIMED_ISSUE_CONTEXT_MARKER, assertClaimedIssueContextIntegrity } from "../src/claimed-issue-context.mjs";
 import { assertObservedVerificationEvidence, persistObservedVerificationResults } from "../src/verification-receipts.mjs";
 import {
@@ -692,9 +694,13 @@ try {
             const current = await readCollaboration(workspaceRoot, id);
             const previousEvidence = current.evidence?.repository;
             const store = createEvidenceStore({ directory: EVIDENCE_ROOT });
+            const snapshotCache = createRepositorySnapshotCache({
+              journal: createRepositoryJournal({ directory: repositorySnapshotCacheDirectory(current.workspace) }),
+            });
             const repositoryEvidence = await captureRepositoryEvidence({
               workspace: current.workspace,
               store,
+              snapshotCache,
               repository: previousEvidence?.repository,
               headSha: previousEvidence?.headSha,
               baseSha: previousEvidence?.baseSha || null,
@@ -717,7 +723,10 @@ try {
                 evidence: {
                   ...(previous.evidence || {}),
                   repository: repositoryEvidence,
-                  cacheMetrics: store.metrics(),
+                  cacheMetrics: {
+                    ...store.metrics(),
+                    snapshots: snapshotCache.metrics(),
+                  },
                 },
               }));
               for (const receipt of persisted.recorded) {

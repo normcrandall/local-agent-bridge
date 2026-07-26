@@ -235,6 +235,7 @@ function runClaude({
         GITHUB_REVIEW_EXPECTED_LOGIN: githubReview.expectedLogin,
         GITHUB_REVIEW_PUBLISH_STATUS_GATE: githubReview.publishStatusGate ? "1" : "0",
         GITHUB_REVIEW_HANDOFF_PATH: actualHandoffPath,
+        GITHUB_REVIEW_WORKSPACE: actualCwd,
         GITHUB_REVIEW_TOKEN_FILE: process.env.GITHUB_REVIEW_TOKEN_FILE || join(homedir(), ".config/ghtoken"),
         GITHUB_REVIEW_API_URL: process.env.GITHUB_REVIEW_API_URL || "https://api.github.com",
       },
