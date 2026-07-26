@@ -88,10 +88,16 @@ try {
   const ancestryGit = async (args, { cwd }) => {
     ancestryCalls.push({ args, cwd });
     if (cwd === missingCheckout) throw Object.assign(new Error("not a git repository"), { code: 128 });
-    if (args[0] === "cat-file") return "";
+    if (args[0] === "cat-file") {
+      const selected = args.at(-1);
+      if (cwd === recordedCheckout && selected === "origin/main^{commit}") {
+        throw Object.assign(new Error("unknown remote ref"), { code: 128 });
+      }
+      return "";
+    }
     if (args[0] === "merge-base") {
       const candidate = args.at(-1);
-      if (cwd === recordedCheckout && candidate === "origin/main") {
+      if (cwd === currentCheckout && candidate === "origin/main") {
         throw Object.assign(new Error("not an ancestor"), { code: 1 });
       }
       return "";
@@ -105,22 +111,31 @@ try {
   });
   assert.deepEqual(
     { contains: located.contains, sourceRoot: located.sourceRoot, candidate: located.candidate },
-    { contains: false, sourceRoot: recordedCheckout, candidate: "origin/main" },
-    "a remote main that excludes the installed commit must not be overridden by local or unrelated refs",
+    { contains: false, sourceRoot: currentCheckout, candidate: "origin/main" },
+    "origin/main in the fallback checkout must outrank a containing local main in the recorded checkout",
   );
+  const recoveryCalls = [];
+  const recoveryGit = async (args, { cwd }) => {
+    recoveryCalls.push({ args, cwd });
+    if (cwd === missingCheckout) throw Object.assign(new Error("not a git repository"), { code: 128 });
+    if (args[0] === "cat-file") return "";
+    if (args[0] === "merge-base") return "";
+    throw Object.assign(new Error(`unexpected git ${args.join(" ")}`), { code: 1 });
+  };
   const recovered = await locateCommitOnMain({
     ancestor: "installed123",
     sourceRoots: [missingCheckout, currentCheckout],
-    runGit: ancestryGit,
+    runGit: recoveryGit,
   });
   assert.equal(recovered.contains, true);
   assert.equal(recovered.sourceRoot, currentCheckout,
     "the caller checkout must recover ancestry verification when the recorded installer path moved");
-  assert.ok(ancestryCalls.some((call) => call.cwd === missingCheckout));
+  assert.ok(recoveryCalls.some((call) => call.cwd === missingCheckout),
+    "recovery must first inspect the recorded installer checkout before falling back to the caller checkout");
   const unknown = await locateCommitOnMain({
     ancestor: "installed123",
     sourceRoots: [missingCheckout],
-    runGit: ancestryGit,
+    runGit: recoveryGit,
   });
   assert.equal(unknown.contains, null, "no usable checkout must remain explicitly unverifiable");
 

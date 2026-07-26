@@ -14,7 +14,17 @@ const LOCK_STALE_MS = 30 * 60 * 1000;
 const DIGEST_SKIPPED = new Set(["node_modules", ".git", PROVENANCE_FILENAME]);
 
 export async function defaultGitRunner(args, { cwd }) {
-  const { stdout } = await run("git", args, { cwd, encoding: "utf8", maxBuffer: 32 * 1024 * 1024 });
+  const { stdout } = await run("git", ["-c", "core.fsmonitor=false", ...args], {
+    cwd,
+    encoding: "utf8",
+    maxBuffer: 32 * 1024 * 1024,
+    env: {
+      ...process.env,
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_OPTIONAL_LOCKS: "0",
+      GIT_TERMINAL_PROMPT: "0",
+    },
+  });
   return stdout;
 }
 

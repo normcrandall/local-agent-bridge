@@ -15,12 +15,16 @@ const selectedChecks = new Set(String(process.env.AGENT_BRIDGE_DOCTOR_CHECKS || 
   .split(",")
   .map((label) => label.trim())
   .filter(Boolean));
-const requestedProjectRoot = resolve(process.env.AGENT_BRIDGE_WORKSPACE || process.cwd());
-const resolvedProjectRoot = spawnSync("git", ["rev-parse", "--show-toplevel"], {
-  cwd: requestedProjectRoot,
-  encoding: "utf8",
-});
-const projectRoot = resolvedProjectRoot.status === 0
+const explicitProjectRoot = String(process.env.AGENT_BRIDGE_WORKSPACE || "").trim();
+const requestedProjectRoot = resolve(explicitProjectRoot || process.cwd());
+const resolvedProjectRoot = explicitProjectRoot
+  ? null
+  : spawnSync("git", ["-c", "core.fsmonitor=false", "rev-parse", "--show-toplevel"], {
+      cwd: requestedProjectRoot,
+      encoding: "utf8",
+      env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0" },
+    });
+const projectRoot = resolvedProjectRoot?.status === 0
   ? resolve(resolvedProjectRoot.stdout.trim())
   : requestedProjectRoot;
 let failed = false;
@@ -381,10 +385,10 @@ check("Global runtime integrity", () => {
   if (!installedProvenance) throw new Error("no provenance recorded to compare against");
   if (!observedDigest) throw new Error(`cannot read ${installedRuntimeRoot}`);
   if (observedDigest !== installedProvenance.digest) {
-    throw new Error("installed runtime no longer matches the digest recorded at install time; it was modified in place");
+    throw new Error("installed runtime payload no longer matches its self-attested install digest; tracked source or script files changed in place");
   }
   return true;
-}, "redeploy with npm run install:global; never edit or copy files into the installed runtime");
+}, "redeploy with npm run install:global; this payload digest detects accidental drift but does not attest node_modules or resist a same-user rewrite of the provenance record");
 
 check("Global runtime drift from main", () => {
   if (!installedProvenance?.commit) throw new Error("no installed commit recorded");

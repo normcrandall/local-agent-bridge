@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
-import { execFileSync } from "node:child_process";
-import { cp, mkdir, mkdtemp, rm } from "node:fs/promises";
+import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
+import { cp, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import process from "node:process";
@@ -30,7 +31,6 @@ try {
     stdio: "inherit",
   });
   const nestedCaller = resolve(sourceRoot, "src");
-  await mkdir(nestedCaller, { recursive: true });
   const source = await inspectSource({ sourceRoot });
   const provenanceSource = {
     ...source,
@@ -62,6 +62,21 @@ try {
     env: doctorEnvironment,
     stdio: "inherit",
   });
+  const explicitWorkspaceEnvironment = {
+    ...doctorEnvironment,
+    AGENT_BRIDGE_WORKSPACE: nestedCaller,
+    AGENT_BRIDGE_DOCTOR_CHECKS: "Codex project config,Claude project config",
+  };
+  const explicitWorkspace = spawnSync(process.execPath, [resolve(runtimeRoot, "scripts/doctor.mjs")], {
+    cwd: sourceRoot,
+    env: explicitWorkspaceEnvironment,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  assert.equal(explicitWorkspace.status, 1,
+    `an explicit nested workspace must fail closed instead of silently adopting its parent repository: ${explicitWorkspace.stdout}`);
+  assert.match(explicitWorkspace.stderr, /\.codex\/config\.toml|\.mcp\.json/,
+    "the failure should identify a missing project-scoped configuration");
   console.log("Installed runtime smoke test passed without relying on source-control metadata.");
 } finally {
   await rm(temporary, { recursive: true, force: true });
