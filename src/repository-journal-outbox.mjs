@@ -459,11 +459,20 @@ export function createRepositoryJournalOutbox({
         const nowMs = Date.parse(nowAt);
         const snapshot = reconstruct(records, nowMs);
         const dropped = [];
+        const droppedDeadLetter = [];
         const kept = [];
         for (const item of snapshot.values()) {
-          const acknowledgedAgeMs = item.acknowledgedAt === null ? null : nowMs - Date.parse(item.acknowledgedAt);
-          if (acknowledgedAgeMs !== null && acknowledgedAgeMs >= terminalHorizonMs) dropped.push(item);
-          else kept.push(item);
+          const exhausted = !item.acknowledgedAt && !item.lease && item.claimCount >= maxAttempts;
+          const deadLetter = !item.acknowledgedAt && (item.terminal || exhausted);
+          const terminalAt = item.acknowledgedAt
+            || (deadLetter ? (item.failure?.failedAt || item.enqueuedAt) : null);
+          const terminalAgeMs = terminalAt === null ? null : nowMs - Date.parse(terminalAt);
+          if (terminalAgeMs !== null && terminalAgeMs >= terminalHorizonMs) {
+            dropped.push(item);
+            if (deadLetter) droppedDeadLetter.push(item);
+          } else {
+            kept.push(item);
+          }
         }
         const append = kept.map((item) => {
           const checkpointItem = canonicalize({
@@ -500,6 +509,7 @@ export function createRepositoryJournalOutbox({
           metadata: {
             checkpointedItems: kept.length,
             droppedTerminalItems: dropped.length,
+            droppedDeadLetterItems: droppedDeadLetter.length,
             terminalHorizonMs,
           },
         };

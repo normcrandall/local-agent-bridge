@@ -233,6 +233,33 @@ try {
   assert.equal((await retentionJournal.read()).length <= retentionReceipt.retained, true,
     "repeated retention must not be permanently pinned by old terminal-item checkpoints");
 
+  const generousRetentionDirectory = join(root, "generous-safe-retention");
+  const generousRetentionJournal = createRepositoryJournal({ directory: generousRetentionDirectory, now });
+  const generousRetentionOutbox = createRepositoryJournalOutbox({
+    journal: generousRetentionJournal,
+    now,
+    leaseMs: 1_000,
+  });
+  for (const idempotencyKey of ["one", "two", "three"]) {
+    await generousRetentionOutbox.enqueue({
+      repository: "veliqon/generous-retention",
+      operation: "publish",
+      idempotencyKey,
+      payload: { idempotencyKey },
+    });
+  }
+  await generousRetentionOutbox.claim({ workerId: "publisher", limit: 3 });
+  const generousRetentionReceipt = await generousRetentionOutbox.retain({ maxRecords: 5 });
+  assert.equal(generousRetentionReceipt.retained, 3,
+    "retention must start at the checkpoint floor when liveItems < maxRecords < records.length");
+  const generousRetentionRestart = createRepositoryJournalOutbox({
+    journal: createRepositoryJournal({ directory: generousRetentionDirectory, now }),
+    now,
+    leaseMs: 1_000,
+  });
+  assert.deepEqual((await generousRetentionRestart.inspect()).pending.map((entry) => entry.idempotencyKey), ["one", "three", "two"],
+    "a generous retention cap must remain replayable instead of retaining orphan lifecycle events");
+
   const atomicDirectory = join(root, "atomic-retention");
   const atomicJournal = createRepositoryJournal({ directory: atomicDirectory, now });
   const atomicOutbox = createRepositoryJournalOutbox({ journal: atomicJournal, now });
@@ -280,6 +307,33 @@ try {
   assert.equal(horizonReceipt.bounded, true);
   assert.deepEqual((await horizonOutbox.inspect()).pending.map((entry) => entry.idempotencyKey), ["unpublished"],
     "retention must preserve unpublished work while aging out only acknowledged history");
+
+  const deadLetterHorizonDirectory = join(root, "dead-letter-horizon");
+  const deadLetterHorizonJournal = createRepositoryJournal({ directory: deadLetterHorizonDirectory, now });
+  const deadLetterHorizonOutbox = createRepositoryJournalOutbox({
+    journal: deadLetterHorizonJournal,
+    now,
+    terminalHorizonMs: 1_000,
+  });
+  await deadLetterHorizonOutbox.enqueue({
+    repository: "veliqon/dead-letter-horizon",
+    operation: "publish",
+    idempotencyKey: "permanent-failure",
+    payload: {},
+  });
+  const [deadLetterLease] = await deadLetterHorizonOutbox.claim({ workerId: "publisher" });
+  await deadLetterHorizonOutbox.fail({
+    leaseId: deadLetterLease.lease.leaseId,
+    failure: { kind: "policy", message: "denied" },
+  });
+  advance(1_001);
+  const deadLetterHorizonReceipt = await deadLetterHorizonOutbox.retain({ maxRecords: 1 });
+  assert.equal(deadLetterHorizonReceipt.droppedTerminalItems, 1,
+    "aged dead-letter history must count toward the receipted terminal horizon");
+  assert.equal(deadLetterHorizonReceipt.droppedDeadLetterItems, 1,
+    "dead-letter eviction must be separately visible to operators");
+  assert.deepEqual((await deadLetterHorizonOutbox.inspect()).deadLetter, [],
+    "aged dead-letter history must not permanently pin the retention floor");
 
   const fullyTerminalDirectory = join(root, "fully-terminal-horizon");
   const fullyTerminalJournal = createRepositoryJournal({ directory: fullyTerminalDirectory, now });
