@@ -11,6 +11,7 @@
     "github-app:installations": "node scripts/github-app-installations.mjs",
     "github-app:verify": "node scripts/github-app-permission-check.mjs",
     "github-app:run": "node scripts/github-app-run.mjs",
+    "review-benchmark:report": "node scripts/review-benchmark-report.mjs",
     "install:global": "node scripts/install-global.mjs",
     "smoke": "node scripts/smoke-test.mjs",
     "smoke:live": "node scripts/collaboration-live-smoke.mjs",
