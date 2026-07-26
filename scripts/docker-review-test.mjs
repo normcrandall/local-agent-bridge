@@ -148,6 +148,20 @@ try {
     });
     assert.equal(rejected.isError, true);
     assert.match(rejected.content[0].text, /review-only/);
+    await writeFile(configPath, "{ invalid JSON\n");
+    const unavailable = await client.callTool({ name: "get_docker_status", arguments: {} });
+    assert.equal(unavailable.isError, true);
+    assert.deepEqual(unavailable.structuredContent, { available: false, reason: "configuration_error" });
+    assert.match(unavailable.content[0].text, /configuration_error/);
+    assert.doesNotMatch(JSON.stringify(unavailable), new RegExp(repository));
+    const reviewUnavailable = await client.callTool({
+      name: "ask_docker",
+      arguments: { prompt: "Review this repository", cwd: ".", mode: "review" },
+    });
+    assert.equal(reviewUnavailable.isError, true);
+    assert.equal(reviewUnavailable.structuredContent.reason, "configuration_error");
+    assert.match(reviewUnavailable.content[0].text, /configuration_error/);
+    assert.doesNotMatch(JSON.stringify(reviewUnavailable), new RegExp(repository));
   } finally {
     await client.close();
   }

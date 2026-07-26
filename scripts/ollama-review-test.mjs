@@ -10,9 +10,13 @@ import { loadOllamaSession, saveOllamaSession } from "../src/ollama-session-stor
 import {
   assertOllamaFallbackAllowed,
   availableDockerReviewer,
+  classifyDockerProbeFailure,
+  LOCAL_REVIEW_PREFLIGHT_BUDGET_MS,
+  OLLAMA_DOCKER_PROBE_TIMEOUT_MS,
+  OLLAMA_FALLBACK_PREFLIGHT_MAX_MS,
   OLLAMA_DOCKER_PRIORITY_MESSAGE,
 } from "../src/local-review-priority.mjs";
-import { DEFAULT_OLLAMA_MODEL, executeOllamaReviewTool, runOllamaReview } from "../src/ollama-review.mjs";
+import { DEFAULT_OLLAMA_MODEL, executeOllamaReviewTool, OLLAMA_PROBE_TIMEOUT_MS, runOllamaReview } from "../src/ollama-review.mjs";
 import { ollamaToolRequest } from "../src/tool-requests.mjs";
 import { runConversation } from "../src/talk-protocol.mjs";
 import { selectRoles } from "../src/operations.mjs";
@@ -23,18 +27,36 @@ const repository = await mkdtemp(join(tmpdir(), "ollama-review-test-"));
 try {
   assert.equal(DEFAULT_OLLAMA_MODEL, "qwen3.6:latest");
   const dockerAvailable = async () => ({ available: true, model: "ai/qwen3.6" });
-  const dockerUnavailable = async () => { throw new Error("connect ECONNREFUSED"); };
+  const privateConfigPath = join(repository, "private", "docker-model-runner.json");
+  const dockerUnavailable = async () => {
+    const error = new Error(`Unable to read Docker Model Runner config at ${privateConfigPath}: connect ECONNREFUSED`);
+    error.cause = { code: "ECONNREFUSED" };
+    throw error;
+  };
   assert.equal((await availableDockerReviewer({ probeDocker: dockerAvailable })).model, "ai/qwen3.6");
   const unavailableDocker = await availableDockerReviewer({ probeDocker: dockerUnavailable });
   assert.equal(unavailableDocker.available, false);
-  assert.match(unavailableDocker.reason, /ECONNREFUSED/);
+  assert.equal(unavailableDocker.reason, "service_unreachable");
+  assert.doesNotMatch(unavailableDocker.reason, new RegExp(repository));
   await assert.rejects(
     assertOllamaFallbackAllowed({ probeDocker: dockerAvailable }),
     new RegExp(OLLAMA_DOCKER_PRIORITY_MESSAGE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
   );
   const fallback = await assertOllamaFallbackAllowed({ probeDocker: dockerUnavailable });
   assert.equal(fallback.allowed, true);
-  assert.match(fallback.dockerUnavailableReason, /ECONNREFUSED/);
+  assert.equal(fallback.dockerUnavailableReason, "service_unreachable");
+  assert.doesNotMatch(JSON.stringify(fallback), new RegExp(repository));
+  assert.equal(classifyDockerProbeFailure(Object.assign(new Error("request timed out"), { name: "TimeoutError" })), "probe_timeout");
+  assert.equal(classifyDockerProbeFailure(Object.assign(new Error("fetch failed"), { cause: { name: "TimeoutError" } })), "probe_timeout");
+  assert.equal(classifyDockerProbeFailure(new Error("Docker Model Runner model ai/missing is not installed. Run: docker model pull ai/missing")), "model_unavailable");
+  assert.equal(classifyDockerProbeFailure(new Error("Docker Model Runner health check returned HTTP 503.")), "health_check_failed");
+  assert.equal(classifyDockerProbeFailure(new Error(`Unable to read Docker Model Runner config at ${privateConfigPath}: invalid JSON`)), "configuration_error");
+  assert.equal(classifyDockerProbeFailure(new Error(`unexpected failure at ${privateConfigPath}`)), "probe_failed");
+  assert.equal(OLLAMA_FALLBACK_PREFLIGHT_MAX_MS, OLLAMA_DOCKER_PROBE_TIMEOUT_MS + OLLAMA_PROBE_TIMEOUT_MS);
+  assert.ok(
+    OLLAMA_FALLBACK_PREFLIGHT_MAX_MS < LOCAL_REVIEW_PREFLIGHT_BUDGET_MS,
+    "the serial Docker-priority and Ollama probes must fit within the agent-pool preflight budget",
+  );
   execFileSync("git", ["init", "-b", "main"], { cwd: repository, stdio: "ignore" });
   execFileSync("git", ["config", "user.name", "Test"], { cwd: repository });
   execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repository });
@@ -211,6 +233,46 @@ try {
   } finally {
     await client.close();
     await new Promise((resolve) => dockerStub.close(resolve));
+  }
+
+  const invalidDockerConfig = join(repository, "private-docker-model-runner.json");
+  await writeFile(invalidDockerConfig, "{not-json");
+  const ollamaStub = createServer((request, response) => {
+    if (request.url === "/api/tags") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ models: [{ name: "qwen3.6:latest" }] }));
+      return;
+    }
+    response.writeHead(404).end();
+  });
+  await new Promise((resolve, reject) => {
+    ollamaStub.once("error", reject);
+    ollamaStub.listen(0, "127.0.0.1", resolve);
+  });
+  const ollamaStubPort = ollamaStub.address().port;
+  const fallbackClient = new Client({ name: "ollama-fallback-diagnostic-test", version: "0.1.0" });
+  const fallbackTransport = new StdioClientTransport({
+    command: process.execPath,
+    args: [join(import.meta.dirname, "..", "src", "ollama-bridge.mjs")],
+    cwd: repository,
+    env: {
+      ...process.env,
+      BRIDGE_WORKSPACE_ROOT: repository,
+      AGENT_BRIDGE_DOCKER_MODEL_RUNNER_CONFIG: invalidDockerConfig,
+      OLLAMA_HOST: `http://127.0.0.1:${ollamaStubPort}`,
+      OLLAMA_MODEL: "qwen3.6:latest",
+    },
+  });
+  try {
+    await fallbackClient.connect(fallbackTransport);
+    const availableFallback = await fallbackClient.callTool({ name: "get_ollama_status", arguments: {} });
+    assert.notEqual(availableFallback.isError, true);
+    assert.equal(availableFallback.structuredContent.dockerUnavailableReason, "configuration_error");
+    assert.match(availableFallback.content[0].text, /configuration_error/);
+    assert.doesNotMatch(JSON.stringify(availableFallback), new RegExp(repository));
+  } finally {
+    await fallbackClient.close();
+    await new Promise((resolve) => ollamaStub.close(resolve));
   }
 
   console.log("Ollama review-only provider tests passed.");
