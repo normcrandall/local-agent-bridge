@@ -346,6 +346,56 @@ try {
   assert.deepEqual(deadLetterHorizonInspection.pending.map((entry) => entry.idempotencyKey), ["surviving-publication"],
     "under-budget dead-letter eviction must preserve and replay surviving work from its checkpoint");
 
+  const checkpointDedupeDirectory = join(root, "checkpoint-dedupe-floor");
+  const checkpointDedupeJournal = createRepositoryJournal({ directory: checkpointDedupeDirectory, now });
+  const checkpointDedupeOutbox = createRepositoryJournalOutbox({
+    journal: checkpointDedupeJournal,
+    now,
+    terminalHorizonMs: 1,
+  });
+  await checkpointDedupeOutbox.enqueue({
+    repository: "veliqon/checkpoint-dedupe",
+    operation: "publish",
+    idempotencyKey: "survivor-b",
+    payload: {},
+  });
+  const [survivingLease] = await checkpointDedupeOutbox.claim({ workerId: "survivor-publisher" });
+  assert.equal(survivingLease.idempotencyKey, "survivor-b");
+  await checkpointDedupeOutbox.retain({ maxRecords: 100 });
+  const existingSurvivorCheckpoint = (await checkpointDedupeJournal.read()).at(-1);
+  const survivorEvent = existingSurvivorCheckpoint.payload.repositoryOutbox;
+  const matchingNextCheckpointIdentity = `repository-outbox:${survivorEvent.keyDigest}:checkpoint:4:${survivorEvent.stateDigest}`;
+  await checkpointDedupeJournal.append({
+    identity: matchingNextCheckpointIdentity,
+    ...existingSurvivorCheckpoint.binding,
+    payload: existingSurvivorCheckpoint.payload,
+  });
+  await checkpointDedupeOutbox.enqueue({
+    repository: "veliqon/checkpoint-dedupe",
+    operation: "publish",
+    idempotencyKey: "discarded-a",
+    payload: {},
+  });
+  const [discardedLease] = await checkpointDedupeOutbox.claim({ workerId: "publisher" });
+  assert.equal(discardedLease.idempotencyKey, "discarded-a");
+  await checkpointDedupeOutbox.fail({
+    leaseId: discardedLease.lease.leaseId,
+    failure: { kind: "policy", message: "denied" },
+  });
+  advance(2);
+  const checkpointDedupeReceipt = await checkpointDedupeOutbox.retain({ maxRecords: 100 });
+  assert.ok(checkpointDedupeReceipt.removed > 0);
+  assert.equal(checkpointDedupeReceipt.droppedDeadLetterItems, 1);
+  const checkpointDedupeRestart = createRepositoryJournalOutbox({
+    journal: createRepositoryJournal({ directory: checkpointDedupeDirectory, now }),
+    now,
+    terminalHorizonMs: 1,
+  });
+  const checkpointDedupeInspection = await checkpointDedupeRestart.inspect();
+  assert.deepEqual(checkpointDedupeInspection.deadLetter, []);
+  assert.deepEqual(checkpointDedupeInspection.pending.map((entry) => entry.idempotencyKey), ["survivor-b"],
+    "a surviving key must receive a fresh checkpoint above a later discarded-item floor");
+
   const fullyTerminalDirectory = join(root, "fully-terminal-horizon");
   const fullyTerminalJournal = createRepositoryJournal({ directory: fullyTerminalDirectory, now });
   const fullyTerminalOutbox = createRepositoryJournalOutbox({ journal: fullyTerminalJournal, now, terminalHorizonMs: 1 });

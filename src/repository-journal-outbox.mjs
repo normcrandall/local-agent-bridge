@@ -498,7 +498,10 @@ export function createRepositoryJournalOutbox({
             item: checkpointItem,
           };
           return {
-            identity: eventIdentity(item.keyDigest, "checkpoint", `${item.lastSequence}:${checkpointDigest}`),
+            // Retention is already atomic under the journal lock, so every
+            // generation needs a fresh identity. Reusing a prior checkpoint
+            // can leave its only surviving copy below a later discard floor.
+            identity: eventIdentity(item.keyDigest, "checkpoint", randomUUID()),
             ...item.binding,
             payload: { repositoryOutbox: event },
           };
