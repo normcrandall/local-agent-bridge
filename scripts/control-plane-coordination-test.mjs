@@ -4,7 +4,12 @@ import assert from "node:assert/strict";
 import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { collaborationAlias, collaborationIdentity } from "../src/collaboration-identity.mjs";
+import {
+  COLLABORATION_REUSE_DIMENSIONS,
+  collaborationAlias,
+  collaborationIdentity,
+  collaborationReuseCompatibility,
+} from "../src/collaboration-identity.mjs";
 import { acquireIdentityLock, archiveCollaboration, collaborationDirectory, createCollaboration, findCollaborationByIdentity, queryControlPlane, updateCollaboration } from "../src/collaboration-store.mjs";
 import { classifyWaitLane, waitExitCode, waitForControlPlane } from "../src/control-plane-wait.mjs";
 
@@ -15,9 +20,106 @@ process.env.BRIDGE_COLLABORATION_DIR = root;
 
 try {
   const binding = { repository: "veliqon/nolvaren-next", prNumber: 183, headSha: "a".repeat(40) };
-  const identity = collaborationIdentity({ workspace, mode: "review", githubReview: binding });
-  assert.equal(identity, collaborationIdentity({ workspace, mode: "review", githubReview: binding }));
-  assert.notEqual(identity, collaborationIdentity({ workspace, mode: "review", githubReview: { ...binding, headSha: "b".repeat(40) } }));
+  const reviewRequest = {
+    workspace,
+    mode: "review",
+    agents: ["claude"],
+    startAgent: "claude",
+    models: { claude: "claude-opus-5" },
+    modelFallbacks: { claude: ["claude-opus-4.6"] },
+    handoffPath: "docs/handoffs/pr-183-claude.md",
+    githubReview: { ...binding, expectedLogins: { claude: "veliqon-claude-reviewer" } },
+  };
+  const identity = collaborationIdentity(reviewRequest);
+  assert.equal(identity, collaborationIdentity(reviewRequest));
+  assert.notEqual(identity, collaborationIdentity({ ...reviewRequest, githubReview: { ...reviewRequest.githubReview, headSha: "b".repeat(40) } }));
+  assert.notEqual(identity, collaborationIdentity({ ...reviewRequest, agents: ["antigravity"], startAgent: "antigravity" }), "a different requested provider must not reuse the same exact-head review");
+  assert.notEqual(identity, collaborationIdentity({ ...reviewRequest, agents: ["claude", "antigravity"] }), "the ordered provider roster is a compatibility dimension");
+  assert.notEqual(
+    collaborationIdentity({ ...reviewRequest, agents: ["claude", "antigravity"] }),
+    collaborationIdentity({ ...reviewRequest, agents: ["antigravity", "claude"] }),
+    "provider-roster order must remain significant",
+  );
+  assert.notEqual(identity, collaborationIdentity({ ...reviewRequest, startAgent: "antigravity" }));
+  assert.notEqual(identity, collaborationIdentity({ ...reviewRequest, models: { claude: "claude-opus-4.6" } }));
+  assert.notEqual(identity, collaborationIdentity({ ...reviewRequest, modelFallbacks: { claude: [] } }));
+  assert.notEqual(identity, collaborationIdentity({ ...reviewRequest, allowClaudeFable: true }));
+  assert.notEqual(identity, collaborationIdentity({ ...reviewRequest, handoffPath: "docs/handoffs/pr-183-other.md" }));
+  assert.notEqual(identity, collaborationIdentity({
+    ...reviewRequest,
+    githubReview: { ...reviewRequest.githubReview, expectedLogins: { claude: "other-reviewer" } },
+  }));
+  assert.equal(identity, collaborationIdentity({
+    ...reviewRequest,
+    githubReview: { ...reviewRequest.githubReview, expectedLogins: { claude: "VELIQON-CLAUDE-REVIEWER[bot]" } },
+  }), "equivalent reviewer App login spellings must remain compatible");
+  const claimedReviewRequest = {
+    ...reviewRequest,
+    issueClaim: {
+      repository: "veliqon/nolvaren-next",
+      issueNumber: 248,
+      headSha: "c".repeat(40),
+    },
+  };
+  const claimedReviewIdentity = collaborationIdentity(claimedReviewRequest);
+  assert.notEqual(claimedReviewIdentity, collaborationIdentity({
+    ...claimedReviewRequest,
+    githubReview: { ...claimedReviewRequest.githubReview, headSha: "d".repeat(40) },
+  }), "the exact review head must constrain reuse even when issueClaim owns the primary target identity");
+  assert.notEqual(claimedReviewIdentity, collaborationIdentity({
+    ...claimedReviewRequest,
+    githubReview: { ...claimedReviewRequest.githubReview, prNumber: 184 },
+  }), "the review PR number must constrain reuse independently of the issue claim");
+  assert.notEqual(claimedReviewIdentity, collaborationIdentity({
+    ...claimedReviewRequest,
+    githubReview: { ...claimedReviewRequest.githubReview, repository: "veliqon/other" },
+  }), "the review repository must constrain reuse independently of the issue claim");
+  assert.notEqual(identity, collaborationIdentity({
+    ...reviewRequest,
+    agents: ["claude"],
+    requestedAgents: ["codex", "claude"],
+  }), "the requested roster remains distinct from the post-chair effective roster");
+  assert.notEqual(identity, collaborationIdentity({
+    ...reviewRequest,
+    chair: { provider: "codex", sessionId: "thread-one", workspace, allowSameProviderDelegation: false },
+  }), "native-chair routing identity must constrain reuse");
+  const builderRequest = {
+    workspace,
+    mode: "work",
+    writer: "claude",
+    agents: ["claude"],
+    startAgent: "claude",
+    githubBuilder: {
+      repository: "veliqon/nolvaren-next",
+      issueNumber: 248,
+      prNumber: 251,
+      headSha: "a".repeat(40),
+      expectedLogin: "veliqon-builder",
+      allowedOperations: ["push_branch", "ensure_pull_request"],
+    },
+  };
+  const builderIdentity = collaborationIdentity(builderRequest);
+  assert.notEqual(builderIdentity, collaborationIdentity({
+    ...builderRequest,
+    githubBuilder: { ...builderRequest.githubBuilder, expectedLogin: "other-builder" },
+  }), "builder App authority must constrain reuse");
+  assert.notEqual(builderIdentity, collaborationIdentity({
+    ...builderRequest,
+    githubBuilder: { ...builderRequest.githubBuilder, allowedOperations: ["push_branch"] },
+  }), "builder operation authority must constrain reuse");
+  assert.equal(builderIdentity, collaborationIdentity({
+    ...builderRequest,
+    githubBuilder: {
+      ...builderRequest.githubBuilder,
+      expectedLogin: "VELIQON-BUILDER[bot]",
+      allowedOperations: ["ensure_pull_request", "push_branch"],
+    },
+  }), "equivalent builder login and operation-set spellings must remain compatible");
+  assert.deepEqual(
+    Object.keys(collaborationReuseCompatibility(reviewRequest)),
+    [...COLLABORATION_REUSE_DIMENSIONS],
+    "the reuse receipt dimensions and identity payload must stay aligned",
+  );
 
   const id = "bridge-11111111-1111-4111-8111-111111111111";
   const state = await createCollaboration(root, {
@@ -25,9 +127,12 @@ try {
     identityKey: identity,
     workspace,
     status: "running",
-    githubReview: binding,
-    agents: ["claude"],
-    startAgent: "claude",
+    githubReview: reviewRequest.githubReview,
+    agents: reviewRequest.agents,
+    startAgent: reviewRequest.startAgent,
+    models: reviewRequest.models,
+    modelFallbacks: reviewRequest.modelFallbacks,
+    handoffPath: reviewRequest.handoffPath,
     runtime: { activeCall: { agent: "claude", heartbeatAt: new Date().toISOString() } },
   });
   assert.equal(collaborationAlias(state), "veliqon/nolvaren-next:PR-183:claude-review");

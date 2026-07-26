@@ -85,7 +85,12 @@ import {
 import { CLAIMED_ISSUE_CONTEXT_MARKER, assertClaimedIssueContextIntegrity, hydrateBeforeClaimLease, hydrateClaimedIssueTask } from "./claimed-issue-context.mjs";
 import { createIssueClaimClient, createIssueClaimHydrationClient } from "./github-issue-claims.mjs";
 import { startSupervisedWorker } from "./worker-supervisor-client.mjs";
-import { collaborationAlias, collaborationIdentity } from "./collaboration-identity.mjs";
+import {
+  COLLABORATION_REUSE_DIMENSIONS,
+  collaborationAlias,
+  collaborationIdentity,
+  collaborationReuseCompatibility,
+} from "./collaboration-identity.mjs";
 import { runWorkspaceRecipe, workspaceRecipePlan } from "./workspace-operations.mjs";
 import {
   inspectWriterRetirement,
@@ -899,6 +904,19 @@ server.registerTool(
     const canonicalIssueClaim = input.issueClaim
       ? { ...input.issueClaim, expectedLogin: canonicalGitHubAppLogin(input.issueClaim.expectedLogin) }
       : null;
+    const reuseCompatibility = collaborationReuseCompatibility({
+      workspace: requestedWorkspace,
+      agents: delegatedAgents,
+      requestedAgents: input.agents,
+      startAgent,
+      chair: native.chair,
+      models: input.models,
+      modelFallbacks: input.modelFallbacks,
+      allowClaudeFable: input.allowClaudeFable,
+      handoffPath: input.handoffPath,
+      githubReview: input.githubReview,
+      githubBuilder: input.githubBuilder,
+    });
     const identityKey = collaborationIdentity({
       workspace: requestedWorkspace,
       mode: effectiveMode,
@@ -907,6 +925,14 @@ server.registerTool(
       githubReview: input.githubReview,
       githubBuilder: input.githubBuilder,
       resumeKey: input.resumeKey,
+      agents: delegatedAgents,
+      requestedAgents: input.agents,
+      startAgent,
+      chair: native.chair,
+      models: input.models,
+      modelFallbacks: input.modelFallbacks,
+      allowClaudeFable: input.allowClaudeFable,
+      handoffPath: input.handoffPath,
     });
     let releaseIdentityLock = null;
     if (identityKey && input.resumeIfCompatible !== false) {
@@ -917,7 +943,15 @@ server.registerTool(
         releaseIdentityLock = null;
         return toolResponse({
           ...(await collaborationView(WORKSPACE_ROOT, existing.id, 1)),
-          resume: { reused: true, identityKey, reason: "compatible_live_or_recoverable_lane" },
+          resume: {
+            reused: true,
+            identityKey,
+            reason: "compatible_live_or_recoverable_lane",
+            compatibility: {
+              matchedDimensions: [...COLLABORATION_REUSE_DIMENSIONS],
+              ...reuseCompatibility,
+            },
+          },
         });
       }
     }
@@ -1247,6 +1281,7 @@ server.registerTool(
       const state = await createCollaboration(WORKSPACE_ROOT, {
         id: collaborationId,
         identityKey,
+        reuseCompatibility,
         resumeKey: input.resumeKey || null,
         task: resolvedTask,
         taskBase,
