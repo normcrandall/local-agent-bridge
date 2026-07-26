@@ -13,6 +13,24 @@ spawn /bin/zsh -f
 send -- "cd '$project'; before=\$(stty -g); node scripts/mission-control.mjs --state-root '$stateRoot' --refresh-ms 250; result=\$?; after=\$(stty -g); if \[\[ \"\$before\" == \"\$after\" \]\]; then echo TERMINAL_OK:\$result; else echo TERMINAL_BAD:\$result; fi; echo INPUT_OK\r"
 expect "AGENT BRIDGE MISSION CONTROL"
 expect "QUOTA"
+expect "1:active"
+after 100
+send -- "\t"
+expect "Focused details pane."
+send -- "z"
+expect "Zoomed details pane."
+send -- "\t"
+expect "Focus remains on details pane."
+send -- "+"
+expect "Resized details pane."
+send -- "d"
+expect "Detached details pane. Focused work pane."
+send -- "D"
+expect "Reattached details pane."
+send -- "6"
+expect -exact {[6:history]}
+send -- "s"
+expect -exact {[2:needs you]}
 after 100
 set quitStarted [clock milliseconds]
 send -- "q"

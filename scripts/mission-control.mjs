@@ -7,14 +7,13 @@ import { execFile, spawnSync } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import {
   clearRepositoryCache,
-  deduplicateOperatorLanes,
   loadMissionControlSnapshot,
   loadTimeline,
   missionControlRepositories,
+  missionControlTabOperatorLanes,
   missionControlVisibleLanes,
   navigationIntent,
   newlyObservedAttentionKeys,
-  paneFocusIntent,
   renderMissionControl,
   renderSnapshot,
 } from "../src/mission-control.mjs";
@@ -22,6 +21,8 @@ import {
   missionControlActionAvailability,
   missionControlConfirmation,
   missionControlCopyText,
+  createMissionControlPaneLayout,
+  missionControlPaneControlIntent,
   missionControlPlatformCommands,
   missionControlPrUrl,
   missionControlShouldRedraw,
@@ -133,6 +134,8 @@ let pendingConfirmation = null;
 let activePane = 1;
 let detailExpanded = false;
 let detailOffset = 0;
+let paneLayout = createMissionControlPaneLayout();
+let selectedTab = view === "attention" ? "needsYou" : view === "all" ? "history" : "active";
 let selectedRepository = repositoryFilter || null;
 const seenAttentionKeys = new Set();
 let resolveExit;
@@ -252,21 +255,10 @@ function subscriptionSnapshot(viewModel) {
     }
   }
   const matching = [...all.values()].filter((lane) => !repositoryFilter || lane.repository === repositoryFilter);
-  const liveRepositories = new Set(matching
-    .filter((lane) => lane.operatorCategory === "active")
-    .map((lane) => lane.repository));
-  const liveSource = matching.filter((lane) => {
-    if (["active", "needs_user"].includes(lane.operatorCategory)) return true;
-    return lane.operatorCategory === "waiting"
-      && (liveRepositories.size === 0 || liveRepositories.has(lane.repository));
-  });
-  const modeSource = view === "all"
-    ? matching
-    : view === "attention"
-      ? matching.filter((lane) => ["needs_user", "waiting"].includes(lane.operatorCategory))
-      : liveSource;
-  const operatorLanes = deduplicateOperatorLanes(modeSource, {
-    includeHistory: view === "all" || (view === "attention" && includeStale),
+  const operatorLanes = missionControlTabOperatorLanes(viewModel, matching, {
+    selectedTab,
+    repositoryFilter,
+    includeStale,
     staleAfterMs: staleAfterHours * 60 * 60 * 1000,
   });
   const counts = {
@@ -278,6 +270,7 @@ function subscriptionSnapshot(viewModel) {
   return {
     generatedAt: viewModel.updatedAt || new Date().toISOString(),
     mode: view,
+    selectedTab,
     filter: repositoryFilter,
     lanes: [...all.values()],
     operatorLanes,
@@ -339,6 +332,7 @@ async function draw(currentOverride = null) {
       activePane,
       detailExpanded,
       detailOffset,
+      paneLayout,
       selectedRepository,
       repositoryLocked: Boolean(repositoryFilter),
       viewportState,
@@ -372,23 +366,40 @@ async function handleKey(key) {
   }
   if (["l", "a", "h"].includes(key)) {
     view = key === "l" ? "live" : key === "a" ? "attention" : "all";
+    selectedTab = key === "l" ? "active" : key === "a" ? "needsYou" : "history";
     selectedIndex = 0;
     selectedId = null;
     actionMessage = null;
     pendingConfirmation = null;
     detailOffset = 0;
   }
-  else if (key === "\t" || key === "\x1b[C") {
-    activePane = paneFocusIntent(key, activePane);
+  else if (/^[1-6]$/u.test(key)) {
+    selectedTab = ["active", "needsYou", "queue", "reviews", "mergeTrain", "history"][Number(key) - 1];
+    view = selectedTab === "active" ? "live" : selectedTab === "history" ? "all" : "attention";
+    selectedIndex = 0;
+    selectedId = null;
+    detailOffset = 0;
     actionMessage = null;
+    pendingConfirmation = null;
+  }
+  else if (key === "\t" || key === "\x1b[C") {
+    const previousPane = activePane;
+    ({ layout: paneLayout, activePane } = missionControlPaneControlIntent(paneLayout, key, activePane));
+    actionMessage = previousPane === activePane
+      ? `Focus remains on ${["repositories", "work", "details"][activePane]} pane.`
+      : `Focused ${["repositories", "work", "details"][activePane]} pane.`;
   }
   else if (key === "\x1b[Z" || key === "\x1b[D") {
-    activePane = paneFocusIntent(key, activePane);
-    actionMessage = null;
+    const previousPane = activePane;
+    ({ layout: paneLayout, activePane } = missionControlPaneControlIntent(paneLayout, key, activePane));
+    actionMessage = previousPane === activePane
+      ? `Focus remains on ${["repositories", "work", "details"][activePane]} pane.`
+      : `Focused ${["repositories", "work", "details"][activePane]} pane.`;
   }
   else if (key === "\r" || key === "\n") {
-    if (activePane === 0) activePane = 1;
-    else if (activePane === 1) activePane = 2;
+    if (activePane === 0 || activePane === 1) {
+      ({ layout: paneLayout, activePane } = missionControlPaneControlIntent(paneLayout, "\t", activePane));
+    }
     else {
       detailExpanded = !detailExpanded;
       detailOffset = 0;
@@ -418,12 +429,28 @@ async function handleKey(key) {
   }
   else if (key === "s") {
     if (view !== "attention") view = "attention";
+    selectedTab = "needsYou";
     includeStale = !includeStale;
     selectedIndex = 0;
     selectedId = null;
     actionMessage = null;
     pendingConfirmation = null;
     detailOffset = 0;
+  }
+  else if (["\\", "+", "=", "-", "_", "z", "d", "D"].includes(key)) {
+    const controlledPane = activePane;
+    const control = missionControlPaneControlIntent(paneLayout, key, activePane);
+    ({ layout: paneLayout, activePane } = control);
+    const paneName = ["repositories", "work", "details"][controlledPane];
+    actionMessage = key === "d" || key === "D"
+      ? control.operation
+        ? `${control.operation.type === "detached" ? "Detached" : "Reattached"} ${["repositories", "work", "details"][control.operation.pane]} pane.${control.operation.type === "detached" ? ` Focused ${["repositories", "work", "details"][activePane]} pane.` : ""}`
+        : "Pane layout unchanged."
+      : key === "z"
+        ? `${paneLayout.zoomedPane == null ? "Restored split view from" : "Zoomed"} ${paneName} pane.`
+        : key === "\\"
+          ? `${paneLayout.split ? "Enabled" : "Disabled"} split view.`
+          : `Resized ${paneName} pane.`;
   }
   else if (["o", "y", "c", "x", "A", "w"].includes(key)) {
     const visibleLanes = missionControlVisibleLanes(lastSnapshot || { lanes: [] }, selectedRepository);
