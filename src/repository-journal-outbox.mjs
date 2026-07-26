@@ -7,6 +7,7 @@ const DEFAULT_MAX_ATTEMPTS = 5;
 const DEFAULT_BASE_BACKOFF_MS = 1_000;
 const DEFAULT_MAX_BACKOFF_MS = 15 * 60_000;
 const DEFAULT_MAX_PAYLOAD_BYTES = 64 * 1024;
+const DEFAULT_TERMINAL_HORIZON_MS = 30 * 24 * 60 * 60_000;
 const MAX_CLAIM_LIMIT = 100;
 const SECRET_FIELD = /(authorization|credential|password|passwd|secret|token|apikey|privatekey)/i;
 
@@ -159,6 +160,10 @@ function reconstruct(records, nowMs) {
           fail("Repository outbox checkpoint has an invalid lease.", "CORRUPT_CHECKPOINT");
         }
       }
+      const expectedKeyDigest = hash({ repository: record.binding.repository, idempotencyKey: checkpointItem.idempotencyKey });
+      if (event.keyDigest !== expectedKeyDigest) {
+        fail("Repository outbox checkpoint is bound to the wrong idempotency key.", "CORRUPT_CHECKPOINT");
+      }
       items.set(event.keyDigest, {
         ...checkpointItem,
         keyDigest: event.keyDigest,
@@ -254,6 +259,7 @@ export function createRepositoryJournalOutbox({
   baseBackoffMs = DEFAULT_BASE_BACKOFF_MS,
   maxBackoffMs = DEFAULT_MAX_BACKOFF_MS,
   maxPayloadBytes = DEFAULT_MAX_PAYLOAD_BYTES,
+  terminalHorizonMs = DEFAULT_TERMINAL_HORIZON_MS,
 } = {}) {
   if (!journal || typeof journal.append !== "function" || typeof journal.read !== "function") {
     fail("A repository journal with append() and read() is required.", "INVALID_JOURNAL");
@@ -263,6 +269,7 @@ export function createRepositoryJournalOutbox({
   millis(baseBackoffMs, "baseBackoffMs");
   millis(maxBackoffMs, "maxBackoffMs");
   millis(maxPayloadBytes, "maxPayloadBytes");
+  millis(terminalHorizonMs, "terminalHorizonMs", { minimum: 0 });
   if (baseBackoffMs > maxBackoffMs) fail("baseBackoffMs must not exceed maxBackoffMs.", "INVALID_CONFIGURATION");
 
   async function state() {
@@ -345,6 +352,7 @@ export function createRepositoryJournalOutbox({
     if (!Number.isInteger(limit) || limit <= 0 || limit > MAX_CLAIM_LIMIT) fail(`limit must be from 1 through ${MAX_CLAIM_LIMIT}.`, "INVALID_LIMIT");
     millis(leaseDurationMs, "leaseDurationMs");
     const claimed = [];
+    const attemptedKeys = new Set();
     while (claimed.length < limit) {
       const snapshot = await state();
       const candidates = [...snapshot.items.values()]
@@ -352,8 +360,10 @@ export function createRepositoryJournalOutbox({
         .sort((left, right) => (left.retryAt || left.enqueuedAt).localeCompare(right.retryAt || right.enqueuedAt)
           || left.enqueueSequence - right.enqueueSequence
           || left.idempotencyKey.localeCompare(right.idempotencyKey));
-      const candidate = candidates.find((item) => !claimed.some((entry) => entry.idempotencyKey === item.idempotencyKey));
+      const candidate = candidates.find((item) => !attemptedKeys.has(item.keyDigest)
+        && !claimed.some((entry) => entry.idempotencyKey === item.idempotencyKey));
       if (!candidate) break;
+      attemptedKeys.add(candidate.keyDigest);
       const claimOrdinal = candidate.claimCount + 1;
       const leaseId = randomUUID();
       const at = snapshot.nowAt;
@@ -442,38 +452,59 @@ export function createRepositoryJournalOutbox({
   async function retain({ maxRecords }) {
     if (typeof journal.retain !== "function") fail("The repository journal does not support retention.", "INVALID_JOURNAL");
     millis(maxRecords, "maxRecords");
-    const snapshot = await state();
-    for (const item of snapshot.items.values()) {
-      const checkpointItem = canonicalize({
-        idempotencyKey: item.idempotencyKey,
-        operation: item.operation,
-        payload: item.payload,
-        payloadDigest: item.payloadDigest,
-        enqueuedAt: item.enqueuedAt,
-        enqueueSequence: item.enqueueSequence,
-        claimCount: item.claimCount,
-        lease: item.lease,
-        acknowledgedAt: item.acknowledgedAt,
-        failure: item.failure,
-        retryAt: item.retryAt,
-        terminal: item.terminal,
-      }, "checkpoint.item");
-      const checkpointDigest = hash(checkpointItem);
-      const event = {
-        version: REPOSITORY_JOURNAL_OUTBOX_VERSION,
-        event: "checkpoint",
-        keyDigest: item.keyDigest,
-        stateDigest: checkpointDigest,
-        item: checkpointItem,
-      };
-      await journal.append({
-        identity: eventIdentity(item.keyDigest, "checkpoint", `${item.lastSequence}:${checkpointDigest}`),
-        ...item.binding,
-        payload: { repositoryOutbox: event },
-      });
-    }
-    const receipt = await journal.retain({ maxRecords });
-    return { ...receipt, checkpointedItems: snapshot.items.size };
+    return journal.retain({
+      maxRecords,
+      prepare(records) {
+        const nowAt = isoNow(now);
+        const nowMs = Date.parse(nowAt);
+        const snapshot = reconstruct(records, nowMs);
+        const dropped = [];
+        const kept = [];
+        for (const item of snapshot.values()) {
+          const acknowledgedAgeMs = item.acknowledgedAt === null ? null : nowMs - Date.parse(item.acknowledgedAt);
+          if (acknowledgedAgeMs !== null && acknowledgedAgeMs >= terminalHorizonMs) dropped.push(item);
+          else kept.push(item);
+        }
+        const append = kept.map((item) => {
+          const checkpointItem = canonicalize({
+            idempotencyKey: item.idempotencyKey,
+            operation: item.operation,
+            payload: item.payload,
+            payloadDigest: item.payloadDigest,
+            enqueuedAt: item.enqueuedAt,
+            enqueueSequence: item.enqueueSequence,
+            claimCount: item.claimCount,
+            lease: item.lease,
+            acknowledgedAt: item.acknowledgedAt,
+            failure: item.failure,
+            retryAt: item.retryAt,
+            terminal: item.terminal,
+          }, "checkpoint.item");
+          const checkpointDigest = hash(checkpointItem);
+          const event = {
+            version: REPOSITORY_JOURNAL_OUTBOX_VERSION,
+            event: "checkpoint",
+            keyDigest: item.keyDigest,
+            stateDigest: checkpointDigest,
+            item: checkpointItem,
+          };
+          return {
+            identity: eventIdentity(item.keyDigest, "checkpoint", `${item.lastSequence}:${checkpointDigest}`),
+            ...item.binding,
+            payload: { repositoryOutbox: event },
+          };
+        });
+        return {
+          append,
+          discardOutboxKeys: dropped.map((item) => item.keyDigest),
+          metadata: {
+            checkpointedItems: kept.length,
+            droppedTerminalItems: dropped.length,
+            terminalHorizonMs,
+          },
+        };
+      },
+    });
   }
 
   return Object.freeze({ enqueue, claim, acknowledge, ack: acknowledge, fail: recordFailure, inspect, retain });

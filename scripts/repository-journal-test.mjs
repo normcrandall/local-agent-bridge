@@ -98,7 +98,14 @@ try {
   await writeFile(orphanTemporary, "orphaned retention rewrite");
   await writeFile(unrelatedTemporary, "must not be removed");
   const retained = await concurrent.retain({ maxRecords: 8 });
-  assert.deepEqual(retained, { removed: 22, retained: 8, firstSequence: 23 });
+  assert.deepEqual(retained, {
+    removed: 22,
+    retained: 8,
+    firstSequence: 23,
+    requestedMaxRecords: 8,
+    bounded: true,
+    protectedOutboxItems: 0,
+  });
   await assert.rejects(stat(orphanTemporary), (error) => error.code === "ENOENT", "recognized orphan retention temps must be removed under lock");
   assert.equal((await readFile(unrelatedTemporary, "utf8")), "must not be removed", "cleanup must not remove unrelated temp files");
   assert.deepEqual((await concurrent.read()).map((record) => record.sequence), [23, 24, 25, 26, 27, 28, 29, 30]);
