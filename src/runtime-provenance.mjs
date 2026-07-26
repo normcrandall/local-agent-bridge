@@ -36,7 +36,10 @@ export async function inspectSource({ sourceRoot, runGit = defaultGitRunner } = 
   if (!commit) {
     return { root: sourceRoot, commit: null, ref: null, dirty: false, dirtyEntries: [], committedAt: null };
   }
-  const status = await tryGit(runGit, ["status", "--porcelain", "--untracked-files=no"], sourceRoot);
+  // Untracked files count as dirty: deployRuntime copies whole directories, so
+  // an untracked file under src/ or scripts/ reaches the global runtime even
+  // though no commit describes it.
+  const status = await tryGit(runGit, ["status", "--porcelain", "--untracked-files=normal"], sourceRoot);
   const committedAt = await tryGit(runGit, ["show", "-s", "--format=%cI", commit], sourceRoot);
   const dirtyEntries = (status || "")
     .split("\n")
@@ -214,8 +217,10 @@ function alive(pid) {
 
 /**
  * Machine-level mutual exclusion for global installs. Concurrent installers
- * queue instead of interleaving; an owner that died leaves a lock that is
- * reclaimed only once it is both unowned and stale.
+ * queue instead of interleaving. A lock whose same-host owner is gone is
+ * reclaimed at once; a lock held by a live same-host owner is never reclaimed,
+ * however long the install runs. Only an unattributable lock — a foreign host,
+ * or a record with no usable pid — falls back to the age threshold.
  */
 export async function acquireInstallLock({
   installRoot,
@@ -244,7 +249,12 @@ export async function acquireInstallLock({
       try { owner = JSON.parse(await readFile(path, "utf8")); } catch {}
       const age = await stat(path).then((info) => now() - info.mtimeMs, () => 0);
       const sameHost = !owner?.host || owner.host === hostname();
-      if (age >= staleMs && (!sameHost || !isAlive(owner?.pid))) {
+      // A partially written lock parses to no pid; it belongs to an installer
+      // that is mid-acquisition, so it is only ever reclaimed on age.
+      const knownOwner = sameHost && Number.isInteger(owner?.pid) && owner.pid > 0;
+      const deadOwner = knownOwner && !isAlive(owner.pid);
+      const liveOwner = knownOwner && !deadOwner;
+      if (deadOwner || (!liveOwner && age >= staleMs)) {
         await unlink(path).catch(() => {});
         continue;
       }
