@@ -24,18 +24,33 @@ function processAlive(pid) {
   }
 }
 
-async function request(endpoint, payload, timeoutMs = 1_000) {
+function abortError() {
+  const error = new Error("Supervisor request aborted.");
+  error.name = "AbortError";
+  error.code = "ABORT_ERR";
+  return error;
+}
+
+async function request(endpoint, payload, timeoutMs = 1_000, { signal } = {}) {
   return new Promise((resolvePromise, rejectPromise) => {
+    if (signal?.aborted) {
+      rejectPromise(abortError());
+      return;
+    }
     let settled = false;
     let buffer = "";
     const socket = createConnection(endpoint);
+    const abort = () => finish(abortError());
     const finish = (error, value) => {
       if (settled) return;
       settled = true;
+      signal?.removeEventListener("abort", abort);
+      socket.setTimeout(0);
       socket.destroy();
       if (error) rejectPromise(error);
       else resolvePromise(value);
     };
+    signal?.addEventListener("abort", abort, { once: true });
     socket.setTimeout(timeoutMs, () => finish(new Error("Supervisor request timed out.")));
     socket.once("error", (error) => finish(error));
     socket.once("connect", () => socket.write(`${JSON.stringify({ protocol: PROTOCOL_VERSION, ...payload })}\n`));
@@ -54,11 +69,12 @@ async function request(endpoint, payload, timeoutMs = 1_000) {
   });
 }
 
-async function acquireStartupLock(directory) {
+async function acquireStartupLock(directory, signal) {
   const lock = join(directory, "supervisor-start.lock");
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await chmod(directory, 0o700);
   for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (signal?.aborted) throw abortError();
     try {
       await mkdir(lock, { mode: 0o700 });
       await writeFile(join(lock, "owner"), `${process.pid}\n`, { mode: 0o600 });
@@ -81,16 +97,20 @@ async function acquireStartupLock(directory) {
   throw new Error("Timed out acquiring the collaboration supervisor startup lock.");
 }
 
-async function ensureSupervisor({ runtimeRoot, workspaceRoot, stateDirectory, endpoint }) {
+async function ensureSupervisor({ runtimeRoot, workspaceRoot, stateDirectory, endpoint, signal }) {
+  if (signal?.aborted) throw abortError();
   try {
-    return await request(endpoint, { type: "ping" }, 300);
+    return await request(endpoint, { type: "ping" }, 300, { signal });
   } catch {}
 
-  const release = await acquireStartupLock(stateDirectory);
+  if (signal?.aborted) throw abortError();
+  const release = await acquireStartupLock(stateDirectory, signal);
   try {
     try {
-      return await request(endpoint, { type: "ping" }, 300);
+      return await request(endpoint, { type: "ping" }, 300, { signal });
     } catch {}
+
+    if (signal?.aborted) throw abortError();
 
     const bootstrap = resolve(runtimeRoot, "scripts/collaboration-supervisor-bootstrap.mjs");
     const launched = spawnSync(process.execPath, [bootstrap], {
@@ -110,8 +130,9 @@ async function ensureSupervisor({ runtimeRoot, workspaceRoot, stateDirectory, en
     const deadline = Date.now() + 5_000;
     let lastError = null;
     while (Date.now() < deadline) {
+      if (signal?.aborted) throw abortError();
       try {
-        return await request(endpoint, { type: "ping" }, 300);
+        return await request(endpoint, { type: "ping" }, 300, { signal });
       } catch (error) {
         lastError = error;
         await pause(50);
@@ -187,10 +208,11 @@ export async function getMissionControlEventSnapshot({
   runtimeRoot = resolve(fileURLToPath(new URL("..", import.meta.url))),
   workspaceRoot = resolve(process.env.BRIDGE_WORKSPACE_ROOT || runtimeRoot),
   stateDirectory = resolve(process.env.BRIDGE_COLLABORATION_DIR || collaborationDirectory(workspaceRoot)),
+  signal,
 } = {}) {
   const endpoint = supervisorEndpoint(stateDirectory);
-  await ensureSupervisor({ runtimeRoot, workspaceRoot, stateDirectory, endpoint });
-  return request(endpoint, { type: "mission_control_snapshot" }, 10_000);
+  await ensureSupervisor({ runtimeRoot, workspaceRoot, stateDirectory, endpoint, signal });
+  return request(endpoint, { type: "mission_control_snapshot" }, 10_000, { signal });
 }
 
 export async function readMissionControlEvents({
@@ -201,6 +223,7 @@ export async function readMissionControlEvents({
   runtimeRoot = resolve(fileURLToPath(new URL("..", import.meta.url))),
   workspaceRoot = resolve(process.env.BRIDGE_WORKSPACE_ROOT || runtimeRoot),
   stateDirectory = resolve(process.env.BRIDGE_COLLABORATION_DIR || collaborationDirectory(workspaceRoot)),
+  signal,
 } = {}) {
   if (!Number.isSafeInteger(waitMs) || waitMs < 0 || waitMs > 5_000) {
     throw new Error("Mission Control subscription wait must be between 0 and 5000ms.");
@@ -209,14 +232,14 @@ export async function readMissionControlEvents({
     throw new Error("Mission Control subscription batch must be between 1 and 100.");
   }
   const endpoint = supervisorEndpoint(stateDirectory);
-  await ensureSupervisor({ runtimeRoot, workspaceRoot, stateDirectory, endpoint });
+  await ensureSupervisor({ runtimeRoot, workspaceRoot, stateDirectory, endpoint, signal });
   return request(endpoint, {
     type: "mission_control_subscribe",
     streamId,
     cursor,
     maxEvents,
     waitMs,
-  }, Math.min(15_000, Math.max(5_000, waitMs + 5_000)));
+  }, Math.min(15_000, Math.max(5_000, waitMs + 5_000)), { signal });
 }
 
 export async function refreshSupervisor({

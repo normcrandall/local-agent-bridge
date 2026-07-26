@@ -127,6 +127,7 @@ let terminalRestored = false;
 let lastSnapshot = null;
 let lastViewModel = null;
 let subscriptionClient = null;
+const subscriptionAbort = new AbortController();
 let actionMessage = null;
 let pendingConfirmation = null;
 let activePane = 1;
@@ -141,6 +142,7 @@ const restoreSequence = "\x1b[?25h\x1b[?1049l";
 function restore() {
   if (restorePromise) return restorePromise;
   stopped = true;
+  subscriptionAbort.abort();
   subscriptionClient?.stop();
   providerQuotaMonitor.stop();
   if (timer) clearInterval(timer);
@@ -504,5 +506,5 @@ subscriptionClient = createMissionControlSubscriptionClient({
     if (lastSnapshot) await draw(lastSnapshot);
   },
 });
-void subscriptionClient.run();
+void subscriptionClient.run({ signal: subscriptionAbort.signal });
 await exitRequested;

@@ -154,4 +154,32 @@ assert.equal(
   "a healthy paginated batch resets the resync backoff before a later gap",
 );
 
-console.log("Mission Control live-client tests passed: ordered batching, reconnect cursor reuse, bounded gap resync/backoff, and redraw coalescing are verified.");
+const shutdownAbort = new AbortController();
+let shutdownReadStarted;
+const shutdownReadReady = new Promise((resolvePromise) => { shutdownReadStarted = resolvePromise; });
+let shutdownErrors = 0;
+const shutdownClient = createMissionControlSubscriptionClient({
+  runtimeRoot: "/runtime",
+  workspaceRoot: "/workspace",
+  stateRoot: "/state",
+  snapshotReader: async () => snapshot(0, "running"),
+  eventReader: ({ signal }) => new Promise((resolvePromise, rejectPromise) => {
+    shutdownReadStarted();
+    signal.addEventListener("abort", () => {
+      const error = new Error("transport aborted");
+      error.name = "AbortError";
+      rejectPromise(error);
+    }, { once: true });
+  }),
+  onError: () => { shutdownErrors += 1; },
+});
+const shutdownRun = shutdownClient.run({ signal: shutdownAbort.signal });
+await shutdownReadReady;
+const shutdownStartedAt = Date.now();
+shutdownAbort.abort();
+shutdownClient.stop();
+await shutdownRun;
+assert.ok(Date.now() - shutdownStartedAt < 100, "subscription shutdown must not wait for the long-poll deadline");
+assert.equal(shutdownErrors, 0, "an intentional subscription abort must not report a reconnect failure");
+
+console.log("Mission Control live-client tests passed: ordered batching, reconnect cursor reuse, bounded gap resync/backoff, redraw coalescing, and clean abort shutdown are verified.");
