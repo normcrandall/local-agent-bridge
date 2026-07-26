@@ -6,7 +6,8 @@ import { dirname, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { publishBoundReviewGate, submitBoundReview } from "./github-review-client.mjs";
+import { assertBoundReviewHead, publishBoundReviewGate, submitBoundReview } from "./github-review-client.mjs";
+import { reconcilePublishedReview } from "./github-review-workflow.mjs";
 import {
   canPublishReviewStatus,
   createInstallationToken,
@@ -106,7 +107,7 @@ const server = new McpServer(
   { name: "bounded-github-review", version: "0.1.0" },
   {
     instructions:
-      `Submit exactly one formal review to ${repository} PR #${prNumber} at ${headSha} as ${expectedLogin}. Write the durable handoff first.${statusGateEnabled ? ` This reviewer App also publishes the exact-head ${statusContext} status.` : " This repository uses the formal App review as its merge gate; no machine status will be published."}${appCredential ? builderRole ? " After an APPROVE review, read the bound review threads and authorize resolution only for satisfied threads opened by this reviewer App; GitHub executes the mutation through the bounded builder App because reviewer installation tokens are not repository collaborators." : " After APPROVE, review threads are readable but resolution is unavailable because no builder App executor is configured." : " A PAT compatibility credential is comment-only and cannot read or resolve review threads."} This server cannot access any other repository, PR, commit, or GitHub mutation.`,
+      `Submit exactly one formal review to ${repository} PR #${prNumber} at ${headSha} as ${expectedLogin}. Write the durable handoff first.${statusGateEnabled ? ` This reviewer App also publishes the exact-head ${statusContext} status.` : " This repository uses the formal App review as its merge gate; no machine status will be published."}${appCredential ? builderRole ? " An APPROVE submission automatically reconciles satisfied blocker threads opened by this reviewer App through the bounded builder App; other reviewers' threads remain blocking." : " After APPROVE, review threads are readable but resolution is unavailable because no builder App executor is configured." : " A PAT compatibility credential is comment-only and cannot read or resolve review threads."} This server cannot access any other repository, PR, commit, or GitHub mutation.`,
   },
 );
 let submittedReview = null;
@@ -171,6 +172,13 @@ const currentReadiness = async () => evaluateReviewThreadState({
   trustedWriterLogins,
   trustRoster,
 });
+const assertCurrentReviewHead = () => assertBoundReviewHead({
+  apiUrl: reviewApiUrl,
+  token,
+  repository,
+  prNumber,
+  headSha,
+});
 
 server.registerTool(
   "write_handoff",
@@ -208,7 +216,8 @@ server.registerTool(
     },
   },
   async ({ event, body, comments, summary }) => {
-    if (submittedReview) {
+    const resumingResolution = submittedReview?.reviewResolution?.complete === false;
+    if (submittedReview && !resumingResolution) {
       return {
         content: [{
           type: "text",
@@ -219,14 +228,21 @@ server.registerTool(
     }
     const handoff = await readFile(handoffPath, "utf8");
     if (!handoff.trim()) throw new Error("The authorized handoff file is empty; write it before posting the review.");
+    if (resumingResolution && event !== "APPROVE") {
+      throw new Error("An incomplete published APPROVE review may be resumed only with APPROVE.");
+    }
     if (!appCredential && event !== "COMMENT") {
       throw new Error("A PAT fallback may post an attributed comment but cannot APPROVE or REQUEST_CHANGES; configure the reviewer GitHub App.");
     }
-    let readiness = null;
-    if (event === "APPROVE" && threadReaderClient) {
+    let readiness = resumingResolution ? submittedReview.reviewReadiness : null;
+    if (!resumingResolution && event === "APPROVE" && threadReaderClient) {
       readiness = await currentReadiness();
     }
-    const constrained = constrainApprovalToReviewThreadState({
+    const constrained = resumingResolution ? {
+      event: "APPROVE",
+      body,
+      gateReviewState: statusGateEnabled ? "COMMENT" : null,
+    } : constrainApprovalToReviewThreadState({
       event,
       body,
       readiness: event === "APPROVE" && threadReaderClient ? readiness : { ready: true, unanswered: [], unresolved: [] },
@@ -235,36 +251,62 @@ server.registerTool(
     const effectiveEvent = constrained.event;
     const effectiveBody = constrained.body;
     const gateReviewState = constrained.gateReviewState;
-    const result = await submitBoundReview({
-      apiUrl: reviewApiUrl,
-      token,
-      repository,
-      prNumber,
-      headSha,
-      expectedLogin,
-      verifiedLogin,
-      event: effectiveEvent,
-      body: effectiveBody,
-      comments,
-      summary,
-      statusContext,
-      publishGate: statusGateEnabled,
-      gateReviewState,
-    });
+    const result = resumingResolution ? { ...submittedReview } : await submitBoundReview({
+        apiUrl: reviewApiUrl,
+        token,
+        repository,
+        prNumber,
+        headSha,
+        expectedLogin,
+        verifiedLogin,
+        event: effectiveEvent,
+        body: effectiveBody,
+        comments,
+        summary,
+        statusContext,
+        publishGate: statusGateEnabled,
+        gateReviewState,
+      });
+    // GitHub review publication and thread resolution are separate remote
+    // mutations. Reconcile them as one restart-safe transaction: publication
+    // is content-addressed, builder resolutions have durable intent receipts,
+    // and every retry re-reads the exact bound head before continuing.
+    submittedEvent = approvedSubmissionEvent(result.state);
+    let reviewResolution = null;
+    if (threadResolverClient) {
+      const reconciled = await reconcilePublishedReview({
+        result,
+        requestedEvent: effectiveEvent,
+        expectedLogin,
+        headSha,
+        readReadiness: currentReadiness,
+        resolveThread: ({ threadId }) => threadController.resolve({ threadId }),
+        assertCurrentHead: assertCurrentReviewHead,
+        statusGate: statusGateEnabled ? {
+          apiUrl: reviewApiUrl,
+          token,
+          repository,
+          context: statusContext,
+        } : null,
+      });
+      submittedEvent = reconciled.submittedEvent;
+      reviewResolution = reconciled.reviewResolution;
+    }
     // Evidence describes an actual publication outcome. A failed GitHub
     // mutation must not leave a receipt that later appears successfully posted.
-    const effectiveTrustRoster = readiness?.trustRoster || trustRoster;
+    const evidenceReadiness = reviewResolution?.readiness || readiness;
+    const effectiveTrustRoster = evidenceReadiness?.trustRoster || trustRoster;
     const evidence = {
         reviewerLogin: expectedLogin,
-        readinessDigest: readiness?.digest || null,
+        readinessDigest: evidenceReadiness?.digest || null,
         configuredWriterLogins: effectiveTrustRoster.configuredWriterLogins,
         rosterSource: effectiveTrustRoster.source,
         degraded: effectiveTrustRoster.degraded,
         unknown: effectiveTrustRoster.unknown === true,
         degradationReason: effectiveTrustRoster.reason,
-        unansweredCount: readiness?.unanswered.length || 0,
-        signerNotTrusted: readiness?.signerNotTrusted || [],
-        unresolvedCount: readiness?.unresolved.length || 0,
+        unansweredCount: evidenceReadiness?.unanswered.length || 0,
+        signerNotTrusted: evidenceReadiness?.signerNotTrusted || [],
+        unresolvedCount: evidenceReadiness?.unresolved.length || 0,
     };
     let trustEvidence;
     try {
@@ -297,12 +339,12 @@ server.registerTool(
         unresolvedCount: evidence.unresolvedCount,
       };
     }
-    submittedReview = {
+    const nextSubmittedReview = {
       ...result,
-      reviewReadiness: readiness,
+      reviewReadiness: reviewResolution?.readiness || readiness,
+      reviewResolution,
       reviewTrustRoster: trustEvidence,
     };
-    submittedEvent = approvedSubmissionEvent(result.state);
     const gateReceipt = result.gate
       ? `gate \`${result.gate.context}\` = \`${result.gate.state}\``
       : appCredential
@@ -310,10 +352,21 @@ server.registerTool(
         : "no machine gate (PAT compatibility comment only)";
     const receipt = `- **PR review:** [${result.state || event}](${result.url}) as \`${result.login}\` at \`${headSha.slice(0, 12)}\`; ${gateReceipt}`;
     if (!handoff.includes(result.url)) await appendFile(handoffPath, `\n\n${receipt}\n`);
+    if (reviewResolution?.complete === false) {
+      const incompleteReceipt = `- **Thread reconciliation:** incomplete at \`${headSha.slice(0, 12)}\`; ${reviewResolution.error?.message || "retry required"}`;
+      const latestHandoff = await readFile(handoffPath, "utf8");
+      if (!latestHandoff.includes(incompleteReceipt)) await appendFile(handoffPath, `\n${incompleteReceipt}\n`);
+    }
+    // Publish the in-memory completion receipt only after the durable trust and
+    // handoff evidence are recorded. If either write fails, an identical retry
+    // rediscovers the content-addressed GitHub review and resumes safely.
+    submittedReview = nextSubmittedReview;
     return {
       content: [{
         type: "text",
-        text: `${result.idempotent ? "Existing" : "Posted"} ${result.state || effectiveEvent} review as ${result.login}: ${result.url}`,
+        text: reviewResolution?.complete === false
+          ? `Posted ${result.state || effectiveEvent} review as ${result.login}, but exact-head thread reconciliation is incomplete and restart-safe: ${reviewResolution.error?.message || "retry required"}`
+          : `${result.idempotent ? "Existing" : "Posted"} ${result.state || effectiveEvent} review as ${result.login}: ${result.url}`,
       }],
       structuredContent: submittedReview,
     };
@@ -343,15 +396,18 @@ if (appCredential) {
       "resolve_review_thread",
       {
         title: "Resolve reviewer-owned pull request thread",
-        description: "After submitting APPROVE, authorize resolution of one satisfied thread opened by this reviewer App; the bounded builder App executes the GitHub mutation.",
+        description: "Retry reconciliation of one satisfied thread opened by this reviewer App after APPROVE; normal approval submission resolves eligible blockers automatically.",
         inputSchema: { threadId: z.string().min(1) },
       },
       async ({ threadId }) => {
+        await assertCurrentReviewHead();
         const result = await threadController.resolve({ threadId });
+        await assertCurrentReviewHead();
         let gate = null;
-        if (statusGateEnabled && submittedReview && submittedEvent === "APPROVE") {
-          const readiness = await currentReadiness();
-          if (readiness.ready) {
+        let readiness = null;
+        if (submittedReview && submittedEvent === "APPROVE") {
+          readiness = await currentReadiness();
+          if (statusGateEnabled && readiness.ready) {
             gate = await publishBoundReviewGate({
               apiUrl: reviewApiUrl,
               token,
@@ -362,8 +418,21 @@ if (appCredential) {
               reviewUrl: submittedReview.url,
               context: statusContext,
             });
-            submittedReview = { ...submittedReview, gate };
           }
+        }
+        if (submittedReview) {
+          submittedReview = {
+            ...submittedReview,
+            ...(gate ? { gate } : {}),
+            ...(readiness ? { reviewReadiness: readiness } : {}),
+            reviewResolution: {
+              attempted: true,
+              complete: Boolean(readiness?.ready),
+              resolved: [...(submittedReview.reviewResolution?.resolved || []), result],
+              readiness,
+              error: readiness?.ready ? null : submittedReview.reviewResolution?.error || null,
+            },
+          };
         }
         const receipt = gate ? { ...result, gate } : result;
         return {

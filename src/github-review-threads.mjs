@@ -322,6 +322,88 @@ export function approvedSubmissionEvent(reviewState) {
   return String(reviewState || "").toUpperCase() === "APPROVED" ? "APPROVE" : null;
 }
 
+export async function reconcileApprovedReviewerBlockers({
+  requestedEvent,
+  submittedReviewState,
+  expectedLogin,
+  headSha,
+  readReadiness,
+  resolveThread,
+  assertCurrentHead = async () => {},
+}) {
+  if (requestedEvent !== "APPROVE" || approvedSubmissionEvent(submittedReviewState) !== "APPROVE") {
+    return { attempted: false, resolved: [], readiness: null };
+  }
+  if (!validSha(headSha)) throw new Error("Review-thread reconciliation requires a full exact-head SHA.");
+  if (!expectedLogin) throw new Error("Review-thread reconciliation requires the approving reviewer login.");
+  if (typeof readReadiness !== "function" || typeof resolveThread !== "function" || typeof assertCurrentHead !== "function") {
+    throw new Error("Review-thread reconciliation requires bounded readiness and resolution operations.");
+  }
+
+  const resolved = [];
+  let candidates = [];
+  try {
+    await assertCurrentHead();
+    const before = await readReadiness();
+    if (before?.headSha !== headSha.toLowerCase()) {
+      throw new Error(`Review-thread reconciliation refused stale authorization: expected ${headSha.toLowerCase()}, received ${before?.headSha || "unknown"}.`);
+    }
+    candidates = (before.unresolved || []).filter((entry) => (
+      entry.answered
+      && sameBotLogin(entry.reviewerLogin, expectedLogin)
+      && entry.disposition?.disposition === "fixed"
+    ));
+    for (const candidate of candidates) {
+      await assertCurrentHead();
+      try {
+        resolved.push(await resolveThread({ threadId: candidate.threadId }));
+      } catch (error) {
+      // The mutation may have reached GitHub even if the response was lost.
+      // Re-read before declaring it pending so retries reconcile observed state.
+      await assertCurrentHead();
+      const observed = await readReadiness();
+      const stillPending = (observed.unresolved || []).some((entry) => entry.threadId === candidate.threadId);
+      if (!stillPending) {
+        resolved.push({ threadId: candidate.threadId, idempotent: true, reconciled: true });
+        continue;
+      }
+        return {
+          attempted: true,
+          complete: false,
+          resolved,
+          readiness: observed,
+          error: {
+            message: `Exact-head approval published, but reviewer-owned blocker reconciliation stopped after ${resolved.length}/${candidates.length}: ${error.message}`,
+            headSha: headSha.toLowerCase(),
+            expectedLogin,
+            completedThreadIds: resolved.map((entry) => entry.threadId),
+            pendingThreadIds: candidates.filter((entry) => (
+              (observed.unresolved || []).some((pending) => pending.threadId === entry.threadId)
+            )).map((entry) => entry.threadId),
+          },
+        };
+      }
+    }
+    await assertCurrentHead();
+    const readiness = await readReadiness();
+    if (readiness?.headSha !== headSha.toLowerCase()) {
+      throw new Error(`Review-thread reconciliation observed a stale final head: expected ${headSha.toLowerCase()}, received ${readiness?.headSha || "unknown"}.`);
+    }
+    return { attempted: true, complete: true, resolved, readiness, error: null };
+  } catch (error) {
+    const completedThreadIds = resolved.map((entry) => entry.threadId);
+    const failure = error instanceof Error ? error : new Error(String(error));
+    failure.reviewResolution = {
+      resolved: [...resolved],
+      completedThreadIds,
+      pendingThreadIds: candidates
+        .map((entry) => entry.threadId)
+        .filter((threadId) => !completedThreadIds.includes(threadId)),
+    };
+    throw failure;
+  }
+}
+
 export function reviewThreadReceiptPath({ repository, prNumber, headSha, expectedLogin, stateRoot }) {
   const repositoryParts = String(repository || "").split("/");
   if (

@@ -8,6 +8,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { existsSync, realpathSync, symlinkSync } from "node:fs";
 import { reviewGateState, reviewMarker, submitBoundReview } from "../src/github-review-client.mjs";
+import { reconcilePublishedReview } from "../src/github-review-workflow.mjs";
 import { createBoundBuilderClient } from "../src/github-builder-client.mjs";
 import {
   assertReviewThreadReadiness,
@@ -20,6 +21,7 @@ import {
   evaluateReviewThreadState,
   parseReviewFinding,
   parseWriterDisposition,
+  reconcileApprovedReviewerBlockers,
   reviewFindingMarker,
   reviewReadinessReceiptIsCurrent,
   reviewThreadReceiptPath,
@@ -502,6 +504,283 @@ assert.equal(approvedSubmissionEvent("approved"), "APPROVE");
 assert.equal(approvedSubmissionEvent("COMMENTED"), null);
 assert.equal(approvedSubmissionEvent("PENDING"), null);
 assert.equal(approvedSubmissionEvent(undefined), null);
+
+const reviewerBBody = `Fix the second boundary.\n\n${reviewFindingMarker({
+  headSha: base.headSha,
+  reviewerLogin: "reviewer-b[bot]",
+  classification: "blocker",
+  fixRecommendation: "Keep the second boundary fail closed.",
+})}`;
+const suggestionBody = `Optional naming cleanup.\n\n${reviewFindingMarker({
+  headSha: base.headSha,
+  reviewerLogin: "reviewer-a[bot]",
+  classification: "suggestion",
+})}`;
+const fixedBody = `Disposition: fixed\n\n${writerDispositionMarker({
+  headSha: nextHeadSha,
+  writerLogin: "builder[bot]",
+  disposition: "fixed",
+  rationale: "Verified on the repaired exact head.",
+  repository: "owner/repo",
+})}`;
+const repairedThread = (id, reviewerLogin, body = findingBody, resolved = false, dispositionBody = fixedBody) => stateThread({
+  id,
+  isResolved: resolved,
+  comments: { nodes: [
+    { body, author: { login: reviewerLogin, __typename: "Bot" } },
+    { body: dispositionBody, author: { login: "builder", __typename: "Bot" } },
+  ] },
+});
+let repairThreads = [
+  repairedThread("owned-blocker", "reviewer-a"),
+  repairedThread("foreign-blocker", "reviewer-b", reviewerBBody),
+  repairedThread("owned-suggestion", "reviewer-a", suggestionBody),
+  repairedThread("owned-follow-up", "reviewer-a", findingBody, false, followUpBody),
+];
+const repairReadiness = () => evaluateReviewThreadState({ ...stateInput, threads: repairThreads });
+const repairCalls = [];
+const repaired = await reconcileApprovedReviewerBlockers({
+  requestedEvent: "APPROVE",
+  submittedReviewState: "APPROVED",
+  expectedLogin: "reviewer-a[bot]",
+  headSha: nextHeadSha,
+  readReadiness: repairReadiness,
+  resolveThread: async ({ threadId }) => {
+    repairCalls.push(threadId);
+    repairThreads = repairThreads.map((thread) => thread.id === threadId ? { ...thread, isResolved: true } : thread);
+    return { threadId, idempotent: false };
+  },
+});
+assert.deepEqual(repairCalls, ["owned-blocker"], "approval resolves only the approving App's satisfied blocker");
+assert.equal(repaired.readiness.ready, false, "a different reviewer's unresolved blocker remains blocking");
+assert.deepEqual(
+  repaired.readiness.unresolved.map((entry) => entry.threadId),
+  ["foreign-blocker", "owned-follow-up"],
+  "foreign blockers and follow-up deferrals remain blocking",
+);
+
+for (const requestedEvent of ["REQUEST_CHANGES", "COMMENT"]) {
+  let called = false;
+  const skipped = await reconcileApprovedReviewerBlockers({
+    requestedEvent,
+    submittedReviewState: requestedEvent === "REQUEST_CHANGES" ? "CHANGES_REQUESTED" : "COMMENTED",
+    expectedLogin: "reviewer-a[bot]",
+    headSha: nextHeadSha,
+    readReadiness: async () => { called = true; return repairReadiness(); },
+    resolveThread: async () => { called = true; },
+  });
+  assert.equal(skipped.attempted, false);
+  assert.equal(called, false, `${requestedEvent} must not inspect or resolve blocker threads`);
+}
+await assert.rejects(
+  reconcileApprovedReviewerBlockers({
+    requestedEvent: "APPROVE",
+    submittedReviewState: "APPROVED",
+    expectedLogin: "reviewer-a[bot]",
+    headSha: nextHeadSha,
+    readReadiness: async () => ({ ...repairReadiness(), headSha: base.headSha }),
+    resolveThread: async () => assert.fail("stale authorization must not mutate"),
+  }),
+  /refused stale authorization/i,
+);
+
+let retryThreads = [
+  repairedThread("retry-one", "reviewer-a"),
+  repairedThread("retry-two", "reviewer-a"),
+];
+let crashOnce = true;
+const retryReadiness = () => evaluateReviewThreadState({ ...stateInput, threads: retryThreads });
+const retryResolver = async ({ threadId }) => {
+  if (threadId === "retry-one" && crashOnce) {
+    crashOnce = false;
+    throw new Error("simulated failure before remote mutation");
+  }
+  retryThreads = retryThreads.map((thread) => thread.id === threadId ? { ...thread, isResolved: true } : thread);
+  return { threadId, idempotent: false };
+};
+const interrupted = await reconcileApprovedReviewerBlockers({
+    requestedEvent: "APPROVE",
+    submittedReviewState: "APPROVED",
+    expectedLogin: "reviewer-a[bot]",
+    headSha: nextHeadSha,
+    readReadiness: retryReadiness,
+    resolveThread: retryResolver,
+  });
+assert.equal(interrupted.complete, false);
+assert.match(interrupted.error.message, /approval published.*stopped after 0\/2/i);
+assert.deepEqual(interrupted.error.pendingThreadIds, ["retry-one", "retry-two"]);
+const recovered = await reconcileApprovedReviewerBlockers({
+  requestedEvent: "APPROVE",
+  submittedReviewState: "APPROVED",
+  expectedLogin: "reviewer-a[bot]",
+  headSha: nextHeadSha,
+  readReadiness: retryReadiness,
+  resolveThread: retryResolver,
+});
+assert.deepEqual(recovered.resolved.map((entry) => entry.threadId), ["retry-one", "retry-two"]);
+assert.equal(recovered.readiness.ready, true, "retry reconciles the landed mutation and remaining blocker");
+
+let landedThreads = [repairedThread("landed-before-response-loss", "reviewer-a")];
+const landedRecovery = await reconcileApprovedReviewerBlockers({
+  requestedEvent: "APPROVE",
+  submittedReviewState: "APPROVED",
+  expectedLogin: "reviewer-a[bot]",
+  headSha: nextHeadSha,
+  readReadiness: () => evaluateReviewThreadState({ ...stateInput, threads: landedThreads }),
+  resolveThread: async ({ threadId }) => {
+    landedThreads = landedThreads.map((thread) => thread.id === threadId ? { ...thread, isResolved: true } : thread);
+    throw new Error("simulated response loss after remote mutation");
+  },
+});
+assert.equal(landedRecovery.complete, true);
+assert.deepEqual(landedRecovery.resolved, [{
+  threadId: "landed-before-response-loss",
+  idempotent: true,
+  reconciled: true,
+}], "post-error re-read recognizes a mutation that landed before response loss");
+
+let workflowThreads = [repairedThread("workflow-retry", "reviewer-a")];
+const workflowReadiness = () => evaluateReviewThreadState({ ...stateInput, threads: workflowThreads });
+const publishedResult = {
+  id: 900,
+  url: "https://github.test/review/900",
+  state: "APPROVED",
+  login: "reviewer-a[bot]",
+  headSha: nextHeadSha,
+  gate: { state: "pending", context: "agent-review" },
+};
+const incompleteWorkflow = await reconcilePublishedReview({
+  result: { ...publishedResult },
+  requestedEvent: "APPROVE",
+  expectedLogin: "reviewer-a[bot]",
+  headSha: nextHeadSha,
+  readReadiness: workflowReadiness,
+  resolveThread: async () => { throw new Error("builder temporarily unavailable"); },
+  assertCurrentHead: async () => ({ headSha: nextHeadSha }),
+});
+assert.equal(incompleteWorkflow.result.url, publishedResult.url, "published review receipt survives resolution failure");
+assert.equal(incompleteWorkflow.submittedEvent, "APPROVE");
+assert.equal(incompleteWorkflow.reviewResolution.complete, false);
+assert.equal(incompleteWorkflow.reviewResolution.readiness.unresolved.length, 1);
+
+const workflowGateApi = fakeGitHub({ login: "reviewer-a[bot]", headSha: nextHeadSha });
+const recoveredWorkflow = await reconcilePublishedReview({
+  result: { ...incompleteWorkflow.result },
+  requestedEvent: "APPROVE",
+  expectedLogin: "reviewer-a[bot]",
+  headSha: nextHeadSha,
+  readReadiness: workflowReadiness,
+  resolveThread: async ({ threadId }) => {
+    workflowThreads = workflowThreads.map((thread) => thread.id === threadId ? { ...thread, isResolved: true } : thread);
+    return { threadId, idempotent: false };
+  },
+  assertCurrentHead: async () => ({ headSha: nextHeadSha }),
+  statusGate: {
+    fetchImpl: workflowGateApi.fetchImpl,
+    apiUrl: base.apiUrl,
+    token: base.token,
+    repository: base.repository,
+    context: "agent-review",
+  },
+});
+assert.equal(recoveredWorkflow.reviewResolution.complete, true);
+assert.equal(recoveredWorkflow.reviewResolution.readiness.ready, true);
+assert.equal(recoveredWorkflow.result.gate.state, "success", "a retry publishes the success gate after convergence");
+
+let failGatePost = true;
+const gateFailureFetch = async (url, options = {}) => {
+  if (url.includes(`/commits/${nextHeadSha}/statuses`)) return json([]);
+  if (url.endsWith(`/statuses/${nextHeadSha}`) && options.method === "POST") {
+    if (failGatePost) {
+      failGatePost = false;
+      return json({ message: "simulated gate outage" }, 503);
+    }
+    return json({
+      id: 902,
+      ...JSON.parse(options.body),
+      creator: { login: "reviewer-a[bot]" },
+    }, 201);
+  }
+  return json({ message: `Unexpected URL ${url}` }, 404);
+};
+const gateIncomplete = await reconcilePublishedReview({
+  result: { ...publishedResult },
+  requestedEvent: "APPROVE",
+  expectedLogin: "reviewer-a[bot]",
+  headSha: nextHeadSha,
+  readReadiness: workflowReadiness,
+  resolveThread: async () => assert.fail("already-converged threads must not be resolved again"),
+  assertCurrentHead: async () => ({ headSha: nextHeadSha }),
+  statusGate: {
+    fetchImpl: gateFailureFetch,
+    apiUrl: base.apiUrl,
+    token: base.token,
+    repository: base.repository,
+    context: "agent-review",
+  },
+});
+assert.equal(gateIncomplete.reviewResolution.complete, false);
+assert.equal(gateIncomplete.reviewResolution.error.stage, "gate_publication");
+assert.equal(gateIncomplete.result.url, publishedResult.url, "gate failure preserves the published review receipt");
+const gateRecovered = await reconcilePublishedReview({
+  result: { ...gateIncomplete.result },
+  requestedEvent: "APPROVE",
+  expectedLogin: "reviewer-a[bot]",
+  headSha: nextHeadSha,
+  readReadiness: workflowReadiness,
+  resolveThread: async () => assert.fail("gate-only retry must not repeat resolution"),
+  assertCurrentHead: async () => ({ headSha: nextHeadSha }),
+  statusGate: {
+    fetchImpl: gateFailureFetch,
+    apiUrl: base.apiUrl,
+    token: base.token,
+    repository: base.repository,
+    context: "agent-review",
+  },
+});
+assert.equal(gateRecovered.reviewResolution.complete, true);
+assert.equal(gateRecovered.result.gate.state, "success", "an identical retry recovers gate publication without another review");
+
+let advancingThreads = [
+  repairedThread("before-head-advance", "reviewer-a"),
+  repairedThread("after-head-advance", "reviewer-a"),
+];
+let liveHeadChecks = 0;
+const headAdvanceMutations = [];
+const headAdvancedWorkflow = await reconcilePublishedReview({
+  result: { ...publishedResult },
+  requestedEvent: "APPROVE",
+  expectedLogin: "reviewer-a[bot]",
+  headSha: nextHeadSha,
+  readReadiness: () => evaluateReviewThreadState({ ...stateInput, threads: advancingThreads }),
+  resolveThread: async ({ threadId }) => {
+    headAdvanceMutations.push(threadId);
+    advancingThreads = advancingThreads.map((thread) => thread.id === threadId ? { ...thread, isResolved: true } : thread);
+    return { threadId };
+  },
+  assertCurrentHead: async () => {
+    liveHeadChecks += 1;
+    if (liveHeadChecks >= 3) throw new Error(`Pull request head changed: authorized ${nextHeadSha}, current ${base.headSha}.`);
+  },
+});
+assert.equal(headAdvancedWorkflow.reviewResolution.complete, false);
+assert.match(headAdvancedWorkflow.reviewResolution.error.message, /head changed/i);
+assert.deepEqual(headAdvanceMutations, ["before-head-advance"], "a live head advance aborts before the next resolution mutation");
+assert.deepEqual(
+  headAdvancedWorkflow.reviewResolution.error.completedThreadIds,
+  ["before-head-advance"],
+  "a stale-head abort preserves the resolutions that already reached GitHub",
+);
+assert.deepEqual(
+  headAdvancedWorkflow.reviewResolution.resolved.map((entry) => entry.threadId),
+  ["before-head-advance"],
+  "the persisted workflow receipt carries completed resolution objects across its error boundary",
+);
+assert.deepEqual(
+  headAdvancedWorkflow.reviewResolution.error.pendingThreadIds,
+  ["after-head-advance"],
+  "a stale-head abort preserves the exact unresolved remainder for retry",
+);
 assert.equal(
   reviewThreadReceiptPath({
     repository: "owner/repo",
@@ -675,8 +954,8 @@ function fakeGitHub({ login = "review-bot", headSha = base.headSha, files = ["sr
     if (url.endsWith("/user")) return json({ login });
     if (url.includes("/pulls/42/files")) return json(files.map((filename) => ({ filename })));
     if (url.includes("/pulls/42/reviews") && options.method !== "POST") return json(reviews);
-    if (url.includes(`/commits/${base.headSha}/statuses`) && options.method !== "POST") return json([]);
-    if (url.endsWith(`/statuses/${base.headSha}`) && options.method === "POST") {
+    if (url.includes(`/commits/${headSha}/statuses`) && options.method !== "POST") return json([]);
+    if (url.endsWith(`/statuses/${headSha}`) && options.method === "POST") {
       const payload = JSON.parse(options.body);
       return json({ id: 501, ...payload, creator: { login } }, 201);
     }
