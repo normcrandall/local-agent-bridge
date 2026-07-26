@@ -8,6 +8,7 @@ import { spawnSync } from "node:child_process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { createCollaboration, readCollaboration } from "../src/collaboration-store.mjs";
+import { collaborationIdentity } from "../src/collaboration-identity.mjs";
 import { buildClaimedIssueContext } from "../src/claimed-issue-context.mjs";
 import { recordMergeDeliveryReceipt } from "../src/merge-delivery-receipts.mjs";
 // Issue #55 dispatch/narrative fixtures: command allowlist admission and command-aware narrative.
@@ -390,19 +391,149 @@ try {
   assert.equal(claudeCompatibleRetry.structuredContent.resume?.reused, true);
   assert.deepEqual(claudeCompatibleRetry.structuredContent.resume?.compatibility?.matchedDimensions, [
     "requestedProviderRoster",
+    "effectiveProviderRoster",
     "startAgent",
+    "nativeChair",
     "explicitModels",
     "modelFallbacks",
     "allowClaudeFable",
     "handoffPath",
     "githubReviewerIdentityConstraints",
+    "githubBuilderAuthorityConstraints",
   ]);
   assert.deepEqual(claudeCompatibleRetry.structuredContent.resume?.compatibility?.requestedProviderRoster, ["claude"]);
+  assert.deepEqual(claudeCompatibleRetry.structuredContent.resume?.compatibility?.effectiveProviderRoster, ["claude"]);
   assert.equal(claudeCompatibleRetry.structuredContent.resume?.compatibility?.startAgent, "claude");
   await Promise.all([
     waitForStop(reviewRaceClaudeClient, claudeRaceStart.structuredContent.id),
     waitForStop(reviewRaceAntigravityClient, antigravityRaceStart.structuredContent.id),
   ]);
+
+  const rotationRaceBase = {
+    ...reviewRaceBase,
+    task: "Exercise exact-head reviewer rotation compatibility.",
+    agents: ["claude", "antigravity"],
+  };
+  const [rotationZero, rotationOne] = await Promise.all([0, 1].map((taskNumber) => (
+    reviewRaceClaudeClient.callTool({
+      name: "start_collaboration",
+      arguments: { ...rotationRaceBase, taskNumber },
+    })
+  )));
+  assert.notEqual(rotationZero.structuredContent.id, rotationOne.structuredContent.id,
+    "task rotation that selects a different effective start agent must not reuse the sibling review");
+  assert.equal(rotationZero.structuredContent.startAgent, "claude");
+  assert.equal(rotationOne.structuredContent.startAgent, "antigravity");
+  await Promise.all([
+    waitForStop(reviewRaceClaudeClient, rotationZero.structuredContent.id),
+    waitForStop(reviewRaceClaudeClient, rotationOne.structuredContent.id),
+  ]);
+
+  const chairCompatibilityBase = {
+    ...reviewRaceBase,
+    task: "Exercise native-chair reuse compatibility.",
+    agents: ["claude", "antigravity"],
+    startAgent: "claude",
+  };
+  const [hostlessReview, chairedReview] = await Promise.all([
+    reviewRaceClaudeClient.callTool({ name: "start_collaboration", arguments: chairCompatibilityBase }),
+    reviewRaceAntigravityClient.callTool({
+      name: "start_collaboration",
+      arguments: {
+        ...chairCompatibilityBase,
+        agents: ["codex", "claude", "antigravity"],
+        startAgent: "codex",
+        chair: {
+          provider: "codex",
+          sessionId: "reuse-race-native-chair",
+          workspace: cleanWorkspace,
+          allowSameProviderDelegation: false,
+        },
+      },
+    }),
+  ]);
+  assert.notEqual(hostlessReview.structuredContent.id, chairedReview.structuredContent.id,
+    "a native-chair wake route must not reuse a hostless collaboration with the same delegated roster");
+  assert.equal(hostlessReview.structuredContent.chair, null);
+  assert.equal(chairedReview.structuredContent.chair.provider, "codex");
+  assert.deepEqual(chairedReview.structuredContent.agents, ["claude", "antigravity"],
+    "native-chair filtering must be reflected in the effective reuse roster");
+  assert.deepEqual(chairedReview.structuredContent.requestedAgents, ["codex", "claude", "antigravity"]);
+  await Promise.all([
+    waitForStop(reviewRaceClaudeClient, hostlessReview.structuredContent.id),
+    waitForStop(reviewRaceAntigravityClient, chairedReview.structuredContent.id),
+  ]);
+
+  const governedBuilderBase = {
+    task: "Exercise GitHub builder authority reuse compatibility.",
+    workspace: cleanWorkspace,
+    agents: ["claude"],
+    startAgent: "claude",
+    mode: "work",
+    writer: "claude",
+    workProfile: "implement",
+    maxTurns: 1,
+    providerFailover: { enabled: false },
+    issueTarget: { repository: "veliqon/collaboration-fixture", issueNumber: 98 },
+    githubBuilder: {
+      repository: "veliqon/collaboration-fixture",
+      issueNumber: 98,
+      prNumber: 248,
+      headSha: claimedHead,
+      expectedLogin: "test-builder[bot]",
+      allowedOperations: ["read_review_threads"],
+    },
+  };
+  const governedBuilderIdentity = collaborationIdentity({
+    workspace: cleanWorkspace,
+    mode: "work",
+    writer: "claude",
+    agents: ["claude"],
+    requestedAgents: ["claude"],
+    startAgent: "claude",
+    githubBuilder: governedBuilderBase.githubBuilder,
+  });
+  const governedBuilderId = "bridge-24800000-0000-4000-8000-000000000001";
+  await createCollaboration(root, {
+    id: governedBuilderId,
+    identityKey: governedBuilderIdentity,
+    task: governedBuilderBase.task,
+    workspace: cleanWorkspace,
+    status: "running",
+    mode: "work",
+    writer: "claude",
+    agents: ["claude"],
+    startAgent: "claude",
+    githubBuilder: governedBuilderBase.githubBuilder,
+    runtime: { activeCall: { agent: "claude", status: "running" } },
+  });
+  const governedBuilderRetry = await reviewRaceClaudeClient.callTool({
+    name: "start_collaboration",
+    arguments: governedBuilderBase,
+  });
+  assert.equal(governedBuilderRetry.structuredContent.id, governedBuilderId,
+    "an identical builder authority retry must reuse the compatible live lane");
+  assert.equal(governedBuilderRetry.structuredContent.resume?.reused, true);
+  const changedBuilderLogin = await reviewRaceAntigravityClient.callTool({
+    name: "start_collaboration",
+    arguments: {
+      ...governedBuilderBase,
+      githubBuilder: { ...governedBuilderBase.githubBuilder, expectedLogin: "other-builder[bot]" },
+    },
+  });
+  assert.equal(changedBuilderLogin.isError, true,
+    "a changed builder login must reach fresh authorization preflight rather than reuse the live lane");
+  assert.match(changedBuilderLogin.content?.[0]?.text || "", /Writer hydration|self-contained writer checkout|GitHub-governed implementation/i);
+  const widenedBuilderOperations = await reviewRaceAntigravityClient.callTool({
+    name: "start_collaboration",
+    arguments: {
+      ...governedBuilderBase,
+      githubBuilder: { ...governedBuilderBase.githubBuilder, allowedOperations: ["ensure_pull_request"] },
+    },
+  });
+  assert.equal(widenedBuilderOperations.isError, true,
+    "wider builder operations must reach fresh verification preflight rather than reuse the narrower lane");
+  assert.match(widenedBuilderOperations.content?.[0]?.text || "", /Writer hydration|self-contained writer checkout|verifiedHeadSha|verification/i);
   const targetSha = "a".repeat(40);
   const firstHead = "b".repeat(40);
   const plannedPortfolio = await firstClient.callTool({

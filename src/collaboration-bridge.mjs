@@ -906,13 +906,16 @@ server.registerTool(
       : null;
     const reuseCompatibility = collaborationReuseCompatibility({
       workspace: requestedWorkspace,
-      agents: input.agents,
-      startAgent: input.startAgent,
+      agents: delegatedAgents,
+      requestedAgents: input.agents,
+      startAgent,
+      chair: native.chair,
       models: input.models,
       modelFallbacks: input.modelFallbacks,
       allowClaudeFable: input.allowClaudeFable,
       handoffPath: input.handoffPath,
       githubReview: input.githubReview,
+      githubBuilder: input.githubBuilder,
     });
     const identityKey = collaborationIdentity({
       workspace: requestedWorkspace,
@@ -922,8 +925,10 @@ server.registerTool(
       githubReview: input.githubReview,
       githubBuilder: input.githubBuilder,
       resumeKey: input.resumeKey,
-      agents: input.agents,
-      startAgent: input.startAgent,
+      agents: delegatedAgents,
+      requestedAgents: input.agents,
+      startAgent,
+      chair: native.chair,
       models: input.models,
       modelFallbacks: input.modelFallbacks,
       allowClaudeFable: input.allowClaudeFable,

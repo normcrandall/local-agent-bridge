@@ -42,6 +42,8 @@ try {
   );
   assert.notEqual(identity, collaborationIdentity({ ...reviewRequest, startAgent: "antigravity" }));
   assert.notEqual(identity, collaborationIdentity({ ...reviewRequest, models: { claude: "claude-opus-4.6" } }));
+  assert.notEqual(identity, collaborationIdentity({ ...reviewRequest, modelFallbacks: { claude: [] } }));
+  assert.notEqual(identity, collaborationIdentity({ ...reviewRequest, allowClaudeFable: true }));
   assert.notEqual(identity, collaborationIdentity({ ...reviewRequest, handoffPath: "docs/handoffs/pr-183-other.md" }));
   assert.notEqual(identity, collaborationIdentity({
     ...reviewRequest,
@@ -51,6 +53,47 @@ try {
     ...reviewRequest,
     githubReview: { ...reviewRequest.githubReview, expectedLogins: { claude: "VELIQON-CLAUDE-REVIEWER[bot]" } },
   }), "equivalent reviewer App login spellings must remain compatible");
+  assert.notEqual(identity, collaborationIdentity({
+    ...reviewRequest,
+    agents: ["claude"],
+    requestedAgents: ["codex", "claude"],
+  }), "the requested roster remains distinct from the post-chair effective roster");
+  assert.notEqual(identity, collaborationIdentity({
+    ...reviewRequest,
+    chair: { provider: "codex", sessionId: "thread-one", workspace, allowSameProviderDelegation: false },
+  }), "native-chair routing identity must constrain reuse");
+  const builderRequest = {
+    workspace,
+    mode: "work",
+    writer: "claude",
+    agents: ["claude"],
+    startAgent: "claude",
+    githubBuilder: {
+      repository: "veliqon/nolvaren-next",
+      issueNumber: 248,
+      prNumber: 251,
+      headSha: "a".repeat(40),
+      expectedLogin: "veliqon-builder",
+      allowedOperations: ["push_branch", "ensure_pull_request"],
+    },
+  };
+  const builderIdentity = collaborationIdentity(builderRequest);
+  assert.notEqual(builderIdentity, collaborationIdentity({
+    ...builderRequest,
+    githubBuilder: { ...builderRequest.githubBuilder, expectedLogin: "other-builder" },
+  }), "builder App authority must constrain reuse");
+  assert.notEqual(builderIdentity, collaborationIdentity({
+    ...builderRequest,
+    githubBuilder: { ...builderRequest.githubBuilder, allowedOperations: ["push_branch"] },
+  }), "builder operation authority must constrain reuse");
+  assert.equal(builderIdentity, collaborationIdentity({
+    ...builderRequest,
+    githubBuilder: {
+      ...builderRequest.githubBuilder,
+      expectedLogin: "VELIQON-BUILDER[bot]",
+      allowedOperations: ["ensure_pull_request", "push_branch"],
+    },
+  }), "equivalent builder login and operation-set spellings must remain compatible");
   assert.deepEqual(
     Object.keys(collaborationReuseCompatibility(reviewRequest)),
     [...COLLABORATION_REUSE_DIMENSIONS],

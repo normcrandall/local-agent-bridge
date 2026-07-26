@@ -3,12 +3,15 @@ import { basename, resolve } from "node:path";
 
 export const COLLABORATION_REUSE_DIMENSIONS = Object.freeze([
   "requestedProviderRoster",
+  "effectiveProviderRoster",
   "startAgent",
+  "nativeChair",
   "explicitModels",
   "modelFallbacks",
   "allowClaudeFable",
   "handoffPath",
   "githubReviewerIdentityConstraints",
+  "githubBuilderAuthorityConstraints",
 ]);
 
 function clean(value) {
@@ -43,25 +46,63 @@ function reviewerIdentityConstraints(githubReview = null) {
   };
 }
 
+function nativeChairConstraints(chair = null) {
+  if (!chair) return null;
+  return {
+    provider: clean(chair.provider) || null,
+    sessionId: clean(chair.sessionId) || null,
+    workspace: chair.workspace ? resolve(chair.workspace) : null,
+    allowSameProviderDelegation: chair.allowSameProviderDelegation === true,
+  };
+}
+
+function builderAuthorityConstraints(githubBuilder = null) {
+  if (!githubBuilder) return null;
+  return {
+    repository: clean(githubBuilder.repository) || null,
+    issueNumber: githubBuilder.issueNumber || null,
+    prNumber: githubBuilder.prNumber || null,
+    baseSha: clean(githubBuilder.baseSha).toLowerCase() || null,
+    headSha: clean(githubBuilder.headSha).toLowerCase() || null,
+    verifiedHeadSha: clean(githubBuilder.verifiedHeadSha).toLowerCase() || null,
+    expectedLogin: canonicalReviewerLogin(githubBuilder.expectedLogin),
+    expectedLogins: Object.fromEntries(Object.keys(githubBuilder.expectedLogins || {}).sort().flatMap((provider) => {
+      const login = canonicalReviewerLogin(githubBuilder.expectedLogins[provider]);
+      return login ? [[provider, login]] : [];
+    })),
+    writerProvider: clean(githubBuilder.writerProvider) || null,
+    headRef: clean(githubBuilder.headRef) || null,
+    baseRef: clean(githubBuilder.baseRef) || null,
+    allowedOperations: [...new Set(githubBuilder.allowedOperations || [])].sort(),
+  };
+}
+
 export function collaborationReuseCompatibility({
   workspace,
   agents = [],
+  requestedAgents = null,
   startAgent = null,
+  chair = null,
   models = {},
   modelFallbacks = {},
   allowClaudeFable = false,
   handoffPath = null,
   githubReview = null,
+  githubBuilder = null,
 } = {}) {
-  const requestedProviderRoster = (agents || []).map((agent) => clean(agent));
+  const effectiveProviderRoster = (agents || []).map((agent) => clean(agent));
+  const requestedProviderRoster = (requestedAgents || agents || []).map((agent) => clean(agent));
   return {
     requestedProviderRoster,
-    startAgent: clean(startAgent) || requestedProviderRoster[0] || null,
+    effectiveProviderRoster,
+    startAgent: clean(startAgent) || effectiveProviderRoster[0] || null,
+    nativeChair: nativeChairConstraints(chair),
     explicitModels: normalizeProviderValues(models),
     modelFallbacks: normalizeProviderValues(modelFallbacks, { lists: true }),
     allowClaudeFable: allowClaudeFable === true,
     handoffPath: handoffPath ? resolve(workspace, handoffPath) : null,
     githubReviewerIdentityConstraints: reviewerIdentityConstraints(githubReview),
+    githubBuilderAuthorityConstraints: builderAuthorityConstraints(githubBuilder),
   };
 }
 
@@ -82,7 +123,9 @@ export function collaborationIdentity({
   githubBuilder = null,
   resumeKey = null,
   agents = [],
+  requestedAgents = null,
   startAgent = null,
+  chair = null,
   models = {},
   modelFallbacks = {},
   allowClaudeFable = false,
@@ -97,12 +140,15 @@ export function collaborationIdentity({
   const compatibility = collaborationReuseCompatibility({
     workspace,
     agents,
+    requestedAgents,
     startAgent,
+    chair,
     models,
     modelFallbacks,
     allowClaudeFable,
     handoffPath,
     githubReview,
+    githubBuilder,
   });
   return createHash("sha256").update(`${scope.join("\0")}\0${JSON.stringify(compatibility)}`).digest("hex");
 }
