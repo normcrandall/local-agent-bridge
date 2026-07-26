@@ -12,6 +12,16 @@ import {
 } from "../src/coordinator-hook-config.mjs";
 import { exportSkills } from "./skill-portability.mjs";
 import { deployRuntime } from "../src/runtime-deployment.mjs";
+import {
+  acquireInstallLock,
+  buildProvenance,
+  computeRuntimeDigest,
+  describeAncestry,
+  evaluateDeployment,
+  inspectSource,
+  readInstalledProvenance,
+  writeInstalledProvenance,
+} from "../src/runtime-provenance.mjs";
 import { refreshSupervisor } from "../src/worker-supervisor-client.mjs";
 import {
   configuredModelFallbacksPath,
@@ -30,20 +40,60 @@ const skillNames = (await readdir(resolve(sourceRoot, "skills"), { withFileTypes
 const codexDialogueSkillSource = resolve(sourceRoot, ".agents/skills/agent-dialogue");
 const claudeDialogueSkillSource = resolve(sourceRoot, "assets/skills/claude/agent-dialogue");
 
+const force = process.argv.slice(2).some((argument) => argument === "--force" || argument === "--repair");
+const runtimeEntries = ["src", "scripts", "skills", "package.json", "package-lock.json"];
+
 await mkdir(installRoot, { recursive: true, mode: 0o700 });
 await mkdir(stateRoot, { recursive: true, mode: 0o700 });
-await deployRuntime({
-  sourceRoot,
-  installRoot,
-  runtimeRoot,
-  entries: ["src", "scripts", "skills", "package.json", "package-lock.json"],
-  installDependencies: async (stagedRuntime) => {
-    execFileSync("npm", ["ci", "--omit=dev", "--ignore-scripts"], {
-      cwd: stagedRuntime,
-      stdio: "inherit",
-    });
-  },
-});
+
+// Serialize global installs machine-wide: two installers replacing one runtime
+// directory is exactly how a stale checkout silently won last time.
+const releaseInstallLock = await acquireInstallLock({ installRoot });
+try {
+  const incoming = await inspectSource({ sourceRoot });
+  const installed = await readInstalledProvenance(runtimeRoot);
+  const ancestry = installed?.commit && incoming.commit
+    ? await describeAncestry({ sourceRoot, installedCommit: installed.commit, incomingCommit: incoming.commit })
+    : { contains: null, containedBy: null };
+  const verdict = evaluateDeployment({ installed, incoming, ...ancestry, force });
+
+  console.log(`Installed runtime provenance: ${installed
+    ? `${installed.commit ?? "unversioned"}${installed.dirty ? " (dirty)" : ""} installed ${installed.installedAt} from ${installed.installerWorkspace}`
+    : "none recorded"}`);
+  console.log(`Deploying source: ${incoming.commit ?? "unversioned"}${incoming.dirty ? " (dirty)" : ""} on ${incoming.ref ?? "detached"} from ${sourceRoot}`);
+
+  if (!verdict.allowed) {
+    console.error(`REFUSED ${verdict.code}: ${verdict.reason}`);
+    if (verdict.repair) console.error(`Repair: ${verdict.repair}`);
+    process.exit(1);
+  }
+  if (verdict.forced) console.warn(`WARNING forced install over ${verdict.code}: ${verdict.reason}`);
+  else if (verdict.code === "replaces_dirty_install") console.warn(`WARNING ${verdict.reason}`);
+
+  await deployRuntime({
+    sourceRoot,
+    installRoot,
+    runtimeRoot,
+    entries: runtimeEntries,
+    installDependencies: async (stagedRuntime) => {
+      execFileSync("npm", ["ci", "--omit=dev", "--ignore-scripts"], {
+        cwd: stagedRuntime,
+        stdio: "inherit",
+      });
+      // Written into the stage so the provenance record is activated by the
+      // same atomic rename as the code it describes.
+      await writeInstalledProvenance(stagedRuntime, buildProvenance({
+        source: incoming,
+        installedAt: new Date().toISOString(),
+        digest: await computeRuntimeDigest(stagedRuntime),
+        entries: runtimeEntries,
+      }));
+    },
+  });
+  console.log(`Recorded provenance: ${verdict.code}`);
+} finally {
+  await releaseInstallLock();
+}
 
 await mkdir(binRoot, { recursive: true, mode: 0o700 });
 const launchers = {
