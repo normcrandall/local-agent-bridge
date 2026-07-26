@@ -326,14 +326,25 @@ try {
     leaseId: deadLetterLease.lease.leaseId,
     failure: { kind: "policy", message: "denied" },
   });
+  await deadLetterHorizonOutbox.enqueue({
+    repository: "veliqon/dead-letter-horizon",
+    operation: "publish",
+    idempotencyKey: "surviving-publication",
+    payload: {},
+  });
   advance(1_001);
-  const deadLetterHorizonReceipt = await deadLetterHorizonOutbox.retain({ maxRecords: 1 });
+  const deadLetterHorizonReceipt = await deadLetterHorizonOutbox.retain({ maxRecords: 100 });
   assert.equal(deadLetterHorizonReceipt.droppedTerminalItems, 1,
     "aged dead-letter history must count toward the receipted terminal horizon");
   assert.equal(deadLetterHorizonReceipt.droppedDeadLetterItems, 1,
     "dead-letter eviction must be separately visible to operators");
-  assert.deepEqual((await deadLetterHorizonOutbox.inspect()).deadLetter, [],
+  assert.ok(deadLetterHorizonReceipt.removed > 0,
+    "a dead-letter eviction receipt must correspond to records removed even when the journal is under budget");
+  const deadLetterHorizonInspection = await deadLetterHorizonOutbox.inspect();
+  assert.deepEqual(deadLetterHorizonInspection.deadLetter, [],
     "aged dead-letter history must not permanently pin the retention floor");
+  assert.deepEqual(deadLetterHorizonInspection.pending.map((entry) => entry.idempotencyKey), ["surviving-publication"],
+    "under-budget dead-letter eviction must preserve and replay surviving work from its checkpoint");
 
   const fullyTerminalDirectory = join(root, "fully-terminal-horizon");
   const fullyTerminalJournal = createRepositoryJournal({ directory: fullyTerminalDirectory, now });

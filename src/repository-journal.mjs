@@ -477,7 +477,9 @@ export function createRepositoryJournal({
         ? Math.min(...latestOutboxCheckpoint.values())
         : requestedStart;
       const retentionStart = latestOutboxCheckpoint.size
-        ? (requestedStart <= 0 ? 0 : Math.max(protectedStart, lastDiscardedOutboxIndex + 1))
+        ? (requestedStart <= 0 && lastDiscardedOutboxIndex < 0
+            ? 0
+            : Math.max(protectedStart, lastDiscardedOutboxIndex + 1))
         : Math.max(requestedStart, lastDiscardedOutboxIndex + 1);
       const retained = records.slice(retentionStart);
       if (retained.length > maxRecords) {
