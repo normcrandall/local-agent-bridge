@@ -335,6 +335,8 @@ export const REQUIRED_ISSUE_SOURCES = ["issue", "comments", "labels", "dependenc
 export const OPTIONAL_ISSUE_SOURCES = ["projectFields"];
 export const DEFAULT_ISSUE_HYDRATION_ATTEMPTS = 3;
 export const MAX_ISSUE_HYDRATION_ATTEMPTS = 5;
+export const DEFAULT_ISSUE_HYDRATION_BACKOFF_MS = 250;
+export const MAX_ISSUE_HYDRATION_BACKOFF_MS = 5_000;
 
 // A deterministic HTTP answer is authoritative and must not be retried. Only a
 // rate limit, a server fault, or a transport failure without a status can be
@@ -353,6 +355,31 @@ export function classifyHydrationFailure(error) {
   return "deterministic_http";
 }
 
+export function hydrationRetryDelayMs(error, {
+  attempt,
+  now = Date.now,
+  baseDelayMs = DEFAULT_ISSUE_HYDRATION_BACKOFF_MS,
+  maxDelayMs = MAX_ISSUE_HYDRATION_BACKOFF_MS,
+} = {}) {
+  const rawRetryAfter = error?.retryAfterSeconds
+    ?? error?.retryAfter
+    ?? error?.headers?.get?.("retry-after")
+    ?? error?.headers?.["retry-after"]
+    ?? error?.response?.headers?.get?.("retry-after")
+    ?? null;
+  let retryAfterMs = null;
+  if (rawRetryAfter !== null && rawRetryAfter !== undefined && String(rawRetryAfter).trim()) {
+    const seconds = Number(String(rawRetryAfter).trim());
+    if (Number.isFinite(seconds) && seconds >= 0) retryAfterMs = seconds * 1_000;
+    else {
+      const timestamp = Date.parse(String(rawRetryAfter));
+      if (Number.isFinite(timestamp)) retryAfterMs = Math.max(0, timestamp - now());
+    }
+  }
+  const exponential = Math.max(0, baseDelayMs) * (2 ** Math.max(0, Number(attempt || 1) - 1));
+  return Math.min(Math.max(0, maxDelayMs), Math.round(retryAfterMs ?? exponential));
+}
+
 // Retry exhaustion, a server fault, and a transport failure are never an empty
 // set: they fail the whole hydration closed. Only a permission denial or an
 // absent endpoint may degrade, and only for a source declared optional.
@@ -364,8 +391,14 @@ function degradationReason(error) {
   return null;
 }
 
-async function readSource({ name, endpoint, required, unsupportedIsDegraded = false, read, attempts, degradations }) {
-  const record = { name, endpoint, status: "ok", attempts: 0, retryClassifications: [], itemCount: 0, sha256: null };
+async function readSource({
+  name, endpoint, required, unsupportedIsDegraded = false, read, attempts,
+  degradations, sleep, now, baseDelayMs, maxDelayMs,
+}) {
+  const record = {
+    name, endpoint, status: "ok", attempts: 0,
+    failureClassifications: [], retryDelaysMs: [], itemCount: 0, sha256: null,
+  };
   let lastError = null;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     record.attempts = attempt;
@@ -376,16 +409,21 @@ async function readSource({ name, endpoint, required, unsupportedIsDegraded = fa
       return { value, record };
     } catch (error) {
       lastError = error;
-      record.retryClassifications.push(classifyHydrationFailure(error));
+      record.failureClassifications.push(classifyHydrationFailure(error));
       if (!isRetryableHydrationFailure(error)) break;
+      if (attempt < attempts) {
+        const delayMs = hydrationRetryDelayMs(error, { attempt, now, baseDelayMs, maxDelayMs });
+        record.retryDelaysMs.push(delayMs);
+        await sleep(delayMs);
+      }
     }
   }
   const reason = degradationReason(lastError);
   const mayDegrade = reason
     && (!required || (unsupportedIsDegraded && /HTTP (404|410)\)$/.test(reason)));
   if (!mayDegrade) {
-    const classification = record.retryClassifications.at(-1) || "unknown";
-    throw new Error(`required issue fact "${name}" could not be read from ${endpoint} after ${record.attempts} attempt(s) [${classification}]: ${lastError?.message || "unknown failure"}`, { cause: lastError });
+    const classifications = record.failureClassifications.join(",") || "unknown";
+    throw new Error(`required issue fact "${name}" could not be read from ${endpoint} after ${record.attempts} attempt(s) [${classifications}]: ${lastError?.message || "unknown failure"}`, { cause: lastError });
   }
   record.status = "degraded";
   record.reason = reason;
@@ -404,6 +442,10 @@ export async function hydrateClaimedIssueTask({
   evidenceScope = null,
   cacheMaxAgeMs = DEFAULT_CLAIMED_ISSUE_CACHE_MAX_AGE_MS,
   attempts = DEFAULT_ISSUE_HYDRATION_ATTEMPTS,
+  sleep = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
+  now = Date.now,
+  baseDelayMs = DEFAULT_ISSUE_HYDRATION_BACKOFF_MS,
+  maxDelayMs = MAX_ISSUE_HYDRATION_BACKOFF_MS,
   authority = null,
 }) {
   try {
@@ -416,7 +458,10 @@ export async function hydrateClaimedIssueTask({
       const degradations = [];
       const records = [];
       const collect = async (options) => {
-        const { value, record } = await readSource({ ...options, attempts: boundedAttempts, degradations });
+        const { value, record } = await readSource({
+          ...options, attempts: boundedAttempts, degradations,
+          sleep, now, baseDelayMs, maxDelayMs,
+        });
         records.push(record);
         return value;
       };
@@ -499,7 +544,8 @@ export async function hydrateClaimedIssueTask({
             endpoint: String(record.endpoint).slice(0, 200),
             status: record.status,
             attempts: record.attempts,
-            retryClassifications: (record.retryClassifications || []).slice(0, MAX_ISSUE_HYDRATION_ATTEMPTS),
+            failureClassifications: (record.failureClassifications || []).slice(0, MAX_ISSUE_HYDRATION_ATTEMPTS),
+            retryDelaysMs: (record.retryDelaysMs || []).slice(0, MAX_ISSUE_HYDRATION_ATTEMPTS - 1),
             itemCount: record.itemCount,
             sha256: record.sha256,
             ...(record.reason ? { reason: String(record.reason).slice(0, 200) } : {}),

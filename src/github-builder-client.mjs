@@ -213,6 +213,8 @@ async function responseJson(response, label) {
   if (!response.ok) {
     const error = new Error(`${label} failed: ${parsed?.message || text || response.statusText}`);
     error.status = response.status;
+    const retryAfter = response.headers.get("retry-after");
+    if (retryAfter) error.retryAfter = retryAfter;
     throw error;
   }
   return parsed;
