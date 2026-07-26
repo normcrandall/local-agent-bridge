@@ -47,6 +47,9 @@ function exampleValue(field, { githubBuilder, threads }) {
     case "oldSha": return sha;
     case "title": return "Concise pull request title";
     case "body": return "Pull request or reply body";
+    case "disposition": return "fixed";
+    case "rationale": return "How the finding was addressed or why it was declined";
+    case "followUpUrl": return "https://github.com/owner/repo/issues/123";
     case "draft": return false;
     case "threadId": return threadId;
     case "method": return "squash";
@@ -120,6 +123,7 @@ Bound Antigravity builder contract:
 - GitHub mutations are authorized only for ${githubBuilder.repository}${githubBuilder.prNumber ? ` PR #${githubBuilder.prNumber}` : ""} at ${githubBuilder.headSha} as ${githubBuilder.expectedLogin}.
 - Do not use gh, general GitHub access, or another agent.
 - Current bound review threads: ${JSON.stringify(threads)}
+- For an actionable review thread, reply_review_thread must include disposition=fixed, declined, or follow_up. A declined disposition requires rationale; follow_up requires a linked issue URL in this repository. The broker stamps the response to the exact authorized head.
 - Canonical operations you may emit, with their exact field names. Field names are literal: aliases such as branch, headCommit, head, base, or commit are rejected before publication.
 ${renderSpecifications(specifications)}
 - End with exactly this validated envelope, containing one entry per intended mutation. Use {"operations":[]} when this turn has no GitHub mutation. The broker will publish non-empty operations unchanged through bound builder credentials:

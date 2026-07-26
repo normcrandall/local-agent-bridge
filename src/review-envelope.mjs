@@ -7,6 +7,8 @@ const inlineComment = z.object({
   side: z.enum(["LEFT", "RIGHT"]),
   start_line: z.number().int().min(1).optional(),
   start_side: z.enum(["LEFT", "RIGHT"]).optional(),
+  classification: z.enum(["blocker", "suggestion"]).optional(),
+  fixRecommendation: z.string().min(1).max(10_000).optional(),
 }).strict();
 
 const reviewEnvelope = z.object({
@@ -14,6 +16,9 @@ const reviewEnvelope = z.object({
   event: z.enum(["COMMENT", "APPROVE", "REQUEST_CHANGES"]),
   body: z.string().min(1).max(60_000),
   comments: z.array(inlineComment).max(50).default([]),
+  summary: z.object({
+    testingSufficiency: z.string().min(1).max(10_000),
+  }).strict().optional(),
 }).strict();
 
 const START = "---BEGIN BOUND_GITHUB_REVIEW---";
@@ -29,8 +34,10 @@ Bound ${provider} review contract:
 - ${provider === "Ollama" ? "This local-model evaluation may request changes. An APPROVE verdict is published as a non-authorizing COMMENT until local review authority is explicitly promoted by future policy." : "Your validated verdict is eligible for the configured provider review policy."}
 - End your response with exactly one JSON envelope between these markers:
 ${START}
-{"handoff":"complete markdown for ${handoffPath}","event":"COMMENT|APPROVE|REQUEST_CHANGES","body":"general formal review body","comments":[{"path":"changed/file","line":1,"side":"RIGHT","body":"actionable inline finding"}]}
+{"handoff":"complete markdown for ${handoffPath}","event":"COMMENT|APPROVE|REQUEST_CHANGES","body":"general formal review body","summary":{"testingSufficiency":"tests inspected, gaps, and whether coverage is sufficient"},"comments":[{"path":"changed/file","line":1,"side":"RIGHT","body":"actionable inline finding","classification":"blocker|suggestion","fixRecommendation":"concrete fix or suggested patch"}]}
 ${END}
+- The summary must distinguish blockers, non-blocking suggestions, and testing sufficiency.
+- Classify every inline comment. A blocker must include a concrete fix recommendation or suggested patch when practical.
 - The broker will validate and publish your exact authored review to ${githubReview.repository} PR #${githubReview.prNumber} at ${githubReview.headSha} as ${githubReview.expectedLogin} through the target-bound publisher.`;
 }
 

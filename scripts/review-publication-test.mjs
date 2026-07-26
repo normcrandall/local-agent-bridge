@@ -7,6 +7,7 @@ import {
   recordReviewPublicationResult,
   republishValidatedReview,
   resolveReviewPublication,
+  submitReviewWithSummaryCompatibility,
 } from "../src/review-publication.mjs";
 import { localReviewEnvelopePolicy, localReviewPublicationPolicy } from "../src/agent-pool.mjs";
 
@@ -131,6 +132,22 @@ const publishedReceipt = await republishValidatedReview({
 });
 assert.equal(publishAttempts, 2, "publication retried once without re-running the provider");
 assert.equal(publishedReceipt.login, "antigravity-reviewer[bot]");
+
+const compatibilityCalls = [];
+const compatibilityResult = await submitReviewWithSummaryCompatibility({
+  envelope: { ...validatedEnvelope, summary: { testingSufficiency: "Hosted CI is green." } },
+  submit: async (arguments_) => {
+    compatibilityCalls.push(arguments_);
+    if (compatibilityCalls.length === 1) {
+      return { isError: true, content: [{ type: "text", text: "Unrecognized key: summary" }] };
+    }
+    return { structuredContent: { state: "APPROVED" } };
+  },
+});
+assert.equal(compatibilityResult.structuredContent.state, "APPROVED");
+assert.equal(compatibilityCalls.length, 2, "an old publisher is retried exactly once without summary");
+assert.deepEqual(compatibilityCalls[0].summary, { testingSufficiency: "Hosted CI is green." });
+assert.equal("summary" in compatibilityCalls[1], false);
 
 // A terminal (policy) failure is not retried.
 let terminalAttempts = 0;

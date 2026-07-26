@@ -1,9 +1,55 @@
+import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 
+const FINDING_PREFIX = "<!-- agent-bridge-finding:v1:";
+const DISPOSITION_PREFIX = "<!-- agent-bridge-disposition:v1:";
+const SUMMARY_PREFIX = "<!-- agent-bridge-review-summary:v1:";
+const MARKER_SUFFIX = " -->";
+const DISPOSITIONS = new Set(["fixed", "declined", "follow_up"]);
+const CLASSIFICATIONS = new Set(["blocker", "suggestion"]);
+
 function normalizeBotLogin(login) {
-  const normalized = (login || "").toLowerCase();
-  return normalized.endsWith("[bot]") ? normalized.slice(0, -5) : normalized;
+  return String(login || "").toLowerCase().replace(/\[bot\]$/, "");
+}
+
+export function assertTrustedReviewerLogins(logins = []) {
+  const normalized = [...new Set(logins.map(normalizeBotLogin).filter(Boolean))];
+  if (normalized.length === 0) {
+    throw new Error("Review-thread evaluation requires at least one trusted reviewer App login.");
+  }
+  return normalized;
+}
+
+function sameBotLogin(left, right) {
+  return normalizeBotLogin(left) === normalizeBotLogin(right);
+}
+
+function encodeMarker(prefix, value) {
+  return `${prefix}${Buffer.from(JSON.stringify(value)).toString("base64url")}${MARKER_SUFFIX}`;
+}
+
+function decodeMarker(body, prefix) {
+  const source = String(body || "");
+  const start = source.lastIndexOf(prefix);
+  if (start < 0) return null;
+  const end = source.indexOf(MARKER_SUFFIX, start + prefix.length);
+  if (end < 0) return null;
+  try {
+    return JSON.parse(Buffer.from(source.slice(start + prefix.length, end), "base64url").toString("utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function validSha(value) {
+  return /^[0-9a-f]{40}$/i.test(value || "");
+}
+
+function trustedBotComment(comment, login, trustedLogins = []) {
+  return comment?.author?.__typename === "Bot"
+    && sameBotLogin(comment.author?.login, login)
+    && trustedLogins.some((trusted) => sameBotLogin(trusted, login));
 }
 
 function requireReviewerApp(client) {
@@ -11,6 +57,217 @@ function requireReviewerApp(client) {
     throw new Error("Review-thread access requires the configured reviewer GitHub App; PAT fallback is not authorized.");
   }
   return client;
+}
+
+function escapeRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function followUpIssuePattern(repository = null) {
+  return repository
+    ? new RegExp(`^https://github\\.com/${escapeRegExp(repository)}/issues/[1-9][0-9]*$`, "i")
+    : /^https:\/\/github\.com\/[^/]+\/[^/]+\/issues\/[1-9][0-9]*$/i;
+}
+
+export function reviewFindingMarker({
+  headSha,
+  reviewerLogin,
+  classification = "blocker",
+  fixRecommendation,
+}) {
+  if (!validSha(headSha)) throw new Error("Review finding requires a full head SHA.");
+  if (!reviewerLogin) throw new Error("Review finding requires a reviewer login.");
+  if (!CLASSIFICATIONS.has(classification)) throw new Error("Review finding classification must be blocker or suggestion.");
+  if (classification === "blocker" && !String(fixRecommendation || "").trim()) {
+    throw new Error("An actionable review finding requires a concrete fix recommendation.");
+  }
+  return encodeMarker(FINDING_PREFIX, {
+    headSha: headSha.toLowerCase(),
+    reviewerLogin,
+    classification,
+    actionable: classification === "blocker",
+    fixRecommendation: String(fixRecommendation || "").trim() || null,
+  });
+}
+
+export function parseReviewFinding(body) {
+  const value = decodeMarker(body, FINDING_PREFIX);
+  if (
+    !value
+    || !validSha(value.headSha)
+    || !value.reviewerLogin
+    || !CLASSIFICATIONS.has(value.classification)
+    || value.actionable !== (value.classification === "blocker")
+    || (value.actionable && !String(value.fixRecommendation || "").trim())
+  ) return null;
+  return value;
+}
+
+export function reviewSummaryMarker({ headSha, reviewerLogin, blockers, suggestions, testingSufficiency }) {
+  if (!validSha(headSha)) throw new Error("Review summary requires a full head SHA.");
+  return encodeMarker(SUMMARY_PREFIX, {
+    headSha: headSha.toLowerCase(),
+    reviewerLogin,
+    blockers,
+    suggestions,
+    testingSufficiency: String(testingSufficiency || "not reported").trim(),
+  });
+}
+
+export function writerDispositionMarker({
+  headSha,
+  writerLogin,
+  disposition,
+  rationale = "",
+  followUpUrl = null,
+  repository = null,
+}) {
+  if (!validSha(headSha)) throw new Error("Review-thread disposition requires a full head SHA.");
+  if (!writerLogin) throw new Error("Review-thread disposition requires the writer App login.");
+  if (!DISPOSITIONS.has(disposition)) {
+    throw new Error("Review-thread disposition must be fixed, declined, or follow_up.");
+  }
+  const normalizedRationale = String(rationale || "").trim();
+  if (disposition === "declined" && !normalizedRationale) {
+    throw new Error("A declined review finding requires a rationale.");
+  }
+  if (disposition === "follow_up") {
+    const issuePattern = followUpIssuePattern(repository);
+    if (!repository || !issuePattern.test(String(followUpUrl || ""))) {
+      throw new Error(`A follow-up disposition requires a linked ${repository || "repository"} GitHub issue URL.`);
+    }
+  } else if (followUpUrl) {
+    throw new Error("followUpUrl is valid only for a follow_up disposition.");
+  }
+  return encodeMarker(DISPOSITION_PREFIX, {
+    headSha: headSha.toLowerCase(),
+    writerLogin,
+    disposition,
+    rationale: normalizedRationale || null,
+    followUpUrl: followUpUrl || null,
+  });
+}
+
+export function parseWriterDisposition(body, { repository = null } = {}) {
+  const value = decodeMarker(body, DISPOSITION_PREFIX);
+  const followUpPattern = followUpIssuePattern(repository);
+  if (
+    !value
+    || !validSha(value.headSha)
+    || !value.writerLogin
+    || !DISPOSITIONS.has(value.disposition)
+    || (value.disposition === "declined" && !String(value.rationale || "").trim())
+    || (value.disposition === "follow_up" && !followUpPattern.test(value.followUpUrl || ""))
+  ) return null;
+  return value;
+}
+
+function actionableFinding(thread, trustedReviewerLogins) {
+  const original = thread.comments?.nodes?.[0];
+  const finding = parseReviewFinding(original?.body);
+  if (!finding?.actionable) return null;
+  if (!trustedBotComment(original, finding.reviewerLogin, trustedReviewerLogins)) return null;
+  return { original, finding };
+}
+
+function currentDisposition(thread, headSha, trustedWriterLogins, repository = null) {
+  const comments = thread.comments?.nodes || [];
+  for (let index = comments.length - 1; index >= 1; index -= 1) {
+    const comment = comments[index];
+    const disposition = parseWriterDisposition(comment.body, { repository });
+    if (
+      disposition?.headSha?.toLowerCase() === headSha.toLowerCase()
+      && trustedBotComment(comment, disposition.writerLogin, trustedWriterLogins)
+    ) return { comment, disposition };
+  }
+  return null;
+}
+
+export function evaluateReviewThreadState({
+  threads = [],
+  headSha,
+  repository = null,
+  trustedReviewerLogins = [],
+  trustedWriterLogins = [],
+}) {
+  if (!validSha(headSha)) throw new Error("Review-thread evaluation requires a full head SHA.");
+  const actionable = [];
+  for (const thread of threads) {
+    const owned = actionableFinding(thread, trustedReviewerLogins);
+    if (!owned) continue;
+    const response = currentDisposition(thread, headSha, trustedWriterLogins, repository);
+    actionable.push({
+      threadId: thread.id,
+      reviewerLogin: owned.finding.reviewerLogin,
+      findingHeadSha: owned.finding.headSha,
+      disposition: response?.disposition || null,
+      answered: Boolean(response),
+      resolved: thread.isResolved === true,
+      responseUrl: response?.comment?.url || null,
+    });
+  }
+  const unanswered = actionable.filter((entry) => !entry.answered);
+  const unresolved = actionable.filter((entry) => entry.answered && !entry.resolved);
+  const normalizedReviewerLogins = [...new Set(trustedReviewerLogins.map(normalizeBotLogin).filter(Boolean))].sort();
+  const normalizedWriterLogins = [...new Set(trustedWriterLogins.map(normalizeBotLogin).filter(Boolean))].sort();
+  const digest = createHash("sha256").update(JSON.stringify({
+    repository: String(repository || "").toLowerCase() || null,
+    headSha: headSha.toLowerCase(),
+    trustedReviewerLogins: normalizedReviewerLogins,
+    trustedWriterLogins: normalizedWriterLogins,
+    actionable,
+  })).digest("hex");
+  return {
+    version: 1,
+    headSha: headSha.toLowerCase(),
+    actionable,
+    unanswered,
+    unresolved,
+    ready: unanswered.length === 0 && unresolved.length === 0,
+    digest,
+  };
+}
+
+export function constrainApprovalToReviewThreadState({
+  event,
+  body,
+  readiness,
+  statusGateEnabled = false,
+}) {
+  if (event !== "APPROVE") {
+    return { event, body, gateReviewState: null };
+  }
+  if (!readiness) throw new Error("APPROVE requires an exact-head review-thread readiness receipt.");
+  // An answered thread may still need the owning reviewer App to resolve it.
+  // Allow the formal APPROVE so that exact-head approval can authorize that
+  // resolution; the merge gate continues to require every thread resolved.
+  if (readiness.unanswered.length === 0) {
+    return {
+      event,
+      body,
+      gateReviewState: statusGateEnabled ? (readiness.ready ? "APPROVE" : "COMMENT") : null,
+    };
+  }
+  return {
+    event: "COMMENT",
+    body: `${String(body || "").trim()}\n\nApproval withheld: ${readiness.unanswered.length} actionable thread(s) are unanswered and ${readiness.unresolved.length} answered thread(s) remain unresolved at this exact head.`,
+    gateReviewState: statusGateEnabled ? "COMMENT" : null,
+  };
+}
+
+export function assertReviewThreadReadiness(input) {
+  const receipt = evaluateReviewThreadState(input);
+  if (!receipt.ready) {
+    const parts = [];
+    if (receipt.unanswered.length) parts.push(`${receipt.unanswered.length} unanswered`);
+    if (receipt.unresolved.length) parts.push(`${receipt.unresolved.length} unresolved`);
+    throw new Error(`Merge readiness refused on exact head ${receipt.headSha}: actionable review threads are ${parts.join(" and ")}.`);
+  }
+  return receipt;
+}
+
+export function reviewReadinessReceiptIsCurrent(receipt, headSha) {
+  return Boolean(receipt?.ready && validSha(headSha) && receipt.headSha === headSha.toLowerCase());
 }
 
 export function approvedSubmissionEvent(reviewState) {
@@ -28,7 +285,7 @@ export function reviewThreadReceiptPath({ repository, prNumber, headSha, expecte
   if (!Number.isInteger(prNumber) || prNumber < 1) {
     throw new Error("reviewThreadReceiptPath requires a positive PR number.");
   }
-  if (!/^[0-9a-f]{40}$/i.test(headSha || "")) {
+  if (!validSha(headSha)) {
     throw new Error("reviewThreadReceiptPath requires a full commit SHA.");
   }
   if (!/^[A-Za-z0-9-]+(?:\[bot\])?$/.test(expectedLogin || "")) {
@@ -46,6 +303,9 @@ export function createReviewerThreadController({
   readerClient = client,
   resolverClient = client,
   expectedLogin,
+  headSha = null,
+  repository = null,
+  trustedWriterLogins = [],
   getSubmittedEvent,
 }) {
   if (!expectedLogin) throw new Error("expectedLogin is required.");
@@ -70,15 +330,24 @@ export function createReviewerThreadController({
       const originalComment = thread.comments?.nodes?.[0];
       if (
         originalComment?.author?.__typename !== "Bot"
-        || normalizeBotLogin(originalComment.author?.login) !== normalizeBotLogin(expectedLogin)
+        || !sameBotLogin(originalComment.author?.login, expectedLogin)
       ) {
         throw new Error("The reviewer App may resolve only a thread opened by that same reviewer identity.");
+      }
+      const finding = parseReviewFinding(originalComment.body);
+      if (finding && (
+        !headSha
+        || !sameBotLogin(finding.reviewerLogin, expectedLogin)
+        || !currentDisposition(thread, headSha, trustedWriterLogins, repository)
+      )) {
+        throw new Error("The reviewer may resolve an actionable thread only after a validated writer disposition on the refreshed exact head.");
       }
       const result = await resolverClient.resolveReviewThread({ threadId });
       return {
         ...result,
         authorizedBy: expectedLogin,
         executedBy: result.login,
+        ...((headSha || result.headSha) ? { headSha: headSha || result.headSha } : {}),
       };
     },
   };

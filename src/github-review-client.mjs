@@ -1,4 +1,8 @@
 import { createHash } from "node:crypto";
+import {
+  reviewFindingMarker,
+  reviewSummaryMarker,
+} from "./github-review-threads.mjs";
 
 function canonicalPayload({ event, body, comments, headSha }) {
   return JSON.stringify({ event, body, comments, headSha });
@@ -58,7 +62,7 @@ async function getAllPages({ fetchImpl, apiUrl, path, token }) {
   throw new Error(`GitHub GET ${path} exceeded the pagination safety limit.`);
 }
 
-async function publishReviewGate({
+export async function publishBoundReviewGate({
   fetchImpl, apiUrl, token, repository, headSha, expectedLogin, reviewState, reviewUrl, context,
 }) {
   const gate = reviewGateState(reviewState);
@@ -104,8 +108,10 @@ export async function submitBoundReview({
   event,
   body,
   comments = [],
+  summary = null,
   statusContext = "agent-review",
   publishGate = true,
+  gateReviewState = null,
 }) {
   if (verifiedLogin) {
     if (verifiedLogin !== expectedLogin) {
@@ -153,9 +159,9 @@ export async function submitBoundReview({
     review.user?.login === expectedLogin && review.body?.includes(marker)
   ));
   if (existing) {
-    const gate = publishGate ? await publishReviewGate({
+    const gate = publishGate ? await publishBoundReviewGate({
       fetchImpl, apiUrl, token, repository, headSha, expectedLogin,
-      reviewState: existing.state || event, reviewUrl: existing.html_url, context: statusContext,
+      reviewState: gateReviewState || existing.state || event, reviewUrl: existing.html_url, context: statusContext,
     }) : null;
     return {
       id: existing.id,
@@ -169,23 +175,70 @@ export async function submitBoundReview({
     };
   }
 
+  const decoratedComments = comments.map((comment) => {
+    const classification = comment.classification
+      || (event === "REQUEST_CHANGES" ? "blocker" : "suggestion");
+    const fixRecommendation = String(comment.fixRecommendation || "").trim();
+    if (classification === "blocker" && !fixRecommendation) {
+      throw new Error(`Blocker at ${comment.path}:${comment.line} requires an explicit concrete fix recommendation.`);
+    }
+    if (event === "APPROVE" && classification === "blocker") {
+      throw new Error("An APPROVE review cannot introduce an actionable blocker.");
+    }
+    const findingMarker = reviewFindingMarker({
+      headSha,
+      reviewerLogin: expectedLogin,
+      classification,
+      fixRecommendation,
+    });
+    const visibleRecommendation = classification === "blocker"
+      ? `\n\nRecommended fix: ${fixRecommendation}`
+      : "";
+    const {
+      classification: _classification,
+      fixRecommendation: _fixRecommendation,
+      ...githubComment
+    } = comment;
+    return {
+      ...githubComment,
+      body: `${comment.body.trim()}${visibleRecommendation}\n\n${findingMarker}`,
+    };
+  });
+  const blockerCount = comments.filter((comment) => (
+    (comment.classification || (event === "REQUEST_CHANGES" ? "blocker" : "suggestion")) === "blocker"
+  )).length;
+  const suggestionCount = comments.length - blockerCount;
+  const testingSufficiency = String(summary?.testingSufficiency || "not reported").trim();
+  const summaryText = [
+    "Review summary:",
+    `- Blockers: ${blockerCount}`,
+    `- Non-blocking suggestions: ${suggestionCount}`,
+    `- Testing sufficiency: ${testingSufficiency}`,
+  ].join("\n");
+  const summaryMarker = reviewSummaryMarker({
+    headSha,
+    reviewerLogin: expectedLogin,
+    blockers: blockerCount,
+    suggestions: suggestionCount,
+    testingSufficiency,
+  });
   const response = await fetchImpl(`${apiUrl}/repos/${repository}/pulls/${prNumber}/reviews`, {
     method: "POST",
     headers: headers(token),
     body: JSON.stringify({
       commit_id: headSha,
       event,
-      body: `${body.trim()}\n\n${marker}`,
-      comments,
+      body: `${body.trim()}\n\n${summaryText}\n\n${summaryMarker}\n\n${marker}`,
+      comments: decoratedComments,
     }),
   });
   const review = await responseJson(response, "GitHub review submission");
   if (review?.user?.login !== expectedLogin) {
     throw new Error(`GitHub posted with unexpected identity: ${review?.user?.login || "unknown"}.`);
   }
-  const gate = publishGate ? await publishReviewGate({
+  const gate = publishGate ? await publishBoundReviewGate({
     fetchImpl, apiUrl, token, repository, headSha, expectedLogin,
-    reviewState: review.state || event, reviewUrl: review.html_url, context: statusContext,
+    reviewState: gateReviewState || review.state || event, reviewUrl: review.html_url, context: statusContext,
   }) : null;
   return {
     id: review.id,

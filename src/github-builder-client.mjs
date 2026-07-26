@@ -15,6 +15,12 @@ import {
 } from "./github-merge-enforcement.mjs";
 import { loadBranchReconciliationState, loadNonBranchIntents } from "./builder-operation-store.mjs";
 import { classifyDeliveryOutcome } from "./builder-contract.mjs";
+import {
+  assertReviewThreadReadiness,
+  parseReviewFinding,
+  parseWriterDisposition,
+  writerDispositionMarker,
+} from "./github-review-threads.mjs";
 
 const LFS_POINTER_REGEX = /^version https:\/\/git-lfs\.github\.com\/spec\/v1\r?\noid sha256:[0-9a-f]{64}\r?\nsize [0-9]+\r?\n$/;
 const MAX_PUSH_FILES = 2000;
@@ -314,6 +320,7 @@ export function createBoundBuilderClient({
   transportUrl = null,
   receiptPath = null,
   allowWorkspaceHead = false,
+  reviewResolutionAuthority = null,
 }) {
   assertRepository(repository);
   assertSha(headSha);
@@ -479,12 +486,41 @@ export function createBoundBuilderClient({
     return loadReviewThreads();
   }
 
-  async function replyReviewThread({ threadId, body }) {
+  async function replyReviewThread({
+    threadId,
+    body,
+    disposition = null,
+    rationale = "",
+    followUpUrl = null,
+  }) {
     authorize("reply_review_thread");
     const threads = await loadReviewThreads();
     const thread = threads.find((candidate) => candidate.id === threadId);
     if (!thread) throw new Error("Review thread is not part of the bound pull request.");
-    const receiptMarker = marker("reply", activeHeadSha, `${threadId}:${body}`);
+    const finding = parseReviewFinding(thread.comments?.nodes?.[0]?.body);
+    if (finding?.actionable && !disposition) {
+      throw new Error("An actionable review thread requires a validated disposition: fixed, declined, or follow_up.");
+    }
+    const dispositionReceipt = disposition ? writerDispositionMarker({
+      headSha: activeHeadSha,
+      writerLogin: expectedLogin,
+      disposition,
+      rationale,
+      followUpUrl,
+      repository,
+    }) : null;
+    const dispositionText = disposition
+      ? [
+          `Disposition: ${disposition}`,
+          rationale ? `Rationale: ${rationale.trim()}` : null,
+          followUpUrl ? `Follow-up: ${followUpUrl}` : null,
+        ].filter(Boolean).join("\n")
+      : null;
+    const receiptMarker = marker(
+      "reply",
+      activeHeadSha,
+      `${threadId}:${body}:${disposition || "legacy"}:${rationale}:${followUpUrl || ""}`,
+    );
     const existing = thread.comments?.nodes?.find((comment) => (
       comment.author?.__typename === "Bot"
       && normalizeBotLogin(comment.author?.login) === normalizeBotLogin(expectedLogin)
@@ -501,7 +537,18 @@ export function createBoundBuilderClient({
         ...context,
         path: "/graphql",
         method: "POST",
-        body: { query, variables: { threadId, body: `${body.trim()}\n\n${receiptMarker}` } },
+        body: {
+          query,
+          variables: {
+            threadId,
+            body: [
+              body.trim(),
+              dispositionText,
+              dispositionReceipt,
+              receiptMarker,
+            ].filter(Boolean).join("\n\n"),
+          },
+        },
       });
       if (result?.errors?.length) throw new Error(`GitHub review-thread reply failed: ${result.errors[0].message}`);
       const comment = result?.data?.addPullRequestReviewThreadReply?.comment;
@@ -514,9 +561,39 @@ export function createBoundBuilderClient({
 
   async function resolveReviewThread({ threadId }) {
     authorize("resolve_review_thread");
+    if (!reviewResolutionAuthority) {
+      throw new Error("Review-thread resolution requires exact-head authorization from the owning reviewer App.");
+    }
+    if (
+      reviewResolutionAuthority.headSha !== activeHeadSha
+      || !reviewResolutionAuthority.reviewerLogin
+    ) {
+      throw new Error("Review-thread resolution authority is stale or invalid for the active head.");
+    }
     const threads = await loadReviewThreads();
     const thread = threads.find((candidate) => candidate.id === threadId);
     if (!thread) throw new Error("Review thread is not part of the bound pull request.");
+    const original = thread.comments?.nodes?.[0];
+    if (
+      original?.author?.__typename !== "Bot"
+      || normalizeBotLogin(original.author?.login) !== normalizeBotLogin(reviewResolutionAuthority.reviewerLogin)
+    ) {
+      throw new Error("The reviewer App may resolve only its own review thread.");
+    }
+    const finding = parseReviewFinding(original.body);
+    if (finding) {
+      const validDisposition = (thread.comments?.nodes || []).slice(1).some((comment) => {
+        const parsed = parseWriterDisposition(comment.body, { repository });
+        return parsed?.headSha === activeHeadSha
+          && comment.author?.__typename === "Bot"
+          && normalizeBotLogin(parsed.writerLogin) === normalizeBotLogin(comment.author?.login)
+          && (reviewResolutionAuthority.trustedWriterLogins || [])
+            .some((login) => normalizeBotLogin(login) === normalizeBotLogin(parsed.writerLogin));
+      });
+      if (!validDisposition) {
+        throw new Error("An actionable review thread may be resolved only after a validated writer disposition on the refreshed exact head.");
+      }
+    }
     if (thread.isResolved) {
       recordNonBranchSettled("resolve_review_thread", { threadId });
       return { operation: "resolve_review_thread", threadId, idempotent: true, login: expectedLogin, headSha: activeHeadSha, authorizationHeadSha };
@@ -653,6 +730,13 @@ export function createBoundBuilderClient({
       }
       throw new Error(`Merge authorization found neither a trusted machine review nor a trusted human approval on exact head ${activeHeadSha}.`);
     }
+    const reviewReadiness = assertReviewThreadReadiness({
+      threads: await loadReviewThreads(),
+      headSha: activeHeadSha,
+      repository,
+      trustedReviewerLogins: trustedReviewLogins,
+      trustedWriterLogins: [expectedLogin],
+    });
     let enforcement = resolveGitHubMergeEnforcement({ configuredMode: mergeEnforcement });
     if (mergeEnforcement !== "broker") {
       const branch = pull.base?.ref || baseRef;
@@ -699,7 +783,7 @@ export function createBoundBuilderClient({
     });
     return {
       operation: "merge", prNumber, sha: merged.sha, idempotent: false, login: expectedLogin, headSha: activeHeadSha, authorizationHeadSha,
-      reviewGate, mergeEnforcement: enforcement,
+      reviewGate, reviewReadiness, mergeEnforcement: enforcement,
     };
   }
 
@@ -1454,5 +1538,14 @@ export function createBoundBuilderClient({
     });
   }
 
-  return { identity, ensurePullRequest, reviewThreads, replyReviewThread, resolveReviewThread, markReady, merge, createBranch, pushBranch, replaceBranch, getIssue, addIssueLabel, removeIssueLabel, getIssueComments, getIssueTimeline, getIssueDependencies, getIssueProjectItems, updateIssueProjectSingleSelect, postIssueComment, updateIssueComment, deleteIssueComment, listTagLocks, acquireTagLock, releaseTagLock, expectedLogin, repository, issueNumber, authority: boundAuthority };
+  function binding() {
+    return {
+      repository,
+      prNumber,
+      headSha: activeHeadSha,
+      authorizationHeadSha,
+    };
+  }
+
+  return { identity, binding, ensurePullRequest, reviewThreads, replyReviewThread, resolveReviewThread, markReady, merge, createBranch, pushBranch, replaceBranch, getIssue, addIssueLabel, removeIssueLabel, getIssueComments, getIssueTimeline, getIssueDependencies, getIssueProjectItems, updateIssueProjectSingleSelect, postIssueComment, updateIssueComment, deleteIssueComment, listTagLocks, acquireTagLock, releaseTagLock, expectedLogin, repository, issueNumber, authority: boundAuthority };
 }

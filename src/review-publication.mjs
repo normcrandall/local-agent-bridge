@@ -159,6 +159,35 @@ export async function republishValidatedReview({ envelope, publish, attempts = 2
   throw lastError;
 }
 
+export function isUnsupportedReviewSummaryError(result) {
+  if (!result?.isError) return false;
+  const message = [
+    result?.structuredContent?.result,
+    result?.structuredContent?.content,
+    ...(result?.content || []).map((item) => item?.text),
+  ].filter(Boolean).join("\n");
+  return /(?:unrecognized|unexpected|unsupported|unknown|invalid)[^\n]*summary|summary[^\n]*(?:unrecognized|unexpected|unsupported|unknown|invalid)/i.test(message);
+}
+
+export async function submitReviewWithSummaryCompatibility({ envelope, submit, onDowngrade = async () => {} }) {
+  if (!envelope || typeof submit !== "function") {
+    throw new Error("submitReviewWithSummaryCompatibility requires an envelope and submit function.");
+  }
+  const review = await submit({
+    event: envelope.event,
+    body: envelope.body,
+    comments: envelope.comments,
+    ...(envelope.summary ? { summary: envelope.summary } : {}),
+  });
+  if (!envelope.summary || !isUnsupportedReviewSummaryError(review)) return review;
+  await onDowngrade({ reason: "publisher_does_not_accept_summary" });
+  return submit({
+    event: envelope.event,
+    body: envelope.body,
+    comments: envelope.comments,
+  });
+}
+
 export function localReviewPrompt(prompt, reason) {
   return `${prompt}\n\nREVIEW PUBLICATION DEGRADED: ${reason} Complete the independent review and durable handoff, but do not claim that a formal GitHub review or agent-review status was published. A configured trusted human must approve the exact head before merge. Continue the review instead of stopping solely because the reviewer App is unavailable.`;
 }

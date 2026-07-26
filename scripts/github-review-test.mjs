@@ -10,9 +10,18 @@ import { existsSync, realpathSync, symlinkSync } from "node:fs";
 import { reviewGateState, reviewMarker, submitBoundReview } from "../src/github-review-client.mjs";
 import { createBoundBuilderClient } from "../src/github-builder-client.mjs";
 import {
+  assertReviewThreadReadiness,
+  assertTrustedReviewerLogins,
   approvedSubmissionEvent,
+  constrainApprovalToReviewThreadState,
   createReviewerThreadController,
+  evaluateReviewThreadState,
+  parseReviewFinding,
+  parseWriterDisposition,
+  reviewFindingMarker,
+  reviewReadinessReceiptIsCurrent,
   reviewThreadReceiptPath,
+  writerDispositionMarker,
 } from "../src/github-review-threads.mjs";
 import { parseReviewEnvelope, reviewEnvelopeInstructions } from "../src/review-envelope.mjs";
 import { ensureContainedHandoffPath, resolveContainedHandoffPath } from "../src/handoff-path.mjs";
@@ -26,8 +35,225 @@ const base = {
   expectedLogin: "review-bot",
   event: "REQUEST_CHANGES",
   body: "P1: Fix the boundary.",
-  comments: [{ path: "src/a.js", line: 8, side: "RIGHT", body: "Validate this input." }],
+  comments: [{
+    path: "src/a.js",
+    line: 8,
+    side: "RIGHT",
+    body: "Validate this input.",
+    fixRecommendation: "Reject invalid input before mutation.",
+  }],
 };
+
+const nextHeadSha = "b".repeat(40);
+const findingBody = `Fix the boundary.\n\n${reviewFindingMarker({
+  headSha: base.headSha,
+  reviewerLogin: "reviewer-a[bot]",
+  classification: "blocker",
+  fixRecommendation: "Reject the invalid value before mutation.",
+})}`;
+const followUpBody = `Disposition: follow_up\n\n${writerDispositionMarker({
+  headSha: nextHeadSha,
+  writerLogin: "builder[bot]",
+  disposition: "follow_up",
+  rationale: "The compatibility cleanup is independent of this fix.",
+  followUpUrl: "https://github.com/owner/repo/issues/149",
+  repository: "owner/repo",
+})}`;
+assert.equal(parseReviewFinding(findingBody).reviewerLogin, "reviewer-a[bot]");
+assert.equal(parseWriterDisposition(followUpBody).disposition, "follow_up");
+assert.throws(() => writerDispositionMarker({
+  headSha: nextHeadSha,
+  writerLogin: "builder[bot]",
+  disposition: "declined",
+}), /requires a rationale/i);
+assert.throws(() => writerDispositionMarker({
+  headSha: nextHeadSha,
+  writerLogin: "builder[bot]",
+  disposition: "follow_up",
+  followUpUrl: "https://github.com/other/repo/issues/1",
+  repository: "owner/repo",
+}), /linked owner\/repo GitHub issue/i);
+
+const stateThread = (overrides = {}) => ({
+  id: "state-thread",
+  isResolved: false,
+  comments: {
+    nodes: [{
+      body: findingBody,
+      author: { login: "reviewer-a", __typename: "Bot" },
+    }],
+  },
+  ...overrides,
+});
+const stateInput = {
+  headSha: nextHeadSha,
+  repository: "owner/repo",
+  trustedReviewerLogins: ["reviewer-a[bot]", "reviewer-b[bot]"],
+  trustedWriterLogins: ["builder[bot]"],
+};
+const unansweredState = evaluateReviewThreadState({ ...stateInput, threads: [stateThread()] });
+assert.equal(unansweredState.ready, false);
+assert.equal(unansweredState.unanswered[0].threadId, "state-thread");
+assert.equal(reviewReadinessReceiptIsCurrent(unansweredState, base.headSha), false);
+
+const staleDisposition = writerDispositionMarker({
+  headSha: base.headSha,
+  writerLogin: "builder[bot]",
+  disposition: "fixed",
+  repository: "owner/repo",
+});
+const staleState = evaluateReviewThreadState({
+  ...stateInput,
+  threads: [stateThread({
+    comments: { nodes: [
+      stateThread().comments.nodes[0],
+      { body: staleDisposition, author: { login: "builder", __typename: "Bot" } },
+    ] },
+  })],
+});
+assert.equal(staleState.unanswered.length, 1, "a prior-head writer response expires on a refreshed head");
+
+const resolvedFollowUp = stateThread({
+  isResolved: true,
+  comments: { nodes: [
+    stateThread().comments.nodes[0],
+    { body: followUpBody, url: "https://github.test/reply", author: { login: "builder", __typename: "Bot" } },
+  ] },
+});
+const readyState = assertReviewThreadReadiness({ ...stateInput, threads: [resolvedFollowUp] });
+assert.equal(readyState.ready, true);
+assert.equal(reviewReadinessReceiptIsCurrent(readyState, nextHeadSha), true);
+const reopenedState = evaluateReviewThreadState({
+  ...stateInput,
+  threads: [{ ...resolvedFollowUp, isResolved: false }],
+});
+assert.equal(reopenedState.unresolved.length, 1, "a reopened actionable thread invalidates readiness");
+assert.throws(
+  () => assertTrustedReviewerLogins([]),
+  /at least one trusted reviewer App login/i,
+);
+const blockedSubmission = constrainApprovalToReviewThreadState({
+  event: "APPROVE",
+  body: "The code is otherwise acceptable.",
+  readiness: unansweredState,
+  statusGateEnabled: false,
+});
+assert.equal(blockedSubmission.event, "COMMENT", "formal-review-only mode must withhold approval for actionable threads");
+assert.equal(blockedSubmission.gateReviewState, null);
+assert.match(blockedSubmission.body, /Approval withheld/);
+const answeredPendingResolution = constrainApprovalToReviewThreadState({
+  event: "APPROVE",
+  body: "The exact-head disposition is satisfactory.",
+  readiness: reopenedState,
+  statusGateEnabled: true,
+});
+assert.equal(
+  answeredPendingResolution.event,
+  "APPROVE",
+  "an answered thread must permit formal approval so its owning reviewer can resolve it",
+);
+assert.equal(
+  answeredPendingResolution.gateReviewState,
+  "COMMENT",
+  "the optional status gate remains pending until the approved reviewer resolves the thread",
+);
+assert.equal(constrainApprovalToReviewThreadState({
+  event: "APPROVE",
+  body: "Approved.",
+  readiness: readyState,
+  statusGateEnabled: true,
+}).gateReviewState, "APPROVE");
+
+const wrongRepositoryDisposition = writerDispositionMarker({
+  headSha: nextHeadSha,
+  writerLogin: "builder[bot]",
+  disposition: "follow_up",
+  rationale: "Tracked elsewhere.",
+  followUpUrl: "https://github.com/other/repo/issues/149",
+  repository: "other/repo",
+});
+const wrongRepositoryState = evaluateReviewThreadState({
+  ...stateInput,
+  threads: [stateThread({
+    comments: { nodes: [
+      stateThread().comments.nodes[0],
+      { body: wrongRepositoryDisposition, author: { login: "builder", __typename: "Bot" } },
+    ] },
+  })],
+});
+assert.equal(wrongRepositoryState.unanswered.length, 1, "a follow-up issue in another repository cannot satisfy readiness");
+const dottedRepositoryDisposition = writerDispositionMarker({
+  headSha: nextHeadSha,
+  writerLogin: "builder[bot]",
+  disposition: "follow_up",
+  rationale: "Tracked in a similarly named repository.",
+  followUpUrl: "https://github.com/owner/repoXjs/issues/149",
+  repository: "owner/repoXjs",
+});
+assert.equal(
+  parseWriterDisposition(dottedRepositoryDisposition, { repository: "owner/repo.js" }),
+  null,
+  "repository punctuation is escaped before matching a follow-up URL",
+);
+const alteredTrustState = evaluateReviewThreadState({
+  ...stateInput,
+  trustedReviewerLogins: ["reviewer-a[bot]"],
+  threads: [stateThread()],
+});
+assert.notEqual(alteredTrustState.digest, unansweredState.digest, "the readiness digest binds the trusted reviewer set");
+
+const stateResolutionCalls = [];
+const owningReviewerController = createReviewerThreadController({
+  readerClient: { reviewThreads: async () => [{ ...resolvedFollowUp, isResolved: false }] },
+  resolverClient: {
+    resolveReviewThread: async ({ threadId }) => {
+      stateResolutionCalls.push(threadId);
+      return { login: "builder[bot]", operation: "resolve_review_thread", threadId, headSha: nextHeadSha };
+    },
+  },
+  expectedLogin: "reviewer-a[bot]",
+  headSha: nextHeadSha,
+  trustedWriterLogins: ["builder[bot]"],
+  getSubmittedEvent: () => "APPROVE",
+});
+assert.equal(
+  (await owningReviewerController.resolve({ threadId: "state-thread" })).authorizedBy,
+  "reviewer-a[bot]",
+);
+assert.deepEqual(stateResolutionCalls, ["state-thread"]);
+const failoverReviewerController = createReviewerThreadController({
+  readerClient: { reviewThreads: async () => [{ ...resolvedFollowUp, isResolved: false }] },
+  resolverClient: { resolveReviewThread: async () => ({}) },
+  expectedLogin: "reviewer-b[bot]",
+  headSha: nextHeadSha,
+  trustedWriterLogins: ["builder[bot]"],
+  getSubmittedEvent: () => "APPROVE",
+});
+await assert.rejects(
+  failoverReviewerController.resolve({ threadId: "state-thread" }),
+  /only a thread opened by that same reviewer/i,
+);
+
+const foreignAndPatState = evaluateReviewThreadState({
+  ...stateInput,
+  threads: [
+    stateThread({
+      id: "foreign",
+      comments: { nodes: [{
+        body: findingBody,
+        author: { login: "untrusted-reviewer", __typename: "Bot" },
+      }] },
+    }),
+    stateThread({
+      id: "pat",
+      comments: { nodes: [{
+        body: findingBody,
+        author: { login: "reviewer-a", __typename: "User" },
+      }] },
+    }),
+  ],
+});
+assert.equal(foreignAndPatState.actionable.length, 0, "foreign and PAT-authored comments cannot enter the trusted gate");
 
 const envelopeInstructions = reviewEnvelopeInstructions({
   githubReview: base,
@@ -229,10 +455,12 @@ function fakeGitHub({ login = "review-bot", headSha = base.headSha, files = ["sr
     }
     if (url.endsWith("/pulls/42") && options.method !== "POST") return json({ head: { sha: headSha } });
     if (url.endsWith("/pulls/42/reviews") && options.method === "POST") {
+      const payload = JSON.parse(options.body);
       return json({
         id: 99,
         html_url: "https://github.test/review/99",
-        state: "CHANGES_REQUESTED",
+        state: payload.event === "APPROVE" ? "APPROVED"
+          : payload.event === "COMMENT" ? "COMMENTED" : "CHANGES_REQUESTED",
         user: { login },
       }, 201);
     }
@@ -251,7 +479,12 @@ const post = successApi.calls.find((call) => call.options.method === "POST");
 const payload = JSON.parse(post.options.body);
 assert.equal(payload.commit_id, base.headSha);
 assert.equal(payload.event, "REQUEST_CHANGES");
-assert.deepEqual(payload.comments, base.comments);
+assert.equal(payload.comments.length, 1);
+assert.equal(payload.comments[0].path, base.comments[0].path);
+assert.equal(parseReviewFinding(payload.comments[0].body).headSha, base.headSha);
+assert.match(payload.body, /Blockers: 1/);
+assert.match(payload.body, /Non-blocking suggestions: 0/);
+assert.match(payload.body, /Testing sufficiency: not reported/);
 assert.match(payload.body, /agent-bridge-review/);
 const statusPost = successApi.calls.find((call) => call.url.endsWith(`/statuses/${base.headSha}`));
 assert.deepEqual(JSON.parse(statusPost.options.body), {
@@ -262,6 +495,35 @@ assert.deepEqual(JSON.parse(statusPost.options.body), {
 });
 assert.equal(reviewGateState("APPROVED").state, "success");
 assert.equal(reviewGateState("COMMENTED").state, "pending");
+
+const deferredApprovalApi = fakeGitHub({ login: "example-reviewer[bot]" });
+const deferredApproval = await submitBoundReview({
+  ...base,
+  expectedLogin: "example-reviewer[bot]",
+  verifiedLogin: "example-reviewer[bot]",
+  event: "APPROVE",
+  comments: [],
+  gateReviewState: "COMMENT",
+  fetchImpl: deferredApprovalApi.fetchImpl,
+});
+assert.equal(deferredApproval.state, "APPROVED");
+assert.equal(deferredApproval.gate.state, "pending", "formal approval stays non-ready until thread resolution");
+
+await assert.rejects(
+  submitBoundReview({
+    ...base,
+    expectedLogin: "example-reviewer[bot]",
+    verifiedLogin: "example-reviewer[bot]",
+    event: "APPROVE",
+    comments: [{
+      ...base.comments[0],
+      classification: "blocker",
+      fixRecommendation: "Validate before mutating.",
+    }],
+    fetchImpl: fakeGitHub({ login: "example-reviewer[bot]" }).fetchImpl,
+  }),
+  /APPROVE review cannot introduce an actionable blocker/i,
+);
 
 const appApi = fakeGitHub({ login: "example-reviewer[bot]" });
 const appSubmitted = await submitBoundReview({
@@ -296,6 +558,34 @@ await assert.rejects(
 await assert.rejects(
   submitBoundReview({ ...base, fetchImpl: fakeGitHub({ files: ["src/other.js"] }).fetchImpl }),
   /not in the pull request diff/,
+);
+await assert.rejects(
+  submitBoundReview({
+    ...base,
+    comments: [{
+      path: base.comments[0].path,
+      line: base.comments[0].line,
+      side: base.comments[0].side,
+      body: base.comments[0].body,
+      classification: "blocker",
+    }],
+    fetchImpl: fakeGitHub().fetchImpl,
+  }),
+  /concrete fix recommendation/i,
+);
+await assert.rejects(
+  submitBoundReview({
+    ...base,
+    comments: [{
+      path: base.comments[0].path,
+      line: base.comments[0].line,
+      side: base.comments[0].side,
+      body: base.comments[0].body,
+    }],
+    fetchImpl: fakeGitHub().fetchImpl,
+  }),
+  /explicit concrete fix recommendation/i,
+  "REQUEST_CHANGES defaults to blocker and still requires an explicit fix recommendation",
 );
 
 const marker = reviewMarker(base);
