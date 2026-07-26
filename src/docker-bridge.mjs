@@ -53,16 +53,26 @@ async function runWithProgress(input, extra, conversationId = null) {
   }, 10_000);
   heartbeat.unref?.();
   try {
-    const result = await runDockerModelReview({
-      prompt: input.prompt,
-      cwd: input.cwd || existing?.cwd || ".",
-      workspaceRoot: WORKSPACE_ROOT,
-      model: input.model || existing?.model,
-      fallbackModels: input.fallbackModels,
-      messages: existing?.messages || [],
-      timeoutSeconds: input.timeoutSeconds,
-      onProgress: notify,
-    });
+    let result;
+    try {
+      result = await runDockerModelReview({
+        prompt: input.prompt,
+        cwd: input.cwd || existing?.cwd || ".",
+        workspaceRoot: WORKSPACE_ROOT,
+        model: input.model || existing?.model,
+        fallbackModels: input.fallbackModels,
+        messages: existing?.messages || [],
+        timeoutSeconds: input.timeoutSeconds,
+        onProgress: notify,
+      });
+    } catch (error) {
+      const reason = classifyDockerProbeFailure(error);
+      return {
+        content: [{ type: "text", text: `Docker Model Runner review could not start: ${reason}.` }],
+        structuredContent: { available: false, reason, conversationId, isError: true },
+        isError: true,
+      };
+    }
     const id = conversationId || randomUUID();
     const session = {
       cwd: input.cwd || existing?.cwd || ".",

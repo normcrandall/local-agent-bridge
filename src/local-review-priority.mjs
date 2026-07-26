@@ -25,7 +25,7 @@ export function classifyDockerProbeFailure(error) {
   }
   if (/model .*not installed|docker model pull/.test(message)) return "model_unavailable";
   if (/health check returned http/.test(message)) return "health_check_failed";
-  if (/config|loopback address|model must not be empty|unsupported .* version/.test(message)) {
+  if (/unable to read docker model runner config at|loopback address|model must not be empty|unsupported .* version/.test(message)) {
     return "configuration_error";
   }
   return "probe_failed";
