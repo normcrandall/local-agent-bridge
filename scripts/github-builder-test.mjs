@@ -227,7 +227,7 @@ function fakeGitHub({
   reviewStatus = "success", reviewLogin = "reviewer[bot]", reviewStatuses = null, reviews = [],
   statusPermissionDenied = false, branchShas = {}, graphqlReplyLogin = "builder[bot]", graphqlReplyType = "Bot",
   rules = [], branchProtection = null, branchProtectionStatus = 200, merged = false,
-  reviewThreads = null,
+  reviewThreads = null, pullBody = "",
 } = {}) {
   const calls = [];
   const branchState = { main: baseCommitSha, ...branchShas };
@@ -270,7 +270,7 @@ function fakeGitHub({
       return json({ name: branch, protected: false });
     }
     if (path === "/repos/owner/repo/pulls/42" && (options.method || "GET") === "GET") return json({
-      number: 42, node_id: "PR_node", draft: true, merged, html_url: "https://github.test/pr/42", head: { sha: currentSha },
+      number: 42, node_id: "PR_node", draft: true, merged, html_url: "https://github.test/pr/42", body: pullBody, head: { sha: currentSha },
     });
     if (path.startsWith("/repos/owner/repo/pulls?")) return json(existingPull ? [{
       number: 42, html_url: "https://github.test/pr/42", head: { sha: currentSha }, base: { ref: "main" }, state: "open",
@@ -294,6 +294,8 @@ function fakeGitHub({
       const page = Number(new URL(url).searchParams.get("page") || 1);
       return json(reviews.slice((page - 1) * 100, page * 100));
     }
+    if (path.startsWith("/repos/owner/repo/issues/147/comments?per_page=100") && (options.method || "GET") === "GET") return json([]);
+    if (path === "/repos/owner/repo/issues/147/comments" && options.method === "POST") return json({ html_url: "https://github.test/owner/repo/issues/147#issuecomment-1" });
     if (path === "/graphql") {
       if (body.query.includes("reviewThreads")) return json({ data: { repository: { pullRequest: { reviewThreads: {
         nodes: wrongThread ? [] : (reviewThreads || [{
@@ -328,6 +330,29 @@ const createAndContinue = createBoundBuilderClient({ ...base, prNumber: null, fe
 assert.equal((await createAndContinue.ensurePullRequest({ title: "Created", body: "Body" })).prNumber, 42);
 assert.equal((await createAndContinue.reviewThreads())[0].id, "thread-1");
 assert.equal(createAndContinue.binding().prNumber, 42);
+const governedBody = `Closes #147\n\n## Outcome\nVerified delivery.\n\n## Scope\nBound publication.\n\n## Verification\nRisk-based test passed.\n\n## Follow-ups\nNone`;
+await assert.rejects(
+  createBoundBuilderClient({
+    ...base,
+    prNumber: null,
+    deliveryProfile: "github-governed",
+    verifiedHeadSha: headSha,
+    fetchImpl: fakeGitHub().fetchImpl,
+  }).ensurePullRequest({ title: "Missing issue", body: governedBody }),
+  /immutable issue number and broker-verified exact head/,
+);
+await assert.rejects(
+  createBoundBuilderClient({ ...base, prNumber: null, issueNumber: 147, fetchImpl: fakeGitHub().fetchImpl })
+    .ensurePullRequest({ title: "Unverified", body: governedBody }),
+  /broker-verified exact head/,
+);
+assert.equal((await createBoundBuilderClient({
+  ...base,
+  prNumber: null,
+  issueNumber: 147,
+  verifiedHeadSha: headSha,
+  fetchImpl: fakeGitHub().fetchImpl,
+}).ensurePullRequest({ title: "Verified", body: governedBody })).deliveryReceipt.headSha, headSha);
 const threads = await builder.reviewThreads();
 assert.equal(threads[0].id, "thread-1");
 
@@ -503,6 +528,7 @@ const dispositionComment = ({
   dispositionHead = headSha,
   disposition = "fixed",
   dispositionRepository = "owner/repo",
+  writerLogin = "builder[bot]",
   isResolved = false,
 } = {}) => ({
   id: "thread-actionable",
@@ -515,14 +541,14 @@ const dispositionComment = ({
     {
       body: `Handled.\n\n${writerDispositionMarker({
         headSha: dispositionHead,
-        writerLogin: "builder[bot]",
+        writerLogin,
         disposition,
         rationale: disposition === "declined" ? "The proposed behavior conflicts with the public contract." : "",
         followUpUrl: disposition === "follow_up" ? `https://github.com/${dispositionRepository}/issues/149` : null,
         repository: dispositionRepository,
       })}`,
       url: "https://github.test/reply/actionable",
-      author: { login: "builder", __typename: "Bot" },
+      author: { login: writerLogin.replace(/\[bot\]$/i, ""), __typename: "Bot" },
     },
   ] },
 });
@@ -592,6 +618,37 @@ const followUpMerge = await createBoundBuilderClient({
 }).merge({ method: "squash" });
 assert.equal(followUpMerge.reviewReadiness.ready, true);
 assert.equal(followUpMerge.reviewReadiness.headSha, headSha);
+
+const providerWriterResolvedApi = fakeGitHub({
+  reviewThreads: [dispositionComment({ writerLogin: "claude-writer[bot]", isResolved: true })],
+});
+const providerWriterMerge = await createBoundBuilderClient({
+  ...base,
+  fetchImpl: providerWriterResolvedApi.fetchImpl,
+  trustedWriterLogins: ["claude-writer[bot]"],
+}).merge({ method: "squash" });
+assert.equal(providerWriterMerge.reviewReadiness.ready, true, "native merge must recognize dispositions from configured provider writer Apps");
+await assert.rejects(
+  createBoundBuilderClient({
+    ...base,
+    issueNumber: 147,
+    fetchImpl: fakeGitHub({ pullBody: "Relates to #147", reviewThreads: [dispositionComment({ isResolved: true })] }).fetchImpl,
+  }).merge({ method: "squash" }),
+  /no longer closes immutable issue/,
+);
+
+const untrustedProviderWriterApi = fakeGitHub({
+  reviewThreads: [dispositionComment({ writerLogin: "unknown-writer[bot]", isResolved: true })],
+});
+await assert.rejects(
+  createBoundBuilderClient({
+    ...base,
+    fetchImpl: untrustedProviderWriterApi.fetchImpl,
+    trustedWriterLogins: ["claude-writer[bot]"],
+  }).merge({ method: "squash" }),
+  /1 unanswered/i,
+  "a disposition from a writer outside the configured trust roster must not satisfy merge readiness",
+);
 
 const foreignProviderApi = fakeGitHub({
   reviewThreads: [{

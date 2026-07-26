@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { createCollaboration } from "../src/collaboration-store.mjs";
+import { recordMergeDeliveryReceipt } from "../src/merge-delivery-receipts.mjs";
 // Issue #55 dispatch/narrative fixtures: command allowlist admission and command-aware narrative.
 import "./issue-40-autonomy-test.mjs";
 import "./issue-55-allowlist-test.mjs";
@@ -184,8 +185,8 @@ try {
     arguments: {
       maxParallel: 2,
       items: [
-        { id: "101", title: "First", priority: 10, paths: ["src/first"] },
-        { id: "102", title: "Second", priority: 9, blockedBy: ["101"], paths: ["src/second"] },
+        { id: "101", issueNumber: 101, title: "First", priority: 10, paths: ["src/first"] },
+        { id: "102", issueNumber: 102, title: "Second", priority: 9, blockedBy: ["101"], paths: ["src/second"] },
         { id: "103", title: "Third", priority: 8, paths: ["src/third"] },
       ],
     },
@@ -200,8 +201,8 @@ try {
       targetBranch: "main",
       targetSha,
       items: [
-        { id: "101", title: "First", priority: 10, paths: ["src/first"] },
-        { id: "102", title: "Second", priority: 9, blockedBy: ["101"], paths: ["src/second"] },
+        { id: "101", issueNumber: 101, title: "First", priority: 10, paths: ["src/first"] },
+        { id: "102", issueNumber: 102, title: "Second", priority: 9, blockedBy: ["101"], paths: ["src/second"] },
       ],
     },
   })).structuredContent;
@@ -253,7 +254,15 @@ try {
     arguments: { portfolioId: portfolio.id, itemId: "101", observedTargetSha: targetSha, observedHeadSha: firstHead },
   });
   assert.equal(mergeAuthorizationResult.structuredContent.authorization.authorized, true);
-  portfolio = (await firstClient.callTool({
+  await recordMergeDeliveryReceipt(resolve(stateDirectory, "merge-receipts"), {
+    repository: portfolio.repository,
+    issueNumber: 101,
+    prNumber: 11,
+    approvedHeadSha: firstHead,
+    mergedSha: "c".repeat(40),
+    issueRecording: { status: "recorded", commentUrl: "https://github.com/normcrandall/local-agent-bridge/issues/101#issuecomment-1" },
+  });
+  const recordedMerge = await firstClient.callTool({
     name: "record_portfolio_merge",
     arguments: {
       portfolioId: portfolio.id,
@@ -263,7 +272,9 @@ try {
       expectedHeadSha: firstHead,
       mergedSha: "c".repeat(40),
     },
-  })).structuredContent;
+  });
+  assert.notEqual(recordedMerge.isError, true, recordedMerge.content?.[0]?.text || "record_portfolio_merge failed");
+  portfolio = recordedMerge.structuredContent;
   assert.equal(portfolio.items.find((item) => item.id === "101").status, "merged");
   assert.equal(portfolio.schedule.selected[0].id, "102");
   const timedMergeLane = (await firstClient.callTool({
@@ -359,6 +370,7 @@ try {
       agents: ["claude"],
       maxTurns: 1,
       verificationCommands: ["npm test"],
+      deliveryProfile: "local-only",
     },
   });
   assert.notEqual(unbornStarted.isError, true);
@@ -392,6 +404,7 @@ try {
       allowClaudeFable: true,
       verificationCommands: ["npm test"],
       handoffPath: ".bridge/test-handoffs/collaboration-review.md",
+      deliveryProfile: "local-only",
     },
   });
   assert.notEqual(started.isError, true);
@@ -486,6 +499,7 @@ try {
       startAgent: "codex",
       chair: { provider: "codex", sessionId: "native-thread-1", workspace: root },
       maxTurns: 1,
+      deliveryProfile: "local-only",
     },
   });
   assert.notEqual(chaired.isError, true);
@@ -538,6 +552,7 @@ try {
       agents: ["codex", "claude"], taskNumber: 0, mode: "work",
       chair: { provider: "codex", sessionId: "native-thread-2", workspace: root },
       maxTurns: 1,
+      deliveryProfile: "local-only",
     },
   });
   assert.notEqual(rotatedNative.isError, true);
@@ -683,6 +698,7 @@ try {
       startAgent: "antigravity",
       writer: "antigravity",
       mode: "work",
+      deliveryProfile: "local-only",
       workProfile: "implement",
       maxTurns: 1,
     },

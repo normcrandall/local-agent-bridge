@@ -1,5 +1,7 @@
 import { createInstallationToken, inspectGitHubAppRoles } from "./github-app-auth.mjs";
 import { createBoundBuilderClient } from "./github-builder-client.mjs";
+import { resolveDeliveryPolicy } from "./delivery-policy.mjs";
+import { configuredTrustedWriterLogins } from "./github-review-threads.mjs";
 
 export function repositoryMatchesPolicy(repository, patterns = []) {
   const normalized = repository.toLowerCase();
@@ -15,13 +17,23 @@ export async function mergePullRequestWithBuilder({
   repository,
   prNumber,
   headSha,
+  issueNumber = null,
   method = "squash",
+  workspace = process.cwd(),
   createCredential = createInstallationToken,
   inspectRoles = inspectGitHubAppRoles,
+  resolvePolicy = resolveDeliveryPolicy,
   clientFactory = createBoundBuilderClient,
 }) {
   const appRoles = await inspectRoles();
-  const authorizedRepositories = appRoles.mergePolicy?.autonomousMergeRepositories || [];
+  const deliveryPolicy = await resolvePolicy({ workspace });
+  if (deliveryPolicy.deliveryProfile !== "github-governed") {
+    throw new Error(`Autonomous GitHub merge is disabled by the ${deliveryPolicy.deliveryProfile} delivery profile.`);
+  }
+  if (!Number.isInteger(issueNumber) || issueNumber < 1) {
+    throw new Error("GitHub-governed merge requires the immutable issue number from the delivery lane; PR prose is not an authority source.");
+  }
+  const authorizedRepositories = deliveryPolicy.identities.autonomousMergeRepositories;
   if (!repositoryMatchesPolicy(repository, authorizedRepositories)) {
     throw new Error(
       `Autonomous merge is not authorized for ${repository}; add it or its owner wildcard to mergePolicy.autonomousMergeRepositories.`,
@@ -37,9 +49,11 @@ export async function mergePullRequestWithBuilder({
     appRoles.roles?.reviewer?.appId,
     ...Object.values(appRoles.roles?.reviewers || {}).map((reviewer) => reviewer.appId),
   ].filter(Boolean).map(Number);
+  const trustedWriterLogins = configuredTrustedWriterLogins({ appRoles });
   const builder = clientFactory({
     repository,
     prNumber,
+    issueNumber,
     headSha,
     expectedLogin: credential.expectedLogin,
     token: credential.token,
@@ -48,8 +62,9 @@ export async function mergePullRequestWithBuilder({
     requiredReviewStatusContext: "agent-review",
     trustedReviewLogins,
     trustedReviewAppIds,
+    trustedWriterLogins,
     trustedHumanReviewLogins: appRoles.mergePolicy?.trustedHumanReviewers || [],
-    mergeEnforcement: appRoles.github?.mergeEnforcement || "broker",
+    mergeEnforcement: deliveryPolicy.decisions.configuredMergeEnforcement.value,
   });
   return builder.merge({ method });
 }

@@ -27,6 +27,8 @@ Call `collaboration.start_collaboration` with:
 - `agents`: Claude and Codex by default; add Antigravity when requested or valuable.
 - `taskNumber`: enables deterministic rotation.
 - `mode: work`, one `writer`, and `workProfile: implement|deliver`.
+- Use the machine-default `github-governed` profile for issue/PR work, including the hydrated issue binding, self-contained checkout, and builder App. Pass `deliveryProfile: "local-only"` only for intentionally unpublished work and omit every GitHub target, claim, and builder.
+- Publish governed work only in a continuation after the chair records exact-head observed verification receipts; set `githubBuilder.verifiedHeadSha` to that clean head before enabling `ensure_pull_request`.
 - `permissionProfile: standard` unless the user explicitly says `yolo`. If explicit, warn before starting and set `permissionProfile: yolo` for the writer. Reviewers remain source-read-only, but an Antigravity review carrying `verificationCommands` automatically uses `--dangerously-skip-permissions` because `agy` exposes no exact command grant; static Antigravity reviews remain sandboxed.
 - exact `verificationCommands`, unusual `workCommands`, and repository handoff path.
 - `githubReview` when the PR is the source of truth.

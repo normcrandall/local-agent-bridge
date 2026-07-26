@@ -16,6 +16,11 @@ const prNumber = process.env.GITHUB_BUILDER_PR_NUMBER
 const headRef = process.env.GITHUB_BUILDER_HEAD_REF || null;
 const baseRef = process.env.GITHUB_BUILDER_BASE_REF || null;
 const baseSha = process.env.GITHUB_BUILDER_BASE_SHA || null;
+const issueNumber = process.env.GITHUB_BUILDER_ISSUE_NUMBER
+  ? Number.parseInt(process.env.GITHUB_BUILDER_ISSUE_NUMBER, 10)
+  : null;
+const verifiedHeadSha = process.env.GITHUB_BUILDER_VERIFIED_HEAD_SHA || null;
+const deliveryProfile = process.env.GITHUB_BUILDER_DELIVERY_PROFILE || null;
 const allowWorkspaceHead = process.env.GITHUB_BUILDER_ALLOW_WORKSPACE_HEAD === "1";
 const apiUrl = process.env.GITHUB_BUILDER_API_URL || "https://api.github.com";
 const operationsAreBound = process.env.GITHUB_BUILDER_OPERATIONS_BOUND === "1";
@@ -84,6 +89,9 @@ const client = createBoundBuilderClient({
   headRef,
   baseRef,
   baseSha,
+  issueNumber,
+  deliveryProfile,
+  verifiedHeadSha,
   allowWorkspaceHead,
   allowedOperations,
   requiredReviewStatusContext: process.env.GITHUB_BUILDER_REVIEW_STATUS_CONTEXT || "agent-review",
@@ -105,7 +113,7 @@ const response = (value) => ({
 
 server.registerTool("ensure_pull_request", {
   title: "Create or update bound pull request",
-  description: "Create or update the pull request for the pre-bound repository, head ref, base ref, and head SHA.",
+  description: "Create or update the pull request for the pre-bound repository, issue, head ref, base ref, and exact head SHA. GitHub-governed descriptions require Outcome, Scope, Verification, and Follow-ups headings.",
   inputSchema: builderMcpInputSchema("ensure_pull_request"),
 }, async (input) => response(await client.ensurePullRequest(input)));
 

@@ -95,6 +95,8 @@ import {
 } from "./writer-lifecycle.mjs";
 import { verifyCollaborationRetirement } from "./state-cleanup.mjs";
 import { resolveDeliveryPolicy } from "./delivery-policy.mjs";
+import { assertGithubGovernedWorkStart, governedContinuationBuilder } from "./github-delivery-governance.mjs";
+import { readMergeDeliveryReceipt, recordMergeDeliveryReceipt } from "./merge-delivery-receipts.mjs";
 import {
   resolveProviderFailoverRoster,
 } from "./provider-failover.mjs";
@@ -103,6 +105,7 @@ const RUNTIME_ROOT = realpathSync(process.env.BRIDGE_RUNTIME_ROOT || process.env
 const WORKSPACE_ROOT = realpathSync(process.env.BRIDGE_WORKSPACE_ROOT || process.env.BRIDGE_ROOT || process.cwd());
 const PORTFOLIO_ROOT = resolve(process.env.BRIDGE_PORTFOLIO_DIR || collaborationDirectory(WORKSPACE_ROOT), "portfolios");
 const EVIDENCE_ROOT = resolve(collaborationDirectory(WORKSPACE_ROOT), "evidence");
+const MERGE_RECEIPT_ROOT = resolve(collaborationDirectory(WORKSPACE_ROOT), "merge-receipts");
 const TERMINAL_STATUSES = new Set(["agreed", "needs_user", "turn_limit", "failed", "cancelled", "budget"]);
 const STATUS_VALUES = ["queued", "running", "recovering", "cancelling", "indeterminate", ...TERMINAL_STATUSES];
 
@@ -116,6 +119,26 @@ function assertAutonomousDeliveryBinding({ mode, workProfile, githubBuilder }) {
   if (mode === "work" && workProfile === "deliver" && !githubBuilder) {
     throw new Error("Autonomous delivery requires a bound githubBuilder; raw push, gh pull-request mutation, PAT, or ambient git credentials are not permitted in autonomous council/portfolio flows.");
   }
+}
+
+function assertGovernedPublicationVerification({ policy, githubBuilder, repositoryEvidence, verificationPlan, requestedCommands }) {
+  const profile = policy?.deliveryProfile || policy?.profile;
+  if (profile !== "github-governed" || !githubBuilder?.allowedOperations?.includes("ensure_pull_request")) return;
+  if (!githubBuilder.verifiedHeadSha) {
+    throw new Error("GitHub-governed PR publication requires githubBuilder.verifiedHeadSha from broker verification receipts; implement and verify first, then continue with a delivery-bound phase.");
+  }
+  if (githubBuilder.verifiedHeadSha !== repositoryEvidence?.headSha) {
+    throw new Error(`GitHub-governed PR publication head ${githubBuilder.verifiedHeadSha} does not match captured repository head ${repositoryEvidence?.headSha || "unknown"}.`);
+  }
+  if (!requestedCommands?.length) {
+    throw new Error("GitHub-governed PR publication requires at least one risk-based verification command.");
+  }
+  if (verificationPlan?.pendingCommands?.length) {
+    throw new Error(`GitHub-governed PR publication is blocked until exact-head verification receipts exist for: ${verificationPlan.pendingCommands.join(", ")}.`);
+  }
+  const observedCommands = new Set((verificationPlan?.reusable || []).map((receipt) => receipt.command));
+  const missing = requestedCommands.filter((command) => !observedCommands.has(command));
+  if (missing.length) throw new Error(`GitHub-governed PR publication is missing reusable exact-head receipts for: ${missing.join(", ")}.`);
 }
 
 function projectDirectory(requested) {
@@ -571,9 +594,11 @@ const githubReviewSchema = z.object({
 );
 const githubBuilderSchema = z.object({
   repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
+  issueNumber: z.number().int().min(1).optional(),
   prNumber: z.number().int().min(1).optional(),
   baseSha: z.string().regex(/^[0-9a-f]{40}$/i).optional(),
   headSha: z.string().regex(/^[0-9a-f]{40}$/i),
+  verifiedHeadSha: z.string().regex(/^[0-9a-f]{40}$/i).optional().describe("Exact head backed by reusable broker verification receipts for every requested command."),
   expectedLogin: z.string().regex(GITHUB_LOGIN_PATTERN),
   writerProvider: z.enum(WRITER_AGENTS).optional().describe("Resolved writer identity; normally assigned by the broker."),
   expectedLogins: z.object({
@@ -684,6 +709,7 @@ const portfolioItemSchema = z.object({
   triageStatus: z.enum(["untriaged", "triaging", "triaged"]).optional(),
   verificationCommands: verificationCommandsSchema.default([]),
   issueNumber: z.number().int().min(1).optional(),
+  prNumber: z.number().int().min(1).optional(),
 }).strict();
 const arbitrationDossierSchema = z.object({
   itemId: z.string().min(1),
@@ -712,13 +738,33 @@ server.registerTool(
     inputSchema: {
       repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
       prNumber: z.number().int().min(1),
+      issueNumber: z.number().int().min(1),
       headSha: z.string().regex(/^[0-9a-f]{40}$/i),
+      workspace: z.string().min(1),
       method: z.enum(["merge", "squash", "rebase"]).default("squash"),
     },
   },
   async (input) => {
     blockNestedCollaboration();
-    return toolResponse(await mergePullRequestWithBuilder(input));
+    const targetWorkspace = projectDirectory(input.workspace);
+    const identity = await readRepositoryIdentity(targetWorkspace);
+    if (identity !== input.repository) {
+      throw new Error(`Merge workspace repository ${identity || "unknown"} does not match ${input.repository}.`);
+    }
+    const receipt = await mergePullRequestWithBuilder({ ...input, workspace: targetWorkspace });
+    if (receipt.deliveryReceipt && receipt.issueRecording?.status === "recorded") {
+      await recordMergeDeliveryReceipt(MERGE_RECEIPT_ROOT, {
+        ...receipt.deliveryReceipt,
+        issueRecording: receipt.issueRecording,
+      });
+    }
+    return toolResponse({
+      ...receipt,
+      deliveryComplete: receipt.deliveryReceipt ? receipt.issueRecording?.status === "recorded" : false,
+      postMergeRecoveryRequired: receipt.deliveryReceipt && receipt.issueRecording?.status !== "recorded"
+        ? "Retry merge_pull_request with the same exact head and issueNumber to reconcile the durable issue receipt before recording the portfolio merge."
+        : null,
+    });
   },
 );
 
@@ -762,6 +808,7 @@ server.registerTool(
       providerFailover: providerFailoverSchema,
       ciTracking: ciTrackingSchema,
       decisionPolicy: decisionPolicySchema,
+      deliveryProfile: z.enum(["local-only", "github-governed"]).optional().describe("Explicitly narrow this run to local-only delivery or request the machine-authorized GitHub-governed profile."),
       chair: chairSchema,
       resumeKey: z.string().trim().min(1).max(200).regex(/^[A-Za-z0-9._:/#-]+$/).optional().describe("Optional stable caller key for idempotent resume-or-start when no issue or PR binding exists."),
       resumeIfCompatible: z.boolean().default(true).describe("Return a compatible live or recoverable collaboration instead of creating a duplicate lane."),
@@ -810,9 +857,17 @@ server.registerTool(
     }
     if (writer && !delegatedAgents.includes(writer)) throw new Error("writer must be included in delegated agents.");
     const requestedWorkspace = projectDirectory(input.workspace);
+    const deliveryPolicy = await resolveDeliveryPolicy({
+      workspace: requestedWorkspace,
+      options: input.deliveryProfile ? { deliveryProfile: input.deliveryProfile } : {},
+    });
+    if (effectiveMode === "work" && deliveryPolicy.deliveryProfile === "local-only"
+      && (input.githubBuilder || input.issueClaim || input.issueTarget)) {
+      throw new Error("Local-only implementation cannot hydrate or mutate GitHub. Remove GitHub bindings or use the github-governed profile.");
+    }
     const selectedVerificationRole = input.verificationRole || null;
     const policyVerificationCommands = selectedVerificationRole
-      ? (await resolveDeliveryPolicy({ workspace: requestedWorkspace })).verificationRoles[selectedVerificationRole]
+      ? deliveryPolicy.verificationRoles[selectedVerificationRole]
       : [];
     const requestedVerificationCommands = [...new Set([
       ...policyVerificationCommands,
@@ -1072,6 +1127,13 @@ server.registerTool(
         mode: effectiveMode,
         worktree,
       });
+      if (effectiveGithubBuilder) effectiveGithubBuilder.deliveryProfile = deliveryPolicy.deliveryProfile;
+      if (effectiveGithubBuilder && resolvedIssueTarget) {
+        if (effectiveGithubBuilder.issueNumber && effectiveGithubBuilder.issueNumber !== resolvedIssueTarget.issueNumber) {
+          throw new Error(`githubBuilder issue #${effectiveGithubBuilder.issueNumber} does not match hydrated issue ${resolvedIssueTarget.repository}#${resolvedIssueTarget.issueNumber}.`);
+        }
+        if (!effectiveGithubBuilder.issueNumber) effectiveGithubBuilder.issueNumber = resolvedIssueTarget.issueNumber;
+      }
       const writerHydration = effectiveMode === "work"
         ? preflightWriterHydration({
           workspace,
@@ -1079,6 +1141,16 @@ server.registerTool(
           githubBuilder: effectiveGithubBuilder,
         })
         : null;
+      const deliveryContract = assertGithubGovernedWorkStart({
+        policy: deliveryPolicy,
+        requestedProfile: input.deliveryProfile || null,
+        mode: effectiveMode,
+        issueTarget: resolvedIssueTarget,
+        issueClaim: resolvedIssueClaim,
+        issueContext,
+        githubBuilder: effectiveGithubBuilder,
+        worktree,
+      });
       if (input.chair?.workspace && projectDirectory(input.chair.workspace) !== realpathSync(workspace)) {
         throw new Error("Native chair workspace must match the collaboration workspace.");
       }
@@ -1131,6 +1203,13 @@ server.registerTool(
         repositoryEvidence,
         commands: requestedVerificationCommands,
       });
+      assertGovernedPublicationVerification({
+        policy: deliveryPolicy,
+        githubBuilder: effectiveGithubBuilder,
+        repositoryEvidence,
+        verificationPlan,
+        requestedCommands: requestedVerificationCommands,
+      });
       if (verificationPlan.reusable.length) {
         resolvedTask = `${resolvedTask}\n\n${formatReusableVerification(verificationPlan.reusable)}`;
       }
@@ -1165,6 +1244,12 @@ server.registerTool(
         handoffPath: input.handoffPath || null,
         githubReview: input.githubReview || null,
         githubBuilder: effectiveGithubBuilder,
+        deliveryPolicy: {
+          profile: deliveryPolicy.deliveryProfile,
+          source: deliveryPolicy.decisions.deliveryProfile.source,
+          contract: deliveryContract,
+          repositoryPolicyPath: deliveryPolicy.sources.repositoryPolicy,
+        },
         issueClaim: resolvedIssueClaim,
         semanticLifecycle: resolvedIssueClaim
           ? createSemanticLifecycleRecord({
@@ -2103,7 +2188,43 @@ server.registerTool(
   },
   async ({ portfolioId: id, expectedRevision, itemId, expectedTargetSha, expectedHeadSha, mergedSha }) => {
     blockNestedCollaboration();
-    const patch = { status: "merged", summary: `Merged as ${mergedSha}` };
+    const inspectedPortfolio = await readPortfolio(PORTFOLIO_ROOT, id);
+    const inspectedItem = inspectedPortfolio.items.find((item) => item.id === String(itemId));
+    if (!inspectedItem) throw new Error(`Portfolio item ${itemId} does not exist.`);
+    const policy = await resolveDeliveryPolicy({ workspace: inspectedPortfolio.workspace });
+    if (policy.deliveryProfile === "github-governed" && !inspectedItem.issueNumber) {
+      throw new Error(`Portfolio item ${itemId} has no bound issueNumber; a lane id is not an issue reference.`);
+    }
+    if (policy.deliveryProfile === "github-governed" && !inspectedItem.prNumber) {
+      throw new Error(`Portfolio item ${itemId} has no bound prNumber from the merge train.`);
+    }
+    const mergeReceipt = policy.deliveryProfile === "github-governed"
+      ? await readMergeDeliveryReceipt(MERGE_RECEIPT_ROOT, {
+        repository: inspectedPortfolio.repository,
+        prNumber: inspectedItem.prNumber,
+        mergedSha,
+      })
+      : null;
+    if (policy.deliveryProfile === "github-governed" && (!mergeReceipt
+      || mergeReceipt.issueNumber !== inspectedItem.issueNumber
+      || mergeReceipt.approvedHeadSha !== expectedHeadSha.toLowerCase()
+      || mergeReceipt.mergedSha !== mergedSha.toLowerCase()
+      || mergeReceipt.issueRecording?.status !== "recorded")) {
+      throw new Error("GitHub-governed portfolio merge requires the broker's durable exact-head merge and issue-recording receipt.");
+    }
+    const deliveryReceipt = {
+      version: 1,
+      profile: policy.deliveryProfile,
+      repository: inspectedPortfolio.repository || null,
+      issueNumber: inspectedItem.issueNumber || null,
+      prNumber: inspectedItem.prNumber || null,
+      approvedHeadSha: expectedHeadSha,
+      mergedSha,
+      issueRecordingStatus: mergeReceipt?.issueRecording?.status || null,
+      issueRecordingCommentUrl: mergeReceipt?.issueRecording?.commentUrl || null,
+      recordedAt: new Date().toISOString(),
+    };
+    const patch = { status: "merged", summary: `Merged as ${mergedSha}`, deliveryReceipt };
     const updatedState = await updatePortfolioItemWithFootprintReservation(
       PORTFOLIO_ROOT,
       id,
@@ -2507,9 +2628,33 @@ server.registerTool(
     }
     const continuationStore = createEvidenceStore({ directory: EVIDENCE_ROOT });
     const activeGithubReview = githubReview || current.githubReview || null;
-    const activeGithubBuilder = githubBuilder
+    let activeGithubBuilder = githubBuilder
       ? workspaceHeadBuilderBinding({ githubBuilder, mode: current.mode, worktree: current.worktree })
       : current.githubBuilder || null;
+    const immutableIssueTarget = current.issueTarget
+      || (current.issueClaim ? { repository: current.issueClaim.repository, issueNumber: current.issueClaim.issueNumber } : null);
+    activeGithubBuilder = governedContinuationBuilder({
+      deliveryPolicy: current.deliveryPolicy,
+      mode: current.mode,
+      currentBuilder: current.githubBuilder,
+      replacementBuilder: activeGithubBuilder,
+      issueTarget: immutableIssueTarget,
+    });
+    if (activeGithubBuilder) activeGithubBuilder.deliveryProfile = current.deliveryPolicy?.profile || null;
+    if (current.deliveryPolicy?.profile === "github-governed") {
+      assertGithubGovernedWorkStart({
+        policy: {
+          deliveryProfile: current.deliveryPolicy.profile,
+          decisions: { deliveryProfile: { source: current.deliveryPolicy.source } },
+        },
+        mode: current.mode,
+        issueTarget: immutableIssueTarget,
+        issueClaim: resolvedContinuationIssueClaim,
+        issueContext: current.issueContext,
+        githubBuilder: activeGithubBuilder,
+        worktree: current.worktree,
+      });
+    }
     const continuationEvidence = await captureRepositoryEvidence({
       workspace: current.workspace,
       store: continuationStore,
@@ -2526,6 +2671,13 @@ server.registerTool(
       store: continuationStore,
       repositoryEvidence: continuationEvidence,
       commands: requestedContinuationCommands,
+    });
+    assertGovernedPublicationVerification({
+      policy: current.deliveryPolicy,
+      githubBuilder: activeGithubBuilder,
+      repositoryEvidence: continuationEvidence,
+      verificationPlan: continuationVerificationPlan,
+      requestedCommands: requestedContinuationCommands,
     });
     const continuationMessage = [
       message,

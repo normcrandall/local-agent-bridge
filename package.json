@@ -46,7 +46,7 @@
     "test:models": "node scripts/model-routing-test.mjs && node scripts/antigravity-model-selection-test.mjs",
     "test:model-policy": "node scripts/model-policy-test.mjs",
     "test:model-policy:adapters": "node scripts/model-policy-adapter-test.mjs",
-    "test:delivery-policy": "node scripts/delivery-policy-test.mjs",
+    "test:delivery-policy": "node scripts/delivery-policy-test.mjs && node scripts/github-delivery-governance-test.mjs",
     "explain:policy": "node scripts/explain-delivery-policy.mjs",
     "test:native-chair": "node scripts/native-chair-test.mjs",
     "test:codex-isolation": "node scripts/codex-isolation-test.mjs",
