@@ -13,6 +13,7 @@ import {
   assertReviewThreadReadiness,
   assertTrustedReviewerLogins,
   approvedSubmissionEvent,
+  appendReviewTrustEvidence,
   configuredTrustedWriterLogins,
   constrainApprovalToReviewThreadState,
   createReviewerThreadController,
@@ -22,8 +23,10 @@ import {
   reviewFindingMarker,
   reviewReadinessReceiptIsCurrent,
   reviewThreadReceiptPath,
+  readLatestReviewTrustEvidence,
   writerDispositionMarker,
 } from "../src/github-review-threads.mjs";
+import { inspectReviewTrustRoster } from "../src/review-trust-roster.mjs";
 import { parseReviewEnvelope, reviewEnvelopeInstructions } from "../src/review-envelope.mjs";
 import { ensureContainedHandoffPath, resolveContainedHandoffPath } from "../src/handoff-path.mjs";
 
@@ -140,6 +143,55 @@ const resolvedFollowUp = stateThread({
 const readyState = assertReviewThreadReadiness({ ...stateInput, threads: [resolvedFollowUp] });
 assert.equal(readyState.ready, true);
 assert.equal(reviewReadinessReceiptIsCurrent(readyState, nextHeadSha), true);
+const providerWriterBody = `Disposition: fixed\n\n${writerDispositionMarker({
+  headSha: nextHeadSha,
+  writerLogin: "claude-writer[bot]",
+  disposition: "fixed",
+  repository: "owner/repo",
+})}`;
+const providerWriterState = assertReviewThreadReadiness({
+  ...stateInput,
+  trustedWriterLogins: ["builder[bot]", "claude-writer[bot]"],
+  threads: [stateThread({
+    isResolved: true,
+    comments: { nodes: [
+      stateThread().comments.nodes[0],
+      { body: providerWriterBody, url: "https://github.test/provider-reply", author: { login: "claude-writer", __typename: "Bot" } },
+    ] },
+  })],
+});
+assert.equal(providerWriterState.ready, true, "a healthy configured provider-writer disposition satisfies the exact-head gate");
+
+const staleRosterState = evaluateReviewThreadState({
+  ...stateInput,
+  repository: "owner/repo",
+  prNumber: 42,
+  trustRoster: {
+    source: "github-app-roles",
+    configuredWriterLogins: ["builder[bot]"],
+    degraded: false,
+    reason: null,
+  },
+  threads: [stateThread({
+    isResolved: true,
+    comments: { nodes: [
+      stateThread().comments.nodes[0],
+      { body: providerWriterBody, url: "https://github.test/provider-reply", author: { login: "claude-writer", __typename: "Bot" } },
+    ] },
+  })],
+});
+assert.equal(staleRosterState.ready, false);
+assert.equal(staleRosterState.unanswered.length, 0, "a signed disposition is not falsely reported as absent");
+assert.equal(staleRosterState.signerNotTrusted[0].signerNotTrusted.writerLogin, "claude-writer[bot]");
+const staleRosterSubmission = constrainApprovalToReviewThreadState({
+  event: "APPROVE",
+  body: "Implementation is otherwise approved.",
+  readiness: staleRosterState,
+});
+assert.equal(staleRosterSubmission.event, "COMMENT", "an out-of-roster signer remains fail closed");
+assert.match(staleRosterSubmission.body, /owner\/repo PR #42 at b{12}/);
+assert.match(staleRosterSubmission.body, /signer\(s\) are not in the active trusted writer roster/);
+assert.match(staleRosterSubmission.body, /source=github-app-roles; degraded=no; configured writers=builder\[bot\]/);
 const reopenedState = evaluateReviewThreadState({
   ...stateInput,
   threads: [{ ...resolvedFollowUp, isResolved: false }],
@@ -218,6 +270,65 @@ const alteredTrustState = evaluateReviewThreadState({
   threads: [stateThread()],
 });
 assert.notEqual(alteredTrustState.digest, unansweredState.digest, "the readiness digest binds the trusted reviewer set");
+
+const malformedRoster = await inspectReviewTrustRoster({
+  repository: "owner/repo",
+  configPath: "/private/config/github-apps.json",
+  expectedReviewerLogin: "reviewer-a[bot]",
+  inspectRoles: async () => { throw new Error("Unable to read /private/config/github-apps.json: key at /secret/reviewer.pem"); },
+  loadBuilderRole: async () => { throw new Error("must not be reached"); },
+});
+assert.equal(malformedRoster.evidence.degraded, true);
+assert.equal(malformedRoster.trustedWriterLogins.length, 0, "malformed App config must fail closed");
+assert.doesNotMatch(JSON.stringify(malformedRoster.evidence), /private|secret|\.pem/i, "durable diagnostics must not expose configuration or key paths");
+const degradedBuilderRoster = await inspectReviewTrustRoster({
+  repository: "owner/repo",
+  configPath: "/private/config/github-apps.json",
+  expectedReviewerLogin: "reviewer-a[bot]",
+  inspectRoles: async () => ({
+    roles: {
+      writers: {
+        claude: { configured: true, expectedLoginValid: true, expectedLogin: "claude-writer[bot]" },
+      },
+      reviewers: {},
+    },
+  }),
+  loadBuilderRole: async () => { throw new Error("private key /secret/builder.pem missing"); },
+});
+assert.deepEqual(degradedBuilderRoster.evidence.configuredWriterLogins, ["claude-writer[bot]"], "configured identities remain inspectable even when none may be trusted");
+assert.deepEqual(degradedBuilderRoster.trustedWriterLogins, [], "degraded inspection must never authorize the visible configured identities");
+
+const evidenceRoot = await mkdtemp(join(tmpdir(), "review-trust-evidence-"));
+try {
+  await appendReviewTrustEvidence({
+    repository: "owner/repo",
+    prNumber: 42,
+    headSha: nextHeadSha,
+    stateRoot: evidenceRoot,
+    evidence: {
+      reviewerLogin: "reviewer-a[bot]",
+      readinessDigest: staleRosterState.digest,
+      configuredWriterLogins: ["builder[bot]"],
+      rosterSource: "github-app-roles",
+      degraded: true,
+      degradationReason: malformedRoster.evidence.reason,
+      signerNotTrusted: staleRosterState.signerNotTrusted,
+    },
+  });
+  const durableTrust = await readLatestReviewTrustEvidence({
+    repository: "owner/repo",
+    prNumber: 42,
+    headSha: nextHeadSha,
+    stateRoot: evidenceRoot,
+  });
+  assert.equal(durableTrust.repository, "owner/repo");
+  assert.equal(durableTrust.prNumber, 42);
+  assert.equal(durableTrust.headSha, nextHeadSha);
+  assert.equal(durableTrust.signerNotTrusted[0].writerLogin, "claude-writer[bot]");
+  assert.doesNotMatch(JSON.stringify(durableTrust), /private|secret|\.pem/i);
+} finally {
+  await rm(evidenceRoot, { recursive: true, force: true });
+}
 
 const stateResolutionCalls = [];
 const owningReviewerController = createReviewerThreadController({

@@ -89,6 +89,7 @@ export function recordReviewPublicationResult(publication, {
   agent,
   published = false,
   unavailableReason = null,
+  trustRoster = null,
 } = {}) {
   if (!publication || !agent) return publication;
   const publishableAgents = (publication.publishableAgents || []).filter((candidate) => (
@@ -124,6 +125,7 @@ export function recordReviewPublicationResult(publication, {
     localOnlyAgents,
     unavailableAgents,
     humanApprovalRequired: !hasAuthorizationPath,
+    trustRoster: trustRoster || publication.trustRoster || null,
   };
 }
 

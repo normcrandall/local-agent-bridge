@@ -646,7 +646,7 @@ await assert.rejects(
     fetchImpl: untrustedProviderWriterApi.fetchImpl,
     trustedWriterLogins: ["claude-writer[bot]"],
   }).merge({ method: "squash" }),
-  /1 unanswered/i,
+  /1 signed by a writer outside the active trusted roster/i,
   "a disposition from a writer outside the configured trust roster must not satisfy merge readiness",
 );
 

@@ -7,6 +7,7 @@ import { builderEnvelopeInstructions } from "./builder-envelope.mjs";
 import { deliverBuilderEnvelope } from "./builder-delivery-repair.mjs";
 import { configuredReviewerLogin, createInstallationToken, inspectGitHubAppRoles, sameGitHubAppLogin } from "./github-app-auth.mjs";
 import { createBoundBuilderClient } from "./github-builder-client.mjs";
+import { readLatestReviewTrustEvidence } from "./github-review-threads.mjs";
 import {
   localReviewPrompt,
   republishValidatedReview,
@@ -607,6 +608,7 @@ export function createAgentPool({
       request._meta = { progressToken: `${agent}-${Date.now()}` };
       const fallbackSlots = providerFallbackSlots(agent, modelFallbacks);
       const maxTotalTimeoutMs = requestTimeoutMs * (1 + fallbackSlots);
+      const reviewEvidenceNotBefore = Date.now();
       let result;
       try {
         result = await client.callTool(request, undefined, {
@@ -670,6 +672,17 @@ export function createAgentPool({
         message = `${message}\n\nBound builder operations published: ${JSON.stringify(delivery.receipts)}`;
       }
       const structured = result.structuredContent || {};
+      const latestReviewTrustRoster = mode === "review" && effectiveGithubReview
+        ? await readLatestReviewTrustEvidence({
+          repository: effectiveGithubReview.repository,
+          prNumber: effectiveGithubReview.prNumber,
+          headSha: effectiveGithubReview.headSha,
+        }).catch(() => null)
+        : null;
+      const reviewTrustRoster = latestReviewTrustRoster
+        && Date.parse(latestReviewTrustRoster.at) >= reviewEvidenceNotBefore
+        ? latestReviewTrustRoster
+        : null;
       const routing = structured.modelRouting || structured;
       return {
         message,
@@ -710,6 +723,7 @@ export function createAgentPool({
             reason: publication.reason,
             statusGateAvailable: publication.statusGateAvailable ?? false,
             humanApprovalRequired: !publication.available || publication.authorizing === false,
+            trustRoster: reviewTrustRoster,
           } : null,
         },
       };

@@ -92,7 +92,20 @@ assert.equal(failedPublishable.status, "degraded");
 assert.equal(failedPublishable.humanApprovalRequired, true);
 assert.deepEqual(failedPublishable.publishableAgents, []);
 assert.match(failedPublishable.unavailableAgents.claude, /transport closed/);
-const alreadyPublished = recordReviewPublicationResult(preflightPartial, { agent: "claude", published: true });
+const alreadyPublished = recordReviewPublicationResult(preflightPartial, {
+  agent: "claude",
+  published: true,
+  trustRoster: {
+    repository: "owner/repo",
+    prNumber: 1,
+    headSha: "a".repeat(40),
+    rosterSource: "github-app-roles",
+    configuredWriterLogins: ["claude-writer[bot]"],
+    degraded: false,
+    signerNotTrusted: [],
+  },
+});
+assert.equal(alreadyPublished.trustRoster.configuredWriterLogins[0], "claude-writer[bot]");
 const laterFailure = recordReviewPublicationResult(alreadyPublished, {
   agent: "claude",
   unavailableReason: "transport closed after publication",

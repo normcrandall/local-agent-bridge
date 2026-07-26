@@ -20,13 +20,14 @@ import {
 import { createBoundBuilderClient } from "./github-builder-client.mjs";
 import {
   approvedSubmissionEvent,
+  appendReviewTrustEvidence,
   assertTrustedReviewerLogins,
-  configuredTrustedWriterLogins,
   constrainApprovalToReviewThreadState,
   createReviewerThreadController,
   evaluateReviewThreadState,
   reviewThreadReceiptPath,
 } from "./github-review-threads.mjs";
+import { inspectReviewTrustRoster } from "./review-trust-roster.mjs";
 
 const repository = process.env.GITHUB_REVIEW_REPOSITORY;
 const prNumber = Number.parseInt(process.env.GITHUB_REVIEW_PR_NUMBER || "", 10);
@@ -64,25 +65,24 @@ const appConfigPath = process.env.GITHUB_APP_CONFIG || DEFAULT_GITHUB_APPS_CONFI
 let builderRole = null;
 let trustedReviewerLogins = [expectedLogin];
 let trustedWriterLogins = [];
+let trustRoster = {
+  source: "pat-compatibility",
+  configuredWriterLogins: [],
+  degraded: false,
+  reason: null,
+};
 if (appCredential) {
-  try {
-    const roles = await inspectGitHubAppRoles({ configPath: appConfigPath });
-    trustedReviewerLogins = [...new Set([
-      expectedLogin,
-      roles.roles?.reviewer?.expectedLogin,
-      ...Object.values(roles.roles?.reviewers || {}).map((reviewer) => reviewer.expectedLogin),
-    ].filter(Boolean))];
-    builderRole = await loadGitHubAppRole({
-      role: "builder",
-      repository,
-      configPath: appConfigPath,
-    });
-    trustedWriterLogins = configuredTrustedWriterLogins({ appRoles: roles, builderRole });
-  } catch {
-    // Thread resolution is optional. Missing or malformed App configuration must
-    // degrade to read-only threads rather than taking down formal review.
-    builderRole = null;
-  }
+  const inspectedRoster = await inspectReviewTrustRoster({
+    repository,
+    configPath: appConfigPath,
+    expectedReviewerLogin: expectedLogin,
+    inspectRoles: inspectGitHubAppRoles,
+    loadBuilderRole: loadGitHubAppRole,
+  });
+  builderRole = inspectedRoster.builderRole;
+  trustedReviewerLogins = inspectedRoster.trustedReviewerLogins;
+  trustedWriterLogins = inspectedRoster.trustedWriterLogins;
+  trustRoster = inspectedRoster.evidence;
 }
 if (appCredential) assertTrustedReviewerLogins(trustedReviewerLogins);
 
@@ -164,8 +164,10 @@ const currentReadiness = async () => evaluateReviewThreadState({
   threads: await threadController.read(),
   headSha,
   repository,
+  prNumber,
   trustedReviewerLogins,
   trustedWriterLogins,
+  trustRoster,
 });
 
 server.registerTool(
@@ -231,6 +233,22 @@ server.registerTool(
     const effectiveEvent = constrained.event;
     const effectiveBody = constrained.body;
     const gateReviewState = constrained.gateReviewState;
+    const trustEvidence = readiness ? await appendReviewTrustEvidence({
+      repository,
+      prNumber,
+      headSha,
+      evidence: {
+        reviewerLogin: expectedLogin,
+        readinessDigest: readiness.digest,
+        configuredWriterLogins: readiness.trustRoster.configuredWriterLogins,
+        rosterSource: readiness.trustRoster.source,
+        degraded: readiness.trustRoster.degraded,
+        degradationReason: readiness.trustRoster.reason,
+        unansweredCount: readiness.unanswered.length,
+        signerNotTrusted: readiness.signerNotTrusted,
+        unresolvedCount: readiness.unresolved.length,
+      },
+    }) : null;
     const result = await submitBoundReview({
       apiUrl: reviewApiUrl,
       token,
@@ -247,7 +265,11 @@ server.registerTool(
       publishGate: statusGateEnabled,
       gateReviewState,
     });
-    submittedReview = result;
+    submittedReview = {
+      ...result,
+      reviewReadiness: readiness,
+      reviewTrustRoster: trustEvidence,
+    };
     submittedEvent = approvedSubmissionEvent(result.state);
     const gateReceipt = result.gate
       ? `gate \`${result.gate.context}\` = \`${result.gate.state}\``
@@ -261,7 +283,7 @@ server.registerTool(
         type: "text",
         text: `${result.idempotent ? "Existing" : "Posted"} ${result.state || effectiveEvent} review as ${result.login}: ${result.url}`,
       }],
-      structuredContent: result,
+      structuredContent: submittedReview,
     };
   },
 );

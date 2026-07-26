@@ -71,6 +71,10 @@ assert.equal(blockedReason({ lifecyclePhase: "working", portfolio: { status: "me
 assert.equal(blockedReason({ lifecyclePhase: "blocked", portfolio: { status: "blocked", blockedBy: ["issue-672"], blockingDependencies: [{ id: "issue-672", title: "Publish the contract", status: "repairing" }] }, blocker: { error: "Writer provider is unavailable." } }), "Writer provider is unavailable. Waiting for issue #672 (Publish the contract) to complete.");
 assert.equal(blockedReason({ lifecyclePhase: "working" }), "");
 assert.equal(blockedReason({ lifecyclePhase: "agreed", handoff: { summary: "Review completed." } }), "");
+assert.match(blockedReason({
+  lifecyclePhase: "blocked",
+  reviewPublication: { trustRoster: { degraded: true, degradationReason: "Writer trust-roster inspection degraded." } },
+}), /trust-roster inspection degraded/i);
 const lifecycleNow = Date.parse("2026-07-23T12:00:00.000Z");
 assert.equal(canonicalLifecycleCategory({ type: "portfolio_lane", lifecyclePhase: "ready", updatedAt: new Date(lifecycleNow).toISOString() }, lifecycleNow), "queued");
 assert.equal(canonicalLifecycleCategory({ type: "portfolio_lane", lifecyclePhase: "blocked", updatedAt: new Date(lifecycleNow).toISOString() }, lifecycleNow), "blocked");
@@ -910,6 +914,38 @@ try {
   assert.doesNotMatch(noColor, /SELECTED LANE/);
   assert.match(noColor, /ITEM\s+AGENT\s+ROLE\s+UPDATED/);
   assert.match(noColor, /WORK · j\/k choose lane · Enter details/);
+
+  const trustDiagnosticLane = {
+    ...attention.operatorLanes[selectedIndex],
+    id: "trust-diagnostic",
+    repository: "owner/repo",
+    prNumber: 174,
+    headSha: "c".repeat(40),
+    reviewPublication: {
+      trustRoster: {
+        rosterSource: "github-app-roles",
+        configuredWriterLogins: ["builder[bot]"],
+        degraded: true,
+        degradationReason: "GitHub App writer-role inspection failed; configuration or installed runtime may be stale or malformed",
+        signerNotTrusted: [{ writerLogin: "claude-writer[bot]" }],
+      },
+    },
+  };
+  const trustDiagnosticSnapshot = { ...attention, operatorLanes: [trustDiagnosticLane] };
+  const trustDiagnosticOutput = renderMissionControl(trustDiagnosticSnapshot, {
+    selectedIndex: 0,
+    width: 140,
+    height: 42,
+    now,
+    color: false,
+    interactive: true,
+    activePane: 2,
+    detailExpanded: true,
+  });
+  assert.match(trustDiagnosticOutput, /GITHUB\s+.*PR #174.*cccccccccc/);
+  assert.match(trustDiagnosticOutput, /TRUST\s+DEGRADED.*github-app-roles.*writers builder/);
+  assert.match(trustDiagnosticOutput, /REASON\s+GitHub App writer-role inspection failed/);
+  assert.match(trustDiagnosticOutput, new RegExp(`HEAD\\s+${"c".repeat(40)}`));
 
   const secondRepositoryLane = {
     ...attention.operatorLanes[0],
