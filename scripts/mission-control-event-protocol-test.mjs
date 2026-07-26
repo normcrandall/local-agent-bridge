@@ -39,9 +39,29 @@ assert.ok(MISSION_CONTROL_EVENT_TYPES.includes("snapshot"));
 assert.equal(validateMissionControlEventEnvelope(snapshot).cursor, 10);
 assert.throws(() => validateMissionControlEventEnvelope({ ...snapshot, version: 2 }), /Unsupported.*version/i);
 assert.throws(() => validateMissionControlEventEnvelope({ ...snapshot, cursor: 9 }), /cursor.*sequence/i);
+assert.throws(() => validateMissionControlEventEnvelope({ ...snapshot, occurredAt: "not-a-date" }), /occurredAt/i);
+assert.throws(() => validateMissionControlEventEnvelope({ ...snapshot, occurredAt: "2026-02-30T12:00:00Z" }), /occurredAt/i);
+const alternateTimestamp = { ...snapshot, occurredAt: "2026-07-26T08:00:10-04:00" };
+assert.equal(validateMissionControlEventEnvelope(alternateTimestamp).occurredAt, snapshot.occurredAt);
+assert.equal(missionControlEventDigest(alternateTimestamp), missionControlEventDigest(snapshot),
+  "equivalent timestamp spellings must produce the same canonical digest");
 assert.throws(() => validateMissionControlEventEnvelope(envelope(11, "lane.updated", {}, {
   repository: "norm/example",
 })), /laneId/i);
+assert.throws(() => validateMissionControlEventEnvelope(envelope(11, "repository.updated", {}, {
+  repository: "norm/example",
+  laneId: "bridge-1",
+})), /cannot carry laneId/i);
+assert.throws(() => validateMissionControlEventEnvelope(envelope(11, "portfolio.updated", {}, {
+  repository: "norm/example",
+  portfolioId: "helm-1",
+  providerId: "claude",
+})), /cannot carry providerId/i);
+assert.throws(() => validateMissionControlEventEnvelope(envelope(11, "lane.updated", {}, {
+  repository: "norm/example",
+  laneId: "bridge-1",
+  portfolioId: "helm-1",
+})), /cannot carry portfolioId/i);
 assert.throws(() => validateMissionControlEventEnvelope({ ...snapshot, payload: {
   ...snapshot.payload,
   lanes: [...snapshot.payload.lanes, snapshot.payload.lanes[0]],
@@ -56,6 +76,11 @@ const initial = createMissionControlEventState(snapshot);
 const laneKey = missionControlLaneKey("norm/example", "bridge-1");
 assert.equal(initial.cursor, 10);
 assert.equal(initial.lanes[laneKey].status, "running");
+assert.throws(() => reduceMissionControlEvent(initial, envelope(11, "repository.updated", {}, {
+  repository: "norm/example",
+  laneId: "bridge-1",
+})), /cannot carry laneId/i,
+"foreign lane identity must fail envelope validation instead of entering reducer resync logic");
 
 const laneUpdate = envelope(11, "lane.updated", { status: "reviewing", prNumber: 42 }, {
   repository: "norm/example",
@@ -153,6 +178,15 @@ assert.deepEqual(resynchronized.lanes, {});
 const requested = reduceMissionControlEvent(current, envelope(15, "resync.required", { reason: "retention_window_exceeded" }));
 assert.equal(requested.sync.status, "resync_required");
 assert.equal(requested.sync.reason, "retention_window_exceeded");
+assert.equal(validateMissionControlEventEnvelope(envelope(15, "resync.required", {
+  reason: "  retention_window_exceeded\r\n  safely ",
+})).payload.reason, "retention_window_exceeded safely");
+assert.throws(() => validateMissionControlEventEnvelope(envelope(15, "resync.required", {
+  reason: "x".repeat(513),
+})), /must not exceed 512/i);
+assert.throws(() => validateMissionControlEventEnvelope(envelope(15, "resync.required", {
+  reason: "   ",
+})), /must not be empty/i);
 const ignoredWhileUnsynchronized = reduceMissionControlEvent(requested, envelope(16, "repository.updated", { active: 9 }, {
   repository: "norm/example",
 }));

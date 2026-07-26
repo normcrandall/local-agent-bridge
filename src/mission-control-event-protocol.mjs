@@ -22,20 +22,26 @@ export const MISSION_CONTROL_EVENT_TYPES = Object.freeze([
 ]);
 
 const EVENT_TYPES = new Set(MISSION_CONTROL_EVENT_TYPES);
-const LANE_EVENT_TYPES = new Set([
-  "lane.updated",
-  "lane.removed",
-  "provider.updated",
-  "provider.removed",
-  "narrative.updated",
-  "output.appended",
-  "attention.updated",
-  "github.updated",
-  "lifecycle.updated",
-]);
-const PORTFOLIO_EVENT_TYPES = new Set(["portfolio.updated", "portfolio.removed"]);
-const PROVIDER_EVENT_TYPES = new Set(["provider.updated", "provider.removed", "quota.updated"]);
-const REPOSITORY_OPTIONAL_EVENT_TYPES = new Set(["quota.updated", "resync.required"]);
+const IDENTITY_FIELDS = Object.freeze(["repository", "portfolioId", "laneId", "providerId"]);
+const EVENT_IDENTITY_FIELDS = Object.freeze({
+  snapshot: [],
+  "repository.updated": ["repository"],
+  "repository.removed": ["repository"],
+  "portfolio.updated": ["repository", "portfolioId"],
+  "portfolio.removed": ["repository", "portfolioId"],
+  "lane.updated": ["repository", "laneId"],
+  "lane.removed": ["repository", "laneId"],
+  "provider.updated": ["repository", "laneId", "providerId"],
+  "provider.removed": ["repository", "laneId", "providerId"],
+  "narrative.updated": ["repository", "laneId"],
+  "output.appended": ["repository", "laneId"],
+  "attention.updated": ["repository", "laneId"],
+  "github.updated": ["repository", "laneId"],
+  "quota.updated": ["providerId"],
+  "lifecycle.updated": ["repository", "laneId"],
+  "resync.required": [],
+});
+const RESYNC_REASON_MAX_LENGTH = 512;
 
 function isRecord(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -55,6 +61,37 @@ function optionalIdentifier(value, name) {
 
 function clone(value) {
   return structuredClone(value);
+}
+
+function canonicalTimestamp(value) {
+  if (typeof value !== "string") throw new Error("occurredAt must be an ISO-compatible timestamp.");
+  const calendarDate = /^(\d{4})-(\d{2})-(\d{2})(?:T|$)/u.exec(value);
+  if (calendarDate) {
+    const year = Number(calendarDate[1]);
+    const month = Number(calendarDate[2]);
+    const day = Number(calendarDate[3]);
+    const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+    const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    if (month < 1 || month > 12 || day < 1 || day > daysInMonth[month - 1]) {
+      throw new Error("occurredAt must be an ISO-compatible timestamp.");
+    }
+  }
+  const timestamp = new Date(value);
+  if (!Number.isFinite(timestamp.getTime())) throw new Error("occurredAt must be an ISO-compatible timestamp.");
+  return timestamp.toISOString();
+}
+
+function normalizeResyncPayload(payload) {
+  const normalized = clone(payload);
+  if (normalized.reason === undefined || normalized.reason === null) return normalized;
+  if (typeof normalized.reason !== "string") throw new Error("resync.required payload.reason must be a string.");
+  const reason = normalized.reason.trim().replace(/\s+/gu, " ");
+  if (!reason) throw new Error("resync.required payload.reason must not be empty.");
+  if (reason.length > RESYNC_REASON_MAX_LENGTH) {
+    throw new Error(`resync.required payload.reason must not exceed ${RESYNC_REASON_MAX_LENGTH} characters.`);
+  }
+  normalized.reason = reason;
+  return normalized;
 }
 
 function validateSnapshotCollection(value, name) {
@@ -141,45 +178,38 @@ export function validateMissionControlEventEnvelope(value) {
     throw new Error("cursor must be a safe integer equal to sequence.");
   }
   if (!EVENT_TYPES.has(value.type)) throw new Error(`Unsupported Mission Control event type: ${String(value.type)}.`);
-  if (typeof value.occurredAt !== "string" || !Number.isFinite(Date.parse(value.occurredAt))) {
-    throw new Error("occurredAt must be an ISO-compatible timestamp.");
-  }
+  const occurredAt = canonicalTimestamp(value.occurredAt);
   if (!isRecord(value.payload)) throw new Error("event payload must be an object.");
 
-  const repository = optionalIdentifier(value.repository, "repository");
-  const laneId = optionalIdentifier(value.laneId, "laneId");
-  const portfolioId = optionalIdentifier(value.portfolioId, "portfolioId");
-  const providerId = optionalIdentifier(value.providerId, "providerId");
+  const identities = {
+    repository: optionalIdentifier(value.repository, "repository"),
+    portfolioId: optionalIdentifier(value.portfolioId, "portfolioId"),
+    laneId: optionalIdentifier(value.laneId, "laneId"),
+    providerId: optionalIdentifier(value.providerId, "providerId"),
+  };
+  const allowedIdentities = new Set(EVENT_IDENTITY_FIELDS[value.type]);
+  for (const field of IDENTITY_FIELDS) {
+    if (identities[field] && !allowedIdentities.has(field)) {
+      if (value.type === "quota.updated") {
+        throw new Error("quota.updated is machine-global and cannot carry repository, lane, or portfolio identity.");
+      }
+      throw new Error(`${value.type} cannot carry ${field} identity.`);
+    }
+    if (!identities[field] && allowedIdentities.has(field)) {
+      throw new Error(`${value.type} requires ${field} identity.`);
+    }
+  }
 
   if (value.type === "snapshot") {
-    if (repository || laneId || portfolioId || providerId) {
-      throw new Error("snapshot envelopes cannot carry entity identity fields.");
-    }
     return Object.freeze({
       version: value.version,
       streamId,
       sequence: value.sequence,
       cursor: value.cursor,
       type: value.type,
-      occurredAt: value.occurredAt,
+      occurredAt,
       payload: validateMissionControlSnapshotPayload(value.payload),
     });
-  }
-
-  if (!REPOSITORY_OPTIONAL_EVENT_TYPES.has(value.type) && !repository) {
-    throw new Error(`${value.type} requires repository identity.`);
-  }
-  if (LANE_EVENT_TYPES.has(value.type) && !laneId) throw new Error(`${value.type} requires laneId.`);
-  if (PORTFOLIO_EVENT_TYPES.has(value.type) && !portfolioId) throw new Error(`${value.type} requires portfolioId.`);
-  if (PROVIDER_EVENT_TYPES.has(value.type) && !providerId) throw new Error(`${value.type} requires providerId.`);
-  if ((value.type === "repository.updated" || value.type === "repository.removed") && (laneId || portfolioId || providerId)) {
-    throw new Error(`${value.type} cannot carry lane, portfolio, or provider identity.`);
-  }
-  if (value.type === "resync.required" && (repository || laneId || portfolioId || providerId)) {
-    throw new Error("resync.required cannot carry entity identity fields.");
-  }
-  if (value.type === "quota.updated" && (repository || laneId || portfolioId)) {
-    throw new Error("quota.updated is machine-global and cannot carry repository, lane, or portfolio identity.");
   }
 
   return Object.freeze({
@@ -188,12 +218,11 @@ export function validateMissionControlEventEnvelope(value) {
     sequence: value.sequence,
     cursor: value.cursor,
     type: value.type,
-    occurredAt: value.occurredAt,
-    ...(repository ? { repository } : {}),
-    ...(laneId ? { laneId } : {}),
-    ...(portfolioId ? { portfolioId } : {}),
-    ...(providerId ? { providerId } : {}),
-    payload: clone(value.payload),
+    occurredAt,
+    ...Object.fromEntries(IDENTITY_FIELDS
+      .filter((field) => identities[field])
+      .map((field) => [field, identities[field]])),
+    payload: value.type === "resync.required" ? normalizeResyncPayload(value.payload) : clone(value.payload),
   });
 }
 
