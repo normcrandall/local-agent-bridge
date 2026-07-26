@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { processProbe } from "./process-identity-probe.mjs";
 
 export const TERMINAL_COLLABORATION_STATUSES = new Set([
   "agreed", "needs_user", "turn_limit", "failed", "cancelled", "budget",
@@ -26,14 +27,14 @@ export function clearTerminalRuntime(state, { status = state.status, error = sta
   };
 }
 
-export function workerCommandMatches(state, ps = (pid) => spawnSync("/bin/ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" }).stdout?.trim()) {
+export function workerCommandMatches(state, ps = (pid) => processProbe(pid, "command").value || "") {
   const owner = state.workerOwner;
   if (!owner || owner.id !== state.id || owner.pid !== state.workerPid || !Number.isInteger(owner.pid) || owner.pid <= 1) return false;
   const command = ps(owner.pid) || "";
   return command.includes("collaboration-worker.mjs") && command.includes(state.id);
 }
 
-export function legacyWorkerCommandMatches(state, ps = (pid) => spawnSync("/bin/ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" }).stdout?.trim()) {
+export function legacyWorkerCommandMatches(state, ps = (pid) => processProbe(pid, "command").value || "") {
   if (!Number.isInteger(state.workerPid) || state.workerPid <= 1) return false;
   const command = ps(state.workerPid) || "";
   return command.includes("collaboration-worker.mjs") && command.includes(state.id);

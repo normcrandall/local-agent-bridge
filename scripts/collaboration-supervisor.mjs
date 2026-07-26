@@ -20,13 +20,14 @@ import { sanitizeWorkerEnvironment, supervisorEndpoint } from "../src/worker-sup
 import { createLocalModelWarmer } from "../src/local-model-warmth.mjs";
 import { scanPendingUserAttention } from "../src/user-attention.mjs";
 
+import { killProcessSafely, processProbe } from "../src/process-identity-probe.mjs";
+
 const PROTOCOL_VERSION = 1;
 const runtimeRoot = resolve(process.env.BRIDGE_RUNTIME_ROOT || fileURLToPath(new URL("..", import.meta.url)));
 const workspaceRoot = resolve(process.env.BRIDGE_WORKSPACE_ROOT || runtimeRoot);
 const stateDirectory = resolve(process.env.BRIDGE_COLLABORATION_DIR || collaborationDirectory(workspaceRoot));
 const endpoint = supervisorEndpoint(stateDirectory);
 const metadataPath = resolve(stateDirectory, "supervisor.json");
-const processProbeBinary = process.env.BRIDGE_SUPERVISOR_PS_BIN || "/bin/ps";
 const supervisorId = randomUUID();
 const supervisorStartedAt = new Date().toISOString();
 const monitored = new Map();
@@ -46,20 +47,6 @@ function processAlive(pid) {
   } catch (error) {
     return error.code === "EPERM";
   }
-}
-
-function processProbe(pid, field) {
-  let lastError = null;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const result = spawnSync(processProbeBinary, ["-p", String(pid), "-o", `${field}=`], {
-      encoding: "utf8",
-      timeout: 2_000,
-    });
-    const value = result.status === 0 ? result.stdout?.trim() : "";
-    if (value) return { available: true, value, attempts: attempt + 1 };
-    lastError = result.error?.message || result.stderr?.trim() || `exit ${result.status}`;
-  }
-  return { available: false, value: null, attempts: 3, error: lastError };
 }
 
 function workerIdentityStatus({ pid, collaborationId, workerOwner }) {
@@ -267,7 +254,7 @@ async function startWorker({ collaborationId, requestedRuntimeRoot, requestedWor
   });
   const processStartedAt = processProbe(child.pid, "lstart");
   if (!processStartedAt.available) {
-    process.kill(-child.pid, "SIGTERM");
+    killProcessSafely(child.pid, "SIGTERM");
     throw new Error(`Started worker PID ${child.pid} identity could not be captured; the worker was stopped.`);
   }
   child.unref();
