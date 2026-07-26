@@ -364,6 +364,56 @@ assert.equal(threads[0].id, "thread-1");
   await refreshClient.reviewThreads();
   await refreshClient.reviewThreads();
   assert.equal(tokenMints, 1, "operations may reuse a credential while it remains safely before expiry");
+
+  let releaseConcurrentMint;
+  let concurrentMints = 0;
+  const concurrentMintBarrier = new Promise((resolve) => { releaseConcurrentMint = resolve; });
+  const concurrentClient = createBoundBuilderClient({
+    ...base,
+    token: null,
+    verifiedLogin: null,
+    fetchImpl: fakeGitHub().fetchImpl,
+    getToken: async () => {
+      concurrentMints += 1;
+      await concurrentMintBarrier;
+      return {
+        token: "ghs_concurrent",
+        verifiedLogin: "builder[bot]",
+        expiresAt: new Date(nowMs + 600_000).toISOString(),
+        permissions: { contents: "write", issues: "write", metadata: "read", pull_requests: "write" },
+      };
+    },
+    authority: {
+      login: "builder[bot]", appId: "1", installationId: 101, repository: "owner/repo", permissions: {},
+    },
+    now: () => nowMs,
+  });
+  const concurrentOperations = [concurrentClient.reviewThreads(), concurrentClient.reviewThreads()];
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(concurrentMints, 1, "concurrent operations must share one in-flight token mint");
+  releaseConcurrentMint();
+  await Promise.all(concurrentOperations);
+
+  let noExpiryMints = 0;
+  const noExpiryClient = createBoundBuilderClient({
+    ...base,
+    token: null,
+    verifiedLogin: null,
+    fetchImpl: fakeGitHub().fetchImpl,
+    getToken: async () => ({
+      token: `ghs_no_expiry_${++noExpiryMints}`,
+      verifiedLogin: "builder[bot]",
+      permissions: { contents: "write", issues: "write", metadata: "read", pull_requests: "write" },
+    }),
+    authority: {
+      login: "builder[bot]", appId: "1", installationId: 101, repository: "owner/repo", permissions: {},
+    },
+    now: () => nowMs,
+  });
+  await noExpiryClient.reviewThreads();
+  await noExpiryClient.reviewThreads();
+  assert.equal(noExpiryMints, 2, "a credential without expiresAt must be refreshed for every operation");
+
   nowMs += 301_000;
   await refreshClient.reviewThreads();
   assert.equal(tokenMints, 2, "the client must refresh before the cached credential reaches expiry");
