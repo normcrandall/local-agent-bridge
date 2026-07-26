@@ -75,6 +75,8 @@ import {
 import {
   plannedIssueClaimWorktree,
   resolveClaimedWorktreeHead,
+  resolveContinuationIssueClaim,
+  resolveIssueClaimAfterPreflight,
   resolveIssueClaimRevisions,
   workspaceHeadBuilderBinding,
 } from "./collaboration-start-preflight.mjs";
@@ -1183,14 +1185,14 @@ server.registerTool(
       }
       if (input.issueClaim) {
         const actualHead = resolveClaimedWorktreeHead(workspace);
-        resolvedIssueClaim = {
-          ...input.issueClaim,
+        resolvedIssueClaim = resolveIssueClaimAfterPreflight({
+          issueClaim: resolvedIssueClaim,
           writer: writer || input.writer || startAgent,
           branch: worktree?.branch || input.issueClaim.branch || null,
           worktree: workspace,
           baseSha: claimBaseSha,
           headSha: actualHead,
-        };
+        });
         const { refreshClaimLease } = await import("./github-issue-claims.mjs");
         await refreshClaimLease({
           client: claimClient,
@@ -2614,11 +2616,10 @@ server.registerTool(
         || !sameGitHubAppLogin(issueClaim.expectedLogin, current.issueClaim.expectedLogin)) {
         throw new Error("Continuation cannot change the repository, issue number, or builder identity of an existing claim.");
       }
-      resolvedContinuationIssueClaim = {
-        ...current.issueClaim,
-        ...issueClaim,
-        expectedLogin: canonicalGitHubAppLogin(current.issueClaim.expectedLogin),
-      };
+      resolvedContinuationIssueClaim = resolveContinuationIssueClaim({
+        currentIssueClaim: current.issueClaim,
+        issueClaim,
+      });
       const { getBuilderClientForWorkspace, rebindIssueClaim, refreshClaimLease } = await import("./github-issue-claims.mjs");
       const claimClient = await getBuilderClientForWorkspace(current.workspace, current.issueClaim.issueNumber);
       if (!claimClient) throw new Error(`No builder App client is configured for claimed issue #${current.issueClaim.issueNumber}.`);
