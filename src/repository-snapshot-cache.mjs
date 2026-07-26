@@ -153,6 +153,14 @@ function digest(value) {
   return createHash("sha256").update(stableJson(value)).digest("hex");
 }
 
+function bestEffortDataDigest(value) {
+  try {
+    return digest(redactData(value).value);
+  } catch {
+    return null;
+  }
+}
+
 function normalizedRepository(repository) {
   const value = String(repository || "").trim().toLowerCase();
   if (!/^[a-z0-9_.-]+\/[a-z0-9_.-]+$/.test(value)) fail("repository must be an owner/name identifier.", "INVALID_KEY");
@@ -469,7 +477,23 @@ export function createRepositorySnapshotCache({
       return { ...(await existingLoad), cache: "coalesced" };
     }
     const operation = (async () => {
-      const cached = await get(key);
+      let cached;
+      let readDegradation = null;
+      try {
+        cached = await get(key);
+      } catch (error) {
+        readDegradation = {
+          code: error.code || "CACHE_READ_FAILED",
+          message: error.message,
+        };
+        cached = nonAuthoritative({
+          status: "corrupt",
+          key,
+          reason: readDegradation.code,
+          error: readDegradation.message,
+          entry: null,
+        });
+      }
       if (cached.status === "fresh") {
         counters.hits += 1;
         counters.avoidedLoads += 1;
@@ -482,8 +506,8 @@ export function createRepositorySnapshotCache({
         });
       }
       if (cached.status === "stale") counters.refreshes += 1;
+      else if (cached.status === "corrupt") counters.corruptReads += 1;
       else counters.misses += 1;
-      if (cached.status === "corrupt") counters.corruptReads += 1;
       counters.liveLoads += 1;
       const loaded = await liveLoad();
       if (!loaded || typeof loaded !== "object" || !("data" in loaded)) {
@@ -497,6 +521,7 @@ export function createRepositorySnapshotCache({
         ? Math.max(clock().millis, priorRevision + 1)
         : loaded.sourceRevision;
       const loadedFetchedAt = loaded.fetchedAt ?? clock().value;
+      const loadedDigest = bestEffortDataDigest(loaded.data);
       try {
         const written = await put({
           ...key,
@@ -520,9 +545,9 @@ export function createRepositorySnapshotCache({
             fetchedAt: loadedFetchedAt,
             trustClass,
           },
-          degradation: cached.status === "corrupt"
+          degradation: readDegradation || (cached.status === "corrupt"
             ? { code: cached.reason, message: cached.error }
-            : null,
+            : null),
         });
       } catch (error) {
         // The cache is an optimization and evidence surface. A live read that
@@ -532,9 +557,9 @@ export function createRepositorySnapshotCache({
         return nonAuthoritative({
           value: structuredClone(loaded.data),
           cache: "live_uncached",
-          digest: null,
+          digest: loadedDigest,
           provenance: null,
-          degradation: { code: error.code || "CACHE_WRITE_FAILED", message: error.message },
+          degradation: readDegradation || { code: error.code || "CACHE_WRITE_FAILED", message: error.message },
         });
       }
     })();

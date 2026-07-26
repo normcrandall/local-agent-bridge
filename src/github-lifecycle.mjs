@@ -187,7 +187,7 @@ export function createProductionGitHubLifecycleAdapter(client, {
     getPullRequestSnapshot: typeof client.getPullRequest === "function"
       ? (pullRequestNumber, exactHead = headSha) => cachedRead({
         kind: "pull_request",
-        subject: `pr:${pullRequestNumber}`,
+        subject: `pr:${pullRequestNumber}:detail`,
         exactHead,
         load: () => client.getPullRequest(pullRequestNumber),
       })
@@ -195,7 +195,7 @@ export function createProductionGitHubLifecycleAdapter(client, {
     getReviewThreadsSnapshot: typeof client.reviewThreads === "function"
       ? (pullRequestNumber, exactHead = headSha) => cachedRead({
         kind: "review_threads",
-        subject: `pr:${pullRequestNumber}`,
+        subject: `pr:${pullRequestNumber}:threads`,
         exactHead,
         load: () => client.reviewThreads(pullRequestNumber),
       })

@@ -114,9 +114,39 @@ try {
   });
   assert.equal(review.reviewSnapshot.cache, "miss");
   assert.equal(review.reviewSnapshot.usableForAuthorization, false);
+  assert.equal(review.pullRequestSnapshot, null, "exact-head assertions are never cached as pull-request detail");
   assert.equal(review.reviewResolution.complete, true);
   assert.ok(headChecks >= 2, "a cached review snapshot never replaces live exact-head fences");
   assert.equal(readinessReads, 2, "the live miss is reused once, while final readiness remains live");
+
+  let pullDetailReads = 0;
+  let threadDetailReads = 0;
+  const detailLifecycle = createProductionGitHubLifecycleAdapter({
+    async getIssue(number) { return { number, state: "open", labels: [], updated_at: now() }; },
+    async getPullRequest(number) {
+      pullDetailReads += 1;
+      return { number, state: "open", mergeable: true, head: { sha: headSha }, updated_at: now() };
+    },
+    async reviewThreads() {
+      threadDetailReads += 1;
+      return [{ id: "thread-1", isResolved: false }];
+    },
+    async addIssueLabel() {},
+    async removeIssueLabel() {},
+    async updateIssueProjectSingleSelect() {},
+  }, { snapshotCache, repository, headSha });
+  const pullDetail = await detailLifecycle.getPullRequestSnapshot(9);
+  const threadDetail = await detailLifecycle.getReviewThreadsSnapshot(9);
+  assert.equal(pullDetail.cache, "miss", "pull-request detail has a producer-specific subject");
+  assert.equal(threadDetail.cache, "miss", "raw review threads cannot alias the workflow readiness aggregate");
+  assert.equal(pullDetail.value.mergeable, true);
+  assert.equal(threadDetail.value[0].id, "thread-1");
+  assert.equal(pullDetailReads, 1);
+  assert.equal(threadDetailReads, 1);
+  const isolatedSubjects = (await snapshotCache.inspect({ repository })).entries
+    .map(({ entry }) => entry.key.subject)
+    .filter((subject) => subject.startsWith("pr:9"));
+  assert.deepEqual(isolatedSubjects.sort(), ["pr:9:detail", "pr:9:readiness", "pr:9:threads"], "review, PR detail, and raw-thread producers have disjoint cache identities");
 
   nowMs += 61_000;
   let refreshLoads = 0;
@@ -128,7 +158,7 @@ try {
     freshnessMs: 60_000,
     load: async () => { refreshLoads += 1; return { data: { number: 9, headSha } }; },
   });
-  assert.equal(refreshed.cache, "refresh");
+  assert.equal(refreshed.cache, "miss", "the removed authority-assertion cache leaves the generic PR subject unused");
   nowMs += 61_000;
   assert.equal((await snapshotCache.getOrLoad({
     repository,
@@ -159,7 +189,35 @@ try {
   });
   assert.equal(oversized.cache, "live_uncached");
   assert.equal(oversized.degradation.code, "ENTRY_TOO_LARGE");
+  assert.match(oversized.digest, /^[0-9a-f]{64}$/, "oversized live evidence retains a digest even when it is not cached");
   assert.equal(oversized.value.body.length, 2_000, "cache bounds cannot erase a successful live read");
+
+  const identityCache = createRepositorySnapshotCache({
+    journal: createRepositoryJournal({ directory: join(root, "identity-journal"), now }),
+    now,
+  });
+  const identityStore = createEvidenceStore({ directory: join(root, "identity-evidence"), now });
+  await run("git", ["remote", "set-url", "origin", join(root, "local-origin.git")], { cwd: repo });
+  const localEvidence = await captureRepositoryEvidence({
+    workspace: repo,
+    store: identityStore,
+    snapshotCache: identityCache,
+    baseSha,
+    headSha: exactHead,
+  });
+  assert.match(localEvidence.repository, /^local\/[0-9a-f]{16}$/);
+  assert.equal((await identityCache.inspect()).entries.length, 0, "an unresolved workspace identity must not bind the shared repository journal");
+  const governedEvidence = await captureRepositoryEvidence({
+    workspace: repo,
+    store: identityStore,
+    snapshotCache: identityCache,
+    repository,
+    baseSha,
+    headSha: exactHead,
+  });
+  assert.deepEqual(governedEvidence.cache, { repositoryMap: "miss", diff: "miss" });
+  assert.equal((await identityCache.inspect({ repository })).status, "clean", "a later governed lane remains able to use the shared journal");
+  await run("git", ["remote", "set-url", "origin", `https://github.com/${repository}.git`], { cwd: repo });
 
   const corruptJournal = createRepositoryJournal({ directory: join(root, "corrupt-journal"), now });
   const corruptCache = createRepositorySnapshotCache({ journal: corruptJournal, now });

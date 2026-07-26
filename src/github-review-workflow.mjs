@@ -18,40 +18,17 @@ export async function reconcilePublishedReview({
   prNumber = null,
 }) {
   const submittedEvent = approvedSubmissionEvent(result.state);
-  let pullRequestSnapshot = null;
-  let firstLiveHeadAssertion = null;
-  if (snapshotCache && repository && Number.isInteger(prNumber) && prNumber > 0) {
-    pullRequestSnapshot = await snapshotCache.getOrLoad({
-      repository,
-      kind: "pull_request",
-      subject: `pr:${prNumber}`,
-      headSha,
-      trustClass: "github-live",
-      load: async () => ({ data: await assertCurrentHead() }),
-    });
-    if (!["hit", "coalesced"].includes(pullRequestSnapshot.cache)) {
-      firstLiveHeadAssertion = pullRequestSnapshot.value;
-    } else {
-      // Exact-head state is authorization evidence. A fresh cache hit can
-      // describe the PR, but it cannot authorize a review-thread mutation.
-      await assertCurrentHead();
-    }
-  }
-  const authoritativeHead = async () => {
-    if (firstLiveHeadAssertion) {
-      const value = firstLiveHeadAssertion;
-      firstLiveHeadAssertion = null;
-      return value;
-    }
-    return assertCurrentHead();
-  };
+  // Exact-head assertions are authorization evidence, not reusable context.
+  // Caching them adds no information beyond the cache key and can collide with
+  // the lifecycle adapter's full pull-request detail snapshot.
+  const authoritativeHead = () => assertCurrentHead();
   let reviewSnapshot = null;
   let firstLiveReadiness = null;
   if (snapshotCache && repository && Number.isInteger(prNumber) && prNumber > 0) {
     reviewSnapshot = await snapshotCache.getOrLoad({
       repository,
       kind: "review_threads",
-      subject: `pr:${prNumber}`,
+      subject: `pr:${prNumber}:readiness`,
       headSha,
       trustClass: "github-live",
       load: async () => ({ data: await readReadiness() }),
@@ -140,12 +117,6 @@ export async function reconcilePublishedReview({
       usableForAuthorization: false,
       degradation: reviewSnapshot.degradation || null,
     } : null,
-    pullRequestSnapshot: pullRequestSnapshot ? {
-      cache: pullRequestSnapshot.cache,
-      digest: pullRequestSnapshot.digest,
-      authoritative: false,
-      usableForAuthorization: false,
-      degradation: pullRequestSnapshot.degradation || null,
-    } : null,
+    pullRequestSnapshot: null,
   };
 }

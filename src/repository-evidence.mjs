@@ -131,7 +131,14 @@ export async function captureRepositoryEvidence({
   const exactHead = headSha || observedHead;
   assertRepositoryEvidenceHead({ expectedHeadSha: exactHead, observedHeadSha: observedHead });
   const remote = await git(workspace, ["remote", "get-url", "origin"]).catch(() => "");
-  const resolvedRepository = repository || repositoryFromRemote(remote) || `local/${sha256(workspace).slice(0, 16)}`;
+  const durableRepository = repository || repositoryFromRemote(remote);
+  const resolvedRepository = durableRepository || `local/${sha256(workspace).slice(0, 16)}`;
+  // A repository snapshot journal lives in git-common-dir and is shared by
+  // every linked worktree. Never bind that shared journal to a workspace-local
+  // synthetic identity: a later governed lane would otherwise encounter a
+  // permanent repository mismatch. Local-only evidence retains its existing
+  // per-workspace EvidenceStore fallback.
+  const repositorySnapshotCache = durableRepository ? snapshotCache : null;
   const headScope = { repository: resolvedRepository, headSha: exactHead };
   const diffScope = { ...headScope, ...(baseSha ? { baseSha } : {}) };
 
@@ -143,8 +150,8 @@ export async function captureRepositoryEvidence({
         error: tracked.error,
       };
     };
-  const map = snapshotCache
-    ? await snapshotCache.getOrLoad({
+  const map = repositorySnapshotCache
+    ? await repositorySnapshotCache.getOrLoad({
       repository: resolvedRepository,
       kind: "repository_map",
       subject: "tracked_files",
@@ -162,8 +169,8 @@ export async function captureRepositoryEvidence({
     });
 
   const diff = baseSha
-    ? snapshotCache
-      ? await snapshotCache.getOrLoad({
+    ? repositorySnapshotCache
+      ? await repositorySnapshotCache.getOrLoad({
         repository: resolvedRepository,
         kind: "diff",
         subject: `base:${baseSha}`,
@@ -216,7 +223,7 @@ export async function captureRepositoryEvidence({
     environmentFingerprintComplete: environment.complete,
     digests: { repositoryMap: map.digest, diff: diff?.digest || null },
     cache: { repositoryMap: map.cache, diff: diff?.cache || null },
-    cacheMetrics: snapshotCache?.metrics?.() || store.metrics(),
+    cacheMetrics: repositorySnapshotCache?.metrics?.() || store.metrics(),
   };
 }
 
