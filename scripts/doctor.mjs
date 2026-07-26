@@ -8,7 +8,12 @@ import {
   locateCommitOnMain,
   readInstalledProvenance,
 } from "../src/runtime-provenance.mjs";
-import { DEFAULT_OLLAMA_CONFIG, DEFAULT_OLLAMA_MODEL } from "../src/ollama-review.mjs";
+import {
+  DEFAULT_OLLAMA_CONFIG,
+  DEFAULT_OLLAMA_MODEL,
+  OLLAMA_CONFIG_VERSION,
+  ollamaModelIsInstalled,
+} from "../src/ollama-review.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const selectedChecks = new Set(String(process.env.AGENT_BRIDGE_DOCTOR_CHECKS || "")
@@ -117,8 +122,14 @@ let failed = false;
 
 function configuredOllamaModel() {
   const configPath = process.env.AGENT_BRIDGE_OLLAMA_CONFIG || DEFAULT_OLLAMA_CONFIG;
-  const configured = existsSync(configPath) ? JSON.parse(readFileSync(configPath, "utf8")) : {};
-  return String(process.env.OLLAMA_MODEL || configured.model || DEFAULT_OLLAMA_MODEL).trim();
+  const hasConfig = existsSync(configPath);
+  const configured = hasConfig ? JSON.parse(readFileSync(configPath, "utf8")) : {};
+  if (hasConfig && configured.version !== OLLAMA_CONFIG_VERSION) {
+    throw new Error("Unsupported Ollama config version.");
+  }
+  const model = String(process.env.OLLAMA_MODEL || configured.model || DEFAULT_OLLAMA_MODEL).trim();
+  if (!model) throw new Error("Ollama model must not be empty.");
+  return model;
 }
 
 function check(label, test, detail = "") {
@@ -190,8 +201,8 @@ check("Antigravity CLI", () => {
   return result.status === 0;
 }, "install or repair Antigravity CLI, or set AGY_BIN");
 
-const expectedOllamaModel = configuredOllamaModel();
 check("Ollama local reviewer", () => {
+  const expectedOllamaModel = configuredOllamaModel();
   const ollama = process.env.OLLAMA_BIN || "/usr/local/bin/ollama";
   const version = spawnSync(ollama, ["--version"], { encoding: "utf8" });
   if (version.status !== 0) return false;
@@ -201,8 +212,8 @@ check("Ollama local reviewer", () => {
     .slice(1)
     .map((line) => line.trim().split(/\s+/)[0]?.toLowerCase())
     .filter(Boolean);
-  return models.status === 0 && installed.includes(expectedOllamaModel.toLowerCase());
-}, `install Ollama and pull ${expectedOllamaModel}, or set OLLAMA_BIN`);
+  return models.status === 0 && ollamaModelIsInstalled(expectedOllamaModel, installed);
+}, "install Ollama and pull the configured model, or set OLLAMA_BIN");
 
 check("Docker Model Runner local reviewer", () => {
   const docker = process.env.DOCKER_BIN || "/usr/local/bin/docker";
