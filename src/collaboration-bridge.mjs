@@ -78,7 +78,7 @@ import {
   resolveIssueClaimRevisions,
   workspaceHeadBuilderBinding,
 } from "./collaboration-start-preflight.mjs";
-import { assertClaimedIssueContextIntegrity, hydrateClaimedIssueTask } from "./claimed-issue-context.mjs";
+import { CLAIMED_ISSUE_CONTEXT_MARKER, assertClaimedIssueContextIntegrity, hydrateClaimedIssueTask } from "./claimed-issue-context.mjs";
 import { createIssueClaimClient, createIssueClaimHydrationClient } from "./github-issue-claims.mjs";
 import { startSupervisedWorker } from "./worker-supervisor-client.mjs";
 import { collaborationAlias, collaborationIdentity } from "./collaboration-identity.mjs";
@@ -2523,12 +2523,14 @@ server.registerTool(
   }) => {
     blockNestedCollaboration();
     const current = await readCollaboration(WORKSPACE_ROOT, id);
-    if (current.issueContext) {
+    const storedClaimedTask = current.taskBase || current.task;
+    if (current.issueContext || current.issueTarget || current.issueClaim
+      || String(storedClaimedTask || "").includes(CLAIMED_ISSUE_CONTEXT_MARKER)) {
       // The snapshot is immutable across phases. Recompute its digest before
       // any claim refresh, evidence capture, or provider launch so corrupted
       // portable state fails closed at the continuation boundary.
       assertClaimedIssueContextIntegrity({
-        task: current.taskBase || current.task,
+        task: storedClaimedTask,
         metadata: current.issueContext,
       });
     }

@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { createCollaboration } from "../src/collaboration-store.mjs";
+import { createCollaboration, readCollaboration } from "../src/collaboration-store.mjs";
 import { buildClaimedIssueContext } from "../src/claimed-issue-context.mjs";
 import { recordMergeDeliveryReceipt } from "../src/merge-delivery-receipts.mjs";
 // Issue #55 dispatch/narrative fixtures: command allowlist admission and command-aware narrative.
@@ -391,6 +391,64 @@ try {
   });
   assert.equal(rejectedTamperedContinuation.isError, true);
   assert.match(rejectedTamperedContinuation.content?.[0]?.text || "", /Claimed issue context sha256 mismatch/);
+
+  const missingIntegrityMetadata = await createCollaboration(root, {
+    task: `Implement issue #99.\n\n${integrityContext.text}`,
+    taskBase: `Implement issue #99.\n\n${integrityContext.text}`,
+    issueTarget: { repository: "normcrandall/local-agent-bridge", issueNumber: 99 },
+    workspace: cleanWorkspace,
+    agents: ["claude"],
+    mode: "review",
+    status: "turn_limit",
+    runtime: { turnCount: 0, activeCall: null },
+  });
+  const rejectedMissingMetadata = await firstClient.callTool({
+    name: "continue_collaboration",
+    arguments: {
+      collaborationId: missingIntegrityMetadata.id,
+      message: "This must also fail before provider continuation.",
+      additionalTurns: 1,
+    },
+  });
+  assert.equal(rejectedMissingMetadata.isError, true);
+  assert.match(rejectedMissingMetadata.content?.[0]?.text || "", /integrity metadata is missing/);
+
+  const tamperedWorkerCollaboration = await createCollaboration(root, {
+    task: tamperedTask,
+    taskBase: tamperedTask,
+    issueContext: integrityContext.metadata,
+    workspace: cleanWorkspace,
+    agents: ["claude"],
+    startAgent: "claude",
+    mode: "review",
+    status: "queued",
+    runtime: {
+      sessions: { claude: null },
+      turnCount: 0,
+      activeCall: null,
+      availableAgents: ["claude"],
+      unavailableAgents: {},
+    },
+  });
+  const rejectedTamperedWorker = spawnSync(
+    process.execPath,
+    [resolve(root, "scripts/collaboration-worker.mjs"), tamperedWorkerCollaboration.id],
+    {
+      cwd: root,
+      env: {
+        ...env,
+        BRIDGE_RUNTIME_ROOT: root,
+        BRIDGE_WORKSPACE_ROOT: root,
+        BRIDGE_COLLABORATION_DIR: stateDirectory,
+      },
+      encoding: "utf8",
+    },
+  );
+  assert.equal(rejectedTamperedWorker.status, 1, "direct worker launch must fail before provider dispatch");
+  const failedTamperedWorker = await readCollaboration(root, tamperedWorkerCollaboration.id);
+  assert.equal(failedTamperedWorker.status, "failed");
+  assert.match(failedTamperedWorker.error, /Claimed issue context sha256 mismatch/);
+  assert.equal(failedTamperedWorker.runtime.turnCount, 0, "integrity rejection must happen before a provider turn");
 
   const unbornStarted = await firstClient.callTool({
     name: "start_collaboration",

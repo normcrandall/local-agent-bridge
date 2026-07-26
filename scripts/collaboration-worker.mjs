@@ -42,6 +42,7 @@ import {
 import { createVerificationTimingTracker } from "../src/verification-timing.mjs";
 import { assertRepositoryEvidenceHead, captureRepositoryEvidence } from "../src/repository-evidence.mjs";
 import { createEvidenceStore } from "../src/evidence-store.mjs";
+import { CLAIMED_ISSUE_CONTEXT_MARKER, assertClaimedIssueContextIntegrity } from "../src/claimed-issue-context.mjs";
 import { assertObservedVerificationEvidence, persistObservedVerificationResults } from "../src/verification-receipts.mjs";
 import {
   classifyProviderFailure,
@@ -190,6 +191,18 @@ async function scheduleProviderRecovery(error) {
 try {
   releaseWorker = await acquireWorkerLock(workspaceRoot, id);
   state = await readCollaboration(workspaceRoot, id);
+  const storedClaimedTask = state.taskBase || state.task;
+  if (state.issueContext || state.issueTarget || state.issueClaim
+    || String(storedClaimedTask || "").includes(CLAIMED_ISSUE_CONTEXT_MARKER)) {
+    // Supervisors and delayed recovery can launch this executable without
+    // passing through continue_collaboration. Revalidate the stored immutable
+    // issue snapshot here, before credentials, claim refresh, or provider
+    // dispatch, so every worker entry path fails closed on corruption.
+    assertClaimedIssueContextIntegrity({
+      task: storedClaimedTask,
+      metadata: state.issueContext,
+    });
+  }
   if (state.cancelRequested) {
     await updateCollaboration(workspaceRoot, id, (current) => ({ ...current, status: "cancelled", workerPid: null }));
     process.exit(0);
