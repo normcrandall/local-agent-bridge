@@ -8,9 +8,15 @@ function percentile(values, fraction) {
 
 function summarize(values) {
   const sorted = values.filter((value) => value != null).sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  const median = sorted.length === 0
+    ? null
+    : sorted.length % 2
+      ? sorted[middle]
+      : (sorted[middle - 1] + sorted[middle]) / 2;
   return Object.freeze({
     min: sorted[0] ?? null,
-    median: percentile(sorted, 0.5),
+    median,
     p95: percentile(sorted, 0.95),
     max: sorted.at(-1) ?? null,
     mean: sorted.length ? sorted.reduce((sum, value) => sum + value, 0) / sorted.length : null,
@@ -39,7 +45,7 @@ export function aggregateReviewBenchmarks(adjudications) {
         provider: result.provider, model: result.model ?? null, repository: adjudication.repository ?? null,
         repositoryCohort: result.repositoryCohort ?? "default", runs: 0, truePositives: 0, falsePositives: 0,
         falseNegatives: 0, unadjudicated: 0, duplicates: 0, advisories: 0, blockingTruePositives: 0,
-        blockingFalseNegatives: 0, uniqueValidFindingKeys: new Set(), validCitations: 0, evidenceSupported: 0,
+        blockingFalseNegatives: 0, uniqueValidFindingKeys: new Set(), validCitations: 0, citationObserved: 0, evidenceSupported: 0, evidenceObserved: 0,
         actionable: 0, findings: 0, severityCalibrated: 0, severityEvaluated: 0, exactHeadCompleted: 0,
         exactHeadObserved: 0, contractBound: 0, adjudicationComplete: 0,
         timeouts: 0, emptyResponses: 0, invalidEnvelopes: 0, recoveries: 0, fallbacks: 0,
@@ -55,9 +61,13 @@ export function aggregateReviewBenchmarks(adjudications) {
       aggregate.advisories += result.advisoryFindings?.length ?? 0;
       aggregate.blockingTruePositives += result.blockingTruePositives?.length ?? 0;
       aggregate.blockingFalseNegatives += result.blockingFalseNegatives?.length ?? 0;
-      for (const findingKey of result.uniqueValidFindings ?? []) aggregate.uniqueValidFindingKeys.add(findingKey);
+      for (const findingKey of result.uniqueValidFindings ?? []) {
+        aggregate.uniqueValidFindingKeys.add(`${adjudication.headSha ?? "unknown"}\u0000${findingKey}`);
+      }
       aggregate.validCitations += result.validCitationCount ?? 0;
+      aggregate.citationObserved += result.citationObservedCount ?? 0;
       aggregate.evidenceSupported += result.supportedCount ?? 0;
+      aggregate.evidenceObserved += result.evidenceObservedCount ?? 0;
       aggregate.actionable += result.actionableCount ?? 0;
       const currentFindingCount = result.truePositives.length
         + result.falsePositives.length
@@ -92,7 +102,7 @@ export function aggregateReviewBenchmarks(adjudications) {
   }
 
   const providers = [...cohorts.values()].map((entry) => {
-    const adjudicatedFindingCount = entry.truePositives + entry.falsePositives + entry.falseNegatives;
+    const adjudicatedFindingCount = entry.truePositives + entry.falsePositives;
     const exactHeadCompletionCoverage = ratio(entry.exactHeadObserved, entry.runs);
     const exactHeadCompletionRate = ratio(entry.exactHeadCompleted, entry.exactHeadObserved);
     const contractBindingCoverage = ratio(entry.contractBound, entry.runs);
@@ -108,7 +118,10 @@ export function aggregateReviewBenchmarks(adjudications) {
       recall: ratio(entry.truePositives, entry.truePositives + entry.falseNegatives),
       blockingRecall: ratio(entry.blockingTruePositives, entry.blockingTruePositives + entry.blockingFalseNegatives),
       duplicateRate: ratio(entry.duplicates, entry.findings),
-      citationValidity: ratio(entry.validCitations, entry.findings), evidenceSupport: ratio(entry.evidenceSupported, entry.findings),
+      citationValidity: ratio(entry.validCitations, entry.citationObserved),
+      citationCoverage: ratio(entry.citationObserved, entry.findings),
+      evidenceSupport: ratio(entry.evidenceSupported, entry.evidenceObserved),
+      evidenceCoverage: ratio(entry.evidenceObserved, entry.findings),
       actionability: ratio(entry.actionable, entry.findings), severityCalibration: ratio(entry.severityCalibrated, entry.severityEvaluated),
       uniqueValidFindings: entry.uniqueValidFindingKeys.size, exactHeadCompletionRate, exactHeadCompletionCoverage,
       contractBindingCoverage, adjudicationCoverage,

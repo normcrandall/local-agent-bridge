@@ -155,7 +155,9 @@ export function createReviewBenchmarkReport(records, filters = {}) {
         recall: hasAdjudication ? row.recall : null,
         blockingRecall: hasAdjudication ? row.blockingRecall : null,
         citationValidity: row.citationValidity,
+        citationCoverage: row.citationCoverage,
         evidenceSupport: row.evidenceSupport,
+        evidenceCoverage: row.evidenceCoverage,
         actionability: row.actionability,
         duplicateRate: hasAdjudication ? row.duplicateRate : null,
         uniqueValidFindings: hasAdjudication ? row.uniqueValidFindings : null,
@@ -181,7 +183,7 @@ export function createReviewBenchmarkReport(records, filters = {}) {
       sampleCount: aggregate.runCount,
       providerCount: aggregate.providerCount,
       confidence: hasAdjudication ? aggregate.providers.reduce((lowest, row) => {
-        const order = ["insufficient", "directional", "moderate", "strong"];
+        const order = ["incomplete", "insufficient", "directional", "moderate", "strong"];
         return order.indexOf(row.confidence) < order.indexOf(lowest) ? row.confidence : lowest;
       }, "strong") : "incomplete",
       incompleteReason: hasAdjudication ? null : "precision and recall require independent finding adjudication",

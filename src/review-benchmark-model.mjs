@@ -304,9 +304,11 @@ export function adjudicateReviewRuns(runs, options = {}) {
     const falsePositives = byStatus.rejected;
     const falseNegatives = [...accepted].filter((key) => !observed.has(key)).sort();
     const validCitationCount = run.findings.filter((finding) => finding.citationValid === true).length;
+    const citationObservedCount = run.findings.filter((finding) => finding.citationValid != null).length;
     const supportedCount = run.findings.filter((finding) => finding.evidenceSupported === true).length;
+    const evidenceObservedCount = run.findings.filter((finding) => finding.evidenceSupported != null).length;
     const actionableCount = run.findings.filter((finding) => finding.actionable === true || finding.proposedFix).length;
-    const severityComparisons = [...truePositives, ...falsePositives]
+    const severityComparisons = truePositives
       .filter((key) => adjudications.get(key)?.finding)
       .map((key) => runFindings.get(key)?.severity === adjudications.get(key)?.finding?.severity);
     return Object.freeze({
@@ -317,7 +319,7 @@ export function adjudicateReviewRuns(runs, options = {}) {
       duplicateFindings: byStatus.duplicate, advisoryFindings: byStatus.advisory,
       blockingTruePositives: truePositives.filter((key) => adjudications.get(key)?.finding?.blocking),
       blockingFalseNegatives: falseNegatives.filter((key) => adjudications.get(key)?.finding?.blocking),
-      validCitationCount, supportedCount, actionableCount,
+      validCitationCount, citationObservedCount, supportedCount, evidenceObservedCount, actionableCount,
       severityCalibratedCount: severityComparisons.filter(Boolean).length, severityEvaluatedCount: severityComparisons.length,
       contractBound: Boolean(run.contractDigest && run.evidenceSurfaceDigest),
       adjudicationComplete: run.findings.every((finding) => (adjudications.get(finding.key)?.status ?? "unresolved") !== "unresolved"),

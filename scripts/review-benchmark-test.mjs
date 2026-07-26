@@ -203,14 +203,14 @@ try {
         provider: "qwen", model: "qwen3.6", repositoryCohort: "node-services", runId: "cohort-1", latencyMs: 100,
         truePositives: ["tp-1"], falsePositives: ["fp-1"], falseNegatives: ["fn-1"], unadjudicated: ["open-1"],
         duplicateFindings: ["duplicate-1"], advisoryFindings: [], blockingTruePositives: ["tp-1"], blockingFalseNegatives: ["fn-1"],
-        uniqueValidFindings: ["tp-1"], validCitationCount: 2, supportedCount: 1, actionableCount: 3,
+        uniqueValidFindings: ["tp-1"], validCitationCount: 2, citationObservedCount: 2, supportedCount: 1, evidenceObservedCount: 2, actionableCount: 3,
         severityCalibratedCount: 1, severityEvaluatedCount: 2, exactHeadComplete: true, contractBound: true, adjudicationComplete: true,
       },
       {
         provider: "qwen", model: "qwen3.6", repositoryCohort: "node-services", runId: "cohort-2", latencyMs: 200,
         truePositives: ["tp-2"], falsePositives: [], falseNegatives: [], unadjudicated: [],
         duplicateFindings: [], advisoryFindings: ["advisory-1"], blockingTruePositives: [], blockingFalseNegatives: [],
-        uniqueValidFindings: [], validCitationCount: 1, supportedCount: 2, actionableCount: 1,
+        uniqueValidFindings: [], validCitationCount: 1, citationObservedCount: 2, supportedCount: 2, evidenceObservedCount: 2, actionableCount: 1,
         severityCalibratedCount: 1, severityEvaluatedCount: 1, exactHeadComplete: false, contractBound: true, adjudicationComplete: true,
       },
     ],
@@ -220,8 +220,10 @@ try {
   assert.equal(multiRunCohort.recall, 2 / 3);
   assert.equal(multiRunCohort.blockingRecall, 1 / 2);
   assert.equal(multiRunCohort.duplicateRate, 1 / 6);
-  assert.equal(multiRunCohort.citationValidity, 1 / 2);
-  assert.equal(multiRunCohort.evidenceSupport, 1 / 2);
+  assert.equal(multiRunCohort.citationValidity, 3 / 4);
+  assert.equal(multiRunCohort.citationCoverage, 2 / 3);
+  assert.equal(multiRunCohort.evidenceSupport, 3 / 4);
+  assert.equal(multiRunCohort.evidenceCoverage, 2 / 3);
   assert.equal(multiRunCohort.actionability, 2 / 3);
   assert.equal(multiRunCohort.severityCalibration, 2 / 3);
   assert.equal(multiRunCohort.exactHeadCompletionRate, 1 / 2);
@@ -230,7 +232,24 @@ try {
   assert.equal(multiRunCohort.adjudicationCoverage, 1);
   assert.equal(multiRunCohort.confidence, "incomplete", "a failed exact-head run prevents quality confidence");
   assert.equal(multiRunCohort.uniqueValidFindings, 1);
-  assert.deepEqual(multiRunCohort.latencyMs, { min: 100, median: 100, p95: 200, max: 200, mean: 150 });
+  assert.deepEqual(multiRunCohort.latencyMs, { min: 100, median: 150, p95: 200, max: 200, mean: 150 });
+
+  const emptyMisses = aggregateReviewBenchmarks([{
+    repository: "veliqon/example",
+    headSha,
+    results: Array.from({ length: 15 }, (_, index) => ({
+      provider: "empty", model: "empty-1", repositoryCohort: "node-services", runId: `empty-${index}`, latencyMs: 1,
+      truePositives: [], falsePositives: [], falseNegatives: Array.from({ length: 15 }, (_unused, finding) => `miss-${finding}`),
+      unadjudicated: [], duplicateFindings: [], advisoryFindings: [], blockingTruePositives: [], blockingFalseNegatives: [],
+      uniqueValidFindings: [], validCitationCount: 0, citationObservedCount: 0, supportedCount: 0, evidenceObservedCount: 0,
+      actionableCount: 0, severityCalibratedCount: 0, severityEvaluatedCount: 0,
+      exactHeadComplete: true, contractBound: true, adjudicationComplete: true,
+    })),
+  }]).providers[0];
+  assert.equal(emptyMisses.adjudicatedFindingCount, 0, "missed ground truth does not create observed evidence volume");
+  assert.equal(emptyMisses.confidence, "insufficient", "empty reviews cannot earn confidence from repeated false negatives");
+  assert.equal(emptyMisses.citationValidity, null, "unobserved citation validity remains null");
+  assert.equal(emptyMisses.evidenceSupport, null, "unobserved evidence support remains null");
 
   const richFinding = normalizeFinding({
     path: "src/c.mjs", startLine: 10, endLine: 12, severity: "critical", claim: "Authorization can be bypassed",
