@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
+import { canonicalGitHubAppLogin } from "./github-app-auth.mjs";
 
 function revParse(workspace, revision, errorMessage) {
   const result = spawnSync("git", ["rev-parse", revision], {
@@ -33,6 +34,38 @@ export function plannedIssueClaimWorktree({ workspace, worktree, mode = "review"
 
 export function resolveClaimedWorktreeHead(workspace) {
   return revParse(workspace, "HEAD", "Unable to resolve the claimed worktree HEAD.");
+}
+
+export function resolveIssueClaimAfterPreflight({
+  issueClaim,
+  writer,
+  branch,
+  worktree,
+  baseSha,
+  headSha,
+}) {
+  if (!issueClaim) return null;
+  return {
+    ...issueClaim,
+    expectedLogin: canonicalGitHubAppLogin(issueClaim.expectedLogin),
+    writer,
+    branch: branch || issueClaim.branch || null,
+    worktree,
+    baseSha,
+    headSha,
+  };
+}
+
+export function resolveContinuationIssueClaim({ currentIssueClaim, issueClaim }) {
+  if (!currentIssueClaim) return null;
+  return {
+    ...currentIssueClaim,
+    ...(issueClaim || {}),
+    // The verified authority is durable collaboration state. A continuation
+    // may refresh lease details, but it cannot replace or discard that proof.
+    authority: currentIssueClaim.authority,
+    expectedLogin: canonicalGitHubAppLogin(currentIssueClaim.expectedLogin),
+  };
 }
 
 export function workspaceHeadBuilderBinding({ githubBuilder, mode, worktree }) {
