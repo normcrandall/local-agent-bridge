@@ -306,10 +306,18 @@ function canonicalAuthority(authority) {
 }
 
 function repairableAuthorityError(issueNumber, collaborationId, reason) {
-  return new Error(
+  const error = new Error(
     `Issue #${issueNumber} claim identity cannot be safely rebound for collaboration ${collaborationId}: ${reason}. `
     + "Release the inspected claim before mutation, then reacquire it with the verified builder App.",
   );
+  error.code = "CLAIM_AUTHORITY_MISMATCH";
+  return error;
+}
+
+function trustedClaimParseError(message) {
+  const error = new Error(message);
+  error.code = "CLAIM_PARSE_INVALID";
+  return error;
 }
 
 export async function rebindIssueClaim({ client, issueNumber, collaborationId, workspaceRoot, ttlMs = 300_000 }) {
@@ -432,10 +440,10 @@ export async function parseClaims(client, issueNumber) {
           claims.push({ commentId: c.id, data: mappedData, author: authorLogin, isLegacyV1: true });
           continue;
         } catch (error) {
-          throw new Error(`Malformed trusted legacy claim comment ${c.id}: ${error.message}`);
+          throw trustedClaimParseError(`Malformed trusted legacy claim comment ${c.id}: ${error.message}`);
         }
       }
-      throw new Error(`Malformed trusted legacy claim comment ${c.id}: missing JSON payload.`);
+      throw trustedClaimParseError(`Malformed trusted legacy claim comment ${c.id}: missing JSON payload.`);
     }
 
     // Canonical format
@@ -444,7 +452,7 @@ export async function parseClaims(client, issueNumber) {
       try {
         claims.push({ commentId: c.id, data: JSON.parse(match[1]), author: authorLogin });
       } catch (error) {
-        throw new Error(`Malformed trusted canonical claim comment ${c.id}: ${error.message}`);
+        throw trustedClaimParseError(`Malformed trusted canonical claim comment ${c.id}: ${error.message}`);
       }
     }
   }
@@ -907,6 +915,37 @@ async function updatePortfolioWithRetry(portfoliosPath, pId, updater, maxAttempt
   }
 }
 
+function isTransientClaimReconciliationError(error) {
+  const statuses = [error?.status, error?.cause?.status].filter((status) => Number.isInteger(status));
+  if (statuses.some((status) => status === 429 || status >= 500)) return true;
+  const codes = [error?.code, error?.cause?.code].filter(Boolean).map(String);
+  if (codes.some((code) => /^(?:EAI_AGAIN|ECONNABORTED|ECONNREFUSED|ECONNRESET|ENETUNREACH|ETIMEDOUT|UND_ERR_|ABORT_ERR)/.test(code))) {
+    return true;
+  }
+  return error instanceof TypeError && /fetch|network|socket|connection/i.test(error.message || "");
+}
+
+async function recordClaimReconciliationFailure({ portfoliosPath, portfolioId, itemId, stage, error }) {
+  const detail = error?.message || String(error);
+  const transient = isTransientClaimReconciliationError(error);
+  await updatePortfolioWithRetry(portfoliosPath, portfolioId, async (current) => {
+    const targetItem = current.items.find((candidate) => candidate.id === itemId);
+    if (!targetItem) return current;
+    if (transient) {
+      targetItem.summary = `Claim reconciliation ${stage} was deferred after a transient GitHub failure: ${detail}. The retained claim remains held and will retry automatically.`;
+      return current;
+    }
+    targetItem.status = "indeterminate";
+    const recovery = error?.code === "CLAIM_AUTHORITY_MISMATCH"
+      || error?.code === "CLAIM_PARSE_INVALID"
+      ? " Inspect the retained claim, release it without mutation, then reacquire it with the verified builder App."
+      : " Inspect the builder App binding and retained claim before releasing or reacquiring it.";
+    targetItem.summary = `Claim reconciliation ${stage} could not establish trusted authority: ${detail}.${recovery}`;
+    return current;
+  });
+  return { transient };
+}
+
 export async function reconcileClaimsAndPortfolios(workspaceRoot, fetchImpl = fetch, clientOverride = null) {
   const portfoliosPath = resolve(workspaceRoot, ".bridge/portfolios");
   const portfolios = await listPortfolios(portfoliosPath);
@@ -924,11 +963,28 @@ export async function reconcileClaimsAndPortfolios(workspaceRoot, fetchImpl = fe
 
       const issueNum = item.issueNumber || collab?.issueClaim?.issueNumber;
       if (!issueNum) continue;
-      const client = typeof clientOverride === "function"
-        ? await clientOverride({ issueNumber: issueNum, portfolio: portfolioState, item })
-        : clientOverride || await getBuilderClientForWorkspace(portfolioState.workspace || workspaceRoot, issueNum, fetchImpl);
-      if (!client) throw new Error(`No builder App client is configured for claimed issue #${issueNum}.`);
-      const claim = canonicalClaim(await parseClaims(client, issueNum));
+      let client;
+      let claim;
+      try {
+        client = typeof clientOverride === "function"
+          ? await clientOverride({ issueNumber: issueNum, portfolio: portfolioState, item })
+          : clientOverride || await getBuilderClientForWorkspace(portfolioState.workspace || workspaceRoot, issueNum, fetchImpl);
+        if (!client) {
+          const error = new Error(`No builder App client is configured for claimed issue #${issueNum}.`);
+          error.code = "CLAIM_CLIENT_UNAVAILABLE";
+          throw error;
+        }
+        claim = canonicalClaim(await parseClaims(client, issueNum));
+      } catch (error) {
+        await recordClaimReconciliationFailure({
+          portfoliosPath,
+          portfolioId: p.id,
+          itemId: item.id,
+          stage: "preflight",
+          error,
+        });
+        continue;
+      }
       const claimIsHeld = claim && !RELEASED_PHASES.has(normalizePhase(claim.data.phase));
       const lifecycleReconciliation = await reconcileGitHubLifecycle({
         adapter: createProductionGitHubLifecycleAdapter(client),
@@ -1063,18 +1119,20 @@ export async function reconcileClaimsAndPortfolios(workspaceRoot, fetchImpl = fe
           worktree: collab.issueClaim?.worktree || collab.workspace,
           summary: `Reconciled local collaboration status ${collab.status} after broker restart.`,
         });
-      } catch (error) {
-        const detail = error?.message || String(error);
-        const recovery = /release the inspected claim.*reacquire/i.test(detail)
-          ? ""
-          : " The retained claim was not released automatically; inspect and release it, then reacquire it with the verified builder App.";
         await updatePortfolioWithRetry(portfoliosPath, p.id, async (current) => {
           const targetItem = current.items.find((candidate) => candidate.id === item.id);
           if (targetItem) {
-            targetItem.status = "indeterminate";
-            targetItem.summary = `Claim authority could not be refreshed after broker restart: ${detail}${recovery}`;
+            targetItem.summary = `Claim lease reconciled with local collaboration status ${collab.status} after broker restart.`;
           }
           return current;
+        });
+      } catch (error) {
+        await recordClaimReconciliationFailure({
+          portfoliosPath,
+          portfolioId: p.id,
+          itemId: item.id,
+          stage: "refresh",
+          error,
         });
         continue;
       }
