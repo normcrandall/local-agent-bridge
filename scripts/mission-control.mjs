@@ -27,7 +27,10 @@ import {
   resolveMissionControlSelection,
   runClipboardCopy,
 } from "../src/mission-control-actions.mjs";
-import { callMissionControlAction } from "../src/mission-control-client.mjs";
+import {
+  callMissionControlAction,
+  createMissionControlSubscriptionClient,
+} from "../src/mission-control-client.mjs";
 import { createProviderQuotaMonitor } from "../src/provider-quota.mjs";
 
 process.stdout.on("error", (error) => {
@@ -52,7 +55,7 @@ function usage() {
   process.stdout.write(`  --include-stale     Include stale attention and portfolio items\n`);
   process.stdout.write(`  --stale-after-hours N  Collapse attention items older than N hours (default: 24)\n`);
   process.stdout.write(`  --repo OWNER/REPO   Filter to one repository\n`);
-  process.stdout.write(`  --refresh-ms N      Interactive refresh interval (default: 1000)\n`);
+  process.stdout.write(`  --refresh-ms N      Maximum idle redraw interval (minimum/default: 60000)\n`);
   process.stdout.write(`  --state-root PATH   Read a different bridge state directory\n`);
   process.stdout.write(`  --no-color          Disable ANSI colors\n`);
   process.stdout.write(`  --quota             Include a synchronous quota reading in one-shot output\n`);
@@ -66,7 +69,7 @@ if (args.includes("--help") || args.includes("-h")) {
 
 const stateRoot = resolve(value("--state-root", process.env.BRIDGE_COLLABORATION_DIR || resolve(homedir(), ".local/share/agent-bridge/state")));
 const repositoryFilter = value("--repo");
-const refreshMs = Math.max(250, Number.parseInt(value("--refresh-ms", "1000"), 10) || 1000);
+const refreshMs = Math.max(60_000, Number.parseInt(value("--refresh-ms", "60000"), 10) || 60_000);
 let view = args.includes("--all") ? "all" : args.includes("--attention") ? "attention" : "live";
 let includeStale = args.includes("--include-stale");
 const staleAfterHours = Math.max(1, Number.parseInt(value("--stale-after-hours", "24"), 10) || 24);
@@ -120,6 +123,8 @@ let timer = null;
 let restorePromise = null;
 let terminalRestored = false;
 let lastSnapshot = null;
+let lastViewModel = null;
+let subscriptionClient = null;
 let actionMessage = null;
 let pendingConfirmation = null;
 let activePane = 1;
@@ -134,6 +139,7 @@ const restoreSequence = "\x1b[?25h\x1b[?1049l";
 function restore() {
   if (restorePromise) return restorePromise;
   stopped = true;
+  subscriptionClient?.stop();
   providerQuotaMonitor.stop();
   if (timer) clearInterval(timer);
   timer = null;
@@ -227,11 +233,63 @@ async function shutdown(code) {
   resolveExit();
 }
 
-async function draw() {
+function subscriptionSnapshot(viewModel) {
+  const categorized = [
+    ["active", "active"],
+    ["needsYou", "needs_user"],
+    ["queue", "waiting"],
+    ["history", "stopped"],
+  ];
+  const all = new Map();
+  for (const [collection, operatorCategory] of categorized) {
+    for (const lane of viewModel.collections?.[collection] || []) {
+      const key = lane.key || `${lane.repository}\0${lane.id}`;
+      if (!all.has(key)) all.set(key, { ...lane, operatorCategory, providers: [lane.activeAgent || lane.writer].filter(Boolean), relatedLaneCount: 1 });
+    }
+  }
+  const include = view === "live"
+    ? new Set(["active"])
+    : view === "attention" ? new Set(["needs_user", "waiting"]) : null;
+  const operatorLanes = [...all.values()].filter((lane) => (
+    (!include || include.has(lane.operatorCategory))
+    && (!repositoryFilter || lane.repository === repositoryFilter)
+  ));
+  const counts = {
+    active: viewModel.collections?.active?.length || 0,
+    needs_user: viewModel.collections?.needsYou?.length || 0,
+    waiting: viewModel.collections?.queue?.length || 0,
+    stopped: viewModel.collections?.history?.length || 0,
+  };
+  return {
+    generatedAt: viewModel.updatedAt || new Date().toISOString(),
+    mode: view,
+    filter: repositoryFilter,
+    lanes: [...all.values()],
+    operatorLanes,
+    operatorCounts: counts,
+    lifecycleCounts: {
+      needs_user: counts.needs_user,
+      queued: counts.waiting,
+      blocked: (viewModel.collections?.queue || []).filter((lane) => lane.status === "blocked").length,
+      recovering: (viewModel.collections?.active || []).filter((lane) => lane.status === "recovering").length,
+      terminal: counts.stopped,
+    },
+    needsUserCount: counts.needs_user,
+    needsUserKeys: (viewModel.collections?.needsYou || []).map((lane) => lane.key),
+    providerQuota: null,
+    providerCapacity: {},
+    recentActivity: [],
+    historicalNeedsUserCount: 0,
+    staleAfterMs: staleAfterHours * 60 * 60 * 1000,
+  };
+}
+
+async function draw(currentOverride = null) {
   if (drawing || stopped) return;
   drawing = true;
   try {
-    const current = await snapshot();
+    const current = currentOverride || (lastViewModel ? subscriptionSnapshot(lastViewModel) : null) || lastSnapshot || await snapshot();
+    if (quotaEnabled) current.providerQuota = await providerQuotaMonitor.snapshot({ waitForRefresh: false });
     lastSnapshot = current;
     if (stopped) return;
     const newlyObserved = newlyObservedAttentionKeys(seenAttentionKeys, current.needsUserKeys);
@@ -408,5 +466,19 @@ process.on("exit", restoreSynchronously);
 process.stdout.on("resize", handleResize);
 
 startRefreshTimer();
-await draw();
+subscriptionClient = createMissionControlSubscriptionClient({
+  runtimeRoot: resolve(import.meta.dirname, ".."),
+  workspaceRoot: resolve(import.meta.dirname, ".."),
+  stateRoot,
+  onUpdate: async ({ viewModel }) => {
+    lastViewModel = viewModel;
+    if (actionMessage?.startsWith("Subscription reconnecting:")) actionMessage = null;
+    await draw(subscriptionSnapshot(viewModel));
+  },
+  onError: async (error) => {
+    actionMessage = `Subscription reconnecting: ${error.message}`;
+    if (lastSnapshot) await draw(lastSnapshot);
+  },
+});
+void subscriptionClient.run();
 await exitRequested;
