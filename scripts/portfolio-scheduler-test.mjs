@@ -84,6 +84,41 @@ const triageAhead = analyzePortfolio({
 assert.deepEqual(triageAhead.triageAhead.map((item) => item.id), ["blocked-high", "ready"], "triage may run before dependencies merge without selecting blocked implementation");
 assert.deepEqual(triageAhead.selected, [], "the active writer consumes implementation capacity");
 
+const crossPhaseLookahead = analyzePortfolio({
+  items: [
+    { id: "phase-one-foundation", status: "implementing", phase: "foundation", phaseOrder: 1, paths: ["src/foundation"] },
+    { id: "phase-one-blocked", phase: "foundation", phaseOrder: 1, blockedBy: ["phase-one-foundation"], paths: ["src/current"] },
+    { id: "phase-two-safe", phase: "delivery", phaseOrder: 2, paths: ["src/independent"] },
+    { id: "phase-two-conflict", phase: "delivery", phaseOrder: 2, paths: ["src/foundation/adapter"] },
+  ],
+  maxParallel: 3,
+});
+assert.deepEqual(crossPhaseLookahead.selected.map((item) => item.id), ["phase-two-safe"],
+  "unused capacity should be backfilled by a dependency-ready later phase");
+assert.equal(crossPhaseLookahead.selected[0].lookahead, true);
+assert.equal(crossPhaseLookahead.selected[0].lookaheadFromPhase, "foundation");
+assert.equal(crossPhaseLookahead.deferred.find((item) => item.id === "phase-two-conflict").reasons[0].type, "path",
+  "phase lookahead must not weaken footprint deconfliction");
+assert.equal(crossPhaseLookahead.blocked.find((item) => item.id === "phase-one-blocked").reasons[0].type, "dependency",
+  "phase lookahead must not weaken dependency gates");
+
+const tiedPhaseOrder = analyzePortfolio({
+  items: [
+    { id: "z-item", phase: "zeta", phaseOrder: 1, priority: 1 },
+    { id: "a-item", phase: "alpha", phaseOrder: 1, priority: 1 },
+    { id: "later", phase: "delivery", phaseOrder: 2, priority: 100 },
+  ],
+  maxParallel: 3,
+});
+assert.equal(tiedPhaseOrder.currentPhase, "alpha", "tied phase labels must not depend on caller array order");
+assert.deepEqual(tiedPhaseOrder.selected.map((item) => item.id), ["a-item", "z-item", "later"]);
+
+const defaultCapacity = analyzePortfolio({
+  items: Array.from({ length: 6 }, (_, index) => ({ id: `parallel-${index}`, paths: [`src/${index}`] })),
+});
+assert.equal(defaultCapacity.maxParallel, 5);
+assert.equal(defaultCapacity.selected.length, 5, "the default frontier should use the machine's five writer slots");
+
 assert.throws(() => analyzePortfolio({
   items: [
     { id: "a", blockedBy: ["b"] },

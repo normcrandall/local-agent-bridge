@@ -4,6 +4,7 @@ const TERMINAL = new Set(PORTFOLIO_STATUS_GROUPS.terminal);
 const ACTIVE = new Set(PORTFOLIO_STATUS_GROUPS.active);
 const INTEGRATION = new Set(PORTFOLIO_STATUS_GROUPS.integration);
 const PAUSED = new Set(PORTFOLIO_STATUS_GROUPS.paused);
+export const DEFAULT_MAX_PARALLEL = 5;
 
 function strings(value) {
   return [...new Set((value || []).map((item) => String(item).trim()).filter(Boolean))];
@@ -48,6 +49,8 @@ function normalizeItem(value) {
     title: String(value.title || id),
     status: value.status || "ready",
     priority: Number.isFinite(Number(value.priority)) ? Number(value.priority) : 0,
+    phase: value.phase ? String(value.phase).trim() : null,
+    phaseOrder: Number.isFinite(Number(value.phaseOrder)) ? Number(value.phaseOrder) : 0,
     blockedBy: strings(value.blockedBy),
     conflictsWith: strings(value.conflictsWith),
     paths: strings(value.paths).map((path) => path.replace(/^\.\//, "").replace(/\/+$/, "")),
@@ -57,6 +60,13 @@ function normalizeItem(value) {
     ...normalized,
     footprint: normalizePortfolioFootprint(value.footprint || {}, normalized),
   };
+}
+
+function schedulingOrder(left, right) {
+  return left.phaseOrder - right.phaseOrder
+    || right.priority - left.priority
+    || String(left.phase || "").localeCompare(String(right.phase || ""))
+    || left.id.localeCompare(right.id);
 }
 
 export function normalizePortfolioItems(items) {
@@ -143,7 +153,7 @@ function triageCandidates(items, limit = 2) {
     .slice(0, limit);
 }
 
-export function analyzePortfolio({ items, maxParallel = 2 } = {}) {
+export function analyzePortfolio({ items, maxParallel = DEFAULT_MAX_PARALLEL } = {}) {
   if (!Number.isInteger(maxParallel) || maxParallel < 1 || maxParallel > 20) throw new Error("maxParallel must be an integer from 1 to 20.");
   const normalized = normalizePortfolioItems(items || []);
   const cycles = dependencyCycles(normalized);
@@ -172,19 +182,37 @@ export function analyzePortfolio({ items, maxParallel = 2 } = {}) {
       });
     } else ready.push(item);
   }
-  ready.sort((left, right) => right.priority - left.priority || left.id.localeCompare(right.id));
+  ready.sort(schedulingOrder);
   const selected = [];
   const deferred = [];
   const capacity = Math.max(0, maxParallel - active.length);
+  const unfinished = normalized.filter((item) => !TERMINAL.has(item.status));
+  const currentPhaseOrder = unfinished.length
+    ? Math.min(...unfinished.map((item) => item.phaseOrder))
+    : null;
+  const currentPhase = currentPhaseOrder === null
+    ? null
+    : [...unfinished]
+      .filter((item) => item.phaseOrder === currentPhaseOrder)
+      .sort(schedulingOrder)[0]?.phase || null;
   for (const item of ready) {
     const conflicts = [...active, ...integration, ...selected].flatMap((other) => schedulingConflicts(item, other));
     if (conflicts.length) deferred.push({ ...item, reasons: conflicts });
     else if (selected.length >= capacity) deferred.push({ ...item, reasons: [{ type: "capacity", detail: `maxParallel ${maxParallel} reached` }] });
-    else selected.push(item);
+    else {
+      const lookahead = currentPhaseOrder !== null && item.phaseOrder > currentPhaseOrder;
+      selected.push({
+        ...item,
+        lookahead,
+        lookaheadFromPhase: lookahead ? currentPhase : null,
+      });
+    }
   }
   return {
     maxParallel,
     capacity,
+    currentPhase,
+    currentPhaseOrder,
     active,
     integration,
     ready,
@@ -195,7 +223,7 @@ export function analyzePortfolio({ items, maxParallel = 2 } = {}) {
   };
 }
 
-export function buildExecutionWaves({ items, maxParallel = 2 } = {}) {
+export function buildExecutionWaves({ items, maxParallel = DEFAULT_MAX_PARALLEL } = {}) {
   let current = normalizePortfolioItems(items || []);
   const waves = [];
   const maximumWaves = current.length + 1;

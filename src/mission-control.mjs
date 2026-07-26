@@ -1115,6 +1115,12 @@ function detailPane(lane, timeline, width, now, snapshot, expanded = false) {
   if (summaryIsStale) rows.push(paneLine("SUMMARY STALE · process heartbeat remains live", "33;1"));
   const github = [lane.issueNumber && `issue #${lane.issueNumber}`, lane.prNumber && `PR #${lane.prNumber}`, lane.branch, lane.headSha && lane.headSha.slice(0, 10)].filter(Boolean).join(" · ");
   if (github) rows.push(paneLine(""), paneLine(`GITHUB  ${github}`, "35"));
+  if (lane.portfolio?.phase) {
+    const lookahead = lane.portfolio.lookahead
+      ? ` · LOOKAHEAD ahead of ${lane.portfolio.lookaheadFromPhase || "the current phase"}`
+      : "";
+    rows.push(paneLine(`PHASE  ${lane.portfolio.phase}${lookahead}`, lane.portfolio.lookahead ? "33;1" : "90"));
+  }
   if (lane.writerAuthority?.login) {
     const writerIdentity = [
       lane.writerAuthority.login,

@@ -196,6 +196,22 @@ export async function updatePortfolioItemWithFootprintReservation(root, id, expe
     }
     const item = findItem(current, itemId);
     const active = [...PORTFOLIO_STATUS_GROUPS.active, ...PORTFOLIO_STATUS_GROUPS.integration].includes(patch.status);
+    const wasActive = [...PORTFOLIO_STATUS_GROUPS.active, ...PORTFOLIO_STATUS_GROUPS.integration].includes(item.status);
+    const currentSchedule = current.schedule || analyzePortfolio({ items: current.items, maxParallel: current.maxParallel });
+    const scheduledItem = currentSchedule.selected?.find((candidate) => candidate.id === String(itemId)) || null;
+    const derivedLookahead = item.phaseOrder !== null
+      && item.phaseOrder !== undefined
+      && currentSchedule.currentPhaseOrder !== null
+      && currentSchedule.currentPhaseOrder !== undefined
+      && Number(item.phaseOrder) > Number(currentSchedule.currentPhaseOrder);
+    const activationProvenance = active && !wasActive
+      ? {
+          lookahead: scheduledItem?.lookahead === true || derivedLookahead,
+          lookaheadFromPhase: scheduledItem?.lookaheadFromPhase
+            || (derivedLookahead ? currentSchedule.currentPhase : null)
+            || null,
+        }
+      : null;
     const terminal = PORTFOLIO_STATUS_GROUPS.terminal.includes(patch.status);
     let reservation = item.footprintReservation || null;
     if (active && reservation?.status !== "reserved") {
@@ -230,12 +246,21 @@ export async function updatePortfolioItemWithFootprintReservation(root, id, expe
         releaseReason: patch.status,
       };
     }
-    return updatePortfolio(root, id, expectedRevision, (state) => updater({
-      ...state,
-      items: state.items.map((candidate) => candidate.id === String(itemId)
-        ? { ...candidate, ...(reservation ? { footprintReservation: reservation } : {}) }
-        : candidate),
-    }));
+    return updatePortfolio(root, id, expectedRevision, async (state) => {
+      const updated = await updater({
+        ...state,
+        items: state.items.map((candidate) => candidate.id === String(itemId)
+          ? { ...candidate, ...(reservation ? { footprintReservation: reservation } : {}) }
+          : candidate),
+      });
+      if (!activationProvenance) return updated;
+      return {
+        ...updated,
+        items: updated.items.map((candidate) => candidate.id === String(itemId)
+          ? { ...candidate, ...activationProvenance }
+          : candidate),
+      };
+    });
   } finally {
     await releaseRepository();
   }

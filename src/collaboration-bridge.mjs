@@ -40,7 +40,7 @@ import {
   summarizePerformance,
 } from "./performance-timeline.mjs";
 import { replayIncident, formatReplayHuman } from "./incident-replay.mjs";
-import { analyzePortfolio, buildExecutionWaves, normalizePortfolioItems } from "./portfolio-scheduler.mjs";
+import { analyzePortfolio, buildExecutionWaves, DEFAULT_MAX_PARALLEL, normalizePortfolioItems } from "./portfolio-scheduler.mjs";
 import { PORTFOLIO_STATUSES, PORTFOLIO_STATUS_GROUPS } from "./portfolio-status.mjs";
 import {
   createPortfolio,
@@ -708,6 +708,8 @@ const portfolioItemSchema = z.object({
   title: z.string().min(1).max(500).optional(),
   task: z.string().min(1).max(50_000).optional(),
   priority: z.number().finite().default(0),
+  phase: z.string().min(1).max(200).optional(),
+  phaseOrder: z.number().finite().default(0).describe("Numeric phase order. Supply it explicitly with named phases; omitted values intentionally share order 0."),
   status: portfolioStatusSchema.default("ready"),
   blockedBy: z.array(z.string().min(1).max(200)).max(200).default([]),
   conflictsWith: z.array(z.string().min(1).max(200)).max(200).default([]),
@@ -1809,7 +1811,7 @@ server.registerTool(
     description: "Compute the safe ready frontier and dry-run execution waves from explicit dependencies, conflicts, path scopes, and shared resources without starting work.",
     inputSchema: {
       items: z.array(portfolioItemSchema).min(1).max(500),
-      maxParallel: z.number().int().min(1).max(20).default(2),
+      maxParallel: z.number().int().min(1).max(20).default(DEFAULT_MAX_PARALLEL),
     },
   },
   async ({ items, maxParallel }) => toolResponse({
@@ -1828,7 +1830,7 @@ server.registerTool(
       repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/).optional(),
       workspace: z.string().optional(),
       items: z.array(portfolioItemSchema).min(1).max(500),
-      maxParallel: z.number().int().min(1).max(20).default(2),
+      maxParallel: z.number().int().min(1).max(20).default(DEFAULT_MAX_PARALLEL),
       targetBranch: z.string().min(1).max(500).default("main"),
       targetSha: z.string().regex(/^[0-9a-f]{40}$/i),
     },

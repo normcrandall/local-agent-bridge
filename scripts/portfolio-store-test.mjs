@@ -12,6 +12,7 @@ import {
   updatePortfolio,
   updatePortfolioItemWithFootprintReservation,
 } from "../src/portfolio-store.mjs";
+import { analyzePortfolio } from "../src/portfolio-scheduler.mjs";
 
 const root = await mkdtemp(join(tmpdir(), "agent-portfolio-store-"));
 try {
@@ -19,6 +20,35 @@ try {
     ...state,
     items: state.items.map((item) => item.id === itemId ? { ...item, ...patch } : item),
   });
+  const patchItemAndRefresh = (itemId, patch) => (state) => {
+    const items = state.items.map((item) => item.id === itemId ? { ...item, ...patch } : item);
+    return { ...state, items, schedule: analyzePortfolio({ items, maxParallel: state.maxParallel }) };
+  };
+
+  const lookaheadItems = [
+    { id: "foundation", status: "implementing", phase: "foundation", phaseOrder: 1, footprint: { paths: ["src/foundation"] } },
+    { id: "delivery", status: "ready", phase: "delivery", phaseOrder: 2, footprint: { paths: ["src/delivery"] } },
+  ];
+  const lookaheadPortfolio = await createPortfolio(root, {
+    repository: "veliqon/lookahead",
+    objective: "Preserve cross-phase activation provenance",
+    workspace: "/tmp/lookahead",
+    maxParallel: 2,
+    items: lookaheadItems,
+    schedule: analyzePortfolio({ items: lookaheadItems, maxParallel: 2 }),
+  });
+  const activatedLookahead = await updatePortfolioItemWithFootprintReservation(
+    root,
+    lookaheadPortfolio.id,
+    lookaheadPortfolio.revision,
+    "delivery",
+    { status: "implementing" },
+    patchItemAndRefresh("delivery", { status: "implementing" }),
+  );
+  const activatedDelivery = activatedLookahead.items.find((item) => item.id === "delivery");
+  assert.equal(activatedDelivery.lookahead, true, "a selected lookahead lane retains its provenance after activation");
+  assert.equal(activatedDelivery.lookaheadFromPhase, "foundation");
+  assert.equal(activatedLookahead.schedule.selected.length, 0, "the active lane no longer depends on schedule.selected for its provenance");
 
   const firstLane = await createPortfolio(root, {
     repository: "veliqon/example",
