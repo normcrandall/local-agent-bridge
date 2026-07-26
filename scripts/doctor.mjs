@@ -3,6 +3,11 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { GITHUB_LOGIN_PATTERN } from "../src/github-app-auth.mjs";
+import {
+  computeRuntimeDigest,
+  containsCommit,
+  readInstalledProvenance,
+} from "../src/runtime-provenance.mjs";
 import { DEFAULT_OLLAMA_CONFIG, DEFAULT_OLLAMA_MODEL } from "../src/ollama-review.mjs";
 
 const root = resolve(import.meta.dirname, "..");
@@ -329,6 +334,49 @@ check("Global user attention signalling", () => {
   const parsed = JSON.parse(result.stdout);
   return resolve(parsed.stateRoot) === expectedStateRoot && Array.isArray(parsed.pending);
 }, "run npm run install:global to install the needs_user notification and attention CLI");
+
+const installedRuntimeRoot = resolve(homedir(), ".local/share/agent-bridge/runtime");
+const installedProvenance = await readInstalledProvenance(installedRuntimeRoot);
+const observedDigest = installedProvenance
+  ? await computeRuntimeDigest(installedRuntimeRoot).catch(() => null)
+  : null;
+const mainContainsInstalled = installedProvenance?.commit
+  ? await containsCommit({ sourceRoot: root, ancestor: installedProvenance.commit, candidate: "main" })
+  : null;
+
+if (installedProvenance) {
+  console.log(`\nInstalled runtime: ${installedProvenance.commit ?? "unversioned"}${installedProvenance.dirty ? " (DIRTY)" : ""} on ${installedProvenance.ref ?? "detached"}`);
+  console.log(`  installed ${installedProvenance.installedAt} by pid ${installedProvenance.installerPid} on ${installedProvenance.installerHost} from ${installedProvenance.installerWorkspace}`);
+  console.log(`  recorded digest ${installedProvenance.digest}`);
+  console.log(`  observed digest ${observedDigest ?? "unreadable"}\n`);
+}
+
+check("Global runtime provenance", () => {
+  if (!installedProvenance) throw new Error(`no ${installedRuntimeRoot}/.runtime-provenance.json`);
+  if (installedProvenance.dirty) {
+    throw new Error(`deployed from an uncommitted checkout (${installedProvenance.dirtyEntries.slice(0, 5).join(", ")})`);
+  }
+  if (!installedProvenance.commit) throw new Error("deployed from a source with no resolvable commit");
+  return true;
+}, "run npm run install:global from a clean checkout to record deployment provenance");
+
+check("Global runtime integrity", () => {
+  if (!installedProvenance) throw new Error("no provenance recorded to compare against");
+  if (!observedDigest) throw new Error(`cannot read ${installedRuntimeRoot}`);
+  if (observedDigest !== installedProvenance.digest) {
+    throw new Error("installed runtime no longer matches the digest recorded at install time; it was modified in place");
+  }
+  return true;
+}, "redeploy with npm run install:global; never edit or copy files into the installed runtime");
+
+check("Global runtime drift from main", () => {
+  if (!installedProvenance?.commit) throw new Error("no installed commit recorded");
+  if (mainContainsInstalled === null) throw new Error(`cannot compare ${installedProvenance.commit} against main from ${root}`);
+  if (!mainContainsInstalled) {
+    throw new Error(`installed ${installedProvenance.commit} is not contained in main; the global runtime is running unmerged code`);
+  }
+  return true;
+}, "fetch main and redeploy from a commit that main contains, or accept the drift deliberately");
 
 if (failed) process.exit(1);
 console.log("\nConfig checks do not prove live GitHub installation permissions. Run `npm run github-app:verify -- OWNER/REPO` for that repository.");
