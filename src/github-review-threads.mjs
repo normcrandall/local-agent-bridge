@@ -427,6 +427,7 @@ export async function appendReviewTrustEvidence({ repository, prNumber, headSha,
     configuredWriterLogins: [...new Set(evidence.configuredWriterLogins || [])].sort(),
     rosterSource: evidence.rosterSource || "unknown",
     degraded: evidence.degraded === true,
+    unknown: evidence.unknown === true,
     degradationReason: evidence.degradationReason || null,
     unansweredCount: evidence.unansweredCount || 0,
     signerNotTrusted: (evidence.signerNotTrusted || []).map((entry) => ({
@@ -440,15 +441,35 @@ export async function appendReviewTrustEvidence({ repository, prNumber, headSha,
   return record;
 }
 
-export async function readLatestReviewTrustEvidence({ repository, prNumber, headSha, stateRoot }) {
+export async function readLatestReviewTrustEvidence({
+  repository,
+  prNumber,
+  headSha,
+  reviewerLogin,
+  notBefore = null,
+  stateRoot,
+}) {
   const path = reviewTrustEvidencePath({ repository, prNumber, headSha, stateRoot });
   try {
-    const records = (await readFile(path, "utf8")).trim().split("\n").filter(Boolean)
-      .map((line) => { try { return JSON.parse(line); } catch { return null; } })
-      .filter((record) => record?.type === "review_trust_roster");
-    return records.at(-1) || null;
+    const lines = (await readFile(path, "utf8")).trim().split("\n").filter(Boolean);
+    const records = [];
+    for (const line of lines) {
+      let record;
+      try { record = JSON.parse(line); } catch {
+        return { status: "unreadable", evidence: null, reason: "Durable review trust evidence is unreadable." };
+      }
+      if (record?.type !== "review_trust_roster") continue;
+      if (reviewerLogin && !sameBotLogin(record.reviewerLogin, reviewerLogin)) continue;
+      if (notBefore && Date.parse(record.at) < Date.parse(notBefore)) continue;
+      records.push(record);
+    }
+    if (!records.length) return { status: "absent", evidence: null, reason: null };
+    // Within one bounded publication attempt, a degraded observation must not
+    // be hidden by a concurrently appended healthy record for the same signer.
+    const degraded = records.filter((record) => record.degraded === true);
+    return { status: "found", evidence: (degraded.length ? degraded : records).at(-1), reason: null };
   } catch (error) {
-    if (error.code === "ENOENT") return null;
-    throw error;
+    if (error.code === "ENOENT") return { status: "absent", evidence: null, reason: null };
+    return { status: "unreadable", evidence: null, reason: "Durable review trust evidence is unreadable." };
   }
 }

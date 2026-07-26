@@ -38,6 +38,7 @@ const tokenFile = process.env.GITHUB_REVIEW_TOKEN_FILE || resolve(homedir(), ".c
 const apiUrl = process.env.GITHUB_REVIEW_API_URL || "https://api.github.com";
 const statusContext = process.env.GITHUB_REVIEW_STATUS_CONTEXT || "agent-review";
 const publishStatusGate = process.env.GITHUB_REVIEW_PUBLISH_STATUS_GATE !== "0";
+const reviewEvidenceStateRoot = process.env.GITHUB_REVIEW_EVIDENCE_ROOT || undefined;
 
 if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository || "")) {
   throw new Error("GITHUB_REVIEW_REPOSITORY must be owner/name.");
@@ -68,8 +69,9 @@ let trustedWriterLogins = [];
 let trustRoster = {
   source: "pat-compatibility",
   configuredWriterLogins: [],
-  degraded: false,
-  reason: null,
+  degraded: true,
+  unknown: true,
+  reason: "PAT compatibility cannot establish a trusted writer App roster",
 };
 if (appCredential) {
   const inspectedRoster = await inspectReviewTrustRoster({
@@ -233,22 +235,6 @@ server.registerTool(
     const effectiveEvent = constrained.event;
     const effectiveBody = constrained.body;
     const gateReviewState = constrained.gateReviewState;
-    const trustEvidence = readiness ? await appendReviewTrustEvidence({
-      repository,
-      prNumber,
-      headSha,
-      evidence: {
-        reviewerLogin: expectedLogin,
-        readinessDigest: readiness.digest,
-        configuredWriterLogins: readiness.trustRoster.configuredWriterLogins,
-        rosterSource: readiness.trustRoster.source,
-        degraded: readiness.trustRoster.degraded,
-        degradationReason: readiness.trustRoster.reason,
-        unansweredCount: readiness.unanswered.length,
-        signerNotTrusted: readiness.signerNotTrusted,
-        unresolvedCount: readiness.unresolved.length,
-      },
-    }) : null;
     const result = await submitBoundReview({
       apiUrl: reviewApiUrl,
       token,
@@ -264,6 +250,27 @@ server.registerTool(
       statusContext,
       publishGate: statusGateEnabled,
       gateReviewState,
+    });
+    // Evidence describes an actual publication outcome. A failed GitHub
+    // mutation must not leave a receipt that later appears successfully posted.
+    const effectiveTrustRoster = readiness?.trustRoster || trustRoster;
+    const trustEvidence = await appendReviewTrustEvidence({
+      repository,
+      prNumber,
+      headSha,
+      stateRoot: reviewEvidenceStateRoot,
+      evidence: {
+        reviewerLogin: expectedLogin,
+        readinessDigest: readiness?.digest || null,
+        configuredWriterLogins: effectiveTrustRoster.configuredWriterLogins,
+        rosterSource: effectiveTrustRoster.source,
+        degraded: effectiveTrustRoster.degraded,
+        unknown: effectiveTrustRoster.unknown === true,
+        degradationReason: effectiveTrustRoster.reason,
+        unansweredCount: readiness?.unanswered.length || 0,
+        signerNotTrusted: readiness?.signerNotTrusted || [],
+        unresolvedCount: readiness?.unresolved.length || 0,
+      },
     });
     submittedReview = {
       ...result,

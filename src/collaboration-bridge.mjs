@@ -219,10 +219,12 @@ function summary(view) {
     }
   }
   const trustRoster = view.reviewPublication?.trustRoster;
-  if (trustRoster?.degraded || trustRoster?.signerNotTrusted?.length) {
-    const reason = trustRoster.degraded
-      ? trustRoster.degradationReason || "writer trust-roster inspection degraded"
-      : `${trustRoster.signerNotTrusted.length} disposition signer(s) are not in the active trusted writer roster`;
+  if (trustRoster?.unknown || trustRoster?.degraded || trustRoster?.signerNotTrusted?.length) {
+    const reason = trustRoster.unknown
+      ? trustRoster.degradationReason || "writer trust evidence is unknown"
+      : trustRoster.degraded
+        ? trustRoster.degradationReason || "writer trust-roster inspection degraded"
+        : `${trustRoster.signerNotTrusted.length} disposition signer(s) are not in the active trusted writer roster`;
     lines.push(`Review trust: ${view.githubReview?.repository || "unknown repository"} PR #${view.githubReview?.prNumber || "?"}@${view.githubReview?.headSha || "unknown head"} — ${reason}`);
   }
   if (view.rotation) lines.push(`Rotation: task ${view.rotation.taskNumber}; writer ${view.rotation.writer}; reviewers ${view.rotation.reviewers.join(", ")}`);

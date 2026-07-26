@@ -23,6 +23,7 @@ import {
   reviewFindingMarker,
   reviewReadinessReceiptIsCurrent,
   reviewThreadReceiptPath,
+  reviewTrustEvidencePath,
   readLatestReviewTrustEvidence,
   writerDispositionMarker,
 } from "../src/github-review-threads.mjs";
@@ -315,17 +316,83 @@ try {
       signerNotTrusted: staleRosterState.signerNotTrusted,
     },
   });
-  const durableTrust = await readLatestReviewTrustEvidence({
+  const durableTrustResult = await readLatestReviewTrustEvidence({
     repository: "owner/repo",
     prNumber: 42,
     headSha: nextHeadSha,
+    reviewerLogin: "reviewer-a[bot]",
     stateRoot: evidenceRoot,
   });
+  assert.equal(durableTrustResult.status, "found");
+  const durableTrust = durableTrustResult.evidence;
   assert.equal(durableTrust.repository, "owner/repo");
   assert.equal(durableTrust.prNumber, 42);
   assert.equal(durableTrust.headSha, nextHeadSha);
   assert.equal(durableTrust.signerNotTrusted[0].writerLogin, "claude-writer[bot]");
   assert.doesNotMatch(JSON.stringify(durableTrust), /private|secret|\.pem/i);
+
+  await appendReviewTrustEvidence({
+    repository: "owner/repo",
+    prNumber: 42,
+    headSha: nextHeadSha,
+    stateRoot: evidenceRoot,
+    evidence: {
+      reviewerLogin: "reviewer-b[bot]",
+      configuredWriterLogins: ["codex-writer[bot]"],
+      rosterSource: "github-app-roles",
+      degraded: false,
+    },
+  });
+  await appendReviewTrustEvidence({
+    repository: "owner/repo",
+    prNumber: 42,
+    headSha: nextHeadSha,
+    stateRoot: evidenceRoot,
+    evidence: {
+      reviewerLogin: "reviewer-a[bot]",
+      configuredWriterLogins: ["builder[bot]", "claude-writer[bot]"],
+      rosterSource: "github-app-roles",
+      degraded: false,
+    },
+  });
+  const concurrentReviewerA = await readLatestReviewTrustEvidence({
+    repository: "owner/repo",
+    prNumber: 42,
+    headSha: nextHeadSha,
+    reviewerLogin: "reviewer-a[bot]",
+    stateRoot: evidenceRoot,
+  });
+  assert.equal(concurrentReviewerA.evidence.reviewerLogin, "reviewer-a[bot]", "concurrent reviewer evidence must remain identity-bound");
+  assert.equal(concurrentReviewerA.evidence.degraded, true, "matching degraded evidence is selected conservatively within the bounded evidence set");
+  const concurrentReviewerB = await readLatestReviewTrustEvidence({
+    repository: "owner/repo",
+    prNumber: 42,
+    headSha: nextHeadSha,
+    reviewerLogin: "reviewer-b[bot]",
+    stateRoot: evidenceRoot,
+  });
+  assert.deepEqual(concurrentReviewerB.evidence.configuredWriterLogins, ["codex-writer[bot]"]);
+
+  const unreadablePath = reviewTrustEvidencePath({ repository: "owner/broken", prNumber: 7, headSha: nextHeadSha, stateRoot: evidenceRoot });
+  await writeFile(unreadablePath, "not-json\n", { mode: 0o600 });
+  const unreadable = await readLatestReviewTrustEvidence({
+    repository: "owner/broken",
+    prNumber: 7,
+    headSha: nextHeadSha,
+    reviewerLogin: "reviewer-a[bot]",
+    stateRoot: evidenceRoot,
+  });
+  assert.equal(unreadable.status, "unreadable");
+  assert.match(unreadable.reason, /unreadable/i);
+  assert.doesNotMatch(unreadable.reason, /review-trust-evidence|\.jsonl|\//i, "unreadable diagnostics must not expose paths");
+  const absent = await readLatestReviewTrustEvidence({
+    repository: "owner/absent",
+    prNumber: 8,
+    headSha: nextHeadSha,
+    reviewerLogin: "reviewer-a[bot]",
+    stateRoot: evidenceRoot,
+  });
+  assert.equal(absent.status, "absent");
 } finally {
   await rm(evidenceRoot, { recursive: true, force: true });
 }
@@ -742,6 +809,7 @@ let reviewPayload = null;
 let statusPayload = null;
 let reviewPostCount = 0;
 let statusPostCount = 0;
+let failNextReviewPost = false;
 const httpServer = createServer(async (request, response) => {
   const chunks = [];
   for await (const chunk of request) chunks.push(chunk);
@@ -764,6 +832,12 @@ const httpServer = createServer(async (request, response) => {
   else if (request.url === "/repos/owner/repo/pulls/42/reviews" && request.method === "POST") {
     reviewPostCount += 1;
     reviewPayload = payload;
+    if (failNextReviewPost) {
+      failNextReviewPost = false;
+      response.statusCode = 500;
+      response.end(JSON.stringify({ message: "simulated publication failure" }));
+      return;
+    }
     response.statusCode = 201;
     response.end(JSON.stringify({
       id: 123,
@@ -793,6 +867,7 @@ const transport = new StdioClientTransport({
     GITHUB_REVIEW_TOKEN_FILE: tokenFile,
     GITHUB_APP_CONFIG: join(temporary, "not-configured.json"),
     GITHUB_REVIEW_API_URL: `http://127.0.0.1:${port}`,
+    GITHUB_REVIEW_EVIDENCE_ROOT: temporary,
   },
 });
 try {
@@ -814,6 +889,20 @@ try {
   });
   assert.equal(rejectedApproval.isError, true);
   assert.match(rejectedApproval.content[0].text, /PAT fallback.*cannot APPROVE/i);
+  failNextReviewPost = true;
+  const failedPublication = await mcpClient.callTool({
+    name: "submit_pr_review",
+    arguments: { event: "COMMENT", body: "This publication will fail.", comments: [] },
+  });
+  assert.equal(failedPublication.isError, true);
+  const evidenceAfterFailure = await readLatestReviewTrustEvidence({
+    repository: "owner/repo",
+    prNumber: 42,
+    headSha: base.headSha,
+    reviewerLogin: "review-bot",
+    stateRoot: temporary,
+  });
+  assert.equal(evidenceAfterFailure.status, "absent", "failed review publication must not leave durable success evidence");
   const result = await mcpClient.callTool({
     name: "submit_pr_review",
     arguments: { event: "COMMENT", body: "Compatibility review comment.", comments: [] },
@@ -821,6 +910,9 @@ try {
   assert.notEqual(result.isError, true);
   assert.equal(result.structuredContent.login, "review-bot");
   assert.equal(result.structuredContent.gate, null);
+  assert.equal(result.structuredContent.reviewTrustRoster.degraded, true);
+  assert.equal(result.structuredContent.reviewTrustRoster.unknown, true);
+  assert.equal(result.structuredContent.reviewTrustRoster.rosterSource, "pat-compatibility");
   assert.equal(reviewPayload.commit_id, base.headSha);
   assert.equal(reviewPayload.event, "COMMENT");
   assert.equal(statusPayload, null);
@@ -830,7 +922,7 @@ try {
     arguments: { event: "COMMENT", body: "A second payload must not create another review.", comments: [] },
   });
   assert.equal(duplicate.structuredContent.idempotent, true);
-  assert.equal(reviewPostCount, 1);
+  assert.equal(reviewPostCount, 2);
   assert.equal(statusPostCount, 0);
 } finally {
   await mcpClient.close().catch(() => {});

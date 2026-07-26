@@ -938,7 +938,7 @@ export function blockedReason(lane) {
     ? `Waiting for ${dependencies.join(", ")} to complete.`
     : "";
   const candidates = [
-    blocked && lane.reviewPublication?.trustRoster?.degraded
+    blocked && (lane.reviewPublication?.trustRoster?.unknown || lane.reviewPublication?.trustRoster?.degraded)
       ? lane.reviewPublication.trustRoster.degradationReason || "Writer trust-roster inspection degraded."
       : null,
     blocked && lane.reviewPublication?.trustRoster?.signerNotTrusted?.length
@@ -1145,11 +1145,13 @@ function detailPane(lane, timeline, width, now, snapshot, expanded = false) {
       ? trustRoster.configuredWriterLogins.join(", ")
       : "none verified";
     rows.push(paneLine(
-      `TRUST  ${trustRoster.degraded ? "DEGRADED" : "verified"} · ${trustRoster.rosterSource || "unknown source"} · writers ${configuredWriters}`,
-      trustRoster.degraded || trustRoster.signerNotTrusted?.length ? "31;1" : "36",
+      `TRUST  ${trustRoster.unknown ? "UNKNOWN" : trustRoster.degraded ? "DEGRADED" : "verified"} · ${trustRoster.rosterSource || "unknown source"} · writers ${configuredWriters}`,
+      trustRoster.unknown || trustRoster.degraded || trustRoster.signerNotTrusted?.length ? "31;1" : "36",
     ));
-    const trustReason = trustRoster.degraded
-      ? trustRoster.degradationReason
+    const trustReason = trustRoster.unknown
+      ? trustRoster.degradationReason || "Durable review trust evidence is unreadable."
+      : trustRoster.degraded
+        ? trustRoster.degradationReason
       : trustRoster.signerNotTrusted?.length
         ? `${trustRoster.signerNotTrusted.length} disposition signer(s) not trusted at this head`
         : null;

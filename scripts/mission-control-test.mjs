@@ -925,8 +925,9 @@ try {
       trustRoster: {
         rosterSource: "github-app-roles",
         configuredWriterLogins: ["builder[bot]"],
-        degraded: true,
-        degradationReason: "GitHub App writer-role inspection failed; configuration or installed runtime may be stale or malformed",
+        degraded: false,
+        unknown: true,
+        degradationReason: "Durable review trust evidence is unreadable.",
         signerNotTrusted: [{ writerLogin: "claude-writer[bot]" }],
       },
     },
@@ -943,8 +944,8 @@ try {
     detailExpanded: true,
   });
   assert.match(trustDiagnosticOutput, /GITHUB\s+.*PR #174.*cccccccccc/);
-  assert.match(trustDiagnosticOutput, /TRUST\s+DEGRADED.*github-app-roles.*writers builder/);
-  assert.match(trustDiagnosticOutput, /REASON\s+GitHub App writer-role inspection failed/);
+  assert.match(trustDiagnosticOutput, /TRUST\s+UNKNOWN.*github-app-roles.*writers builder/);
+  assert.match(trustDiagnosticOutput, /REASON\s+Durable review trust evidence is unreadable/);
   assert.match(trustDiagnosticOutput, new RegExp(`HEAD\\s+${"c".repeat(40)}`));
 
   const secondRepositoryLane = {

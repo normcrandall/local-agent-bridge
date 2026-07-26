@@ -608,7 +608,7 @@ export function createAgentPool({
       request._meta = { progressToken: `${agent}-${Date.now()}` };
       const fallbackSlots = providerFallbackSlots(agent, modelFallbacks);
       const maxTotalTimeoutMs = requestTimeoutMs * (1 + fallbackSlots);
-      const reviewEvidenceNotBefore = Date.now();
+      const reviewEvidenceNotBefore = new Date().toISOString();
       let result;
       try {
         result = await client.callTool(request, undefined, {
@@ -677,12 +677,26 @@ export function createAgentPool({
           repository: effectiveGithubReview.repository,
           prNumber: effectiveGithubReview.prNumber,
           headSha: effectiveGithubReview.headSha,
-        }).catch(() => null)
+          reviewerLogin: effectiveGithubReview.expectedLogin,
+          notBefore: reviewEvidenceNotBefore,
+        })
         : null;
-      const reviewTrustRoster = latestReviewTrustRoster
-        && Date.parse(latestReviewTrustRoster.at) >= reviewEvidenceNotBefore
-        ? latestReviewTrustRoster
-        : null;
+      const reviewTrustRoster = latestReviewTrustRoster?.status === "found"
+        ? latestReviewTrustRoster.evidence
+        : latestReviewTrustRoster?.status === "unreadable"
+          ? {
+            repository: effectiveGithubReview.repository,
+            prNumber: effectiveGithubReview.prNumber,
+            headSha: effectiveGithubReview.headSha,
+            reviewerLogin: effectiveGithubReview.expectedLogin,
+            rosterSource: "durable-review-evidence",
+            configuredWriterLogins: [],
+            degraded: false,
+            unknown: true,
+            degradationReason: latestReviewTrustRoster.reason,
+            signerNotTrusted: [],
+          }
+          : null;
       const routing = structured.modelRouting || structured;
       return {
         message,
