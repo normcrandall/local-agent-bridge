@@ -81,10 +81,10 @@ export function runGit(args, { gitPath, cwd, env, timeoutMs = LOCAL_GIT_TIMEOUT_
       finish(reject, new Error(redactSecrets(`git spawn failed: ${error.message}`, secrets)));
     });
     cp.on("close", (code) => {
-      const stdout = Buffer.from(
-        redactSecrets(Buffer.concat(stdoutChunks).toString("utf8"), secrets),
-        "utf8",
-      );
+      const rawStdout = Buffer.concat(stdoutChunks);
+      const stdout = secrets.length > 0
+        ? Buffer.from(redactSecrets(rawStdout.toString("utf8"), secrets), "utf8")
+        : rawStdout;
       const stderr = redactSecrets(Buffer.concat(stderrChunks).toString("utf8"), secrets);
       if (timedOut) {
         const error = new Error(`git ${redactSecrets(args.join(" "), secrets)} timed out after ${timeoutMs}ms and its process group was terminated.`);

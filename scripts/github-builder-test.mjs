@@ -156,6 +156,15 @@ const redactedStdout = await runGit(
   },
 );
 assert.equal(redactedStdout.stdout.toString("utf8"), "[REDACTED]");
+const binaryStdout = await runGit(
+  ["-e", "process.stdout.write(Buffer.from([255, 0, 254]))"],
+  {
+    gitPath: process.execPath,
+    cwd: tmpDir,
+    env: process.env,
+  },
+);
+assert.deepEqual(binaryStdout.stdout, Buffer.from([255, 0, 254]));
 const authAttempts = [];
 function createGitServer(mode) {
   const server = http.createServer((req, res) => {
