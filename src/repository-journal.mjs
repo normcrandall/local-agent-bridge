@@ -392,7 +392,13 @@ export function createRepositoryJournal({
       const latestOutboxCheckpoint = new Map();
       for (let index = 0; index < records.length; index += 1) {
         const event = records[index]?.payload?.repositoryOutbox;
-        if (!event?.keyDigest) continue;
+        if (event === undefined || event === null) continue;
+        if (!event || typeof event !== "object" || Array.isArray(event) || typeof event.keyDigest !== "string" || !event.keyDigest) {
+          throw new RepositoryJournalError(
+            "Repository journal retention encountered a malformed outbox record.",
+            { code: "RETENTION_UNSAFE" },
+          );
+        }
         outboxKeys.add(event.keyDigest);
         if (event.event === "checkpoint") latestOutboxCheckpoint.set(event.keyDigest, index);
       }

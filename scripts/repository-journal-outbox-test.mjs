@@ -229,6 +229,35 @@ try {
   }), (error) => error.code === "IDEMPOTENCY_CONFLICT");
   const secondRetention = await retentionRestart.retain({ maxRecords: 2 });
   assert.equal(secondRetention.checkpointedItems, 5, "restart-safe retention must be idempotently repeatable");
+  assert.ok(secondRetention.removed > 0, "a fresh checkpoint epoch must let the retention floor advance on every run");
+  assert.equal((await retentionJournal.read()).length <= retentionReceipt.retained, true,
+    "repeated retention must not be permanently pinned by old terminal-item checkpoints");
+
+  const malformedCheckpointDirectory = join(root, "malformed-checkpoint");
+  const malformedCheckpointJournal = createRepositoryJournal({ directory: malformedCheckpointDirectory, now });
+  await malformedCheckpointJournal.append({
+    identity: "malformed-checkpoint",
+    repository: "veliqon/malformed",
+    payload: { repositoryOutbox: {
+      version: REPOSITORY_JOURNAL_OUTBOX_VERSION,
+      event: "checkpoint",
+      keyDigest: "bad",
+      stateDigest: "0".repeat(64),
+      item: { idempotencyKey: "bad" },
+    } },
+  });
+  const malformedCheckpointOutbox = createRepositoryJournalOutbox({ journal: malformedCheckpointJournal, now });
+  await assert.rejects(malformedCheckpointOutbox.inspect(), (error) => error.code === "CORRUPT_CHECKPOINT");
+
+  const malformedRetentionDirectory = join(root, "malformed-retention");
+  const malformedRetentionJournal = createRepositoryJournal({ directory: malformedRetentionDirectory, now });
+  await malformedRetentionJournal.append({ identity: "plain", repository: "veliqon/malformed", payload: {} });
+  await malformedRetentionJournal.append({
+    identity: "malformed-outbox",
+    repository: "veliqon/malformed",
+    payload: { repositoryOutbox: { version: REPOSITORY_JOURNAL_OUTBOX_VERSION, event: "enqueued" } },
+  });
+  await assert.rejects(malformedRetentionJournal.retain({ maxRecords: 1 }), (error) => error.code === "RETENTION_UNSAFE");
 
   const versionDirectory = join(root, "future-version");
   const versionJournal = createRepositoryJournal({ directory: versionDirectory, now });

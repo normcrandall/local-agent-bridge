@@ -128,8 +128,39 @@ function reconstruct(records, nowMs) {
       if (!event.item || typeof event.item !== "object" || Array.isArray(event.item)) {
         fail("Repository outbox checkpoint is malformed.", "CORRUPT_CHECKPOINT");
       }
+      if (!/^[0-9a-f]{64}$/.test(event.stateDigest || "") || hash(event.item) !== event.stateDigest) {
+        fail("Repository outbox checkpoint has a mismatched state digest.", "CORRUPT_CHECKPOINT");
+      }
+      const checkpointItem = canonicalize(event.item, "checkpoint.item");
+      requiredString(checkpointItem.idempotencyKey, "checkpoint.item.idempotencyKey", 256);
+      requiredString(checkpointItem.operation, "checkpoint.item.operation", 128);
+      if (!/^[0-9a-f]{64}$/.test(checkpointItem.payloadDigest || "") || hash(checkpointItem.payload) !== checkpointItem.payloadDigest) {
+        fail("Repository outbox checkpoint has a mismatched payload digest.", "CORRUPT_CHECKPOINT");
+      }
+      if (!Number.isInteger(checkpointItem.enqueueSequence) || checkpointItem.enqueueSequence <= 0
+        || !Number.isInteger(checkpointItem.claimCount) || checkpointItem.claimCount < 0
+        || typeof checkpointItem.terminal !== "boolean"
+        || !Number.isFinite(Date.parse(checkpointItem.enqueuedAt))) {
+        fail("Repository outbox checkpoint has invalid lifecycle fields.", "CORRUPT_CHECKPOINT");
+      }
+      for (const timestamp of [checkpointItem.acknowledgedAt, checkpointItem.retryAt]) {
+        if (timestamp !== null && !Number.isFinite(Date.parse(timestamp))) {
+          fail("Repository outbox checkpoint has an invalid lifecycle timestamp.", "CORRUPT_CHECKPOINT");
+        }
+      }
+      if (checkpointItem.lease !== null) {
+        const lease = checkpointItem.lease;
+        if (!lease || typeof lease !== "object" || Array.isArray(lease)
+          || !Number.isInteger(lease.claimOrdinal) || lease.claimOrdinal <= 0
+          || typeof lease.leaseId !== "string" || !lease.leaseId
+          || typeof lease.workerId !== "string" || !lease.workerId
+          || !Number.isFinite(Date.parse(lease.claimedAt))
+          || !Number.isFinite(Date.parse(lease.expiresAt))) {
+          fail("Repository outbox checkpoint has an invalid lease.", "CORRUPT_CHECKPOINT");
+        }
+      }
       items.set(event.keyDigest, {
-        ...canonicalize(event.item, "checkpoint.item"),
+        ...checkpointItem,
         keyDigest: event.keyDigest,
         binding: record.binding,
         lastSequence: record.sequence,
@@ -436,7 +467,7 @@ export function createRepositoryJournalOutbox({
         item: checkpointItem,
       };
       await journal.append({
-        identity: eventIdentity(item.keyDigest, "checkpoint", checkpointDigest),
+        identity: eventIdentity(item.keyDigest, "checkpoint", `${item.lastSequence}:${checkpointDigest}`),
         ...item.binding,
         payload: { repositoryOutbox: event },
       });
