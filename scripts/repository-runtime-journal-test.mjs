@@ -3,6 +3,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRepositoryRuntimeJournal } from "../src/repository-runtime-journal.mjs";
+import {
+  publishRepositoryLifecycleCheckpoint,
+  repositoryJournalPublicationState,
+} from "../src/repository-lifecycle-publication.mjs";
 
 const root = await mkdtemp(join(tmpdir(), "agent-bridge-runtime-journal-"));
 const head = "a".repeat(40);
@@ -113,6 +117,128 @@ try {
   const retained = await adapter.inspect();
   assert.equal(retained.pending.length, 0);
   assert.equal(retained.acknowledged.length, 3, "terminal and prior delivery evidence must survive retention and restart");
+
+  const advancedHead = "b".repeat(40);
+  let refreshes = 0;
+  const terminalDrift = await publishRepositoryLifecycleCheckpoint({
+    checkpoint: {
+      kind: "refresh",
+      terminal: true,
+      headSha: head,
+      collaborationId: "bridge-terminal-head-drift",
+      phase: "completed",
+      summary: "Completed at the observed head.",
+      writer: "codex",
+      previousWriter: null,
+    },
+    entry: { binding: { issueNumber: 231 } },
+    currentMetadata: { headSha: advancedHead, branch: "codex/advanced", worktree: root },
+    client: {},
+    workspaceRoot: root,
+    async refreshClaimLease(input) {
+      refreshes += 1;
+      assert.equal(input.phase, "completed");
+      assert.equal(input.headSha, advancedHead, "terminal publication must use the current workspace metadata");
+      return { published: true };
+    },
+    async releaseClaimLease() { throw new Error("release should not run"); },
+  });
+  assert.deepEqual(terminalDrift, { published: true });
+  assert.equal(refreshes, 1, "terminal checkpoints must publish after workspace head drift");
+
+  const staleHeartbeat = await publishRepositoryLifecycleCheckpoint({
+    checkpoint: {
+      kind: "refresh",
+      terminal: false,
+      headSha: head,
+      collaborationId: "bridge-active-head-drift",
+      phase: "working",
+      summary: "Old heartbeat.",
+      writer: "codex",
+      previousWriter: null,
+    },
+    entry: { binding: { issueNumber: 231 } },
+    currentMetadata: { headSha: advancedHead, branch: "codex/advanced", worktree: root },
+    client: {},
+    workspaceRoot: root,
+    async refreshClaimLease() { throw new Error("stale heartbeat must be skipped"); },
+    async releaseClaimLease() { throw new Error("release should not run"); },
+  });
+  assert.equal(staleHeartbeat.skipped, "superseded_head");
+
+  const authorityDirectory = join(root, "authority-redrive");
+  const authorityRuntime = () => createRepositoryRuntimeJournal({
+    workspace: root,
+    directory: authorityDirectory,
+    repository: "veliqon/example",
+    issueNumber: 231,
+    now,
+    maxAttempts: 4,
+    baseBackoffMs: 50,
+    maxBackoffMs: 200,
+  });
+  let authority = authorityRuntime();
+  await authority.enqueue({
+    collaborationId: "bridge-authority-redrive",
+    phase: "completed",
+    writer: "codex",
+    headSha: advancedHead,
+    terminal: true,
+  });
+  result = await authority.publishPending({
+    workerId: "worker-with-expired-authority",
+    async publish() {
+      const error = new Error("installation cannot access this repository");
+      error.status = 403;
+      throw error;
+    },
+  });
+  assert.equal(result[0].status, "dead_letter", "lost authority must still fail closed immediately");
+  assert.equal((await authority.inspect()).deadLetter.length, 1);
+
+  authority = authorityRuntime();
+  assert.equal((await authority.redriveAuthorityFailures()).redriven, 1,
+    "a new worker with restored authority must explicitly re-drive the dead letter");
+  result = await authority.publishPending({
+    workerId: "worker-with-restored-authority",
+    async publish() { return { restored: true }; },
+  });
+  assert.equal(result[0].status, "published");
+  assert.equal((await authority.inspect()).acknowledged.length, 1,
+    "the original idempotency key must become acknowledged after authority is restored");
+
+  const offlineDirectory = join(root, "offline-backoff");
+  const offlineRuntime = createRepositoryRuntimeJournal({
+    workspace: root,
+    directory: offlineDirectory,
+    repository: "veliqon/example",
+    issueNumber: 231,
+    now,
+    maxAttempts: 4,
+    baseBackoffMs: 50,
+    maxBackoffMs: 200,
+  });
+  await offlineRuntime.enqueue({
+    collaborationId: "bridge-offline-backoff",
+    phase: "working",
+    writer: "codex",
+    headSha: advancedHead,
+  });
+  await offlineRuntime.publishPending({
+    workerId: "offline-worker",
+    async publish() {
+      const error = new TypeError("fetch failed");
+      error.cause = { code: "ECONNRESET" };
+      throw error;
+    },
+  });
+  const backoffInspection = await offlineRuntime.inspect();
+  assert.equal(backoffInspection.pending[0].status, "backoff");
+  assert.equal(repositoryJournalPublicationState(backoffInspection).offline, true,
+    "offline must remain true while publication sits in backoff between drain attempts");
+  assert.equal((await offlineRuntime.publishPending({ workerId: "too-early", async publish() {} })).length, 0);
+  assert.equal(repositoryJournalPublicationState(await offlineRuntime.inspect()).offline, true,
+    "an empty drain during backoff must not report the repository journal online");
 
   console.log("repository runtime journal integration tests passed");
 } finally {

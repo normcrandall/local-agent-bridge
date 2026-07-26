@@ -102,7 +102,8 @@ function failureDetails(error) {
   else if (statusCode === 401) kind = "authentication";
   else if (statusCode === 403) kind = "authorization";
   else if (/TIMEOUT|ABORT|ETIMEDOUT/i.test(code)) kind = "timeout";
-  else if (/ECONN|ENET|EAI_AGAIN|FETCH|SOCKET/i.test(code) || error instanceof TypeError) kind = "network";
+  else if (/ECONN|ENET|EAI_AGAIN|FETCH|SOCKET|UND_ERR_/i.test(code)
+    || (error instanceof TypeError && /fetch failed|network|socket|terminated/i.test(String(error.message)))) kind = "network";
   return { kind, statusCode, message: String(error?.message || error || kind).slice(0, 1_024) };
 }
 
@@ -172,5 +173,34 @@ export function createRepositoryRuntimeJournal({
     return results;
   }
 
-  return Object.freeze({ binding, journal, outbox, enqueue, publishPending, inspect: outbox.inspect, retain: outbox.retain });
+  async function redriveAuthorityFailures() {
+    const inspection = await outbox.inspect();
+    const eligible = inspection.deadLetter.filter((entry) => {
+      const classification = entry.failure?.classification;
+      const statusCode = entry.failure?.statusCode;
+      return ["authentication", "authorization"].includes(classification)
+        || [401, 403, 404].includes(statusCode);
+    });
+    const redriven = [];
+    for (const entry of eligible) {
+      try {
+        redriven.push(await outbox.requeue({ idempotencyKey: entry.idempotencyKey }));
+      } catch (error) {
+        // Another worker may have restored this exact entry after our snapshot.
+        if (error?.code !== "ENTRY_NOT_DEAD_LETTER") throw error;
+      }
+    }
+    return { redriven: redriven.length };
+  }
+
+  return Object.freeze({
+    binding,
+    journal,
+    outbox,
+    enqueue,
+    publishPending,
+    redriveAuthorityFailures,
+    inspect: outbox.inspect,
+    retain: outbox.retain,
+  });
 }

@@ -140,6 +140,8 @@ function reconstruct(records, nowMs) {
       }
       if (!Number.isInteger(checkpointItem.enqueueSequence) || checkpointItem.enqueueSequence <= 0
         || !Number.isInteger(checkpointItem.claimCount) || checkpointItem.claimCount < 0
+        || (checkpointItem.attemptCount !== undefined
+          && (!Number.isInteger(checkpointItem.attemptCount) || checkpointItem.attemptCount < 0))
         || typeof checkpointItem.terminal !== "boolean"
         || !Number.isFinite(Date.parse(checkpointItem.enqueuedAt))) {
         fail("Repository outbox checkpoint has invalid lifecycle fields.", "CORRUPT_CHECKPOINT");
@@ -166,6 +168,7 @@ function reconstruct(records, nowMs) {
       }
       items.set(event.keyDigest, {
         ...checkpointItem,
+        attemptCount: checkpointItem.attemptCount ?? checkpointItem.claimCount,
         keyDigest: event.keyDigest,
         binding: record.binding,
         lastSequence: record.sequence,
@@ -184,6 +187,7 @@ function reconstruct(records, nowMs) {
           enqueuedAt: event.at,
           enqueueSequence: record.sequence,
           claimCount: 0,
+          attemptCount: 0,
           lease: null,
           acknowledgedAt: null,
           failure: null,
@@ -201,6 +205,7 @@ function reconstruct(records, nowMs) {
     item.lastSequence = record.sequence;
     if (event.event === "claimed") {
       item.claimCount = Math.max(item.claimCount, event.claimOrdinal);
+      item.attemptCount = (item.attemptCount || 0) + 1;
       item.lease = {
         claimOrdinal: event.claimOrdinal,
         leaseId: event.leaseId,
@@ -223,6 +228,13 @@ function reconstruct(records, nowMs) {
       item.retryAt = event.retryAt;
       item.terminal = event.terminal;
       item.lease = null;
+    } else if (event.event === "requeued") {
+      item.attemptCount = 0;
+      item.lease = null;
+      item.acknowledgedAt = null;
+      item.failure = null;
+      item.retryAt = null;
+      item.terminal = false;
     }
   }
   for (const item of items.values()) {
@@ -232,7 +244,7 @@ function reconstruct(records, nowMs) {
 }
 
 function publicItem(item, nowMs, maxAttempts) {
-  const exhausted = !item.acknowledgedAt && !item.lease && item.claimCount >= maxAttempts;
+  const exhausted = !item.acknowledgedAt && !item.lease && item.attemptCount >= maxAttempts;
   const terminal = item.terminal || exhausted;
   const due = !item.acknowledgedAt && !terminal && !item.lease && (!item.retryAt || Date.parse(item.retryAt) <= nowMs);
   return structuredClone({
@@ -243,6 +255,7 @@ function publicItem(item, nowMs, maxAttempts) {
     payload: item.payload,
     enqueuedAt: item.enqueuedAt,
     claimCount: item.claimCount,
+    attemptCount: item.attemptCount,
     lease: item.lease,
     acknowledgedAt: item.acknowledgedAt,
     retryAt: item.retryAt,
@@ -376,7 +389,12 @@ export function createRepositoryJournalOutbox({
           payload: { repositoryOutbox: event },
         });
         if (result.idempotent || result.record.payload.repositoryOutbox.leaseId !== leaseId) continue;
-        claimed.push(publicItem({ ...candidate, claimCount: claimOrdinal, lease: { claimOrdinal, leaseId, workerId: normalizedWorker, claimedAt: at, expiresAt } }, snapshot.nowMs, maxAttempts));
+        claimed.push(publicItem({
+          ...candidate,
+          claimCount: claimOrdinal,
+          attemptCount: (candidate.attemptCount || 0) + 1,
+          lease: { claimOrdinal, leaseId, workerId: normalizedWorker, claimedAt: at, expiresAt },
+        }, snapshot.nowMs, maxAttempts));
       } catch (error) {
         if (error?.code !== "IDENTITY_CONFLICT") throw error;
       }
@@ -411,9 +429,9 @@ export function createRepositoryJournalOutbox({
     const snapshot = await requireLease(leaseId);
     const classified = classifyFailure(failure);
     const retryAfterMs = failure.retryAfterMs === null || failure.retryAfterMs === undefined ? 0 : millis(failure.retryAfterMs, "retryAfterMs", { minimum: 0 });
-    const exponential = Math.min(maxBackoffMs, baseBackoffMs * (2 ** Math.max(0, snapshot.item.claimCount - 1)));
+    const exponential = Math.min(maxBackoffMs, baseBackoffMs * (2 ** Math.max(0, snapshot.item.attemptCount - 1)));
     const delayMs = Math.min(maxBackoffMs, Math.max(exponential, retryAfterMs));
-    const terminal = classified.terminal || snapshot.item.claimCount >= maxAttempts;
+    const terminal = classified.terminal || snapshot.item.attemptCount >= maxAttempts;
     const retryAt = terminal ? null : new Date(snapshot.nowMs + delayMs).toISOString();
     const message = String(failure.message || classified.classification).slice(0, 1_024);
     const event = {
@@ -449,6 +467,42 @@ export function createRepositoryJournalOutbox({
     };
   }
 
+  async function requeue({ idempotencyKey } = {}) {
+    const normalizedKey = requiredString(idempotencyKey, "idempotencyKey", 256);
+    const snapshot = await state();
+    const matches = [...snapshot.items.values()].filter((item) => item.idempotencyKey === normalizedKey);
+    if (matches.length !== 1) fail(`Dead-letter entry ${normalizedKey} was not found uniquely.`, "ENTRY_NOT_FOUND");
+    const item = matches[0];
+    if (publicItem(item, snapshot.nowMs, maxAttempts).status !== "dead_letter") {
+      fail(`Entry ${normalizedKey} is not dead-lettered.`, "ENTRY_NOT_DEAD_LETTER");
+    }
+    const event = {
+      version: REPOSITORY_JOURNAL_OUTBOX_VERSION,
+      event: "requeued",
+      keyDigest: item.keyDigest,
+      priorClaimCount: item.claimCount,
+      at: snapshot.nowAt,
+    };
+    await journal.append({
+      identity: eventIdentity(item.keyDigest, "requeue", randomUUID()),
+      ...item.binding,
+      payload: { repositoryOutbox: event },
+    });
+    return {
+      requeued: true,
+      entry: publicItem({
+        ...item,
+        claimCount: item.claimCount,
+        attemptCount: 0,
+        lease: null,
+        acknowledgedAt: null,
+        failure: null,
+        retryAt: null,
+        terminal: false,
+      }, snapshot.nowMs, maxAttempts),
+    };
+  }
+
   async function retain({ maxRecords }) {
     if (typeof journal.retain !== "function") fail("The repository journal does not support retention.", "INVALID_JOURNAL");
     millis(maxRecords, "maxRecords");
@@ -462,7 +516,7 @@ export function createRepositoryJournalOutbox({
         const droppedDeadLetter = [];
         const kept = [];
         for (const item of snapshot.values()) {
-          const exhausted = !item.acknowledgedAt && !item.lease && item.claimCount >= maxAttempts;
+          const exhausted = !item.acknowledgedAt && !item.lease && item.attemptCount >= maxAttempts;
           const deadLetter = !item.acknowledgedAt && (item.terminal || exhausted);
           const terminalAt = item.acknowledgedAt
             || (deadLetter ? (item.failure?.failedAt || item.enqueuedAt) : null);
@@ -483,6 +537,7 @@ export function createRepositoryJournalOutbox({
             enqueuedAt: item.enqueuedAt,
             enqueueSequence: item.enqueueSequence,
             claimCount: item.claimCount,
+            attemptCount: item.attemptCount,
             lease: item.lease,
             acknowledgedAt: item.acknowledgedAt,
             failure: item.failure,
@@ -520,5 +575,5 @@ export function createRepositoryJournalOutbox({
     });
   }
 
-  return Object.freeze({ enqueue, claim, acknowledge, ack: acknowledge, fail: recordFailure, inspect, retain });
+  return Object.freeze({ enqueue, claim, acknowledge, ack: acknowledge, fail: recordFailure, inspect, requeue, retain });
 }

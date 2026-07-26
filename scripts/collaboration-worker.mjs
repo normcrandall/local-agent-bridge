@@ -42,6 +42,7 @@ import {
 import { createVerificationTimingTracker } from "../src/verification-timing.mjs";
 import { assertRepositoryEvidenceHead, captureRepositoryEvidence } from "../src/repository-evidence.mjs";
 import { createRepositoryRuntimeJournal } from "../src/repository-runtime-journal.mjs";
+import { publishRepositoryLifecycleCheckpoint, repositoryJournalPublicationState } from "../src/repository-lifecycle-publication.mjs";
 import { createEvidenceStore } from "../src/evidence-store.mjs";
 import { createRepositoryJournal } from "../src/repository-journal.mjs";
 import { createRepositorySnapshotCache, repositorySnapshotCacheDirectory } from "../src/repository-snapshot-cache.mjs";
@@ -75,6 +76,7 @@ let workerHeadSha = null;
 
 async function checkpointClaim({ phase, summary, writer, previousWriter = null, kind = "refresh", terminal = false } = {}) {
   if (!claimClient || !claimJournal || !state?.issueClaim) return { queued: false, publication: [] };
+  await claimJournal.redriveAuthorityFailures();
   const metadata = claimWorkspaceMetadata(state);
   workerHeadSha = metadata.headSha;
   const queued = await claimJournal.enqueue({
@@ -92,46 +94,28 @@ async function checkpointClaim({ phase, summary, writer, previousWriter = null, 
     workerId: `${id}:${process.pid}`,
     async publish(checkpoint, entry) {
       const currentMetadata = claimWorkspaceMetadata(state);
-      if (checkpoint.kind !== "release" && checkpoint.headSha && checkpoint.headSha !== currentMetadata.headSha) {
-        return { skipped: "superseded_head", currentHeadSha: currentMetadata.headSha };
-      }
-      if (checkpoint.kind === "release") {
-        const { releaseClaimLease } = await import("../src/github-issue-claims.mjs");
-        return releaseClaimLease({
-          client: claimClient,
-          issueNumber: entry.binding.issueNumber,
-          collaborationId: checkpoint.collaborationId,
-          outcome: checkpoint.phase,
-          workspaceRoot,
-        });
-      }
-      const { refreshClaimLease } = await import("../src/github-issue-claims.mjs");
-      return refreshClaimLease({
+      const { refreshClaimLease, releaseClaimLease } = await import("../src/github-issue-claims.mjs");
+      return publishRepositoryLifecycleCheckpoint({
+        checkpoint,
+        entry,
+        currentMetadata,
         client: claimClient,
-        issueNumber: entry.binding.issueNumber,
-        collaborationId: checkpoint.collaborationId,
         workspaceRoot,
-        phase: checkpoint.phase,
-        summary: checkpoint.summary,
-        writer: checkpoint.writer,
-        writerFailover: checkpoint.previousWriter
-          ? { from: checkpoint.previousWriter, to: checkpoint.writer, reason: "provider failover" }
-          : null,
-        ...currentMetadata,
+        refreshClaimLease,
+        releaseClaimLease,
       });
     },
   });
   const inspection = await claimJournal.inspect();
+  const publicationState = repositoryJournalPublicationState(inspection);
   await updateCollaboration(workspaceRoot, id, (current) => ({
     ...current,
     repositoryJournal: {
       version: 1,
       lastCheckpointAt: new Date().toISOString(),
       lastCheckpointPhase: phase,
-      pendingPublications: inspection.pending.length,
-      deadLetterPublications: inspection.deadLetter.length,
+      ...publicationState,
       acknowledgedPublications: inspection.acknowledged.length,
-      offline: publication.some((result) => result.status === "retry_scheduled"),
     },
   }));
   const terminalFailure = publication.find((result) => result.status === "dead_letter");
@@ -139,6 +123,9 @@ async function checkpointClaim({ phase, summary, writer, previousWriter = null, 
     const error = new Error(`Repository lifecycle publication was rejected: ${terminalFailure.error}`);
     error.code = "REPOSITORY_LIFECYCLE_PUBLICATION_REJECTED";
     throw error;
+  }
+  if (terminal && publicationState.deadLetterPublications === 0) {
+    await claimJournal.retain({ maxRecords: 500 });
   }
   return { queued: !queued.idempotent, publication };
 }
