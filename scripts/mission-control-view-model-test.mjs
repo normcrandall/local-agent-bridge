@@ -25,7 +25,10 @@ const snapshot = {
     lanes: [
       { id: "writer-a", repository: "veliqon/alpha", status: "running", createdAt: at(3), updatedAt: at(3) },
       { id: "writer-b", repository: "veliqon/alpha", status: "working", createdAt: at(2), updatedAt: at(2) },
-      { id: "needs-user", repository: "veliqon/alpha", status: "needs_user", attention: { required: true }, createdAt: at(4) },
+      {
+        id: "needs-user", repository: "veliqon/alpha", status: "needs_user", createdAt: at(4),
+        coordinatorWake: { status: "pending", kind: "needs_user", nextAction: "needs_user", actionable: false },
+      },
       { id: "queued", repository: "veliqon/beta", status: "blocked", createdAt: at(5) },
       { id: "review", repository: "veliqon/alpha", status: "reviewing", mode: "review", createdAt: at(6) },
       { id: "merge", repository: "veliqon/beta", status: "integrating", createdAt: at(7) },
@@ -51,14 +54,14 @@ let view = projectMissionControlViewModel(eventState, {
 
 assert.deepEqual(view.tabs, MISSION_CONTROL_VIEW_TABS);
 assert.deepEqual(view.collections.active.map((lane) => lane.id), ["writer-b", "writer-a", "review", "merge"]);
-assert.deepEqual(view.collections.needsYou.map((lane) => lane.id), ["needs-user", "terminal-needs-user"]);
+assert.deepEqual(view.collections.needsYou.map((lane) => lane.id), ["needs-user"]);
 assert.deepEqual(view.collections.queue.map((lane) => lane.id), ["queued"]);
 assert.deepEqual(view.collections.reviews.map((lane) => lane.id), ["review"]);
 assert.deepEqual(view.collections.mergeTrain.map((lane) => lane.id), ["merge"]);
 assert.deepEqual(view.collections.history.map((lane) => lane.id), ["done", "terminal-needs-user", "stopped"]);
 assert.deepEqual(view.repositories, [
   { id: "veliqon/alpha", active: 3, needsYou: 1, waiting: 0, stopped: 0, doneUnseen: 1 },
-  { id: "veliqon/beta", active: 1, needsYou: 1, waiting: 1, stopped: 2, doneUnseen: 2 },
+  { id: "veliqon/beta", active: 1, needsYou: 0, waiting: 1, stopped: 2, doneUnseen: 2 },
 ]);
 assert.deepEqual(view.selection, {
   repository: "veliqon/alpha",
@@ -159,5 +162,34 @@ const betaQueue = projectMissionControlViewModel(eventState, {
 });
 assert.equal(betaQueue.selection.lane, "veliqon/beta\0queued");
 assert.equal(betaQueue.collections.queue[0].status, "blocked");
+
+const classificationSnapshot = {
+  ...snapshot,
+  streamId: "attention-classification",
+  payload: {
+    repositories: [{ id: "veliqon/alpha" }],
+    portfolios: [], providers: [], quotas: [],
+    lanes: [
+      { id: "chair-verify", repository: "veliqon/alpha", status: "agreed", updatedAt: at(40), coordinatorWake: { status: "pending", actionable: true, nextAction: "chair_verify" } },
+      { id: "provider-work", repository: "veliqon/alpha", status: "agreed", updatedAt: at(41), coordinatorWake: { status: "delivered", actionable: true, nextAction: "provider_work" } },
+      { id: "requeue", repository: "veliqon/alpha", status: "failed", updatedAt: at(42), coordinatorWake: { status: "pending", actionable: true, nextAction: "requeue" } },
+      { id: "merge-ready", repository: "veliqon/alpha", status: "agreed", updatedAt: at(43), coordinatorWake: { status: "pending", actionable: true, nextAction: "merge_ready" } },
+      { id: "acknowledged", repository: "veliqon/alpha", status: "needs_user", updatedAt: at(44), coordinatorWake: { status: "acknowledged", kind: "needs_user", nextAction: "needs_user" } },
+      { id: "needs-user-boundary", repository: "veliqon/alpha", status: "needs_user", updatedAt: at(45), coordinatorWake: { status: "pending", kind: "needs_user", nextAction: "needs_user" } },
+      { id: "indeterminate-boundary", repository: "veliqon/alpha", status: "indeterminate", updatedAt: at(46), coordinatorWake: { status: "pending", kind: "indeterminate", nextAction: "needs_user" } },
+      { id: "merged-stale-wake", repository: "veliqon/alpha", status: "merged", updatedAt: at(47), coordinatorWake: { status: "pending", kind: "needs_user", nextAction: "needs_user" }, github: { mergeCommitSha: "f".repeat(40) } },
+      { id: "wake-null-needs-user", repository: "veliqon/alpha", status: "needs_user", updatedAt: at(48), attentionRequestedAt: at(48), coordinatorWake: null },
+      { id: "attention-event-boundary", repository: "veliqon/alpha", status: "reviewing", updatedAt: at(49), attention: { required: true, reason: "approval" } },
+      { id: "live-host-boundary", repository: "veliqon/alpha", status: "needs_user", updatedAt: at(50), hostActivity: { processAlive: true }, coordinatorWake: null },
+    ],
+  },
+};
+const classified = projectMissionControlViewModel(createMissionControlEventState(classificationSnapshot));
+assert.deepEqual(classified.collections.needsYou.map((lane) => lane.id), ["attention-event-boundary", "indeterminate-boundary", "live-host-boundary", "needs-user-boundary", "wake-null-needs-user"]);
+assert.deepEqual(classified.collections.queue.map((lane) => lane.id), ["chair-verify", "merge-ready", "provider-work"]);
+assert.deepEqual(classified.collections.history.map((lane) => lane.id), ["acknowledged", "merged-stale-wake", "requeue"]);
+assert.equal(classified.repositories[0].needsYou, 5, "all protected boundaries contribute to the repository rollup");
+assert.equal(classified.repositories[0].waiting, 3);
+assert.equal(classified.repositories[0].stopped, 1, "a failed retry handoff remains stopped rather than queued");
 
 console.log("Mission Control view-model tests passed.");

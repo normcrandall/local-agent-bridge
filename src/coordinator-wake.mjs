@@ -56,6 +56,14 @@ export function classifyCoordinatorWake(state) {
   const withDelivery = (classification) => (
     deliveryOutcome ? { ...classification, deliveryOutcome } : classification
   );
+  if (state.status === "indeterminate") {
+    return withDelivery({
+      kind: "indeterminate",
+      actionable: false,
+      nextAction: "needs_user",
+      summary: coordinatorWakeSummary(state),
+    });
+  }
   if (state.status === "needs_user" || state.completion?.nextAction === "needs_user") {
     return withDelivery({
       kind: "needs_user",

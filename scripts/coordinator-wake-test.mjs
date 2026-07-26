@@ -159,6 +159,20 @@ try {
   assert.equal(decision.decision, "allow");
   assert.match(decision.systemMessage, /requires user input/);
 
+  const indeterminate = await createCollaboration(root, {
+    task: "Inspect ambiguous writer ownership",
+    workspace: root,
+    agents: ["claude"],
+    participants: ["codex", "claude"],
+    chair: { provider: "codex", source: "native-chair" },
+    status: "indeterminate",
+    runtime: { turnCount: 1 },
+  });
+  const indeterminateWake = await enqueueCoordinatorWake(root, indeterminate.id);
+  assert.equal(indeterminateWake.coordinatorWake.kind, "indeterminate");
+  assert.equal(indeterminateWake.coordinatorWake.actionable, false);
+  assert.equal(indeterminateWake.coordinatorWake.nextAction, "needs_user");
+
   console.log("Coordinator wake tests passed: active hold-open, durable idempotent wake, delivery, acknowledgement, and protected user boundary.");
 } finally {
   delete process.env.BRIDGE_COLLABORATION_DIR;

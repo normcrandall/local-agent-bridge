@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { missionControlLaneKey } from "./mission-control-event-protocol.mjs";
+import { requiresCoordinatorAction, requiresHumanAttention } from "./human-attention-policy.mjs";
 
 export const MISSION_CONTROL_VIEW_TABS = Object.freeze([
   "active",
@@ -50,12 +51,6 @@ function laneText(lane) {
     .map(clean)
     .join(" ")
     .toLowerCase();
-}
-
-function isNeedsYou(lane, status) {
-  return status === "needs_user"
-    || (lane.attention?.required === true && lane.attention?.acknowledged !== true)
-    || (lane.coordinatorWake?.actionable === true && lane.coordinatorWake?.status !== "acknowledged");
 }
 
 function isReview(lane, status) {
@@ -176,7 +171,7 @@ function repositoryRollups(repositories, lanes) {
     if (lane.category === "active") rollup.active += 1;
     if (lane.category === "needsYou") rollup.needsYou += 1;
     if (lane.category === "queue") rollup.waiting += 1;
-    if (lane.terminal && !["merged", "complete", "completed", "done", "closed", "agreed"].includes(lane.status)) {
+    if (lane.category === "history" && lane.terminal && !["merged", "complete", "completed", "done", "closed", "agreed"].includes(lane.status)) {
       rollup.stopped += 1;
     }
     if (lane.doneUnseen) rollup.doneUnseen += 1;
@@ -195,11 +190,14 @@ export function projectMissionControlViewModel(eventState, clientState = {}) {
   const lanes = Object.values(eventState.lanes || {}).map((lane) => normalizedLane(lane, acknowledgedDone));
 
   for (const lane of lanes) {
-    if (isNeedsYou(lane, lane.status)) lane.category = "needsYou";
-    else if (lane.terminal) lane.category = "history";
+    if (requiresHumanAttention(lane)) lane.category = "needsYou";
+    else if (["failed", "indeterminate", "budget", "cancelled"].includes(lane.status)) lane.category = "history";
+    else if (requiresCoordinatorAction(lane)) lane.category = "queue";
+    else if (lane.terminal || lane.status === "needs_user") lane.category = "history";
     else if (ACTIVE.has(lane.status)) lane.category = "active";
     else if (QUEUED.has(lane.status)) lane.category = "queue";
     else lane.category = "queue";
+    lane.doneUnseen = lane.category === "history" && lane.doneUnseen;
   }
 
   const activeOrder = orderActive(
@@ -214,7 +212,7 @@ export function projectMissionControlViewModel(eventState, clientState = {}) {
     queue: stable(lanes.filter((lane) => lane.category === "queue")),
     reviews: stable(lanes.filter((lane) => !lane.terminal && isReview(lane, lane.status))),
     mergeTrain: stable(lanes.filter((lane) => !lane.terminal && isMergeTrain(lane, lane.status))),
-    history: stable(lanes.filter((lane) => lane.terminal)),
+    history: stable(lanes.filter((lane) => lane.category === "history")),
   };
 
   const repositories = repositoryRollups(Object.values(eventState.repositories || {}), lanes);

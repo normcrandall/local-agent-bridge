@@ -163,6 +163,63 @@ assert.equal(isLiveLane({ type: "native_host", lifecyclePhase: "working", hostAc
 assert.equal(isStaleLane({ type: "portfolio_lane", lifecyclePhase: "blocked", updatedAt: "2026-07-22T10:00:00.000Z" }, Date.parse("2026-07-23T12:00:00.000Z")), true);
 assert.equal(isStaleLane({ type: "portfolio_lane", lifecyclePhase: "integrating", updatedAt: "2026-07-22T10:00:00.000Z" }, Date.parse("2026-07-23T12:00:00.000Z")), false);
 assert.equal(operatorLaneCategory({ type: "collaboration", lifecyclePhase: "turn_limit", updatedAt: "2026-07-23T11:59:00.000Z" }, classificationNow), null);
+for (const nextAction of ["chair_verify", "provider_work", "requeue", "retry", "merge_ready"]) {
+  assert.equal(operatorLaneCategory({
+    type: "collaboration",
+    lifecyclePhase: "agreed",
+    updatedAt: "2026-07-23T11:59:00.000Z",
+    coordinatorWake: { status: "pending", actionable: true, nextAction },
+  }, classificationNow), "waiting", `${nextAction} is coordinator work, not user attention`);
+}
+assert.equal(operatorLaneCategory({
+  type: "collaboration",
+  lifecyclePhase: "needs_user",
+  updatedAt: "2026-07-23T11:59:00.000Z",
+  attentionRequestedAt: "2026-07-23T11:59:00.000Z",
+  coordinatorWake: { status: "pending", kind: "needs_user", nextAction: "needs_user" },
+}, classificationNow), "needs_user");
+assert.equal(operatorLaneCategory({
+  type: "portfolio_lane",
+  lifecyclePhase: "needs_user",
+  updatedAt: "2026-07-23T11:59:00.000Z",
+  attentionRequestedAt: "2026-07-23T11:59:00.000Z",
+  coordinatorWake: null,
+}, classificationNow), "needs_user", "a synthesized portfolio boundary needs no coordinator wake");
+assert.equal(operatorLaneCategory({
+  type: "collaboration",
+  lifecyclePhase: "reviewing",
+  updatedAt: "2026-07-23T11:59:00.000Z",
+  attentionRequestedAt: "2026-07-23T11:59:00.000Z",
+  attention: { required: true, reason: "approval" },
+}, classificationNow), "needs_user", "attention.updated remains a first-class boundary carrier");
+assert.equal(operatorLaneCategory({
+  type: "combined",
+  lifecyclePhase: "needs_user",
+  updatedAt: "2026-07-23T11:59:00.000Z",
+  attentionRequestedAt: "2026-07-23T11:59:00.000Z",
+  hostActivity: { processAlive: true },
+  coordinatorWake: null,
+}, classificationNow), "needs_user", "host liveness cannot suppress a protected boundary");
+assert.equal(operatorLaneCategory({
+  type: "collaboration",
+  lifecyclePhase: "needs_user",
+  updatedAt: "2026-07-23T11:59:00.000Z",
+  coordinatorWake: { status: "acknowledged", kind: "needs_user", nextAction: "needs_user" },
+}, classificationNow), null);
+assert.equal(operatorLaneCategory({
+  type: "collaboration",
+  lifecyclePhase: "indeterminate",
+  updatedAt: "2026-07-23T11:59:00.000Z",
+  attentionRequestedAt: "2026-07-23T11:59:00.000Z",
+  coordinatorWake: { status: "pending", kind: "indeterminate", nextAction: "needs_user" },
+}, classificationNow), "needs_user");
+assert.equal(operatorLaneCategory({
+  type: "combined",
+  lifecyclePhase: "needs_user",
+  updatedAt: "2026-07-23T11:59:00.000Z",
+  portfolio: { status: "merged" },
+  coordinatorWake: { status: "pending", kind: "needs_user", nextAction: "needs_user" },
+}, classificationNow), null, "a merged outcome suppresses stale attention metadata");
 assert.equal(operatorLaneCategory({
   type: "collaboration",
   lifecyclePhase: "agreed",
@@ -170,6 +227,12 @@ assert.equal(operatorLaneCategory({
   handoff: { acknowledged: false },
 }, classificationNow), null);
 assert.equal(operatorLaneCategory({ type: "collaboration", lifecyclePhase: "budget", updatedAt: "2026-07-23T11:59:00.000Z" }, classificationNow), "stopped");
+assert.equal(operatorLaneCategory({
+  type: "collaboration",
+  lifecyclePhase: "failed",
+  updatedAt: "2026-07-23T11:59:00.000Z",
+  coordinatorWake: { status: "pending", actionable: true, nextAction: "retry" },
+}, classificationNow), "stopped", "failed retry handoffs retain stopped semantics");
 assert.equal(operatorLaneCategory({
   type: "collaboration",
   lifecyclePhase: "turn_limit",
@@ -394,12 +457,13 @@ try {
   ]));
   assert.ok(ledgerNoise.operatorLanes.some((lane) => lane.prNumber === 684 && lane.operatorCategory === "waiting"));
   assert.ok(ledgerNoise.operatorLanes.some((lane) => lane.id === recoveringWaitId && lane.operatorCategory === "waiting"), "active category defines repository scope even when isLiveLane is false");
-  assert.deepEqual(ledgerNoise.scopedOut, { total: 2, repositories: ["norm/historical-noise"] });
-  assert.match(renderSnapshot(ledgerNoise, { width: 120, height: 30 }), /OUTSIDE LIVE SCOPE 2/);
+  assert.deepEqual(ledgerNoise.scopedOut, { total: 5, repositories: ["norm/historical-noise"] });
+  assert.match(renderSnapshot(ledgerNoise, { width: 120, height: 30 }), /OUTSIDE LIVE SCOPE 5/);
 
   const ledgerAttention = await loadMissionControlSnapshot({ stateRoot: ledgerNoiseRoot, now, view: "attention" });
   assert.equal(ledgerAttention.scopedOut.total, 0);
-  assert.ok(ledgerAttention.operatorLanes.some((lane) => lane.repository === "norm/historical-noise" && lane.operatorCategory === "stopped"));
+  assert.ok(ledgerAttention.operatorLanes.some((lane) => lane.repository === "norm/historical-noise" && lane.operatorCategory === "waiting"),
+    "unacknowledged chair work remains visible as coordinator work, never user attention");
   const ledgerHistory = await loadMissionControlSnapshot({ stateRoot: ledgerNoiseRoot, now, view: "all", includeStale: true });
   assert.equal(ledgerHistory.scopedOut.total, 0);
   assert.ok(ledgerHistory.operatorLanes.some((lane) => lane.repository === "norm/historical-noise"));
@@ -724,9 +788,9 @@ try {
     }],
   }));
   const edgeAttention = await loadMissionControlSnapshot({ stateRoot: edgeRoot, view: "attention", now });
-  assert.equal(edgeAttention.operatorCounts.needs_user, 1, "a terminal delivery must not hide a real user boundary");
+  assert.equal(edgeAttention.operatorCounts.needs_user, 0, "a merged delivery must supersede stale user-attention metadata");
   assert.equal(edgeAttention.operatorCounts.waiting, 1, "queued work remains part of the existing attention contract");
-  assert.ok(edgeAttention.operatorLanes.some((lane) => lane.prNumber === 700 && lane.operatorCategory === "needs_user"));
+  assert.ok(!edgeAttention.operatorLanes.some((lane) => lane.prNumber === 700 && lane.operatorCategory === "needs_user"));
   assert.ok(edgeAttention.operatorLanes.some((lane) => lane.issueNumber === 702));
   const edgeHistory = await loadMissionControlSnapshot({ stateRoot: edgeRoot, showAll: true, now });
   const mergedPriorAttempt = edgeHistory.operatorLanes.find((lane) => lane.prNumber === 701);

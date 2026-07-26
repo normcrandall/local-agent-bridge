@@ -43,7 +43,11 @@ const snapshot = {
       { id: "alpha-a", repository: "veliqon/alpha", status: "running", createdAt: at(2), portfolio: { portfolioId: "helm-a" } },
       { id: "alpha-b", repository: "veliqon/alpha", status: "working", createdAt: at(3), portfolio: { portfolioId: "helm-a" } },
       { id: "beta-a", repository: "veliqon/beta", status: "running", createdAt: at(4), portfolio: { portfolioId: "helm-b" } },
-      { id: "decision", repository: "veliqon/alpha", status: "needs_user", createdAt: at(5), attention: { required: true }, portfolio: { portfolioId: "helm-a" } },
+      {
+        id: "decision", repository: "veliqon/alpha", status: "needs_user", createdAt: at(5),
+        coordinatorWake: { status: "pending", kind: "needs_user", nextAction: "needs_user", actionable: false },
+        portfolio: { portfolioId: "helm-a" },
+      },
       { id: "review", repository: "veliqon/alpha", status: "reviewing", createdAt: at(6), mode: "review", portfolio: { portfolioId: "helm-a" } },
       { id: "merge", repository: "veliqon/alpha", status: "integrating", createdAt: at(7), mergeTrain: { queued: true }, portfolio: { portfolioId: "helm-a" } },
       { id: "done", repository: "veliqon/alpha", status: "merged", completedAt: at(8), github: { headSha: "abc" }, portfolio: { portfolioId: "helm-a" } },
