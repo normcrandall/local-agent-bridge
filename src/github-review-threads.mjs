@@ -392,13 +392,15 @@ export async function reconcileApprovedReviewerBlockers({
     return { attempted: true, complete: true, resolved, readiness, error: null };
   } catch (error) {
     const completedThreadIds = resolved.map((entry) => entry.threadId);
-    error.reviewResolution = {
+    const failure = error instanceof Error ? error : new Error(String(error));
+    failure.reviewResolution = {
+      resolved: [...resolved],
       completedThreadIds,
       pendingThreadIds: candidates
         .map((entry) => entry.threadId)
         .filter((threadId) => !completedThreadIds.includes(threadId)),
     };
-    throw error;
+    throw failure;
   }
 }
 

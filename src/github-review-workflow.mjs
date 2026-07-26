@@ -35,7 +35,7 @@ export async function reconcilePublishedReview({
     reviewResolution = {
       attempted: true,
       complete: false,
-      resolved: [],
+      resolved: error.reviewResolution?.resolved || [],
       readiness: observedReadiness,
       error: {
         message: error.message,

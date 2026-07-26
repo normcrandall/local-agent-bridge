@@ -772,6 +772,11 @@ assert.deepEqual(
   "a stale-head abort preserves the resolutions that already reached GitHub",
 );
 assert.deepEqual(
+  headAdvancedWorkflow.reviewResolution.resolved.map((entry) => entry.threadId),
+  ["before-head-advance"],
+  "the persisted workflow receipt carries completed resolution objects across its error boundary",
+);
+assert.deepEqual(
   headAdvancedWorkflow.reviewResolution.error.pendingThreadIds,
   ["after-head-advance"],
   "a stale-head abort preserves the exact unresolved remainder for retry",
