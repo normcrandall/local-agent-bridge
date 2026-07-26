@@ -206,6 +206,40 @@ try {
   assert.equal(reclaimed.applied, true, "a stale dead-owner lock is reclaimed for operator recovery");
   assert.equal((await lockJournal.read()).length, 1);
 
+  await writeFile(lockPath, "{\"pid\":", "utf8");
+  await utimes(lockPath, staleAt, staleAt);
+  await lockJournal.append({ identity: "record-3", repository, issueNumber: 235, payload: { index: 3, status: "completed" } });
+  assert.equal((await lockJournal.read()).length, 2, "a stale truncated lock body is reclaimed after the fail-closed grace period");
+
+  const concurrentDirectory = join(root, "concurrent-retention");
+  const concurrentJournal = await addRecords(concurrentDirectory, 5);
+  const winningOperations = createRepositoryJournalOperations({ directory: concurrentDirectory });
+  let winningResult;
+  const staleOperations = createRepositoryJournalOperations({
+    directory: concurrentDirectory,
+    hooks: {
+      beforeOperatorLock: async () => {
+        winningResult = await winningOperations.retain({ maxRecords: 2, apply: true });
+      },
+    },
+  });
+  await assert.rejects(
+    staleOperations.retain({ maxRecords: 4, apply: true }),
+    (error) => error.code === "STATE_CHANGED",
+    "a concurrent pure head truncation is detected from the exact raw-file digest",
+  );
+  assert.equal(winningResult.applied, true);
+  assert.deepEqual((await concurrentJournal.read()).map((record) => record.sequence), [4, 5], "the stale operator cannot resurrect records removed by the winning retention");
+
+  const nonCanonicalDirectory = join(root, "non-canonical");
+  const nonCanonicalJournal = await addRecords(nonCanonicalDirectory, 1);
+  const [canonicalRecord] = await nonCanonicalJournal.read();
+  const reorderedRecord = { digest: canonicalRecord.digest, ...Object.fromEntries(Object.entries(canonicalRecord).filter(([key]) => key !== "digest")) };
+  await writeFile(nonCanonicalJournal.path, `${JSON.stringify(reorderedRecord)}\n`, "utf8");
+  const nonCanonicalInspection = await nonCanonicalJournal.inspect();
+  assert.equal(nonCanonicalInspection.status, "corrupt");
+  assert.equal(nonCanonicalInspection.error.code, "NON_CANONICAL_RECORD", "byte-different journal records cannot validate under an identical semantic digest");
+
   const tampered = JSON.parse(await readFile(exportedPath, "utf8"));
   tampered.records[0].payload.index = 999;
   const tamperedPath = join(root, "tampered.json");

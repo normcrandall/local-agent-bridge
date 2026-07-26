@@ -75,6 +75,18 @@ async function acquireOperatorLock(directory, options) {
   return acquireRepositoryJournalLock(resolve(directory, LOCK_FILE), options);
 }
 
+async function readJournalSnapshot(journal, attempts = 4) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const before = await readFile(journal.path, "utf8").catch((error) => error.code === "ENOENT" ? "" : Promise.reject(error));
+    const inspection = await journal.inspect();
+    const after = await readFile(journal.path, "utf8").catch((error) => error.code === "ENOENT" ? "" : Promise.reject(error));
+    const beforeSha256 = sha256(before);
+    const afterSha256 = sha256(after);
+    if (beforeSha256 === afterSha256) return { raw: after, rawSha256: afterSha256, inspection };
+  }
+  throw new RepositoryJournalError("Repository journal changed while it was being inspected; retry the operation.", { code: "STATE_CHANGED" });
+}
+
 function protectionReasons(value, path = "payload", reasons = []) {
   if (Array.isArray(value)) {
     value.forEach((entry, index) => protectionReasons(entry, `${path}[${index}]`, reasons));
@@ -308,7 +320,8 @@ export function createRepositoryJournalOperations({
     if (!input) throw new RepositoryJournalError("import requires an input bundle.", { code: "INVALID_ARGUMENT" });
     const document = verifyBundle(JSON.parse(await readFile(resolve(input), "utf8")), { repository });
     const imported = await validateRecords(document.records, repository || document.repository);
-    const current = await journal.inspect();
+    const currentSnapshot = await readJournalSnapshot(journal);
+    const current = currentSnapshot.inspection;
     if (current.status !== "clean") {
       throw new RepositoryJournalError("Import refuses to replace a corrupt journal; archive it and run journal recover first.", { code: "CORRUPT_TARGET" });
     }
@@ -331,20 +344,23 @@ export function createRepositoryJournalOperations({
       );
     }
     if (!apply) return preview;
-    const originalRaw = await readFile(journal.path, "utf8").catch((error) => error.code === "ENOENT" ? "" : Promise.reject(error));
+    await hooks.beforeOperatorLock?.(preview);
     const release = await acquireOperatorLock(root, lockOptions);
+    let replaced = false;
     try {
-      const fresh = await journal.inspect();
-      if (fresh.status !== current.status || fresh.records.at(-1)?.digest !== current.records.at(-1)?.digest) {
+      const freshSnapshot = await readJournalSnapshot(journal);
+      const fresh = freshSnapshot.inspection;
+      if (freshSnapshot.rawSha256 !== currentSnapshot.rawSha256) {
         throw new RepositoryJournalError("Journal changed after import preview; retry the operation.", { code: "STATE_CHANGED" });
       }
       preview.recoveryReceipt = await writeRecoveryReceipt(root, fresh.records, "import", { receiptDirectory });
       await hooks.afterRecoveryReceipt?.(preview);
       await replaceJournal(root, document.records);
+      replaced = true;
       await hooks.afterReplace?.(preview);
       return { ...preview, dryRun: false, applied: true };
     } catch (error) {
-      if (preview.recoveryReceipt) await atomicWrite(journal.path, originalRaw).catch(() => {});
+      if (replaced) await atomicWrite(journal.path, currentSnapshot.raw).catch(() => {});
       throw error;
     } finally {
       await release();
@@ -353,7 +369,8 @@ export function createRepositoryJournalOperations({
 
   async function retention({ maxRecords, apply = false } = {}) {
     const limit = positiveInteger(maxRecords, "maxRecords");
-    const current = await journal.inspect();
+    const currentSnapshot = await readJournalSnapshot(journal);
+    const current = currentSnapshot.inspection;
     if (current.status !== "clean") throw new RepositoryJournalError(current.error.message, { code: current.error.code, line: current.error.line });
     const clone = await mkdtemp(resolve(tmpdir(), "agent-bridge-journal-retain-"));
     let receipt;
@@ -391,20 +408,23 @@ export function createRepositoryJournalOperations({
       recoveryReceipt: null,
     };
     if (!apply) return preview;
-    const originalRaw = await readFile(journal.path, "utf8").catch((error) => error.code === "ENOENT" ? "" : Promise.reject(error));
+    await hooks.beforeOperatorLock?.(preview);
     const release = await acquireOperatorLock(root, lockOptions);
+    let replaced = false;
     try {
-      const fresh = await journal.inspect();
-      if (fresh.status !== "clean" || fresh.records.at(-1)?.digest !== current.records.at(-1)?.digest) {
+      const freshSnapshot = await readJournalSnapshot(journal);
+      const fresh = freshSnapshot.inspection;
+      if (freshSnapshot.rawSha256 !== currentSnapshot.rawSha256) {
         throw new RepositoryJournalError("Journal changed after retention preview; retry the operation.", { code: "STATE_CHANGED" });
       }
       preview.recoveryReceipt = await writeRecoveryReceipt(root, fresh.records, "retain", { receiptDirectory });
       await hooks.afterRecoveryReceipt?.(preview);
       await replaceJournal(root, retainedRecords);
+      replaced = true;
       await hooks.afterReplace?.(preview);
       return { ...preview, dryRun: false, applied: true };
     } catch (error) {
-      if (preview.recoveryReceipt) await atomicWrite(journal.path, originalRaw).catch(() => {});
+      if (replaced) await atomicWrite(journal.path, currentSnapshot.raw).catch(() => {});
       throw error;
     } finally {
       await release();

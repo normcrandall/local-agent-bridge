@@ -95,6 +95,20 @@ function recordContent(record) {
   return content;
 }
 
+function canonicalRecordLine(record) {
+  return JSON.stringify({
+    version: record.version,
+    sequence: record.sequence,
+    identity: record.identity,
+    binding: record.binding,
+    recordedAt: record.recordedAt,
+    payload: record.payload,
+    fingerprint: record.fingerprint,
+    previousDigest: record.previousDigest,
+    digest: record.digest,
+  });
+}
+
 function validateRecord(record, { line, previous = null, expectedRepository = null } = {}) {
   const fail = (message, code = "CORRUPT_RECORD") => {
     throw new RepositoryJournalError(`Repository journal record at line ${line} ${message}`, { code, line });
@@ -163,6 +177,12 @@ function inspectRaw(raw) {
         previous: records.at(-1) || null,
         expectedRepository: repository,
       });
+      if (canonicalRecordLine(validated) !== lines[index]) {
+        throw new RepositoryJournalError(`Repository journal record at line ${index + 1} is not canonically encoded.`, {
+          code: "NON_CANONICAL_RECORD",
+          line: index + 1,
+        });
+      }
       repository ||= validated.binding.repository;
       records.push(validated);
     }
@@ -217,11 +237,11 @@ export async function acquireRepositoryJournalLock(path, {
     } catch (error) {
       if (error.code !== "EEXIST") throw error;
       try {
-        const [owner, info] = await Promise.all([
-          readFile(path, "utf8").then(JSON.parse),
-          stat(path),
-        ]);
-        if (!(await ownerIsAlive(owner.pid)) && Date.now() - info.mtimeMs > STALE_LOCK_MS) {
+        const [rawOwner, info] = await Promise.all([readFile(path, "utf8"), stat(path)]);
+        let owner = null;
+        try { owner = JSON.parse(rawOwner); } catch {}
+        const ownerAlive = owner ? await ownerIsAlive(owner.pid) : false;
+        if (!ownerAlive && Date.now() - info.mtimeMs > STALE_LOCK_MS) {
           await unlink(path).catch(() => {});
           continue;
         }
