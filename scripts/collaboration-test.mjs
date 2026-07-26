@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { createCollaboration } from "../src/collaboration-store.mjs";
+import { buildClaimedIssueContext } from "../src/claimed-issue-context.mjs";
 import { recordMergeDeliveryReceipt } from "../src/merge-delivery-receipts.mjs";
 // Issue #55 dispatch/narrative fixtures: command allowlist admission and command-aware narrative.
 import "./issue-40-autonomy-test.mjs";
@@ -361,6 +362,35 @@ try {
     unsafeAutonomousDelivery.content?.[0]?.text || "",
     /Autonomous delivery requires a bound githubBuilder/,
   );
+
+  const integrityContext = buildClaimedIssueContext({
+    repository: "normcrandall/local-agent-bridge",
+    issueNumber: 99,
+    issue: { title: "Integrity fixture", body: "Original acceptance.", labels: [] },
+    comments: [],
+    capturedAt: "2026-07-26T00:00:00Z",
+  });
+  const tamperedTask = `Implement issue #99.\n\n${integrityContext.text.replace("Original acceptance.", "Modified acceptance.")}`;
+  const tamperedCollaboration = await createCollaboration(root, {
+    task: tamperedTask,
+    taskBase: tamperedTask,
+    issueContext: integrityContext.metadata,
+    workspace: cleanWorkspace,
+    agents: ["claude"],
+    mode: "review",
+    status: "turn_limit",
+    runtime: { turnCount: 1, activeCall: null },
+  });
+  const rejectedTamperedContinuation = await firstClient.callTool({
+    name: "continue_collaboration",
+    arguments: {
+      collaborationId: tamperedCollaboration.id,
+      message: "This must fail before provider continuation.",
+      additionalTurns: 1,
+    },
+  });
+  assert.equal(rejectedTamperedContinuation.isError, true);
+  assert.match(rejectedTamperedContinuation.content?.[0]?.text || "", /Claimed issue context sha256 mismatch/);
 
   const unbornStarted = await firstClient.callTool({
     name: "start_collaboration",
