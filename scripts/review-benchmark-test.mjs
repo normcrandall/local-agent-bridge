@@ -263,11 +263,30 @@ try {
   const forward = adjudicateReviewRuns([lowRun, criticalRun, emptyRun], orderOptions).results;
   const reversed = adjudicateReviewRuns([criticalRun, lowRun, emptyRun], orderOptions).results;
   assert.deepEqual(forward, reversed, "provider order cannot change blocking or severity metrics");
-  assert.equal(forward.find((row) => row.provider === "alpha").blockingTruePositives.length, 0);
+  assert.equal(forward.find((row) => row.provider === "alpha").blockingTruePositives.length, 1,
+    "blocking recall uses the chair's accepted severity while calibration measures provider disagreement separately");
   assert.equal(forward.find((row) => row.provider === "beta").blockingTruePositives.length, 1);
   assert.equal(forward.find((row) => row.provider === "gamma").blockingFalseNegatives.length, 1, "missed blocking severity comes from chair adjudication");
   assert.equal(forward.find((row) => row.provider === "alpha").severityCalibratedCount, 0);
   assert.equal(forward.find((row) => row.provider === "beta").severityCalibratedCount, 0);
+
+  const orderReport = aggregateReviewBenchmarks([{
+    repository: "veliqon/example",
+    results: forward,
+  }]).providers;
+  assert.equal(orderReport.find((row) => row.provider === "alpha").blockingRecall, 1,
+    "a found chair-blocking issue cannot disappear from the recall denominator because the provider under-labelled it");
+  assert.equal(orderReport.find((row) => row.provider === "gamma").blockingRecall, 0);
+
+  const repeatedUnique = aggregateReviewBenchmarks([{
+    repository: "veliqon/example",
+    results: [
+      { ...forward.find((row) => row.provider === "alpha"), runId: "alpha-repeat-1", uniqueValidFindings: [chairFinding.key] },
+      { ...forward.find((row) => row.provider === "alpha"), runId: "alpha-repeat-2", uniqueValidFindings: [chairFinding.key] },
+    ],
+  }]).providers[0];
+  assert.equal(repeatedUnique.uniqueValidFindings, 1,
+    "unique valid findings are distinct within a provider/model/repository cohort rather than summed per run");
 } finally {
   await rm(root, { recursive: true, force: true });
 }

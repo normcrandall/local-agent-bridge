@@ -39,7 +39,7 @@ export function aggregateReviewBenchmarks(adjudications) {
         provider: result.provider, model: result.model ?? null, repository: adjudication.repository ?? null,
         repositoryCohort: result.repositoryCohort ?? "default", runs: 0, truePositives: 0, falsePositives: 0,
         falseNegatives: 0, unadjudicated: 0, duplicates: 0, advisories: 0, blockingTruePositives: 0,
-        blockingFalseNegatives: 0, uniqueValidFindings: 0, validCitations: 0, evidenceSupported: 0,
+        blockingFalseNegatives: 0, uniqueValidFindingKeys: new Set(), validCitations: 0, evidenceSupported: 0,
         actionable: 0, findings: 0, severityCalibrated: 0, severityEvaluated: 0, exactHeadCompleted: 0,
         exactHeadObserved: 0, contractBound: 0, adjudicationComplete: 0,
         timeouts: 0, emptyResponses: 0, invalidEnvelopes: 0, recoveries: 0, fallbacks: 0,
@@ -55,7 +55,7 @@ export function aggregateReviewBenchmarks(adjudications) {
       aggregate.advisories += result.advisoryFindings?.length ?? 0;
       aggregate.blockingTruePositives += result.blockingTruePositives?.length ?? 0;
       aggregate.blockingFalseNegatives += result.blockingFalseNegatives?.length ?? 0;
-      aggregate.uniqueValidFindings += result.uniqueValidFindings?.length ?? 0;
+      for (const findingKey of result.uniqueValidFindings ?? []) aggregate.uniqueValidFindingKeys.add(findingKey);
       aggregate.validCitations += result.validCitationCount ?? 0;
       aggregate.evidenceSupported += result.supportedCount ?? 0;
       aggregate.actionable += result.actionableCount ?? 0;
@@ -110,7 +110,7 @@ export function aggregateReviewBenchmarks(adjudications) {
       duplicateRate: ratio(entry.duplicates, entry.findings),
       citationValidity: ratio(entry.validCitations, entry.findings), evidenceSupport: ratio(entry.evidenceSupported, entry.findings),
       actionability: ratio(entry.actionable, entry.findings), severityCalibration: ratio(entry.severityCalibrated, entry.severityEvaluated),
-      uniqueValidFindings: entry.uniqueValidFindings, exactHeadCompletionRate, exactHeadCompletionCoverage,
+      uniqueValidFindings: entry.uniqueValidFindingKeys.size, exactHeadCompletionRate, exactHeadCompletionCoverage,
       contractBindingCoverage, adjudicationCoverage,
       confidence: evidenceComplete ? confidenceLabel(entry.runs, adjudicatedFindingCount) : "incomplete", adjudicatedFindingCount,
       reliability: Object.freeze({ timeouts: entry.timeouts, emptyResponses: entry.emptyResponses, invalidEnvelopes: entry.invalidEnvelopes, recoveries: entry.recoveries, fallbacks: entry.fallbacks }),

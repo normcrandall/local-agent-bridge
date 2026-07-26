@@ -306,14 +306,16 @@ export function adjudicateReviewRuns(runs, options = {}) {
     const validCitationCount = run.findings.filter((finding) => finding.citationValid === true).length;
     const supportedCount = run.findings.filter((finding) => finding.evidenceSupported === true).length;
     const actionableCount = run.findings.filter((finding) => finding.actionable === true || finding.proposedFix).length;
-    const severityComparisons = truePositives.map((key) => runFindings.get(key)?.severity === adjudications.get(key)?.finding?.severity);
+    const severityComparisons = [...truePositives, ...falsePositives]
+      .filter((key) => adjudications.get(key)?.finding)
+      .map((key) => runFindings.get(key)?.severity === adjudications.get(key)?.finding?.severity);
     return Object.freeze({
       provider: run.provider, model: run.model, repositoryCohort: run.repositoryCohort, runId: run.runId,
       latencyMs: run.latencyMs, performance: run.performance, reliability: run.reliability, exactHeadComplete: run.exactHeadComplete,
       outcomes: run.outcomes,
       truePositives, falsePositives, falseNegatives, unadjudicated: byStatus.unresolved,
       duplicateFindings: byStatus.duplicate, advisoryFindings: byStatus.advisory,
-      blockingTruePositives: truePositives.filter((key) => runFindings.get(key)?.blocking),
+      blockingTruePositives: truePositives.filter((key) => adjudications.get(key)?.finding?.blocking),
       blockingFalseNegatives: falseNegatives.filter((key) => adjudications.get(key)?.finding?.blocking),
       validCitationCount, supportedCount, actionableCount,
       severityCalibratedCount: severityComparisons.filter(Boolean).length, severityEvaluatedCount: severityComparisons.length,
