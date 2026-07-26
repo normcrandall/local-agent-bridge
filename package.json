@@ -37,6 +37,7 @@
     "test:lifecycle": "node scripts/github-lifecycle-test.mjs",
     "test:evidence": "node scripts/evidence-store-test.mjs && node scripts/repository-evidence-test.mjs && node scripts/verification-receipts-test.mjs && npm run test:context-delta && npm run test:snapshot-integration",
     "test:snapshot-integration": "node scripts/repository-snapshot-cache-test.mjs && node scripts/repository-snapshot-integration-test.mjs",
+    "test:repository-journal-operations": "node scripts/repository-journal-operations-test.mjs",
     "test:context-delta": "node scripts/repository-context-delta-test.mjs",
     "test:performance": "node scripts/performance-timeline-test.mjs",
     "test:model-warmth": "node scripts/local-model-warmth-test.mjs",
