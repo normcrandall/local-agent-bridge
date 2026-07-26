@@ -41,6 +41,13 @@ assert.throws(() => validateMissionControlEventEnvelope({ ...snapshot, version: 
 assert.throws(() => validateMissionControlEventEnvelope({ ...snapshot, cursor: 9 }), /cursor.*sequence/i);
 assert.throws(() => validateMissionControlEventEnvelope({ ...snapshot, occurredAt: "not-a-date" }), /occurredAt/i);
 assert.throws(() => validateMissionControlEventEnvelope({ ...snapshot, occurredAt: "2026-02-30T12:00:00Z" }), /occurredAt/i);
+assert.throws(() => validateMissionControlEventEnvelope({ ...snapshot, occurredAt: "2026-02-30 12:00:00" }), /occurredAt/i,
+  "space-separated timestamps must not bypass calendar validation");
+assert.throws(() => validateMissionControlEventEnvelope({ ...snapshot, occurredAt: "2026-07-26T12:00:10" }), /occurredAt/i,
+  "offset-less timestamps would produce host-timezone-dependent digests");
+assert.throws(() => validateMissionControlEventEnvelope({ ...snapshot, occurredAt: "2026-07-26T12:00:10.1234Z" }), /occurredAt/i,
+  "sub-millisecond precision must not be silently truncated into a digest collision");
+assert.throws(() => validateMissionControlEventEnvelope({ ...snapshot, occurredAt: "2026-07-26T24:00:10Z" }), /occurredAt/i);
 const alternateTimestamp = { ...snapshot, occurredAt: "2026-07-26T08:00:10-04:00" };
 assert.equal(validateMissionControlEventEnvelope(alternateTimestamp).occurredAt, snapshot.occurredAt);
 assert.equal(missionControlEventDigest(alternateTimestamp), missionControlEventDigest(snapshot),
