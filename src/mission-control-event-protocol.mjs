@@ -47,7 +47,7 @@ function isRecord(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function requiredIdentifier(value, name) {
+export function requiredIdentifier(value, name) {
   if (typeof value !== "string" || !value.trim() || value.length > 512 || /[\0\r\n]/u.test(value)) {
     throw new Error(`${name} must be a non-empty identifier without control-line characters.`);
   }
