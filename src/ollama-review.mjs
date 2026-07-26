@@ -48,11 +48,21 @@ export async function loadOllamaConfig({
   };
 }
 
-export async function probeOllama({ model, baseUrl, fetchImpl = fetch } = {}) {
+export async function probeOllama({ model, baseUrl, fetchImpl = fetch, timeoutMs = OLLAMA_PROBE_TIMEOUT_MS } = {}) {
   const configuration = await loadOllamaConfig();
   const selectedModel = model || configuration.model;
   const selectedBaseUrl = normalizedBaseUrl(baseUrl || configuration.baseUrl);
-  const response = await fetchImpl(`${selectedBaseUrl}/api/tags`, { signal: AbortSignal.timeout(OLLAMA_PROBE_TIMEOUT_MS) });
+  let response;
+  try {
+    response = await fetchImpl(`${selectedBaseUrl}/api/tags`, { signal: AbortSignal.timeout(timeoutMs) });
+  } catch (error) {
+    const timedOut = error?.name === "TimeoutError"
+      || error?.name === "AbortError"
+      || error?.cause?.name === "TimeoutError"
+      || error?.cause?.name === "AbortError";
+    const detail = timedOut ? `timed out after ${timeoutMs}ms` : `could not connect: ${error?.message || error}`;
+    throw new Error(`Ollama health check ${detail}.`, { cause: error });
+  }
   if (!response.ok) throw new Error(`Ollama health check returned HTTP ${response.status}.`);
   const payload = await response.json();
   const models = (payload.models || []).map((entry) => entry.name || entry.model).filter(Boolean);
@@ -251,6 +261,24 @@ export function executeLocalReviewTool({ cwd, name, arguments: rawArguments = {}
 export const OLLAMA_REVIEW_TOOLS = LOCAL_REVIEW_TOOLS;
 export const executeOllamaReviewTool = executeLocalReviewTool;
 
+export function parseLocalReviewToolArguments(rawArguments, { providerLabel = "Local reviewer", toolName = "unknown" } = {}) {
+  let parsed = rawArguments;
+  if (typeof parsed === "string") {
+    const trimmed = parsed.trim();
+    if (!trimmed) return {};
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch (error) {
+      throw new Error(`${providerLabel} tool ${toolName} supplied malformed JSON arguments: ${error.message}`);
+    }
+  }
+  if (parsed === undefined) return {};
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${providerLabel} tool ${toolName} arguments must be a JSON object.`);
+  }
+  return parsed;
+}
+
 function toolSummary(name, args) {
   if (name === "read_file") return `Local reviewer is inspecting ${args.path || "a file"}.`;
   if (name === "search") return `Local reviewer is searching the codebase for ${JSON.stringify(args.query || "a symbol")}.`;
@@ -415,13 +443,15 @@ export async function runLocalReview({
         toolCalls += 1;
         if (toolCalls > MAX_TOOL_CALLS) throw new Error(`${providerLabel} exceeded the ${MAX_TOOL_CALLS}-call review tool budget.`);
         const name = call?.function?.name;
-        const args = call?.function?.arguments || {};
-        onProgress(toolSummary(name, args));
+        let args;
         let content;
         const toolStartedAt = Date.now();
         try {
+          args = parseLocalReviewToolArguments(call?.function?.arguments, { providerLabel, toolName: name });
+          onProgress(toolSummary(name, args));
           content = JSON.stringify(executeLocalReviewTool({ cwd: actualCwd, name, arguments: args }));
         } catch (error) {
+          onProgress(`${providerLabel} supplied an invalid ${name || "unknown"} tool request; returning the bounded error for correction.`);
           content = JSON.stringify({ error: error.message });
         }
         timing.toolCalls += 1;

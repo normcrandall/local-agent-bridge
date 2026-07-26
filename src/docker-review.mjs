@@ -10,6 +10,15 @@ export const DEFAULT_DOCKER_MODEL_RUNNER_CONFIG = resolve(
 export const DEFAULT_DOCKER_MODEL_RUNNER_MODEL = "ai/qwen3.6";
 export const DEFAULT_DOCKER_MODEL_RUNNER_BASE_URL = "http://127.0.0.1:12434";
 
+const DOCKER_CONTRACT_PROBE_TOOL = {
+  type: "function",
+  function: {
+    name: "bridge_contract_probe",
+    description: "Confirm that Docker Model Runner preserves tool calls in its Ollama-compatible chat response.",
+    parameters: { type: "object", properties: {}, additionalProperties: false },
+  },
+};
+
 function normalizedBaseUrl(value) {
   const raw = String(value || DEFAULT_DOCKER_MODEL_RUNNER_BASE_URL).trim();
   const url = new URL(/^https?:\/\//i.test(raw) ? raw : `http://${raw}`);
@@ -72,6 +81,39 @@ export async function probeDockerModelRunner({ model, baseUrl, fetchImpl = fetch
     );
   }
   return { available: true, model: selectedModel, baseUrl: selectedBaseUrl, installedModels: models };
+}
+
+export async function probeDockerModelRunnerContract({
+  model,
+  baseUrl,
+  fetchImpl = fetch,
+  timeoutMs = 30_000,
+} = {}) {
+  const health = await probeDockerModelRunner({ model, baseUrl, fetchImpl, timeoutMs });
+  const response = await fetchImpl(`${health.baseUrl}/api/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: health.model,
+      messages: [{ role: "user", content: "Call bridge_contract_probe exactly once. Do not answer in text." }],
+      tools: [DOCKER_CONTRACT_PROBE_TOOL],
+      stream: false,
+      think: false,
+    }),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!response.ok) {
+    throw new Error(`Docker Model Runner chat contract probe returned HTTP ${response.status}.`);
+  }
+  const payload = await response.json();
+  if (!payload?.message) {
+    throw new Error("Docker Model Runner chat contract probe returned no assistant message.");
+  }
+  const calls = payload.message.tool_calls;
+  if (!Array.isArray(calls) || !calls.some((call) => call?.function?.name === "bridge_contract_probe")) {
+    throw new Error("Docker Model Runner chat contract probe did not preserve the requested tool call.");
+  }
+  return { ...health, chatCompatible: true, toolCallingCompatible: true };
 }
 
 export async function runDockerModelReview(options = {}) {
