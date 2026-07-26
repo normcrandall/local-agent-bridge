@@ -55,6 +55,35 @@ assert.deepEqual(queuedStillReservesScope.selected.map((item) => item.id), ["ind
 assert.equal(queuedStillReservesScope.deferred.find((item) => item.id === "path-overlap").reasons[0].type, "path");
 assert.equal(queuedStillReservesScope.deferred.find((item) => item.id === "resource-overlap").reasons[0].type, "resource");
 
+const semanticFootprints = analyzePortfolio({
+  items: [
+    {
+      id: "contract-writer",
+      status: "implementing",
+      footprint: { version: 2, symbols: ["reserveClaim"], contracts: [{ name: "claim-envelope", mode: "write", fingerprint: "v2" }] },
+    },
+    { id: "symbol-overlap", footprint: { symbols: ["reserveClaim"] } },
+    { id: "contract-overlap", footprint: { contracts: [{ name: "claim-envelope", mode: "write", fingerprint: "v3" }] } },
+    { id: "contract-reader", footprint: { contracts: [{ name: "claim-envelope", mode: "read" }] } },
+  ],
+  maxParallel: 4,
+});
+assert.equal(semanticFootprints.deferred.find((item) => item.id === "symbol-overlap").reasons[0].type, "symbol");
+assert.equal(semanticFootprints.deferred.find((item) => item.id === "contract-overlap").reasons[0].type, "contract");
+assert.equal(semanticFootprints.deferred.find((item) => item.id === "contract-reader").reasons[0].type, "contract");
+
+const triageAhead = analyzePortfolio({
+  items: [
+    { id: "foundation", status: "implementing", priority: 100 },
+    { id: "blocked-high", status: "ready", priority: 90, blockedBy: ["foundation"] },
+    { id: "ready", status: "ready", priority: 80 },
+    { id: "already-triaged", status: "ready", priority: 70, triageStatus: "triaged" },
+  ],
+  maxParallel: 1,
+});
+assert.deepEqual(triageAhead.triageAhead.map((item) => item.id), ["blocked-high", "ready"], "triage may run before dependencies merge without selecting blocked implementation");
+assert.deepEqual(triageAhead.selected, [], "the active writer consumes implementation capacity");
+
 assert.throws(() => analyzePortfolio({
   items: [
     { id: "a", blockedBy: ["b"] },

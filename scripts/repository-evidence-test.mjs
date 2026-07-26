@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { createEvidenceStore } from "../src/evidence-store.mjs";
-import { assertRepositoryEvidenceHead, captureRepositoryEvidence, readRepositoryHead } from "../src/repository-evidence.mjs";
+import { assertRepositoryEvidenceHead, captureActualRepositoryFootprint, captureRepositoryEvidence, readRepositoryHead } from "../src/repository-evidence.mjs";
 
 const run = promisify(execFile);
 const root = await mkdtemp(join(tmpdir(), "agent-bridge-repository-evidence-"));
@@ -43,6 +43,15 @@ try {
   assert.equal(second.cache.repositoryMap, "hit");
   assert.equal(second.cache.diff, "hit");
   assert.ok(second.cacheMetrics.avoidedLoads >= 2);
+
+  await writeFile(join(repo, "src/index.mjs"), "export const first = 'dirty';\n");
+  await writeFile(join(repo, "src/untracked.mjs"), "export const untracked = true;\n");
+  const actualFootprint = await captureActualRepositoryFootprint({ workspace: repo, baseSha });
+  assert.deepEqual(actualFootprint.paths, ["src/index.mjs", "src/new.mjs", "src/untracked.mjs"]);
+  assert.equal(actualFootprint.evidence.headSha, headSha);
+  assert.equal(actualFootprint.evidence.dirty, true, "working, staged, and untracked changes participate in footprint reconciliation");
+  await rm(join(repo, "src/untracked.mjs"));
+  await run("git", ["restore", "src/index.mjs"], { cwd: repo });
 
   await writeFile(join(repo, "src/index.mjs"), "x".repeat(21 * 1024 * 1024));
   const oversizedDirty = await captureRepositoryEvidence({ workspace: repo, store, baseSha, headSha });

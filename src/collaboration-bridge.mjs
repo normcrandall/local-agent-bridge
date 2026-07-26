@@ -33,7 +33,7 @@ import { clearTerminalRuntime, legacyWorkerCommandMatches, reconciliationAction,
 import { acknowledgeCompletion } from "./handoff-protocol.mjs";
 import { readContextCapsule } from "./context-capsule.mjs";
 import { createEvidenceStore } from "./evidence-store.mjs";
-import { assertRepositoryEvidenceHead, captureRepositoryEvidence, formatRepositoryEvidence, readRepositoryHead } from "./repository-evidence.mjs";
+import { assertRepositoryEvidenceHead, captureActualRepositoryFootprint, captureRepositoryEvidence, formatRepositoryEvidence, readRepositoryHead, readRepositoryIdentity } from "./repository-evidence.mjs";
 import { formatReusableVerification, resolveVerificationPlan } from "./verification-receipts.mjs";
 import {
   createPerformanceTimeline,
@@ -44,7 +44,15 @@ import {
 import { replayIncident, formatReplayHuman } from "./incident-replay.mjs";
 import { analyzePortfolio, buildExecutionWaves, normalizePortfolioItems } from "./portfolio-scheduler.mjs";
 import { PORTFOLIO_STATUSES, PORTFOLIO_STATUS_GROUPS } from "./portfolio-status.mjs";
-import { createPortfolio, listPortfolios, readPortfolio, updatePortfolio } from "./portfolio-store.mjs";
+import {
+  createPortfolio,
+  listPortfolios,
+  listRepositoryFootprintReservations,
+  readPortfolio,
+  reconcilePortfolioItemFootprint,
+  updatePortfolio,
+  updatePortfolioItemWithFootprintReservation,
+} from "./portfolio-store.mjs";
 import { createSemanticLifecycleRecord, loadRepositoryLifecyclePolicy } from "./github-lifecycle.mjs";
 import {
   loadProviderConcurrency,
@@ -648,6 +656,20 @@ const chairSchema = z.object({
 }).strict().optional().describe("Declare the active host as a native participant. Its provider is not delegated again unless explicitly allowed.");
 const portfolioId = z.string().regex(/^helm-[0-9a-f-]{36}$/).describe("Durable portfolio ID returned by create_portfolio.");
 const portfolioStatusSchema = z.enum(PORTFOLIO_STATUSES);
+const footprintContractSchema = z.object({
+  name: z.string().min(1).max(500),
+  mode: z.enum(["read", "write"]).default("write"),
+  fingerprint: z.string().min(1).max(1_000).optional(),
+}).strict();
+const portfolioFootprintSchema = z.object({
+  version: z.number().int().min(1).default(1),
+  paths: z.array(z.string().min(1).max(1_000)).max(1_000).default([]),
+  symbols: z.array(z.string().min(1).max(1_000)).max(1_000).default([]),
+  contracts: z.array(z.union([z.string().min(1).max(500), footprintContractSchema])).max(500).default([]),
+  resources: z.array(z.string().min(1).max(500)).max(500).default([]),
+  blockers: z.array(z.string().min(1).max(500)).max(500).default([]),
+  evidence: z.record(z.string(), z.unknown()).default({}),
+}).strict();
 const portfolioItemSchema = z.object({
   id: z.string().min(1).max(200),
   title: z.string().min(1).max(500).optional(),
@@ -658,6 +680,8 @@ const portfolioItemSchema = z.object({
   conflictsWith: z.array(z.string().min(1).max(200)).max(200).default([]),
   paths: z.array(z.string().min(1).max(1_000)).max(500).default([]),
   resources: z.array(z.string().min(1).max(500)).max(200).default([]),
+  footprint: portfolioFootprintSchema.optional(),
+  triageStatus: z.enum(["untriaged", "triaging", "triaged"]).optional(),
   verificationCommands: verificationCommandsSchema.default([]),
   issueNumber: z.number().int().min(1).optional(),
 }).strict();
@@ -1715,6 +1739,7 @@ server.registerTool(
     description: "Create a revisioned portfolio ledger and exact-SHA merge train. Selected lanes must still be started through start_collaboration in isolated worktrees.",
     inputSchema: {
       objective: z.string().min(1).max(50_000),
+      repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/).optional(),
       workspace: z.string().optional(),
       items: z.array(portfolioItemSchema).min(1).max(500),
       maxParallel: z.number().int().min(1).max(20).default(2),
@@ -1722,12 +1747,17 @@ server.registerTool(
       targetSha: z.string().regex(/^[0-9a-f]{40}$/i),
     },
   },
-  async ({ objective, workspace: requestedWorkspace, items, maxParallel, targetBranch, targetSha }) => {
+  async ({ objective, repository, workspace: requestedWorkspace, items, maxParallel, targetBranch, targetSha }) => {
     blockNestedCollaboration();
     const workspace = projectDirectory(requestedWorkspace);
+    const resolvedRepository = repository || await readRepositoryIdentity(workspace);
+    if (!resolvedRepository) {
+      throw new Error("create_portfolio requires repository OWNER/REPO when the workspace origin is not a GitHub remote.");
+    }
     const normalized = normalizePortfolioItems(items);
     const initial = refreshPortfolioState({
       objective,
+      repository: resolvedRepository,
       workspace,
       maxParallel,
       items: normalized,
@@ -1795,6 +1825,23 @@ server.registerTool(
 );
 
 server.registerTool(
+  "inspect_repository_footprints",
+  {
+    title: "Inspect repository footprint reservations",
+    description: "List durable predicted/actual footprint reservations across every portfolio that targets the same repository.",
+    inputSchema: { portfolioId },
+  },
+  async ({ portfolioId: id }) => {
+    const portfolio = await readPortfolio(PORTFOLIO_ROOT, id);
+    return toolResponse({
+      portfolioId: id,
+      repository: portfolio.repository || portfolio.workspace,
+      reservations: await listRepositoryFootprintReservations(PORTFOLIO_ROOT, portfolio),
+    });
+  },
+);
+
+server.registerTool(
   "update_portfolio_item",
   {
     title: "Update portfolio lane",
@@ -1811,12 +1858,20 @@ server.registerTool(
       prNumber: z.number().int().min(1).optional(),
       headSha: z.string().regex(/^[0-9a-f]{40}$/i).optional(),
       summary: z.string().max(20_000).optional(),
+      triageStatus: z.enum(["untriaged", "triaging", "triaged"]).optional(),
     },
   },
   async ({ portfolioId: id, expectedRevision, itemId, status, ...details }) => {
     blockNestedCollaboration();
     const patch = Object.fromEntries(Object.entries({ status, ...details }).filter(([, value]) => value !== undefined));
-    const result = await updatePortfolio(PORTFOLIO_ROOT, id, expectedRevision, (current) => updatePortfolioItemState(current, itemId, patch));
+    const result = await updatePortfolioItemWithFootprintReservation(
+      PORTFOLIO_ROOT,
+      id,
+      expectedRevision,
+      itemId,
+      patch,
+      (current) => updatePortfolioItemState(current, itemId, patch),
+    );
 
     const updatedItem = result.items.find((item) => item.id === String(itemId));
     if (status === "reviewing") await markLinkedCollaborationPerformance(updatedItem, "review_started");
@@ -1827,6 +1882,49 @@ server.registerTool(
     }
 
     return toolResponse(result);
+  },
+);
+
+server.registerTool(
+  "reconcile_portfolio_footprint",
+  {
+    title: "Reconcile a portfolio lane footprint",
+    description: "Compare a lane's predicted footprint with its current Git diff or publication footprint, report accuracy, and deterministically park the newer or lower-priority conflicting lane without discarding work.",
+    inputSchema: {
+      portfolioId,
+      expectedRevision: z.number().int().min(1),
+      itemId: z.string().min(1).max(200),
+      phase: z.enum(["work", "pre_publish"]).default("work"),
+      actual: portfolioFootprintSchema.partial().optional(),
+    },
+  },
+  async ({ portfolioId: id, expectedRevision, itemId, phase, actual }) => {
+    blockNestedCollaboration();
+    const portfolio = await readPortfolio(PORTFOLIO_ROOT, id);
+    const item = portfolio.items.find((candidate) => candidate.id === String(itemId));
+    if (!item) throw new Error(`Portfolio item ${itemId} does not exist.`);
+    const captured = await captureActualRepositoryFootprint({
+      workspace: item.worktree || portfolio.workspace,
+      baseSha: portfolio.mergeTrain?.targetSha || null,
+    });
+    const reconciledActual = {
+      ...captured,
+      ...(actual || {}),
+      paths: captured.paths,
+      symbols: actual?.symbols ?? item.actualFootprint?.symbols ?? item.footprint?.symbols ?? [],
+      contracts: actual?.contracts ?? item.actualFootprint?.contracts ?? item.footprint?.contracts ?? [],
+      resources: actual?.resources ?? item.actualFootprint?.resources ?? item.footprint?.resources ?? item.resources ?? [],
+      blockers: actual?.blockers ?? item.actualFootprint?.blockers ?? item.footprint?.blockers ?? item.blockedBy ?? [],
+      evidence: { ...captured.evidence, ...(actual?.evidence || {}) },
+    };
+    return toolResponse(await reconcilePortfolioItemFootprint(
+      PORTFOLIO_ROOT,
+      id,
+      expectedRevision,
+      itemId,
+      reconciledActual,
+      { phase },
+    ));
   },
 );
 
@@ -1846,10 +1944,18 @@ server.registerTool(
   },
   async ({ portfolioId: id, expectedRevision, itemId, prNumber, headSha, priority }) => {
     blockNestedCollaboration();
-    const result = await updatePortfolio(PORTFOLIO_ROOT, id, expectedRevision, (current) => updatePortfolioItemState({
-      ...current,
-      mergeTrain: enqueueMergeCandidate(current.mergeTrain, { itemId, prNumber, headSha, priority }),
-    }, itemId, { status: "ready_to_merge", prNumber, headSha }));
+    const patch = { status: "ready_to_merge", prNumber, headSha };
+    const result = await updatePortfolioItemWithFootprintReservation(
+      PORTFOLIO_ROOT,
+      id,
+      expectedRevision,
+      itemId,
+      patch,
+      (current) => updatePortfolioItemState({
+        ...current,
+        mergeTrain: enqueueMergeCandidate(current.mergeTrain, { itemId, prNumber, headSha, priority }),
+      }, itemId, patch),
+    );
     await markLinkedCollaborationPerformance(result.items.find((item) => item.id === String(itemId)), "review_completed", { prNumber, headSha });
     return toolResponse(result);
   },
@@ -1997,10 +2103,18 @@ server.registerTool(
   },
   async ({ portfolioId: id, expectedRevision, itemId, expectedTargetSha, expectedHeadSha, mergedSha }) => {
     blockNestedCollaboration();
-    const updatedState = await updatePortfolio(PORTFOLIO_ROOT, id, expectedRevision, (current) => updatePortfolioItemState({
-      ...current,
-      mergeTrain: recordMergeResult(current.mergeTrain, { itemId, expectedTargetSha, expectedHeadSha, mergedSha }),
-    }, itemId, { status: "merged", summary: `Merged as ${mergedSha}` }));
+    const patch = { status: "merged", summary: `Merged as ${mergedSha}` };
+    const updatedState = await updatePortfolioItemWithFootprintReservation(
+      PORTFOLIO_ROOT,
+      id,
+      expectedRevision,
+      itemId,
+      patch,
+      (current) => updatePortfolioItemState({
+        ...current,
+        mergeTrain: recordMergeResult(current.mergeTrain, { itemId, expectedTargetSha, expectedHeadSha, mergedSha }),
+      }, itemId, patch),
+    );
 
     const mergedItem = updatedState.items.find((item) => item.id === String(itemId));
     await markLinkedCollaborationPerformance(mergedItem, "merge_completed", { mergedSha });

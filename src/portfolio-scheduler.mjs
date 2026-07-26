@@ -9,11 +9,40 @@ function strings(value) {
   return [...new Set((value || []).map((item) => String(item).trim()).filter(Boolean))];
 }
 
+function contracts(value) {
+  return (value || []).map((contract) => {
+    if (typeof contract === "string") return { name: contract.trim(), mode: "write", fingerprint: null };
+    if (!contract || typeof contract !== "object" || Array.isArray(contract)) throw new Error("Footprint contracts must be strings or objects.");
+    const name = String(contract.name || "").trim();
+    if (!name) throw new Error("Every footprint contract requires a name.");
+    const mode = String(contract.mode || "write").trim();
+    if (!["read", "write"].includes(mode)) throw new Error(`Unsupported footprint contract mode: ${mode}`);
+    return { name, mode, fingerprint: contract.fingerprint ? String(contract.fingerprint) : null };
+  }).filter((contract) => contract.name);
+}
+
+export function normalizePortfolioFootprint(value = {}, fallback = {}) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("A portfolio footprint must be an object.");
+  const version = Number(value.version || 1);
+  if (!Number.isInteger(version) || version < 1) throw new Error("A portfolio footprint version must be a positive integer.");
+  return {
+    version,
+    paths: strings(value.paths ?? fallback.paths).map((path) => path.replace(/^\.\//, "").replace(/\/+$/, "")),
+    symbols: strings(value.symbols),
+    contracts: contracts(value.contracts),
+    resources: strings(value.resources ?? fallback.resources),
+    blockers: strings(value.blockers ?? fallback.blockedBy),
+    evidence: value.evidence && typeof value.evidence === "object" && !Array.isArray(value.evidence)
+      ? structuredClone(value.evidence)
+      : {},
+  };
+}
+
 function normalizeItem(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Portfolio items must be objects.");
   const id = String(value.id || "").trim();
   if (!id) throw new Error("Every portfolio item requires an id.");
-  return {
+  const normalized = {
     ...value,
     id,
     title: String(value.title || id),
@@ -23,6 +52,10 @@ function normalizeItem(value) {
     conflictsWith: strings(value.conflictsWith),
     paths: strings(value.paths).map((path) => path.replace(/^\.\//, "").replace(/\/+$/, "")),
     resources: strings(value.resources),
+  };
+  return {
+    ...normalized,
+    footprint: normalizePortfolioFootprint(value.footprint || {}, normalized),
   };
 }
 
@@ -64,21 +97,50 @@ function pathOverlap(left, right) {
 }
 
 export function schedulingConflicts(left, right) {
-  if (left.id === right.id) return [];
+  if (left.id === right.id) {
+    if (left.portfolioId && right.portfolioId && left.portfolioId !== right.portfolioId) {
+      return [{ type: "duplicate", with: right.id, detail: `issue is already reserved by ${right.portfolioId}` }];
+    }
+    return [];
+  }
   const reasons = [];
-  if (left.conflictsWith.includes(right.id) || right.conflictsWith.includes(left.id)) {
+  const leftConflicts = strings(left.conflictsWith);
+  const rightConflicts = strings(right.conflictsWith);
+  if (leftConflicts.includes(right.id) || rightConflicts.includes(left.id)) {
     reasons.push({ type: "conflict", with: right.id, detail: "explicit conflict edge" });
   }
-  const resource = left.resources.find((candidate) => right.resources.includes(candidate));
+  const leftFootprint = normalizePortfolioFootprint(left.footprint || {}, left);
+  const rightFootprint = normalizePortfolioFootprint(right.footprint || {}, right);
+  const resource = leftFootprint.resources.find((candidate) => rightFootprint.resources.includes(candidate));
   if (resource) reasons.push({ type: "resource", with: right.id, detail: resource });
-  for (const leftPath of left.paths) {
-    const rightPath = right.paths.find((candidate) => pathOverlap(leftPath, candidate));
+  for (const leftPath of leftFootprint.paths) {
+    const rightPath = rightFootprint.paths.find((candidate) => pathOverlap(leftPath, candidate));
     if (rightPath) {
       reasons.push({ type: "path", with: right.id, detail: `${leftPath} overlaps ${rightPath}` });
       break;
     }
   }
+  const symbol = leftFootprint.symbols.find((candidate) => rightFootprint.symbols.includes(candidate));
+  if (symbol) reasons.push({ type: "symbol", with: right.id, detail: symbol });
+  for (const leftContract of leftFootprint.contracts) {
+    const rightContract = rightFootprint.contracts.find((candidate) => candidate.name === leftContract.name);
+    if (!rightContract || (leftContract.mode === "read" && rightContract.mode === "read")) continue;
+    if (leftContract.fingerprint && rightContract.fingerprint && leftContract.fingerprint === rightContract.fingerprint) continue;
+    reasons.push({
+      type: "contract",
+      with: right.id,
+      detail: `${leftContract.name} has incompatible ${leftContract.mode}/${rightContract.mode} intent`,
+    });
+  }
   return reasons;
+}
+
+function triageCandidates(items, limit = 2) {
+  return items
+    .filter((item) => !TERMINAL.has(item.status) && !ACTIVE.has(item.status) && !INTEGRATION.has(item.status) && !PAUSED.has(item.status))
+    .filter((item) => item.triageStatus !== "triaged")
+    .sort((left, right) => right.priority - left.priority || left.id.localeCompare(right.id))
+    .slice(0, limit);
 }
 
 export function analyzePortfolio({ items, maxParallel = 2 } = {}) {
@@ -120,7 +182,17 @@ export function analyzePortfolio({ items, maxParallel = 2 } = {}) {
     else if (selected.length >= capacity) deferred.push({ ...item, reasons: [{ type: "capacity", detail: `maxParallel ${maxParallel} reached` }] });
     else selected.push(item);
   }
-  return { maxParallel, capacity, active, integration, ready, selected, blocked, deferred };
+  return {
+    maxParallel,
+    capacity,
+    active,
+    integration,
+    ready,
+    selected,
+    blocked,
+    deferred,
+    triageAhead: triageCandidates(normalized),
+  };
 }
 
 export function buildExecutionWaves({ items, maxParallel = 2 } = {}) {
