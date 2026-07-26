@@ -5,7 +5,7 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import { resolveGitHubMergeEnforcement } from "./github-merge-enforcement.mjs";
 
 export const DEFAULT_GITHUB_APPS_CONFIG = resolve(homedir(), ".config/local-agent-bridge/github-apps.json");
-export const GITHUB_LOGIN_PATTERN = /^[A-Za-z0-9-]+(?:\[bot\])?$/;
+export const GITHUB_LOGIN_PATTERN = /^[A-Za-z0-9-]+(?:\[bot\])?$/i;
 export const GITHUB_REPOSITORY_POLICY_PATTERN = /^[A-Za-z0-9_.-]+\/(?:[A-Za-z0-9_.-]+|\*)$/;
 export const GITHUB_APP_ROLE_PERMISSIONS = {
   builder: { contents: "write", pull_requests: "write", issues: "write", metadata: "read" },
@@ -25,7 +25,12 @@ export function canonicalGitHubAppLogin(login) {
 
 export function sameGitHubAppLogin(left, right) {
   if (!left || !right) return false;
-  return canonicalGitHubAppLogin(left) === canonicalGitHubAppLogin(right);
+  if (typeof left !== "string" || typeof right !== "string") return false;
+  try {
+    return canonicalGitHubAppLogin(left) === canonicalGitHubAppLogin(right);
+  } catch {
+    return false;
+  }
 }
 
 export function assertGitHubAppPermissions(role, permissions = {}) {
