@@ -107,7 +107,7 @@ try {
     entries: ["src", "scripts", "package.json", "package-lock.json"],
   }));
   const doctorEnvironment = {
-    ...process.env,
+    ...isolatedGitEnvironment,
     AGENT_BRIDGE_INSTALLED_RUNTIME_ROOT: runtimeRoot,
     AGENT_BRIDGE_DOCTOR_CHECKS: [
       "Codex project config",
