@@ -179,6 +179,28 @@ assert.equal(operatorLaneCategory({
   coordinatorWake: { status: "pending", kind: "needs_user", nextAction: "needs_user" },
 }, classificationNow), "needs_user");
 assert.equal(operatorLaneCategory({
+  type: "portfolio_lane",
+  lifecyclePhase: "needs_user",
+  updatedAt: "2026-07-23T11:59:00.000Z",
+  attentionRequestedAt: "2026-07-23T11:59:00.000Z",
+  coordinatorWake: null,
+}, classificationNow), "needs_user", "a synthesized portfolio boundary needs no coordinator wake");
+assert.equal(operatorLaneCategory({
+  type: "collaboration",
+  lifecyclePhase: "reviewing",
+  updatedAt: "2026-07-23T11:59:00.000Z",
+  attentionRequestedAt: "2026-07-23T11:59:00.000Z",
+  attention: { required: true, reason: "approval" },
+}, classificationNow), "needs_user", "attention.updated remains a first-class boundary carrier");
+assert.equal(operatorLaneCategory({
+  type: "combined",
+  lifecyclePhase: "needs_user",
+  updatedAt: "2026-07-23T11:59:00.000Z",
+  attentionRequestedAt: "2026-07-23T11:59:00.000Z",
+  hostActivity: { processAlive: true },
+  coordinatorWake: null,
+}, classificationNow), "needs_user", "host liveness cannot suppress a protected boundary");
+assert.equal(operatorLaneCategory({
   type: "collaboration",
   lifecyclePhase: "needs_user",
   updatedAt: "2026-07-23T11:59:00.000Z",
@@ -205,6 +227,12 @@ assert.equal(operatorLaneCategory({
   handoff: { acknowledged: false },
 }, classificationNow), null);
 assert.equal(operatorLaneCategory({ type: "collaboration", lifecyclePhase: "budget", updatedAt: "2026-07-23T11:59:00.000Z" }, classificationNow), "stopped");
+assert.equal(operatorLaneCategory({
+  type: "collaboration",
+  lifecyclePhase: "failed",
+  updatedAt: "2026-07-23T11:59:00.000Z",
+  coordinatorWake: { status: "pending", actionable: true, nextAction: "retry" },
+}, classificationNow), "stopped", "failed retry handoffs retain stopped semantics");
 assert.equal(operatorLaneCategory({
   type: "collaboration",
   lifecyclePhase: "turn_limit",

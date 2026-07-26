@@ -113,10 +113,9 @@ try {
     status: "needs_user",
   });
   const chairlessDelivery = await signalUserAttention(root, chairless.id, { now, platform: "darwin", run });
-  assert.equal(chairlessDelivery.delivered, false);
-  assert.equal(chairlessDelivery.reason, "not_due_or_not_needed");
+  assert.equal(chairlessDelivery.delivered, true, "a stopped needs_user record remains actionable without a coordinator wake");
   state = await readCollaboration(root, chairless.id);
-  assert.equal(state.coordinatorWake, undefined);
+  assert.equal(state.coordinatorWake.userAttention.status, "delivered");
   assert.equal(state.userAttention, undefined);
 
   const providerStillRunning = await createCollaboration(root, {

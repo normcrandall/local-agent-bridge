@@ -178,14 +178,18 @@ const classificationSnapshot = {
       { id: "needs-user-boundary", repository: "veliqon/alpha", status: "needs_user", updatedAt: at(45), coordinatorWake: { status: "pending", kind: "needs_user", nextAction: "needs_user" } },
       { id: "indeterminate-boundary", repository: "veliqon/alpha", status: "indeterminate", updatedAt: at(46), coordinatorWake: { status: "pending", kind: "indeterminate", nextAction: "needs_user" } },
       { id: "merged-stale-wake", repository: "veliqon/alpha", status: "merged", updatedAt: at(47), coordinatorWake: { status: "pending", kind: "needs_user", nextAction: "needs_user" }, github: { mergeCommitSha: "f".repeat(40) } },
+      { id: "wake-null-needs-user", repository: "veliqon/alpha", status: "needs_user", updatedAt: at(48), attentionRequestedAt: at(48), coordinatorWake: null },
+      { id: "attention-event-boundary", repository: "veliqon/alpha", status: "reviewing", updatedAt: at(49), attention: { required: true, reason: "approval" } },
+      { id: "live-host-boundary", repository: "veliqon/alpha", status: "needs_user", updatedAt: at(50), hostActivity: { processAlive: true }, coordinatorWake: null },
     ],
   },
 };
 const classified = projectMissionControlViewModel(createMissionControlEventState(classificationSnapshot));
-assert.deepEqual(classified.collections.needsYou.map((lane) => lane.id), ["indeterminate-boundary", "needs-user-boundary"]);
-assert.deepEqual(classified.collections.queue.map((lane) => lane.id), ["chair-verify", "merge-ready", "provider-work", "requeue"]);
-assert.deepEqual(classified.collections.history.map((lane) => lane.id), ["acknowledged", "merged-stale-wake"]);
-assert.equal(classified.repositories[0].needsYou, 2);
-assert.equal(classified.repositories[0].waiting, 4);
+assert.deepEqual(classified.collections.needsYou.map((lane) => lane.id), ["attention-event-boundary", "indeterminate-boundary", "live-host-boundary", "needs-user-boundary", "wake-null-needs-user"]);
+assert.deepEqual(classified.collections.queue.map((lane) => lane.id), ["chair-verify", "merge-ready", "provider-work"]);
+assert.deepEqual(classified.collections.history.map((lane) => lane.id), ["acknowledged", "merged-stale-wake", "requeue"]);
+assert.equal(classified.repositories[0].needsYou, 5, "all protected boundaries contribute to the repository rollup");
+assert.equal(classified.repositories[0].waiting, 3);
+assert.equal(classified.repositories[0].stopped, 1, "a failed retry handoff remains stopped rather than queued");
 
 console.log("Mission Control view-model tests passed.");

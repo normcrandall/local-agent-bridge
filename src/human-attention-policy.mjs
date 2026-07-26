@@ -33,8 +33,11 @@ function hasSuccessfulOutcome(state) {
 
 function providerStillOwnsExecution(state) {
   return Boolean(state.runtime?.activeCall)
-    || state.recovery?.processAlive === true
-    || state.hostActivity?.processAlive === true;
+    || state.recovery?.processAlive === true;
+}
+
+function explicitAttentionBoundary(state) {
+  return state.attention?.required === true && state.attention?.acknowledged !== true;
 }
 
 /**
@@ -43,10 +46,22 @@ function providerStillOwnsExecution(state) {
  * user-facing notifications.
  */
 export function requiresHumanAttention(state) {
-  if (!state || hasSuccessfulOutcome(state) || providerStillOwnsExecution(state)) return false;
-  const wake = pendingWake(state);
+  if (!state || hasSuccessfulOutcome(state)) return false;
   const status = lifecycle(state);
+  const attentionBoundary = explicitAttentionBoundary(state);
+  if (!attentionBoundary && !["needs_user", "indeterminate"].includes(status)) return false;
+  if (providerStillOwnsExecution(state)) return false;
+
+  const wake = pendingWake(state);
+  if (attentionBoundary) {
+    // attention.updated is the event protocol's explicit boundary carrier.
+    // A source acknowledgement or an acknowledged coordinator wake clears it.
+    return clean(state.coordinatorWake?.status) !== "acknowledged";
+  }
   if (status === "needs_user") {
+    // Portfolio-synthesized lanes intentionally have no coordinator wake. The
+    // lifecycle itself is authoritative until an explicit wake is acknowledged.
+    if (!state.coordinatorWake) return true;
     return Boolean(wake && (clean(wake.kind) === "needs_user" || clean(wake.nextAction) === "needs_user"));
   }
   if (status === "indeterminate") {

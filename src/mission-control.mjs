@@ -260,8 +260,11 @@ function stoppedReason(lane) {
 export function operatorLaneCategory(lane, now = Date.now(), staleAfterMs = DEFAULT_STALE_AFTER_MS) {
   const status = effectiveLaneStatus(lane);
   if (laneNeedsUser(lane) && attentionRequestIsFresh(lane, now)) return "needs_user";
-  if (requiresCoordinatorAction(lane)) return now - dateMs(lane.updatedAt) <= staleAfterMs ? "waiting" : null;
   const attemptStatus = String(lane.lifecyclePhase || "unknown").toLowerCase();
+  if (!portfolioTerminalStatus(lane) && ["failed", "indeterminate", "budget", "cancelled"].includes(attemptStatus)) {
+    return now - dateMs(lane.updatedAt) <= 86_400_000 || attemptStatus === "indeterminate" ? "stopped" : null;
+  }
+  if (requiresCoordinatorAction(lane)) return now - dateMs(lane.updatedAt) <= staleAfterMs ? "waiting" : null;
   if (attemptStatus === "needs_user") {
     const heartbeatAt = dateMs(lane.heartbeat?.heartbeatAt);
     return lane.recovery?.processAlive === true || (heartbeatAt > 0 && now - heartbeatAt <= DEFAULT_LIVE_HEARTBEAT_AFTER_MS)

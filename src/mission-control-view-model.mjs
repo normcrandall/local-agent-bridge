@@ -191,9 +191,9 @@ export function projectMissionControlViewModel(eventState, clientState = {}) {
 
   for (const lane of lanes) {
     if (requiresHumanAttention(lane)) lane.category = "needsYou";
+    else if (["failed", "indeterminate", "budget", "cancelled"].includes(lane.status)) lane.category = "history";
     else if (requiresCoordinatorAction(lane)) lane.category = "queue";
-    else if (lane.status === "needs_user") lane.category = "history";
-    else if (lane.terminal) lane.category = "history";
+    else if (lane.terminal || lane.status === "needs_user") lane.category = "history";
     else if (ACTIVE.has(lane.status)) lane.category = "active";
     else if (QUEUED.has(lane.status)) lane.category = "queue";
     else lane.category = "queue";
