@@ -19,6 +19,8 @@ import { enqueueCoordinatorWake } from "../src/coordinator-wake.mjs";
 import { sanitizeWorkerEnvironment, supervisorEndpoint } from "../src/worker-supervisor-protocol.mjs";
 import { createLocalModelWarmer } from "../src/local-model-warmth.mjs";
 import { scanPendingUserAttention } from "../src/user-attention.mjs";
+import { loadMissionControlSnapshot } from "../src/mission-control.mjs";
+import { MissionControlEventStream } from "../src/mission-control-event-stream.mjs";
 
 import { killProcessSafely, processProbe } from "../src/process-identity-probe.mjs";
 
@@ -38,6 +40,20 @@ let refreshing = false;
 let modelWarmthStatus = { status: "starting", provider: null };
 let attentionScanRunning = false;
 const modelWarmer = createLocalModelWarmer({ onStatus: (status) => { modelWarmthStatus = status; } });
+const configuredMissionControlRetention = Number.parseInt(process.env.BRIDGE_MISSION_CONTROL_EVENT_RETENTION || "512", 10);
+const missionControlStream = new MissionControlEventStream({
+  retention: Number.isSafeInteger(configuredMissionControlRetention)
+    && configuredMissionControlRetention >= 1
+    && configuredMissionControlRetention <= 10_000
+    ? configuredMissionControlRetention
+    : 512,
+  loadSnapshot: () => loadMissionControlSnapshot({
+    stateRoot: stateDirectory,
+    view: "all",
+    includeStale: true,
+  }),
+});
+let missionControlStreamActive = false;
 
 function processAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 1) return false;
@@ -392,7 +408,9 @@ const server = createServer((socket) => {
   socket.on("data", (chunk) => {
     buffer += chunk.toString("utf8");
     if (buffer.length > 1_000_000) {
-      socket.destroy(new Error("Supervisor request exceeded the size limit."));
+      // Drop oversized untrusted input without attaching an unhandled socket error
+      // that could terminate the machine supervisor and its subscription surface.
+      socket.destroy();
       return;
     }
     const newline = buffer.indexOf("\n");
@@ -400,6 +418,8 @@ const server = createServer((socket) => {
     const raw = buffer.slice(0, newline);
     buffer = buffer.slice(newline + 1);
     void (async () => {
+      const requestAbort = new AbortController();
+      socket.once("close", () => requestAbort.abort());
       try {
         const request = JSON.parse(raw);
         if (request.protocol !== PROTOCOL_VERSION) throw new Error("Unsupported supervisor protocol version.");
@@ -427,6 +447,18 @@ const server = createServer((socket) => {
             requestedWorkspaceRoot: request.workspaceRoot,
             workerEnvironment: request.workerEnvironment,
           }));
+        } else if (request.type === "mission_control_snapshot") {
+          missionControlStreamActive = true;
+          result = await missionControlStream.snapshot();
+        } else if (request.type === "mission_control_subscribe") {
+          missionControlStreamActive = true;
+          result = await missionControlStream.read({
+            streamId: request.streamId,
+            cursor: request.cursor,
+            maxEvents: request.maxEvents,
+            waitMs: request.waitMs,
+            signal: requestAbort.signal,
+          });
         } else if (request.type === "refresh") {
           refreshing = true;
           ready = false;
@@ -537,11 +569,17 @@ monitor.unref();
 const attentionMonitor = setInterval(() => { void scanAttention(); }, 60_000);
 attentionMonitor.unref();
 
+const missionControlMonitor = setInterval(() => {
+  if (missionControlStreamActive) void missionControlStream.refresh().catch(() => {});
+}, 250);
+missionControlMonitor.unref();
+
 async function shutdown(signal) {
   if (stopping) return;
   stopping = true;
   clearInterval(monitor);
   clearInterval(attentionMonitor);
+  clearInterval(missionControlMonitor);
   modelWarmer.stop();
   await atomicMetadata({
     protocol: PROTOCOL_VERSION,

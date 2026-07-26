@@ -1045,3 +1045,5 @@ try {
 } finally {
   await rm(root, { recursive: true, force: true });
 }
+
+await import("./mission-control-subscription-test.mjs");

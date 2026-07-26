@@ -183,6 +183,36 @@ export async function getSupervisorStatus({
   }
 }
 
+export async function getMissionControlEventSnapshot({
+  runtimeRoot = resolve(fileURLToPath(new URL("..", import.meta.url))),
+  workspaceRoot = resolve(process.env.BRIDGE_WORKSPACE_ROOT || runtimeRoot),
+  stateDirectory = resolve(process.env.BRIDGE_COLLABORATION_DIR || collaborationDirectory(workspaceRoot)),
+} = {}) {
+  const endpoint = supervisorEndpoint(stateDirectory);
+  await ensureSupervisor({ runtimeRoot, workspaceRoot, stateDirectory, endpoint });
+  return request(endpoint, { type: "mission_control_snapshot" }, 10_000);
+}
+
+export async function readMissionControlEvents({
+  streamId,
+  cursor,
+  maxEvents = 50,
+  waitMs = 0,
+  runtimeRoot = resolve(fileURLToPath(new URL("..", import.meta.url))),
+  workspaceRoot = resolve(process.env.BRIDGE_WORKSPACE_ROOT || runtimeRoot),
+  stateDirectory = resolve(process.env.BRIDGE_COLLABORATION_DIR || collaborationDirectory(workspaceRoot)),
+} = {}) {
+  const endpoint = supervisorEndpoint(stateDirectory);
+  await ensureSupervisor({ runtimeRoot, workspaceRoot, stateDirectory, endpoint });
+  return request(endpoint, {
+    type: "mission_control_subscribe",
+    streamId,
+    cursor,
+    maxEvents,
+    waitMs,
+  }, Math.min(7_000, Math.max(1_000, Number(waitMs) + 1_000)));
+}
+
 export async function refreshSupervisor({
   runtimeRoot = resolve(fileURLToPath(new URL("..", import.meta.url))),
   workspaceRoot = resolve(process.env.BRIDGE_WORKSPACE_ROOT || runtimeRoot),
