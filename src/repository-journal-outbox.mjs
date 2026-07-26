@@ -94,7 +94,11 @@ function eventIdentity(keyDigest, event, ordinal = 0) {
 
 function outboxEvent(record) {
   const event = record?.payload?.repositoryOutbox;
-  return event?.version === REPOSITORY_JOURNAL_OUTBOX_VERSION ? event : null;
+  if (event === undefined || event === null) return null;
+  if (event.version !== REPOSITORY_JOURNAL_OUTBOX_VERSION) {
+    fail(`Repository outbox event uses unsupported version ${String(event.version)}.`, "UNSUPPORTED_VERSION");
+  }
+  return event;
 }
 
 function classifyFailure(failure = {}) {
@@ -142,7 +146,9 @@ function reconstruct(records, nowMs) {
       continue;
     }
     const item = items.get(event.keyDigest);
-    if (!item) continue;
+    if (!item) {
+      fail("Repository outbox history is missing the enqueue record required to reconstruct an item.", "OUTBOX_HISTORY_GAP");
+    }
     if (event.event === "claimed") {
       item.claimCount = Math.max(item.claimCount, event.claimOrdinal);
       item.lease = {
@@ -248,7 +254,8 @@ export function createRepositoryJournalOutbox({
         ...binding,
         payload: { repositoryOutbox: event },
       });
-      return { entry: publicItem(reconstruct([result.record], Date.parse(event.at)).get(keyDigest), Date.parse(event.at), maxAttempts), idempotent: result.idempotent };
+      const records = await journal.read();
+      return { entry: publicItem(reconstruct(records, Date.parse(event.at)).get(keyDigest), Date.parse(event.at), maxAttempts), idempotent: result.idempotent };
     } catch (error) {
       if (error?.code === "IDENTITY_CONFLICT") {
         const records = await journal.read();
@@ -262,7 +269,7 @@ export function createRepositoryJournalOutbox({
           && stableJson(existingRecord.binding) === stableJson(binding);
         if (equivalent) {
           return {
-            entry: publicItem(reconstruct([existingRecord], Date.parse(event.at)).get(keyDigest), Date.parse(event.at), maxAttempts),
+            entry: publicItem(reconstruct(records, Date.parse(event.at)).get(keyDigest), Date.parse(event.at), maxAttempts),
             idempotent: true,
           };
         }

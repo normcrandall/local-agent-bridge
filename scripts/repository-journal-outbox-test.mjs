@@ -86,6 +86,18 @@ try {
   const acknowledged = await outbox.ack({ leaseId: lease.lease.leaseId, headSha: head });
   assert.equal(acknowledged.entry.status, "acknowledged");
   assert.equal((await outbox.inspect()).acknowledged.length, 1);
+  const acknowledgedReplay = await outbox.enqueue({
+    repository: "veliqon/example",
+    operation: "issue_summary",
+    idempotencyKey: "issue-207:complete",
+    issueNumber: 207,
+    pullRequestNumber: 42,
+    headSha: head,
+    payload: { summary: "Implemented", counts: { findings: 0 } },
+  });
+  assert.equal(acknowledgedReplay.idempotent, true);
+  assert.equal(acknowledgedReplay.entry.status, "acknowledged",
+    "idempotent enqueue must reconstruct the complete current state instead of replaying publication");
 
   await outbox.enqueue({ repository: "veliqon/example", operation: "pr_comment", idempotencyKey: "retry", payload: { body: "summary" } });
   const [retryLease] = await outbox.claim({ workerId: "publisher-a" });
@@ -147,6 +159,26 @@ try {
   await raceA.enqueue({ repository: "veliqon/race", operation: "publish", idempotencyKey: "one-winner", payload: {} });
   const raced = await Promise.all([raceA.claim({ workerId: "a" }), raceB.claim({ workerId: "b" })]);
   assert.equal(raced.flat().length, 1, "deterministic claim identity must allow only one concurrent lease winner");
+
+  const gapDirectory = join(root, "history-gap");
+  const gapJournal = createRepositoryJournal({ directory: gapDirectory, now });
+  const gapOutbox = createRepositoryJournalOutbox({ journal: gapJournal, now });
+  await gapOutbox.enqueue({ repository: "veliqon/gap", operation: "publish", idempotencyKey: "retained-child", payload: {} });
+  const [gapLease] = await gapOutbox.claim({ workerId: "publisher" });
+  await gapJournal.retain({ maxRecords: 1 });
+  await assert.rejects(gapOutbox.inspect(), (error) => error.code === "OUTBOX_HISTORY_GAP",
+    "partial retention must fail closed rather than erase the idempotency state");
+
+  const versionDirectory = join(root, "future-version");
+  const versionJournal = createRepositoryJournal({ directory: versionDirectory, now });
+  await versionJournal.append({
+    identity: "future-outbox",
+    repository: "veliqon/version",
+    payload: { repositoryOutbox: { version: REPOSITORY_JOURNAL_OUTBOX_VERSION + 1, event: "enqueued" } },
+  });
+  const versionOutbox = createRepositoryJournalOutbox({ journal: versionJournal, now });
+  await assert.rejects(versionOutbox.inspect(), (error) => error.code === "UNSUPPORTED_VERSION",
+    "newer outbox records must fail closed instead of disappearing from reconstructed state");
 } finally {
   await rm(root, { recursive: true, force: true });
 }
