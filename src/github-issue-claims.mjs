@@ -1,5 +1,5 @@
 import { readCollaboration, updateCollaboration } from "./collaboration-store.mjs";
-import { listPortfolios, readPortfolio, updatePortfolio } from "./portfolio-store.mjs";
+import { readPortfolio, updatePortfolio } from "./portfolio-store.mjs";
 import { createBoundBuilderClient } from "./github-builder-client.mjs";
 import { createInstallationToken, sameGitHubAppLogin } from "./github-app-auth.mjs";
 import {
@@ -13,6 +13,7 @@ import {
   transitionSemanticLifecycle,
 } from "./github-lifecycle.mjs";
 import { spawnSync } from "node:child_process";
+import { readdir } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const CANONICAL_PHASES = [
@@ -928,44 +929,86 @@ function isTransientClaimReconciliationError(error) {
 async function recordClaimReconciliationFailure({ portfoliosPath, portfolioId, itemId, stage, error }) {
   const detail = error?.message || String(error);
   const transient = isTransientClaimReconciliationError(error);
-  await updatePortfolioWithRetry(portfoliosPath, portfolioId, async (current) => {
-    const targetItem = current.items.find((candidate) => candidate.id === itemId);
-    if (!targetItem) return current;
-    if (transient) {
-      targetItem.summary = `Claim reconciliation ${stage} was deferred after a transient GitHub failure: ${detail}. The retained claim remains held and will retry automatically.`;
+  try {
+    await updatePortfolioWithRetry(portfoliosPath, portfolioId, async (current) => {
+      const targetItem = current.items.find((candidate) => candidate.id === itemId);
+      if (!targetItem) return current;
+      if (transient) {
+        targetItem.summary = `Claim reconciliation ${stage} was deferred after a transient GitHub failure: ${detail}. The retained claim remains held and will retry automatically.`;
+        return current;
+      }
+      targetItem.status = "indeterminate";
+      const recovery = error?.code === "CLAIM_AUTHORITY_MISMATCH"
+        || error?.code === "CLAIM_PARSE_INVALID"
+        ? " Inspect the retained claim, release it without mutation, then reacquire it with the verified builder App."
+        : " Inspect the builder App binding and retained claim before releasing or reacquiring it.";
+      targetItem.summary = `Claim reconciliation ${stage} could not establish trusted authority: ${detail}.${recovery}`;
       return current;
+    });
+    return { transient, recorded: true, recordError: null };
+  } catch (recordError) {
+    // A diagnostic write must never become a sweep-wide failure. The retained
+    // GitHub claim remains the authority fence, so leave it untouched and make
+    // the inability to persist the local diagnosis observable to the caller.
+    console.error(`Unable to record claim reconciliation failure for ${portfolioId}/${itemId}: ${recordError.message}`);
+    return { transient, recorded: false, recordError };
+  }
+}
+
+async function readPortfoliosForClaimSweep(portfoliosPath) {
+  const failures = [];
+  const names = (await readdir(portfoliosPath).catch((error) => {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  }))
+    .filter((name) => /^helm-[0-9a-f-]{36}\.json$/.test(name));
+  const portfolios = [];
+  for (const name of names) {
+    const id = name.slice(0, -5);
+    try {
+      const portfolio = await readPortfolio(portfoliosPath, id);
+      if (!portfolio || portfolio.id !== id || !Array.isArray(portfolio.items)) {
+        const error = new Error(`Portfolio ${id} has an invalid reconciliation shape; expected matching id and an items array.`);
+        error.code = "PORTFOLIO_STATE_INVALID";
+        throw error;
+      }
+      portfolios.push(portfolio);
+    } catch (error) {
+      // Corrupt/unreadable portfolio state is never guessed or overwritten:
+      // skip that portfolio, report it for inspected repair, and continue with
+      // every independently readable portfolio in the sweep.
+      console.error(`Skipping unreadable claim-reconciliation portfolio ${id}: ${error.message}`);
+      failures.push({ portfolioId: id, itemId: null, stage: "portfolio-read", error });
     }
-    targetItem.status = "indeterminate";
-    const recovery = error?.code === "CLAIM_AUTHORITY_MISMATCH"
-      || error?.code === "CLAIM_PARSE_INVALID"
-      ? " Inspect the retained claim, release it without mutation, then reacquire it with the verified builder App."
-      : " Inspect the builder App binding and retained claim before releasing or reacquiring it.";
-    targetItem.summary = `Claim reconciliation ${stage} could not establish trusted authority: ${detail}.${recovery}`;
-    return current;
-  });
-  return { transient };
+  }
+  portfolios.sort((left, right) => String(right.updatedAt || "").localeCompare(String(left.updatedAt || "")));
+  return { portfolios, failures };
 }
 
 export async function reconcileClaimsAndPortfolios(workspaceRoot, fetchImpl = fetch, clientOverride = null) {
   const portfoliosPath = resolve(workspaceRoot, ".bridge/portfolios");
-  const portfolios = await listPortfolios(portfoliosPath);
+  const sweep = await readPortfoliosForClaimSweep(portfoliosPath);
+  const failures = [...sweep.failures];
+  const portfolios = sweep.portfolios;
   for (const p of portfolios) {
-    let portfolioState = await readPortfolio(portfoliosPath, p.id);
+    const portfolioState = p;
     for (const item of portfolioState.items) {
-      let collab = null;
-      if (item.collaborationId) {
-        try {
-          collab = await readCollaboration(workspaceRoot, item.collaborationId);
-        } catch (err) {
-          if (err.code !== "ENOENT") throw err;
-        }
-      }
-
-      const issueNum = item.issueNumber || collab?.issueClaim?.issueNumber;
-      if (!issueNum) continue;
-      let client;
-      let claim;
+      let reconciliationStage = "collaboration-read";
       try {
+        let collab = null;
+        if (item.collaborationId) {
+          try {
+            collab = await readCollaboration(workspaceRoot, item.collaborationId);
+          } catch (err) {
+            if (err.code !== "ENOENT") throw err;
+          }
+        }
+
+        const issueNum = item.issueNumber || collab?.issueClaim?.issueNumber;
+        if (!issueNum) continue;
+        let client;
+        let claim;
+        reconciliationStage = "preflight";
         client = typeof clientOverride === "function"
           ? await clientOverride({ issueNumber: issueNum, portfolio: portfolioState, item })
           : clientOverride || await getBuilderClientForWorkspace(portfolioState.workspace || workspaceRoot, issueNum, fetchImpl);
@@ -975,17 +1018,8 @@ export async function reconcileClaimsAndPortfolios(workspaceRoot, fetchImpl = fe
           throw error;
         }
         claim = canonicalClaim(await parseClaims(client, issueNum));
-      } catch (error) {
-        await recordClaimReconciliationFailure({
-          portfoliosPath,
-          portfolioId: p.id,
-          itemId: item.id,
-          stage: "preflight",
-          error,
-        });
-        continue;
-      }
       const claimIsHeld = claim && !RELEASED_PHASES.has(normalizePhase(claim.data.phase));
+      reconciliationStage = "lifecycle-read";
       const lifecycleReconciliation = await reconcileGitHubLifecycle({
         adapter: createProductionGitHubLifecycleAdapter(client),
         issueNumber: issueNum,
@@ -998,6 +1032,7 @@ export async function reconcileClaimsAndPortfolios(workspaceRoot, fetchImpl = fe
       if (lifecycleReconciliation.outcome) {
         const semanticState = lifecycleReconciliation.outcome;
         if (claim && lifecycleReconciliation.applied) {
+          reconciliationStage = "lifecycle-comment-update";
           claim.data.lifecycle = lifecycleReconciliation.record;
           claim.data.history = lifecycleReconciliation.history;
           claim.data.phase = semanticState;
@@ -1005,6 +1040,7 @@ export async function reconcileClaimsAndPortfolios(workspaceRoot, fetchImpl = fe
           claim.data.timestamps.updated = new Date().toISOString();
           await client.updateIssueComment(claim.commentId, generateCommentBody(claim.data));
         }
+        reconciliationStage = "lifecycle-portfolio-update";
         await updatePortfolioWithRetry(portfoliosPath, p.id, async (current) => {
           const targetItem = current.items.find((candidate) => candidate.id === item.id);
           if (targetItem) {
@@ -1015,6 +1051,7 @@ export async function reconcileClaimsAndPortfolios(workspaceRoot, fetchImpl = fe
           return current;
         });
         if (collab) {
+          reconciliationStage = "lifecycle-collaboration-update";
           await updateCollaboration(workspaceRoot, collab.id, (current) => ({
             ...current,
             status: semanticState,
@@ -1027,6 +1064,7 @@ export async function reconcileClaimsAndPortfolios(workspaceRoot, fetchImpl = fe
           }));
         }
         if (claimIsHeld && claim.data.collaboration === item.collaborationId) {
+          reconciliationStage = "lifecycle-claim-release";
           await releaseClaimLease({
             client,
             issueNumber: issueNum,
@@ -1040,18 +1078,21 @@ export async function reconcileClaimsAndPortfolios(workspaceRoot, fetchImpl = fe
 
       if (["cancelled", "obsolete"].includes(collab?.status)) {
         if (claimIsHeld && claim.data.collaboration === item.collaborationId) {
+          reconciliationStage = "terminal-claim-release";
           await releaseClaimLease({ client, issueNumber: issueNum, collaborationId: item.collaborationId, outcome: collab.status });
         }
         continue;
       }
 
       if (!item.collaborationId && claimIsHeld) {
+        reconciliationStage = "claim-collaboration-recovery-read";
         let recoveredCollaboration = null;
         try {
           recoveredCollaboration = await readCollaboration(workspaceRoot, claim.data.collaboration);
         } catch (error) {
           if (error.code !== "ENOENT") throw error;
         }
+        reconciliationStage = "claim-collaboration-recovery-update";
         await updatePortfolioWithRetry(portfoliosPath, p.id, async (current) => {
           const targetItem = current.items.find((candidate) => candidate.id === item.id);
           if (targetItem) {
@@ -1073,6 +1114,7 @@ export async function reconcileClaimsAndPortfolios(workspaceRoot, fetchImpl = fe
         const detail = !claimIsHeld
           ? "no active trusted GitHub claim exists"
           : `GitHub is held by ${claim.data.collaboration}`;
+        reconciliationStage = "authority-mismatch-update";
         await updatePortfolioWithRetry(portfoliosPath, p.id, async (current) => {
           const targetItem = current.items.find((candidate) => candidate.id === item.id);
           if (targetItem) {
@@ -1085,6 +1127,7 @@ export async function reconcileClaimsAndPortfolios(workspaceRoot, fetchImpl = fe
       }
 
       if (!collab) {
+        reconciliationStage = "missing-collaboration-update";
         await updatePortfolioWithRetry(portfoliosPath, p.id, async (current) => {
           const targetItem = current.items.find((candidate) => candidate.id === item.id);
           if (targetItem) {
@@ -1097,6 +1140,7 @@ export async function reconcileClaimsAndPortfolios(workspaceRoot, fetchImpl = fe
       }
 
       if (["indeterminate", "failed"].includes(collab.status)) {
+        reconciliationStage = "stopped-collaboration-update";
         await updatePortfolioWithRetry(portfoliosPath, p.id, async (current) => {
           const targetItem = current.items.find((candidate) => candidate.id === item.id);
           if (targetItem) {
@@ -1108,7 +1152,7 @@ export async function reconcileClaimsAndPortfolios(workspaceRoot, fetchImpl = fe
         continue;
       }
 
-      try {
+        reconciliationStage = "refresh";
         await refreshClaimLease({
           client,
           issueNumber: issueNum,
@@ -1119,6 +1163,7 @@ export async function reconcileClaimsAndPortfolios(workspaceRoot, fetchImpl = fe
           worktree: collab.issueClaim?.worktree || collab.workspace,
           summary: `Reconciled local collaboration status ${collab.status} after broker restart.`,
         });
+        reconciliationStage = "refresh-portfolio-update";
         await updatePortfolioWithRetry(portfoliosPath, p.id, async (current) => {
           const targetItem = current.items.find((candidate) => candidate.id === item.id);
           if (targetItem) {
@@ -1127,15 +1172,32 @@ export async function reconcileClaimsAndPortfolios(workspaceRoot, fetchImpl = fe
           return current;
         });
       } catch (error) {
-        await recordClaimReconciliationFailure({
+        const failure = await recordClaimReconciliationFailure({
           portfoliosPath,
           portfolioId: p.id,
           itemId: item.id,
-          stage: "refresh",
+          stage: reconciliationStage,
           error,
         });
-        continue;
+        failures.push({
+          portfolioId: p.id,
+          itemId: item.id,
+          stage: reconciliationStage,
+          error,
+          recordError: failure.recordError,
+        });
       }
     }
   }
+  return {
+    reconciled: true,
+    failures: failures.map(({ portfolioId, itemId, stage, error, recordError = null }) => ({
+      portfolioId,
+      itemId,
+      stage,
+      transient: isTransientClaimReconciliationError(error),
+      error: error?.message || String(error),
+      recordError: recordError ? (recordError.message || String(recordError)) : null,
+    })),
+  };
 }

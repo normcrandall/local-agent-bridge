@@ -1105,11 +1105,14 @@ async function runTests() {
   const noClientPortfolioId = "helm-00000000-0000-4000-8000-000000000003";
   const malformedPortfolioId = "helm-00000000-0000-4000-8000-000000000004";
   const goodPortfolioId = "helm-00000000-0000-4000-8000-000000000005";
+  const unwritableFailurePortfolioId = "helm-00000000-0000-4000-8000-000000000006";
+  const corruptPortfolioId = "helm-00000000-0000-4000-8000-000000000007";
   const badCollaborationId = "bridge-00000000-0000-4000-8000-000000000001";
   const transientCollaborationId = "bridge-00000000-0000-4000-8000-000000000002";
   const noClientCollaborationId = "bridge-00000000-0000-4000-8000-000000000003";
   const malformedCollaborationId = "bridge-00000000-0000-4000-8000-000000000004";
   const goodCollaborationId = "bridge-00000000-0000-4000-8000-000000000005";
+  const unwritableFailureCollaborationId = "bridge-00000000-0000-4000-8000-000000000006";
   const claimFor = ({ portfolio, item, collaboration, authority }) => ({
     portfolio,
     item,
@@ -1142,12 +1145,14 @@ async function runTests() {
   writeReconciliationPortfolio({ id: transientPortfolioId, issueNumber: 43, collaborationId: transientCollaborationId, updatedAt: "2026-01-01T00:00:04.000Z" });
   writeReconciliationPortfolio({ id: noClientPortfolioId, issueNumber: 44, collaborationId: noClientCollaborationId, updatedAt: "2026-01-01T00:00:03.000Z" });
   writeReconciliationPortfolio({ id: malformedPortfolioId, issueNumber: 45, collaborationId: malformedCollaborationId, updatedAt: "2026-01-01T00:00:02.000Z" });
+  writeReconciliationPortfolio({ id: unwritableFailurePortfolioId, issueNumber: 47, collaborationId: unwritableFailureCollaborationId, updatedAt: "2026-01-01T00:00:01.500Z" });
   writeReconciliationPortfolio({ id: goodPortfolioId, issueNumber: 46, collaborationId: goodCollaborationId, updatedAt: "2026-01-01T00:00:01.000Z" });
   for (const [id, issueNumber] of [
     [badCollaborationId, 42],
     [transientCollaborationId, 43],
     [noClientCollaborationId, 44],
     [malformedCollaborationId, 45],
+    [unwritableFailureCollaborationId, 47],
     [goodCollaborationId, 46],
   ]) {
     await createCollaboration(isolatedWorkspace, {
@@ -1206,18 +1211,18 @@ async function runTests() {
   }]);
   const badClaimClient = createIssueClaimClient({ ...claimClientArgs, issueNumber: 42, workspace: isolatedWorkspace, fetchImpl: badMock.fetchImpl });
   const transientBaseClient = createIssueClaimClient({ ...claimClientArgs, issueNumber: 43, workspace: isolatedWorkspace, fetchImpl: transientMock.fetchImpl });
-  let transientCommentReads = 0;
+  let transientIssueReads = 0;
   const transientClaimClient = new Proxy(transientBaseClient, {
     get(target, property, receiver) {
-      if (property !== "getIssueComments") return Reflect.get(target, property, receiver);
+      if (property !== "getIssue") return Reflect.get(target, property, receiver);
       return async (...args) => {
-        transientCommentReads += 1;
-        if (transientCommentReads === 2) {
-          const error = new Error("GitHub comments temporarily unavailable");
+        transientIssueReads += 1;
+        if (transientIssueReads === 1) {
+          const error = new Error("GitHub issue lifecycle temporarily unavailable");
           error.status = 503;
           throw error;
         }
-        return target.getIssueComments(...args);
+        return target.getIssue(...args);
       };
     },
   });
@@ -1230,6 +1235,10 @@ async function runTests() {
     if (issueNumber === 43) return transientClaimClient;
     if (issueNumber === 44) return null;
     if (issueNumber === 45) return malformedClaimClient;
+    if (issueNumber === 47) {
+      fs.rmSync(path.join(isolatedPortfolios, `${unwritableFailurePortfolioId}.json`));
+      return null;
+    }
     return goodClaimClient;
   };
   // Pin the first-pass ordering so this regression proves that unhealthy
@@ -1239,6 +1248,7 @@ async function runTests() {
     [transientPortfolioId, "2026-01-01T00:00:04.000Z"],
     [noClientPortfolioId, "2026-01-01T00:00:03.000Z"],
     [malformedPortfolioId, "2026-01-01T00:00:02.000Z"],
+    [unwritableFailurePortfolioId, "2026-01-01T00:00:01.500Z"],
     [goodPortfolioId, "2026-01-01T00:00:01.000Z"],
   ]) {
     const portfolioFile = path.join(isolatedPortfolios, `${portfolio}.json`);
@@ -1248,14 +1258,17 @@ async function runTests() {
   }
   assert.deepEqual(
     (await listPortfolios(isolatedPortfolios)).map((portfolio) => portfolio.items[0].issueNumber),
-    [42, 43, 44, 45, 46],
+    [42, 43, 44, 45, 47, 46],
   );
-  await reconcileClaimsAndPortfolios(
+  fs.writeFileSync(path.join(isolatedPortfolios, `${corruptPortfolioId}.json`), "{not valid portfolio json}\n");
+  const firstSweep = await reconcileClaimsAndPortfolios(
     isolatedWorkspace,
     fetch,
     reconciliationClient,
   );
-  assert.deepEqual(reconciliationOrder, [42, 43, 44, 45, 46]);
+  assert.deepEqual(reconciliationOrder, [42, 43, 44, 45, 47, 46]);
+  assert.ok(firstSweep.failures.some((failure) => failure.portfolioId === corruptPortfolioId && failure.stage === "portfolio-read"));
+  assert.ok(firstSweep.failures.some((failure) => failure.portfolioId === unwritableFailurePortfolioId && failure.recordError), "failure-recorder write errors must be reported without aborting the sweep");
   const isolatedBadPortfolio = JSON.parse(fs.readFileSync(path.join(isolatedPortfolios, `${badPortfolioId}.json`), "utf8"));
   let isolatedTransientPortfolio = JSON.parse(fs.readFileSync(path.join(isolatedPortfolios, `${transientPortfolioId}.json`), "utf8"));
   const isolatedNoClientPortfolio = JSON.parse(fs.readFileSync(path.join(isolatedPortfolios, `${noClientPortfolioId}.json`), "utf8"));
