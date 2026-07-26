@@ -78,7 +78,7 @@ import {
   resolveIssueClaimRevisions,
   workspaceHeadBuilderBinding,
 } from "./collaboration-start-preflight.mjs";
-import { CLAIMED_ISSUE_CONTEXT_MARKER, assertClaimedIssueContextIntegrity, hydrateClaimedIssueTask } from "./claimed-issue-context.mjs";
+import { CLAIMED_ISSUE_CONTEXT_MARKER, assertClaimedIssueContextIntegrity, hydrateBeforeClaimLease, hydrateClaimedIssueTask } from "./claimed-issue-context.mjs";
 import { createIssueClaimClient, createIssueClaimHydrationClient } from "./github-issue-claims.mjs";
 import { startSupervisedWorker } from "./worker-supervisor-client.mjs";
 import { collaborationAlias, collaborationIdentity } from "./collaboration-identity.mjs";
@@ -924,6 +924,7 @@ server.registerTool(
     let verificationPlan = { reusable: [], pendingCommands: requestedVerificationCommands, avoidedCommands: 0, estimatedAvoidedMs: 0 };
     const evidenceStore = createEvidenceStore({ directory: EVIDENCE_ROOT });
 
+    try {
     // The explicit issue target is authoritative for what this lane implements.
     // A claim always implies its own target; when both are supplied they must
     // agree exactly rather than silently preferring one binding.
@@ -939,7 +940,12 @@ server.registerTool(
       const { acquireClaimLease } = await import("./github-issue-claims.mjs");
       const { createInstallationToken } = await import("./github-app-auth.mjs");
       const repository = input.issueClaim.repository;
-      const credential = await createInstallationToken({ role: "builder", repository });
+      const credential = await createInstallationToken({
+        role: "builder",
+        repository,
+        configPath: process.env.AGENT_BRIDGE_GITHUB_APPS_CONFIG || process.env.GITHUB_APP_CONFIG,
+        apiUrl: process.env.GITHUB_BUILDER_API_URL || "https://api.github.com",
+      });
       if (!sameGitHubAppLogin(input.issueClaim.expectedLogin, credential.expectedLogin)) {
         throw new Error(`Issue claim builder identity mismatch: requested ${input.issueClaim.expectedLogin}, verified ${credential.expectedLogin}.`);
       }
@@ -974,18 +980,6 @@ server.registerTool(
         fetchImpl: fetch,
       });
 
-      const hydrated = await hydrateClaimedIssueTask({
-        client: claimClient,
-        repository,
-        issueNumber: input.issueClaim.issueNumber,
-        task: input.task,
-        evidenceStore,
-        evidenceScope: { repository, headSha },
-        authority: resolvedIssueClaim.authority,
-      });
-      resolvedTask = hydrated.task;
-      issueContext = hydrated.metadata;
-
       let portfolioId = input.issueClaim.portfolioId || null;
       let itemId = input.issueClaim.itemId || null;
       if (!portfolioId || !itemId) {
@@ -1009,20 +1003,33 @@ server.registerTool(
       });
 
       claimLifecyclePolicy = loadRepositoryLifecyclePolicy(requestedWorkspace);
-      await acquireClaimLease({
-        client: claimClient,
-        issueNumber: input.issueClaim.issueNumber,
-        portfolioId,
-        itemId,
-        writer: writer || input.writer || startAgent,
-        collaborationId,
-        branch: input.worktree?.branch || input.issueClaim.branch || null,
-        worktree: plannedWorktreePath || input.issueClaim.worktree || null,
-        baseSha: claimBaseSha,
-        headSha: claimHeadSha,
-        workspaceRoot: WORKSPACE_ROOT,
-        lifecyclePolicy: claimLifecyclePolicy,
+      const hydrated = await hydrateBeforeClaimLease({
+        hydrate: () => hydrateClaimedIssueTask({
+          client: claimClient,
+          repository,
+          issueNumber: input.issueClaim.issueNumber,
+          task: input.task,
+          evidenceStore,
+          evidenceScope: { repository, headSha },
+          authority: resolvedIssueClaim.authority,
+        }),
+        acquireClaimLease: () => acquireClaimLease({
+          client: claimClient,
+          issueNumber: input.issueClaim.issueNumber,
+          portfolioId,
+          itemId,
+          writer: writer || input.writer || startAgent,
+          collaborationId,
+          branch: input.worktree?.branch || input.issueClaim.branch || null,
+          worktree: plannedWorktreePath || input.issueClaim.worktree || null,
+          baseSha: claimBaseSha,
+          headSha: claimHeadSha,
+          workspaceRoot: WORKSPACE_ROOT,
+          lifecyclePolicy: claimLifecyclePolicy,
+        }),
       });
+      resolvedTask = hydrated.task;
+      issueContext = hydrated.metadata;
       leaseAcquired = true;
     } else if (resolvedIssueTarget) {
       // Target without a claim: hydrate read-only through the same builder App.
@@ -1030,7 +1037,12 @@ server.registerTool(
       // missing bound client fails closed before any provider launches.
       const { createInstallationToken } = await import("./github-app-auth.mjs");
       const repository = resolvedIssueTarget.repository;
-      const credential = await createInstallationToken({ role: "builder", repository }).catch((error) => {
+      const credential = await createInstallationToken({
+        role: "builder",
+        repository,
+        configPath: process.env.AGENT_BRIDGE_GITHUB_APPS_CONFIG || process.env.GITHUB_APP_CONFIG,
+        apiUrl: process.env.GITHUB_BUILDER_API_URL || "https://api.github.com",
+      }).catch((error) => {
         throw new Error(`Unable to hydrate issue ${repository}#${resolvedIssueTarget.issueNumber} before provider launch: no bound builder App client is available (${error.message}).`, { cause: error });
       });
       const revisions = resolveIssueClaimRevisions({
@@ -1065,7 +1077,6 @@ server.registerTool(
       issueContext = hydrated.metadata;
     }
 
-    try {
       let readiness = null;
       if (!input.worktree) {
         readiness = preflight({ workspace: requestedWorkspace, agents: delegatedAgents, mode: effectiveMode, workProfile: input.workProfile || "exact", permissionProfile: effectivePermissionProfile });
@@ -1110,7 +1121,10 @@ server.registerTool(
       if (input.githubBuilder && effectiveMode === "work") {
         const { configuredWriterLogin } = await import("./github-app-auth.mjs");
         const writerProvider = writer || input.writer || startAgent;
-        const expectedLogin = await configuredWriterLogin({ provider: writerProvider });
+        const expectedLogin = await configuredWriterLogin({
+          provider: writerProvider,
+          configPath: process.env.AGENT_BRIDGE_GITHUB_APPS_CONFIG || process.env.GITHUB_APP_CONFIG,
+        });
         const pinnedLogin = input.githubBuilder.expectedLogins?.[writerProvider] || null;
         if (pinnedLogin && !sameGitHubAppLogin(pinnedLogin, expectedLogin)) {
           throw new Error(`Configured ${writerProvider} writer identity ${expectedLogin} does not match the bound authorization ${pinnedLogin}.`);

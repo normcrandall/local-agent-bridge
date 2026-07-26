@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { generateKeyPairSync } from "node:crypto";
+import { appendFile, chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer as createHttpsServer } from "node:https";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -46,6 +48,104 @@ await mkdir(unbornWorkspace, { recursive: true });
 const fakeCodex = join(stateDirectory, "codex");
 await writeFile(fakeCodex, `#!/bin/sh\nexec "${process.execPath}" "${resolve(root, "scripts/fixtures/fake-codex-progress.mjs")}" "$@"\n`);
 await chmod(fakeCodex, 0o700);
+const githubAppKey = join(stateDirectory, "github-app.pem");
+const githubTlsKey = join(stateDirectory, "github-tls-key.pem");
+const githubTlsCert = join(stateDirectory, "github-tls-cert.pem");
+const githubAppsConfig = join(stateDirectory, "github-apps.json");
+const providerLaunchMarker = join(stateDirectory, "hydration-provider-launched");
+const hydrationEventLog = join(stateDirectory, "hydration-events.log");
+const hydrationProvider = join(stateDirectory, "hydration-claude");
+const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+await writeFile(githubAppKey, privateKey.export({ type: "pkcs8", format: "pem" }), { mode: 0o600 });
+const tls = spawnSync("openssl", [
+  "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+  "-keyout", githubTlsKey, "-out", githubTlsCert, "-days", "1",
+  "-subj", "/CN=127.0.0.1", "-addext", "subjectAltName=IP:127.0.0.1",
+], { encoding: "utf8" });
+if (tls.status !== 0) throw new Error(`Unable to prepare loopback GitHub TLS fixture: ${tls.stderr}`);
+await chmod(githubTlsKey, 0o600);
+await writeFile(githubAppsConfig, `${JSON.stringify({
+  version: 1,
+  roles: {
+    builder: {
+      appId: "123456",
+      expectedLogin: "test-builder[bot]",
+      privateKeyPath: githubAppKey,
+      installations: { veliqon: 222 },
+    },
+    reviewers: {
+      claude: {
+        appId: "123456",
+        expectedLogin: "test-builder[bot]",
+        privateKeyPath: githubAppKey,
+        installations: { veliqon: 222 },
+      },
+    },
+  },
+})}\n`, { mode: 0o600 });
+await writeFile(hydrationProvider, `#!/bin/sh\nif [ "$1" != "--version" ]; then\n  printf launched > "${providerLaunchMarker}"\n  printf 'provider:launch\\n' >> "${hydrationEventLog}"\nfi\nexec "${process.execPath}" "${resolve(root, "scripts/fake-claude.mjs")}" "$@"\n`);
+await chmod(hydrationProvider, 0o700);
+
+const githubFixture = {
+  failHydration: false,
+  events: [],
+  comments: [],
+  tagLocked: false,
+};
+function fixtureJson(response, value, status = 200, headers = {}) {
+  response.writeHead(status, { "content-type": "application/json", ...headers });
+  response.end(JSON.stringify(value));
+}
+const githubServer = createHttpsServer({
+  key: await readFile(githubTlsKey),
+  cert: await readFile(githubTlsCert),
+}, async (request, response) => {
+  const chunks = [];
+  for await (const chunk of request) chunks.push(chunk);
+  const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : null;
+  const path = request.url;
+  githubFixture.events.push({ method: request.method, path, body });
+  await appendFile(hydrationEventLog, `github:${request.method}:${path}\n`);
+  if (path === "/app") return fixtureJson(response, { slug: "test-builder" });
+  if (path === "/app/installations/222/access_tokens") return fixtureJson(response, {
+    token: "ghs_test_installation_token",
+    expires_at: "2099-01-01T00:00:00Z",
+    permissions: { contents: "write", pull_requests: "write", issues: "write", metadata: "read" },
+  }, 201);
+  if (path === "/repos/veliqon/collaboration-fixture/issues/98") {
+    if (githubFixture.failHydration) return fixtureJson(response, { message: "private issue denied" }, 403);
+    return fixtureJson(response, { number: 98, title: "Hydration ordering", body: "Acceptance", state: "open", labels: [] });
+  }
+  if (path?.startsWith("/repos/veliqon/collaboration-fixture/issues/98/comments")) {
+    if (request.method === "POST") {
+      const comment = { id: 9001, body: body.body, user: { login: "test-builder[bot]", type: "Bot" } };
+      githubFixture.comments = [comment];
+      return fixtureJson(response, comment, 201);
+    }
+    return fixtureJson(response, githubFixture.comments);
+  }
+  if (path === "/repos/veliqon/collaboration-fixture/issues/comments/9001" && request.method === "PATCH") {
+    githubFixture.comments[0].body = body.body;
+    return fixtureJson(response, githubFixture.comments[0]);
+  }
+  if (path?.includes("/dependencies/")) return fixtureJson(response, []);
+  if (path?.startsWith("/repos/veliqon/collaboration-fixture/issues/98/timeline")) return fixtureJson(response, []);
+  if (path === "/graphql") return fixtureJson(response, { data: { repository: { issue: { projectItems: { nodes: [] } } } } });
+  if (path?.startsWith("/repos/veliqon/collaboration-fixture/git/matching-refs/tags/claims/issue-98")) {
+    return fixtureJson(response, githubFixture.tagLocked
+      ? [{ ref: "refs/tags/claims/issue-98-generation-1", object: { sha: "a".repeat(40) } }]
+      : []);
+  }
+  if (path === "/repos/veliqon/collaboration-fixture/git/refs" && request.method === "POST") {
+    githubFixture.tagLocked = true;
+    return fixtureJson(response, { ref: body.ref, object: { sha: body.sha } }, 201);
+  }
+  if (path?.startsWith("/repos/veliqon/collaboration-fixture/labels/")) return fixtureJson(response, { name: decodeURIComponent(path.split("/").at(-1)) });
+  if (path === "/repos/veliqon/collaboration-fixture/issues/98/labels" && request.method === "POST") return fixtureJson(response, body.labels || []);
+  return fixtureJson(response, { message: `Unexpected fixture route ${request.method} ${path}` }, 404);
+});
+await new Promise((resolvePromise) => githubServer.listen(0, "127.0.0.1", resolvePromise));
+const githubApiUrl = `https://127.0.0.1:${githubServer.address().port}`;
 const cleanProcessEnv = Object.fromEntries(
   Object.entries(process.env).filter(([name]) => (
     !name.startsWith("BRIDGE_")
@@ -58,6 +158,9 @@ const env = {
   BRIDGE_COLLABORATION_DIR: stateDirectory,
   CLAUDE_BIN: resolve(root, "scripts/fake-claude.mjs"),
   AGY_BIN: "/bin/echo",
+  AGENT_BRIDGE_GITHUB_APPS_CONFIG: githubAppsConfig,
+  GITHUB_BUILDER_API_URL: githubApiUrl,
+  NODE_TLS_REJECT_UNAUTHORIZED: "0",
 };
 const terminalReconcileId = "bridge-00000000-0000-4000-8000-000000000001";
 await writeFile(join(stateDirectory, `${terminalReconcileId}.json`), `${JSON.stringify({
@@ -125,7 +228,7 @@ let capacityClient;
 let recoveryClient;
 let mixedFailureClient;
 try {
-  firstClient = await connect("collaboration-test-app-one");
+  firstClient = await connect("collaboration-test-app-one", { CLAUDE_BIN: hydrationProvider });
   const tools = await firstClient.listTools();
   const names = tools.tools.map((tool) => tool.name).sort();
   assert.deepEqual(names, [
@@ -165,6 +268,64 @@ try {
     "update_portfolio_item",
     "wait_for_portfolio_lane",
   ]);
+  const claimedHead = spawnSync("git", ["rev-parse", "HEAD"], { cwd: cleanWorkspace, encoding: "utf8" }).stdout.trim();
+  const claimedStart = {
+    task: "Exercise real claimed-start hydration ordering.",
+    workspace: cleanWorkspace,
+    agents: ["claude"],
+    startAgent: "claude",
+    mode: "review",
+    maxTurns: 1,
+    providerFailover: { enabled: false },
+    issueClaim: {
+      repository: "veliqon/collaboration-fixture",
+      issueNumber: 98,
+      expectedLogin: "test-builder[bot]",
+      branch: "main",
+      headSha: claimedHead,
+    },
+  };
+
+  // Exercise the real MCP start handler. A required-read failure must stop
+  // before any repository mutation and before the provider process exists.
+  githubFixture.failHydration = true;
+  githubFixture.events = [];
+  await writeFile(hydrationEventLog, "");
+  await rm(providerLaunchMarker, { force: true });
+  const rejectedClaimedStart = await firstClient.callTool({
+    name: "start_collaboration",
+    arguments: claimedStart,
+  });
+  assert.equal(rejectedClaimedStart.isError, true);
+  assert.match(rejectedClaimedStart.content?.[0]?.text || "", /private issue denied/);
+  assert.ok(githubFixture.events.some((event) => event.method === "GET" && event.path === "/repos/veliqon/collaboration-fixture/issues/98"));
+  assert.ok(!githubFixture.events.some((event) => (
+    event.path?.startsWith("/repos/veliqon/collaboration-fixture/")
+    && event.method !== "GET"
+  )), "failed hydration must perform no claim mutation");
+  await assert.rejects(readFile(providerLaunchMarker), /ENOENT/);
+
+  // On success, the same real path reads the required issue facts, publishes
+  // the lease, and only then allows the provider supervisor to launch.
+  githubFixture.failHydration = false;
+  githubFixture.events = [];
+  githubFixture.comments = [];
+  githubFixture.tagLocked = false;
+  await writeFile(hydrationEventLog, "");
+  const acceptedClaimedStart = await firstClient.callTool({
+    name: "start_collaboration",
+    arguments: claimedStart,
+  });
+  assert.notEqual(acceptedClaimedStart.isError, true, acceptedClaimedStart.content?.[0]?.text || "claimed start failed");
+  await waitForStop(firstClient, acceptedClaimedStart.structuredContent.id);
+  assert.equal(await readFile(providerLaunchMarker, "utf8"), "launched");
+  const orderedEvents = (await readFile(hydrationEventLog, "utf8")).trim().split("\n");
+  const requiredReadIndex = orderedEvents.findIndex((event) => event === "github:GET:/repos/veliqon/collaboration-fixture/issues/98");
+  const claimMutationIndex = orderedEvents.findIndex((event) => event === "github:POST:/repos/veliqon/collaboration-fixture/git/refs");
+  const providerLaunchIndex = orderedEvents.indexOf("provider:launch");
+  assert.ok(requiredReadIndex >= 0 && claimMutationIndex > requiredReadIndex, "claim mutation must follow required hydration");
+  assert.ok(providerLaunchIndex > claimMutationIndex, "provider launch must follow claim publication");
+
   const namedVerification = await firstClient.callTool({
     name: "start_collaboration",
     arguments: {
@@ -1050,6 +1211,7 @@ try {
   await capacityClient?.close().catch(() => {});
   await recoveryClient?.close().catch(() => {});
   await mixedFailureClient?.close().catch(() => {});
+  await new Promise((resolvePromise) => githubServer.close(resolvePromise));
   try {
     const supervisor = JSON.parse(await readFile(join(stateDirectory, "supervisor.json"), "utf8"));
     process.kill(supervisor.pid, "SIGTERM");

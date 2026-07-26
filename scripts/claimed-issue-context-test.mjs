@@ -11,8 +11,11 @@ import {
   assertClaimedIssueContextIntegrity,
   buildClaimedIssueContext,
   claimedIssueContextWorstCaseFooterLength,
+  classifyHydrationFailure,
   extractLinkedPullRequests,
   hydrateClaimedIssueTask,
+  hydrationRetryDelayMs,
+  RETRY_AFTER_EXCEEDS_BUDGET,
   isAgentBridgeClaimComment,
   isRetryableHydrationFailure,
 } from "../src/claimed-issue-context.mjs";
@@ -207,6 +210,18 @@ assert.equal(isRetryableHydrationFailure(httpError("server fault", 503)), true);
 assert.equal(isRetryableHydrationFailure(new Error("socket hang up")), true);
 assert.equal(isRetryableHydrationFailure(httpError("forbidden", 403)), false);
 assert.equal(isRetryableHydrationFailure(httpError("missing", 404)), false);
+assert.equal(classifyHydrationFailure(httpError("rate limited", 429)), "transient_rate_limit");
+assert.equal(classifyHydrationFailure(httpError("server fault", 503)), "transient_server");
+assert.equal(classifyHydrationFailure(new Error("socket hang up")), "transient_network");
+assert.equal(classifyHydrationFailure(httpError("forbidden", 403)), "deterministic_http");
+assert.equal(hydrationRetryDelayMs(new Error("network"), { attempt: 1 }), 250);
+assert.equal(hydrationRetryDelayMs(new Error("network"), { attempt: 3 }), 1_000);
+assert.equal(hydrationRetryDelayMs({ retryAfter: "2" }, { attempt: 1 }), 2_000);
+assert.equal(hydrationRetryDelayMs(
+  { headers: new Headers({ "retry-after": "Tue, 21 Jul 2026 10:03:03 GMT" }) },
+  { attempt: 1, now: () => Date.parse("2026-07-21T10:03:00Z") },
+), 3_000);
+assert.equal(hydrationRetryDelayMs({ retryAfter: "99" }, { attempt: 1 }), RETRY_AFTER_EXCEEDS_BUDGET);
 
 const dependencies = {
   blockedBy: [{ number: 145, state: "open", title: "Parent lane" }],
@@ -326,6 +341,7 @@ await assert.rejects(
     repository: "owner/public",
     issueNumber: 42,
     task: "Implement issue #42.",
+    sleep: async () => {},
   }),
   /required issue fact "comments" was malformed/,
 );
@@ -408,10 +424,163 @@ const retried = await hydrateClaimedIssueTask({
   issueNumber: 42,
   task: "Implement issue #42.",
   capturedAt: "2026-07-21T10:03:00Z",
+  sleep: async () => {},
+  random: () => 1,
 });
 assert.equal(timelineAttempts, 3);
 assert.equal(retried.metadata.provenance.sources.find((source) => source.name === "linkedPullRequests").attempts, 3);
+assert.deepEqual(
+  retried.metadata.provenance.sources.find((source) => source.name === "linkedPullRequests").failureClassifications,
+  ["transient_server", "transient_server"],
+);
+assert.deepEqual(
+  retried.metadata.provenance.sources.find((source) => source.name === "linkedPullRequests").retryDelaysMs,
+  [250, 500],
+);
 assert.deepEqual(retried.metadata.degradedFields, []);
+
+const pacedSleeps = [];
+let pacedIssueAttempts = 0;
+const paced = await hydrateClaimedIssueTask({
+  client: stubClient({
+    async getIssue() {
+      pacedIssueAttempts += 1;
+      if (pacedIssueAttempts === 1) {
+        const error = httpError("rate limited", 429);
+        error.retryAfter = "2";
+        throw error;
+      }
+      return issue;
+    },
+  }),
+  repository: "owner/public",
+  issueNumber: 42,
+  task: "Implement issue #42.",
+  sleep: async (delayMs) => { pacedSleeps.push(delayMs); },
+});
+assert.deepEqual(pacedSleeps, [2_000]);
+assert.deepEqual(
+  paced.metadata.provenance.sources.find((source) => source.name === "issue").retryDelaysMs,
+  [2_000],
+);
+
+let throttled403Attempts = 0;
+const throttled403 = await hydrateClaimedIssueTask({
+  client: stubClient({
+    async getIssue() {
+      throttled403Attempts += 1;
+      if (throttled403Attempts === 1) {
+        const error = httpError("secondary rate limit", 403);
+        error.retryAfter = "1";
+        throw error;
+      }
+      return issue;
+    },
+  }),
+  repository: "owner/private",
+  issueNumber: 42,
+  task: "Implement issue #42.",
+  sleep: async () => {},
+});
+assert.equal(throttled403Attempts, 2);
+assert.deepEqual(
+  throttled403.metadata.provenance.sources.find((source) => source.name === "issue").failureClassifications,
+  ["transient_rate_limit"],
+);
+
+let optionalThrottleAttempts = 0;
+const optionalThrottle = await hydrateClaimedIssueTask({
+  client: stubClient({
+    async getIssueProjectItems() {
+      optionalThrottleAttempts += 1;
+      if (optionalThrottleAttempts === 1) {
+        const error = httpError("secondary rate limit", 403);
+        error.retryAfter = "1";
+        throw error;
+      }
+      return projectItems;
+    },
+  }),
+  repository: "owner/private",
+  issueNumber: 42,
+  task: "Implement issue #42.",
+  sleep: async () => {},
+});
+assert.equal(optionalThrottleAttempts, 2);
+assert.deepEqual(optionalThrottle.metadata.degradedFields, [], "a throttled optional read is never persisted as permission degradation");
+
+let overBudgetAttempts = 0;
+await assert.rejects(
+  hydrateClaimedIssueTask({
+    client: stubClient({
+      async getIssue() {
+        overBudgetAttempts += 1;
+        const error = httpError("rate limited", 429);
+        error.retryAfter = "60";
+        throw error;
+      },
+    }),
+    repository: "owner/private",
+    issueNumber: 42,
+    task: "Implement issue #42.",
+    sleep: async () => assert.fail("an over-budget Retry-After must not retry early"),
+  }),
+  /transient_rate_limit,retry_after_exceeds_budget/,
+);
+assert.equal(overBudgetAttempts, 1);
+
+// The two idempotent required reads used to establish the issue identity and
+// trusted discussion both retry bounded transient failures and expose why.
+for (const [method, source] of [["getIssue", "issue"], ["getIssueComments", "comments"]]) {
+  for (const [failure, classification] of [
+    [httpError("rate limited", 429), "transient_rate_limit"],
+    [httpError("server unavailable", 503), "transient_server"],
+    [new Error("socket reset"), "transient_network"],
+  ]) {
+    let attempts = 0;
+    const transient = await hydrateClaimedIssueTask({
+      client: stubClient({
+        async [method]() {
+          attempts += 1;
+          if (attempts === 1) throw failure;
+          return method === "getIssue" ? issue : [triage, lease];
+        },
+      }),
+      repository: "owner/public",
+      issueNumber: 42,
+      task: "Implement issue #42.",
+      sleep: async () => {},
+      random: () => 1,
+    });
+    assert.equal(attempts, 2);
+    assert.deepEqual(
+      transient.metadata.provenance.sources.find((entry) => entry.name === source).failureClassifications,
+      [classification],
+    );
+    assert.deepEqual(
+      transient.metadata.provenance.sources.find((entry) => entry.name === source).retryDelaysMs,
+      [250],
+    );
+  }
+}
+
+for (const [method, source] of [["getIssue", "issue"], ["getIssueComments", "comments"]]) {
+  for (const status of [401, 403, 404]) {
+    let attempts = 0;
+    await assert.rejects(
+      hydrateClaimedIssueTask({
+        client: stubClient({
+          [method]() { attempts += 1; throw httpError(`HTTP ${status}`, status); },
+        }),
+        repository: "owner/private",
+        issueNumber: 42,
+        task: "Implement issue #42.",
+      }),
+      new RegExp(`required issue fact "${source}".*after 1 attempt\\(s\\) \\[deterministic_http\\]`, "s"),
+    );
+    assert.equal(attempts, 1);
+  }
+}
 
 let deniedAttempts = 0;
 await assert.rejects(
@@ -420,6 +589,7 @@ await assert.rejects(
     repository: "owner/private",
     issueNumber: 42,
     task: "Implement issue #42.",
+    sleep: async () => {},
   }),
   /after 1 attempt\(s\)/,
 );
@@ -432,10 +602,26 @@ await assert.rejects(
     repository: "owner/public",
     issueNumber: 42,
     task: "Implement issue #42.",
+    sleep: async () => {},
   }),
   /required issue fact "projectFields" could not be read.*after 3 attempt\(s\)/s,
 );
 assert.equal(exhaustedAttempts, 3);
+
+// The retry budget is capped even if an internal caller supplies a larger one.
+let boundedAttempts = 0;
+await assert.rejects(
+  hydrateClaimedIssueTask({
+    client: stubClient({ getIssueComments() { boundedAttempts += 1; throw new Error("connection reset"); } }),
+    repository: "owner/public",
+    issueNumber: 42,
+    task: "Implement issue #42.",
+    attempts: 99,
+    sleep: async () => {},
+  }),
+  /after 5 attempt\(s\) \[transient_network,transient_network,transient_network,transient_network,transient_network\]/,
+);
+assert.equal(boundedAttempts, 5);
 
 // Truncation still bounds the snapshot once structured facts are rendered.
 const boundedHydration = await hydrateClaimedIssueTask({

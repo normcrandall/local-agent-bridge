@@ -334,6 +334,23 @@ export function buildClaimedIssueContext({
 export const REQUIRED_ISSUE_SOURCES = ["issue", "comments", "labels", "dependencies", "linkedPullRequests"];
 export const OPTIONAL_ISSUE_SOURCES = ["projectFields"];
 export const DEFAULT_ISSUE_HYDRATION_ATTEMPTS = 3;
+export const MAX_ISSUE_HYDRATION_ATTEMPTS = 5;
+export const DEFAULT_ISSUE_HYDRATION_BACKOFF_MS = 250;
+export const MAX_ISSUE_HYDRATION_BACKOFF_MS = 5_000;
+export const RETRY_AFTER_EXCEEDS_BUDGET = Symbol("retry_after_exceeds_budget");
+
+function isRateLimitedHydrationFailure(error) {
+  const status = Number(error?.status);
+  if (status === 429) return true;
+  if (status !== 403) return false;
+  const retryAfter = error?.retryAfterSeconds
+    ?? error?.retryAfter
+    ?? error?.headers?.get?.("retry-after")
+    ?? error?.headers?.["retry-after"]
+    ?? error?.response?.headers?.get?.("retry-after");
+  return retryAfter !== null && retryAfter !== undefined
+    || /\brate limit|secondary rate|abuse detection/i.test(String(error?.message || ""));
+}
 
 // A deterministic HTTP answer is authoritative and must not be retried. Only a
 // rate limit, a server fault, or a transport failure without a status can be
@@ -341,13 +358,53 @@ export const DEFAULT_ISSUE_HYDRATION_ATTEMPTS = 3;
 export function isRetryableHydrationFailure(error) {
   const status = Number(error?.status);
   if (!Number.isFinite(status)) return true;
-  return status === 429 || (status >= 500 && status <= 599);
+  return isRateLimitedHydrationFailure(error) || (status >= 500 && status <= 599);
+}
+
+export function classifyHydrationFailure(error) {
+  const status = Number(error?.status);
+  if (!Number.isFinite(status)) return "transient_network";
+  if (isRateLimitedHydrationFailure(error)) return "transient_rate_limit";
+  if (status >= 500 && status <= 599) return "transient_server";
+  return "deterministic_http";
+}
+
+export function hydrationRetryDelayMs(error, {
+  attempt,
+  now = Date.now,
+  baseDelayMs = DEFAULT_ISSUE_HYDRATION_BACKOFF_MS,
+  maxDelayMs = MAX_ISSUE_HYDRATION_BACKOFF_MS,
+  random = () => 1,
+} = {}) {
+  const rawRetryAfter = error?.retryAfterSeconds
+    ?? error?.retryAfter
+    ?? error?.headers?.get?.("retry-after")
+    ?? error?.headers?.["retry-after"]
+    ?? error?.response?.headers?.get?.("retry-after")
+    ?? null;
+  let retryAfterMs = null;
+  if (rawRetryAfter !== null && rawRetryAfter !== undefined && String(rawRetryAfter).trim()) {
+    const seconds = Number(String(rawRetryAfter).trim());
+    if (Number.isFinite(seconds) && seconds >= 0) retryAfterMs = seconds * 1_000;
+    else {
+      const timestamp = Date.parse(String(rawRetryAfter));
+      if (Number.isFinite(timestamp)) retryAfterMs = Math.max(0, timestamp - now());
+    }
+  }
+  const cap = Math.max(0, maxDelayMs);
+  if (retryAfterMs !== null) {
+    return retryAfterMs > cap ? RETRY_AFTER_EXCEEDS_BUDGET : Math.round(retryAfterMs);
+  }
+  const exponential = Math.min(cap, Math.max(0, baseDelayMs) * (2 ** Math.max(0, Number(attempt || 1) - 1)));
+  const jitter = Math.max(0, Math.min(1, Number(random()) || 0));
+  return Math.round((exponential / 2) + (jitter * exponential / 2));
 }
 
 // Retry exhaustion, a server fault, and a transport failure are never an empty
 // set: they fail the whole hydration closed. Only a permission denial or an
 // absent endpoint may degrade, and only for a source declared optional.
 function degradationReason(error) {
+  if (isRateLimitedHydrationFailure(error)) return null;
   const status = Number(error?.status);
   if (status === 403 || status === 401) return `permission denied (HTTP ${status})`;
   if (status === 404 || status === 410) return `unavailable on this GitHub deployment (HTTP ${status})`;
@@ -355,8 +412,14 @@ function degradationReason(error) {
   return null;
 }
 
-async function readSource({ name, endpoint, required, unsupportedIsDegraded = false, read, attempts, degradations }) {
-  const record = { name, endpoint, status: "ok", attempts: 0, itemCount: 0, sha256: null };
+async function readSource({
+  name, endpoint, required, unsupportedIsDegraded = false, read, attempts,
+  degradations, sleep, now, baseDelayMs, maxDelayMs, random,
+}) {
+  const record = {
+    name, endpoint, status: "ok", attempts: 0,
+    failureClassifications: [], retryDelaysMs: [], itemCount: 0, sha256: null,
+  };
   let lastError = null;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     record.attempts = attempt;
@@ -367,14 +430,25 @@ async function readSource({ name, endpoint, required, unsupportedIsDegraded = fa
       return { value, record };
     } catch (error) {
       lastError = error;
+      record.failureClassifications.push(classifyHydrationFailure(error));
       if (!isRetryableHydrationFailure(error)) break;
+      if (attempt < attempts) {
+        const delayMs = hydrationRetryDelayMs(error, { attempt, now, baseDelayMs, maxDelayMs, random });
+        if (delayMs === RETRY_AFTER_EXCEEDS_BUDGET) {
+          record.failureClassifications.push("retry_after_exceeds_budget");
+          break;
+        }
+        record.retryDelaysMs.push(delayMs);
+        await sleep(delayMs);
+      }
     }
   }
   const reason = degradationReason(lastError);
   const mayDegrade = reason
     && (!required || (unsupportedIsDegraded && /HTTP (404|410)\)$/.test(reason)));
   if (!mayDegrade) {
-    throw new Error(`required issue fact "${name}" could not be read from ${endpoint} after ${record.attempts} attempt(s): ${lastError?.message || "unknown failure"}`, { cause: lastError });
+    const classifications = record.failureClassifications.join(",") || "unknown";
+    throw new Error(`required issue fact "${name}" could not be read from ${endpoint} after ${record.attempts} attempt(s) [${classifications}]: ${lastError?.message || "unknown failure"}`, { cause: lastError });
   }
   record.status = "degraded";
   record.reason = reason;
@@ -393,15 +467,27 @@ export async function hydrateClaimedIssueTask({
   evidenceScope = null,
   cacheMaxAgeMs = DEFAULT_CLAIMED_ISSUE_CACHE_MAX_AGE_MS,
   attempts = DEFAULT_ISSUE_HYDRATION_ATTEMPTS,
+  sleep = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
+  now = Date.now,
+  baseDelayMs = DEFAULT_ISSUE_HYDRATION_BACKOFF_MS,
+  maxDelayMs = MAX_ISSUE_HYDRATION_BACKOFF_MS,
+  random = Math.random,
   authority = null,
 }) {
   try {
     if (!client) throw new Error("no bound builder App client is available for this repository");
+    const boundedAttempts = Math.min(
+      MAX_ISSUE_HYDRATION_ATTEMPTS,
+      Math.max(1, Number.isSafeInteger(attempts) ? attempts : DEFAULT_ISSUE_HYDRATION_ATTEMPTS),
+    );
     const loaded = async () => {
       const degradations = [];
       const records = [];
       const collect = async (options) => {
-        const { value, record } = await readSource({ ...options, attempts, degradations });
+        const { value, record } = await readSource({
+          ...options, attempts: boundedAttempts, degradations,
+          sleep, now, baseDelayMs, maxDelayMs, random,
+        });
         records.push(record);
         return value;
       };
@@ -484,6 +570,8 @@ export async function hydrateClaimedIssueTask({
             endpoint: String(record.endpoint).slice(0, 200),
             status: record.status,
             attempts: record.attempts,
+            failureClassifications: (record.failureClassifications || []).slice(0, MAX_ISSUE_HYDRATION_ATTEMPTS),
+            retryDelaysMs: (record.retryDelaysMs || []).slice(0, MAX_ISSUE_HYDRATION_ATTEMPTS - 1),
             itemCount: record.itemCount,
             sha256: record.sha256,
             ...(record.reason ? { reason: String(record.reason).slice(0, 200) } : {}),
@@ -495,4 +583,13 @@ export async function hydrateClaimedIssueTask({
   } catch (error) {
     throw new Error(`Unable to hydrate claimed issue ${repository}#${issueNumber} before provider launch: ${error.message}`, { cause: error });
   }
+}
+
+// This is the sequencing boundary used by claimed starts: the lease callback
+// is unreachable until every required issue fact has been fetched and
+// validated successfully.
+export async function hydrateBeforeClaimLease({ hydrate, acquireClaimLease }) {
+  const hydrated = await hydrate();
+  await acquireClaimLease();
+  return hydrated;
 }
