@@ -28,6 +28,7 @@ assert.equal(portfolioStatusForSemanticState("cancelled"), "obsolete");
 assert.equal(portfolioStatusForSemanticState("stale"), "indeterminate");
 assert.equal(semanticStateForPhase("completed"), "reviewing");
 assert.equal(semanticStateForPhase("stale"), "stale");
+assert.equal(semanticStateForPhase("mystery-provider-state"), null);
 
 const policy = normalizeLifecyclePolicy({
   labels: {
@@ -97,6 +98,95 @@ assert.deepEqual(result.record.assignments.map(({ writer, reason }) => ({ writer
   { writer: "claude", reason: "provider_failover" },
 ]);
 assert.equal(result.record.activeWriter, "claude");
+
+const reentryOne = await transitionSemanticLifecycle({
+  adapter: memory,
+  issueNumber: 151,
+  policy,
+  record: result.record,
+  history: result.history,
+  state: "implementing",
+  collaborationId: "bridge-test",
+  writer: "claude",
+});
+const reentryTwo = await transitionSemanticLifecycle({
+  adapter: memory,
+  issueNumber: 151,
+  policy,
+  record: reentryOne.record,
+  history: reentryOne.history,
+  state: "implementing",
+  collaborationId: "bridge-test",
+  writer: "claude",
+});
+assert.equal(reentryOne.applied, true);
+assert.equal(reentryTwo.applied, true, "derived lifecycle events remain monotonic across state re-entry");
+assert.notEqual(reentryOne.transition.id, reentryTwo.transition.id);
+
+const switchedPolicy = normalizeLifecyclePolicy({ labels: { implementing: "workflow:shipping" } });
+const switched = await transitionSemanticLifecycle({
+  adapter: memory,
+  issueNumber: 151,
+  policy: switchedPolicy,
+  record: reentryTwo.record,
+  history: reentryTwo.history,
+  state: "implementing",
+  collaborationId: "bridge-test",
+  writer: "claude",
+});
+assert.equal(memory.labels.has("workflow:active"), false, "the persisted prior policy label is removed after a policy switch");
+assert.equal(memory.labels.has("workflow:shipping"), true);
+
+const labelDeniedAdapter = createInMemoryGitHubLifecycleAdapter();
+labelDeniedAdapter.addLabel = async () => {
+  const error = new Error("resource not accessible by integration");
+  error.status = 403;
+  throw error;
+};
+const labelDenied = await transitionSemanticLifecycle({
+  adapter: labelDeniedAdapter,
+  issueNumber: 151,
+  policy,
+  state: "queued",
+  transitionId: "label-denied",
+});
+assert.equal(labelDenied.applied, true, "label permission degradation does not abort the lifecycle ledger");
+assert.equal(labelDenied.transition.labels.reason, "permission_unavailable");
+
+const mappingMissingAdapter = createInMemoryGitHubLifecycleAdapter();
+mappingMissingAdapter.setProjectState = async () => {
+  const error = new Error("mapping not found");
+  error.status = 404;
+  error.code = "project_mapping_not_found";
+  throw error;
+};
+const mappingMissing = await transitionSemanticLifecycle({
+  adapter: mappingMissingAdapter,
+  issueNumber: 151,
+  policy,
+  state: "reviewing",
+  transitionId: "mapping-missing",
+});
+assert.equal(mappingMissing.transition.project.reason, "misconfigured");
+
+const replayAdapter = createInMemoryGitHubLifecycleAdapter();
+const replayInput = {
+  adapter: replayAdapter,
+  issueNumber: 151,
+  policy,
+  state: "queued",
+  transitionId: "restart-safe-transition",
+};
+const interruptedAttempt = await transitionSemanticLifecycle(replayInput);
+const replayAfterLostLedger = await transitionSemanticLifecycle(replayInput);
+assert.equal(replayAfterLostLedger.transition.id, interruptedAttempt.transition.id);
+assert.deepEqual([...replayAdapter.labels], ["workflow:backlog"], "replaying after label mutation is externally idempotent");
+const persistedReplay = await transitionSemanticLifecycle({
+  ...replayInput,
+  record: replayAfterLostLedger.record,
+  history: replayAfterLostLedger.history,
+});
+assert.equal(persistedReplay.duplicate, true, "once the ledger persists, restart replay is suppressed");
 
 const unavailableProject = createInMemoryGitHubLifecycleAdapter({ projectAvailable: false });
 const fallback = await transitionSemanticLifecycle({

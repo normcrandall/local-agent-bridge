@@ -1877,6 +1877,27 @@ assert.deepEqual(projectMutationCalls[1].variables, {
   option: "OPTION_1",
 });
 
+const missingProjectMappingClient = createBoundBuilderClient({
+  ...base,
+  prNumber: null,
+  issueNumber: 147,
+  allowedOperations: ["update_issue_project_single_select"],
+  fetchImpl: async () => json({ data: { repository: { issue: { projectItems: { nodes: [] } } } } }),
+});
+await assert.rejects(
+  missingProjectMappingClient.updateIssueProjectSingleSelect(147, {
+    projectNumber: 3,
+    fieldName: "Status",
+    optionName: "In progress",
+  }),
+  (error) => {
+    assert.equal(error.status, 404);
+    assert.equal(error.code, "project_mapping_not_found");
+    return true;
+  },
+  "a missing configured field or option must be classified as repository misconfiguration",
+);
+
 // ---------------------------------------------------------------------------
 // (8) Issue #40 regression fixtures (observed 2026-07-25, collaboration
 // bridge-d7adbfc4). Antigravity completed issue #146 at commit 74d2f02 and then

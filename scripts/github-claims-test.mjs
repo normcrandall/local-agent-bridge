@@ -361,7 +361,8 @@ async function runTests() {
     worktree: "/tmp/wt1",
     baseSha: "0000000000000000000000000000000000000000",
     headSha: "1111111111111111111111111111111111111111",
-    workspaceRoot: tempWorkspaceRoot
+    workspaceRoot: tempWorkspaceRoot,
+    lifecyclePolicy: { labels: { queued: "workflow:queued" } },
   });
   assert.equal(mock.getComments().length, 1);
   assert.ok(mock.getLabels().has("agent:in-progress"));
@@ -369,6 +370,9 @@ async function runTests() {
   assert.ok(mock.getComments()[0].body.includes("Summary: Claim acquired before provider work starts."));
   let acquired = (await parseClaims(client, 42))[0];
   assert.deepEqual(acquired.data.authority, baseClientConfig.authority);
+  assert.equal(acquired.data.lifecyclePolicy.labels.queued, "workflow:queued");
+  assert.equal(acquired.data.lifecycle.labelPolicy.queued, "workflow:queued");
+  assert.equal(acquired.data.lifecycle.state, "queued", "the first published claim comment already contains its lifecycle ledger");
   assert.equal(mock.getComments()[0].body.includes("ghs_test-token"), false);
 
   const malformedAuthorityBody = mock.getComments()[0].body.replace(
@@ -641,11 +645,50 @@ async function runTests() {
     client,
     issueNumber: 42,
     collaborationId: "bridge-33333333-3333-3333-4444-555555555555",
+    phase: "reviewing",
+  });
+  await refreshClaimLease({
+    client,
+    issueNumber: 42,
+    collaborationId: "bridge-33333333-3333-3333-4444-555555555555",
+    phase: "working",
+    summary: "A delayed writer heartbeat arrived after review began.",
+  });
+  const stateAfterDelayedHeartbeat = (await parseClaims(client, 42)).find(
+    (claim) => claim.data.collaboration === "bridge-33333333-3333-3333-4444-555555555555",
+  ).data;
+  assert.equal(stateAfterDelayedHeartbeat.phase, "reviewing");
+  assert.equal(
+    stateAfterDelayedHeartbeat.lifecycle.state,
+    "reviewing",
+    "a stale heartbeat cannot regress the semantic lifecycle behind the clamped claim phase",
+  );
+
+  await refreshClaimLease({
+    client,
+    issueNumber: 42,
+    collaborationId: "bridge-33333333-3333-3333-4444-555555555555",
     phase: "claiming"
   });
   const claimsAfterRegress = await parseClaims(client, 42);
   const stateNoRegress = claimsAfterRegress.find(c => c.data.collaboration === "bridge-33333333-3333-3333-4444-555555555555").data;
-  assert.equal(stateNoRegress.phase, "working");
+  assert.equal(stateNoRegress.phase, "reviewing");
+  const transitionsBeforeUnknownPhase = stateNoRegress.lifecycle.transitions.length;
+  await refreshClaimLease({
+    client,
+    issueNumber: 42,
+    collaborationId: "bridge-33333333-3333-3333-4444-555555555555",
+    phase: "provider_magic_state",
+    summary: "Unknown provider phase observed without inventing implementation progress.",
+  });
+  const stateAfterUnknownPhase = (await parseClaims(client, 42)).find(
+    (claim) => claim.data.collaboration === "bridge-33333333-3333-3333-4444-555555555555",
+  ).data;
+  assert.equal(
+    stateAfterUnknownPhase.lifecycle.transitions.length,
+    transitionsBeforeUnknownPhase,
+    "an unknown provider phase does not fabricate a semantic lifecycle transition",
+  );
 
   console.log("8. Testing terminal lifecycle transitions...");
   await releaseClaimLease({
@@ -791,6 +834,7 @@ async function runTests() {
       collaborationId: "bridge-aaaaaaaa-3333-4444-5555-666666666666",
       headSha: "1111111111111111111111111111111111111111",
       workspaceRoot: tempWorkspaceRoot,
+      lifecyclePolicy: { labels: { queued: null } },
     }),
     /Label service unavailable/,
   );
@@ -799,6 +843,23 @@ async function runTests() {
   assert.equal(rolledBackClaims[0].data.phase, "rolled_back");
   assert.equal(mock.getRefs().size, 0);
   assert.ok(!mock.getLabels().has("agent:in-progress"));
+  console.log("8d. Testing label permission degradation preserves the durable claim...");
+  mock.clear();
+  mock.getRepoLabels().add("agent:in-progress");
+  mock.failNextIssueLabelAdd(403, "Resource not accessible by integration");
+  await acquireClaimLease({
+    client,
+    issueNumber: 42,
+    writer: "codex",
+    collaborationId: "bridge-bbbbbbbb-3333-4444-5555-666666666666",
+    headSha: "1111111111111111111111111111111111111111",
+    workspaceRoot: tempWorkspaceRoot,
+    lifecyclePolicy: { labels: { queued: null } },
+  });
+  const degradedLabelClaim = (await parseClaims(client, 42))[0];
+  assert.equal(degradedLabelClaim.data.claimLabel.applied, false);
+  assert.equal(degradedLabelClaim.data.claimLabel.status, 403);
+  assert.equal(mock.getRefs().size, 1, "label permission degradation retains claim ownership");
   console.log("9. Testing non-terminal outcomes (failed does not release tag lock)...");
   mock.clear();
   mock.getRepoLabels().add("agent:in-progress");

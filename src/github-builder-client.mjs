@@ -1348,6 +1348,7 @@ export function createBoundBuilderClient({
     if (!item || !field || !option) {
       const error = new Error(`Configured GitHub Project mapping was not found for field ${fieldName} and option ${optionName}.`);
       error.status = 404;
+      error.code = "project_mapping_not_found";
       throw error;
     }
     const mutation = `mutation($project:ID!,$item:ID!,$field:ID!,$option:String!){updateProjectV2ItemFieldValue(input:{projectId:$project,itemId:$item,fieldId:$field,value:{singleSelectOptionId:$option}}){projectV2Item{id}}}`;

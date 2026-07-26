@@ -45,7 +45,7 @@ import { replayIncident, formatReplayHuman } from "./incident-replay.mjs";
 import { analyzePortfolio, buildExecutionWaves, normalizePortfolioItems } from "./portfolio-scheduler.mjs";
 import { PORTFOLIO_STATUSES, PORTFOLIO_STATUS_GROUPS } from "./portfolio-status.mjs";
 import { createPortfolio, listPortfolios, readPortfolio, updatePortfolio } from "./portfolio-store.mjs";
-import { createSemanticLifecycleRecord } from "./github-lifecycle.mjs";
+import { createSemanticLifecycleRecord, loadRepositoryLifecyclePolicy } from "./github-lifecycle.mjs";
 import {
   loadProviderConcurrency,
   normalizeProviderConcurrency,
@@ -795,6 +795,7 @@ server.registerTool(
     let claimClient = null;
     let claimHeadSha = null;
     let claimBaseSha = null;
+    let claimLifecyclePolicy = null;
     let resolvedIssueClaim = canonicalIssueClaim;
     let resolvedTask = input.task;
     let issueContext = null;
@@ -890,6 +891,7 @@ server.registerTool(
         mode: effectiveMode,
       });
 
+      claimLifecyclePolicy = loadRepositoryLifecyclePolicy(requestedWorkspace);
       await acquireClaimLease({
         client: claimClient,
         issueNumber: input.issueClaim.issueNumber,
@@ -902,6 +904,7 @@ server.registerTool(
         baseSha: claimBaseSha,
         headSha: claimHeadSha,
         workspaceRoot: WORKSPACE_ROOT,
+        lifecyclePolicy: claimLifecyclePolicy,
       });
       leaseAcquired = true;
     } else if (resolvedIssueTarget) {
@@ -1081,6 +1084,7 @@ server.registerTool(
             state: "queued",
             collaborationId,
             writer: resolvedIssueClaim.writer || writer,
+            policy: claimLifecyclePolicy,
           })
           : null,
         issueTarget: resolvedIssueTarget,

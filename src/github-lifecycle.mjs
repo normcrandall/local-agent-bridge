@@ -17,6 +17,7 @@ export const SEMANTIC_LIFECYCLE_STATES = Object.freeze([
 
 const SEMANTIC_STATE_SET = new Set(SEMANTIC_LIFECYCLE_STATES);
 const PROJECT_FALLBACK_STATUSES = new Set([403, 404, 422]);
+const LABEL_FALLBACK_STATUSES = new Set([403, 404]);
 
 export const DEFAULT_LIFECYCLE_LABELS = Object.freeze(Object.fromEntries(
   SEMANTIC_LIFECYCLE_STATES.map((state) => [state, `agent:${state.replaceAll("_", "-")}`]),
@@ -68,14 +69,14 @@ function assertSemanticState(state) {
   }
 }
 
-function stableTransitionId({ collaborationId, state, writer, deliveryId }) {
+function stableTransitionId({ collaborationId, state, writer, deliveryId, sequence = 1 }) {
   if (deliveryId) return `delivery:${deliveryId}`;
-  const value = `${collaborationId || "unbound"}:${state}:${writer || "unassigned"}`;
+  const value = `${collaborationId || "unbound"}:${state}:${writer || "unassigned"}:${sequence}`;
   return `lifecycle:${createHash("sha256").update(value).digest("hex").slice(0, 24)}`;
 }
 
 export function semanticStateForPhase(phase) {
-  return PHASE_TO_SEMANTIC[String(phase || "").toLowerCase()] || "implementing";
+  return PHASE_TO_SEMANTIC[String(phase || "").toLowerCase()] || null;
 }
 
 export function portfolioStatusForSemanticState(state) {
@@ -125,11 +126,13 @@ export function createSemanticLifecycleRecord({
   state = "queued",
   collaborationId = null,
   writer = null,
+  policy = normalizeLifecyclePolicy(),
   at = new Date().toISOString(),
 } = {}) {
   assertSemanticState(state);
+  const normalizedPolicy = normalizeLifecyclePolicy(policy);
   const transition = {
-    id: stableTransitionId({ collaborationId, state, writer }),
+    id: stableTransitionId({ collaborationId, state, writer, sequence: 1 }),
     state,
     at,
     collaborationId,
@@ -140,7 +143,9 @@ export function createSemanticLifecycleRecord({
     state,
     updatedAt: at,
     transitions: [transition],
+    transitionSequence: 1,
     deliveryIds: [],
+    labelPolicy: normalizedPolicy.labels,
   }, { writer, at, reason: "claimed" });
 }
 
@@ -217,21 +222,42 @@ export async function transitionSemanticLifecycle({
 }) {
   assertSemanticState(state);
   const normalizedPolicy = normalizeLifecyclePolicy(policy);
-  const id = transitionId || stableTransitionId({ collaborationId, state, writer, deliveryId });
   const priorTransitions = [...(record.transitions || [])];
   const priorDeliveries = [...(record.deliveryIds || [])];
+  const transitionSequence = Math.max(record.transitionSequence || 0, priorTransitions.length) + 1;
+  const id = transitionId || stableTransitionId({ collaborationId, state, writer, deliveryId, sequence: transitionSequence });
   if (priorTransitions.some((entry) => entry.id === id) || (deliveryId && priorDeliveries.includes(deliveryId))) {
     return { record, history, applied: false, duplicate: true };
   }
 
   const targetLabel = normalizedPolicy.labels[state];
-  if (targetLabel) await adapter.addLabel(issueNumber, targetLabel);
-  for (const [otherState, label] of Object.entries(normalizedPolicy.labels)) {
-    if (!label || otherState === state) continue;
+  const labelReceipt = { applied: true, reason: null, degradations: [] };
+  if (targetLabel) {
     try {
-      await adapter.removeLabel(issueNumber, label);
+      await adapter.addLabel(issueNumber, targetLabel);
     } catch (error) {
-      if (error.status !== 404) throw error;
+      if (!LABEL_FALLBACK_STATUSES.has(error.status)) throw error;
+      labelReceipt.applied = false;
+      labelReceipt.reason = "permission_unavailable";
+      labelReceipt.degradations.push({ operation: "add", label: targetLabel, status: error.status });
+    }
+  }
+  if (labelReceipt.applied) {
+    const lifecycleLabels = new Set([
+      ...Object.values(DEFAULT_LIFECYCLE_LABELS),
+      ...Object.values(record.labelPolicy || {}),
+      ...Object.values(normalizedPolicy.labels),
+    ].filter(Boolean));
+    for (const label of lifecycleLabels) {
+      if (label === targetLabel) continue;
+      try {
+        await adapter.removeLabel(issueNumber, label);
+      } catch (error) {
+        if (!LABEL_FALLBACK_STATUSES.has(error.status)) throw error;
+        labelReceipt.applied = false;
+        labelReceipt.reason = "partially_applied";
+        labelReceipt.degradations.push({ operation: "remove", label, status: error.status });
+      }
     }
   }
 
@@ -248,23 +274,38 @@ export async function transitionSemanticLifecycle({
       project = { applied: true };
     } catch (error) {
       if (!PROJECT_FALLBACK_STATUSES.has(error.status)) throw error;
-      project = { applied: false, reason: "unavailable", status: error.status };
+      project = {
+        applied: false,
+        reason: error.code === "project_mapping_not_found" ? "misconfigured" : "unavailable",
+        status: error.status,
+        ...(error.code ? { code: error.code } : {}),
+      };
     }
   }
 
-  const transition = { id, state, at, collaborationId, writer, project, ...(deliveryId ? { deliveryId } : {}) };
+  const transition = { id, state, at, collaborationId, writer, labels: labelReceipt, project, ...(deliveryId ? { deliveryId } : {}) };
   let nextRecord = {
     ...record,
     state,
     updatedAt: at,
     transitions: [...priorTransitions, transition],
+    transitionSequence,
     deliveryIds: deliveryId ? [...priorDeliveries, deliveryId] : priorDeliveries,
+    labelPolicy: normalizedPolicy.labels,
   };
   nextRecord = recordLifecycleAssignment(nextRecord, { writer, at, reason: writerReason });
-  const nextHistory = [
-    { event: "lifecycle_transition", collaboration: collaborationId, writer, phase: state, semanticState: state, transitionId: id, at },
-    ...history,
-  ].slice(0, 10);
+  const lifecycleHistoryEntry = {
+    event: "lifecycle_transition",
+    collaboration: collaborationId,
+    writer,
+    phase: state,
+    semanticState: state,
+    transitionId: id,
+    at,
+  };
+  const nextHistory = writerReason === "provider_failover" && history[0]?.event === "writer_failover"
+    ? [history[0], lifecycleHistoryEntry, ...history.slice(1)].slice(0, 10)
+    : [lifecycleHistoryEntry, ...history].slice(0, 10);
   return { record: nextRecord, history: nextHistory, applied: true, duplicate: false, transition };
 }
 
