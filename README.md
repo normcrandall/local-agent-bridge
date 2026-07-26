@@ -126,7 +126,7 @@ On another computer, generate a new private key for the same App when possible, 
 
 GitHub Apps give builder and reviewer activity distinct bot identities without storing a long-lived personal access token. This repository does not provide shared hosted identities: the Veliqon Apps used by the maintainers are private infrastructure and are not intended for installation by other users. The checked-in configuration is a generic template; each user creates and installs Apps owned by their own GitHub account or organization and keeps the real IDs and private-key paths under `~/.config/local-agent-bridge`.
 
-The recommended setup for one GitHub account owner is four Apps: one builder plus one reviewer for each provider, for example `your-project-builder`, `your-project-claude-reviewer`, `your-project-codex-reviewer`, and `your-project-gemini-reviewer`. Provider-specific reviewers make the PR history show which model authored each review. A legacy shared reviewer App is supported, but it loses that distinction.
+The recommended setup for one GitHub account owner is seven Apps: one compatibility/merge builder, three provider writers, and three provider reviewers. For example: `your-project-builder`, `your-project-claude-writer`, `your-project-codex-writer`, `your-project-gemini-writer`, plus the corresponding reviewer Apps. Provider-specific identities make branches, PRs, issue comments, and reviews show which model performed the work. The singular builder remains the merge/control identity and is also the automatic writer fallback when a provider-specific writer is omitted. A legacy shared reviewer App remains supported, but it loses provider attribution.
 
 Make each App private by selecting **Only on this account**. A private App can be installed only on the personal account or organization that owns it. If the bridge must work across repositories owned by different accounts, create an owner-local App set for each account and keep their credentials/configuration separate. Select **Any account** only when you deliberately want a public App that other accounts can install. Never instruct users to install the maintainers' Apps or copy the maintainers' App IDs, installation IDs, or keys.
 
@@ -134,7 +134,7 @@ Create each App from **GitHub Settings → Developer settings → GitHub Apps �
 
 - Turn off webhooks and OAuth unless another part of your system needs them.
 - Select **Only on this account** by default. Treat **Any account** as an explicit public-distribution decision, not a portability shortcut.
-- Builder repository permissions: **Contents: Read and write**, **Pull requests: Read and write**, **Issues: Read and write**, and **Metadata: Read-only**. Grant **Workflows: Read and write** only if the builder must intentionally modify workflow files.
+- Builder and writer repository permissions: **Contents: Read and write**, **Pull requests: Read and write**, **Issues: Read and write**, and **Metadata: Read-only**. Grant **Workflows: Read and write** only if that identity must intentionally modify workflow files.
 - Reviewer repository permissions: **Contents: Read-only**, **Pull requests: Read and write**, and **Metadata: Read-only**. These permissions are sufficient for the App to submit a formal exact-head PR review.
 - **Commit statuses: Read and write** is optional. Add it only when a repository explicitly requires the `agent-review` commit-status context. After changing an installed App's permissions, approve the installation's requested permission update for every personal account or organization where it is installed; changing the App definition alone does not upgrade existing installation tokens.
 - Generate a private key, move it outside the repository, and restrict it with `chmod 600`.
@@ -157,7 +157,9 @@ chmod 600 ~/.config/local-agent-bridge/github-apps/*.pem
 
 The `installations` keys are GitHub account or organization names and the values are the installation IDs printed by the discovery command. Role selection is based on the repository owner, so one config can cover personal and organization repositories.
 
-The bound PR-review publisher automatically selects `roles.reviewers.claude`, `.codex`, or `.antigravity` for the active reviewer. A legacy singular `roles.reviewer` entry remains supported. It falls back to `~/.config/ghtoken` only when no reviewer App is configured; if a configured App fails authentication, it stops rather than silently posting as another identity.
+The bound delivery publisher automatically selects `roles.writers.claude`, `.codex`, or `.antigravity` for the active writer and records its verified login, App ID, and installation ID in durable receipts. If that provider entry is absent, it uses `roles.builder`; it never crosses into `roles.reviewers`. The compatibility builder remains responsible for merge/control operations, so merge authority is independent of the writer identity. The bound PR-review publisher similarly selects `roles.reviewers.<provider>`. A legacy singular `roles.reviewer` entry remains supported. It falls back to `~/.config/ghtoken` only when no reviewer App is configured; if a configured App fails authentication, it stops rather than silently posting as another identity.
+
+Migration is additive: configure `roles.writers` and run `npm run github-app:verify -- OWNER/REPO` before removing any old delivery setup. Existing lanes that name the compatibility builder continue to authorize the provider selection, while new durable receipts use the selected writer identity. Roll back by removing one provider entry to make only that provider fall back to `roles.builder`, or remove the entire `roles.writers` object to restore shared-builder delivery. Never copy App keys into a repository or skill; provider processes remain credentialless and the broker supplies only short-lived installation tokens to the bound publisher.
 
 Identity configuration belongs in the machine-local JSON file, not in a collaboration skill. Skills should normally pass only the repository, PR number, and exact head SHA:
 
@@ -245,12 +247,13 @@ After changing App permissions or installing the Apps on another account, verify
 npm run github-app:verify -- OWNER/REPO
 ```
 
-`doctor` validates local configuration and key hygiene only; `github-app:verify` mints short-lived installation tokens and checks the actual builder and provider-reviewer permissions accepted for that repository owner.
+`doctor` validates local configuration and key hygiene only; `github-app:verify` mints short-lived installation tokens and checks the actual compatibility-builder, provider-writer, and provider-reviewer permissions accepted for that repository owner.
 
 For a bounded builder-side GitHub CLI command, mint a short-lived repository-scoped token at execution time:
 
 ```sh
 npm run github-app:run -- builder owner/repository -- gh pr view 123
+npm run github-app:run -- builder:codex owner/repository -- gh pr view 123
 npm run github-app:run -- reviewer:codex owner/repository -- gh pr view 123
 ```
 

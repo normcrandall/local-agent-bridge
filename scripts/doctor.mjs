@@ -228,8 +228,15 @@ function configuredGitHubReviewer(provider) {
   const roles = JSON.parse(readFileSync(configPath, "utf8")).roles || {};
   return configuredGitHubEntry(roles.reviewers?.[provider] || roles.reviewer);
 }
+function configuredGitHubWriter(provider) {
+  const configPath = resolve(homedir(), ".config/local-agent-bridge/github-apps.json");
+  if (!existsSync(configPath)) return false;
+  const roles = JSON.parse(readFileSync(configPath, "utf8")).roles || {};
+  return configuredGitHubEntry(roles.writers?.[provider] || roles.builder);
+}
 check("GitHub builder App config", () => configuredGitHubRole("builder"), "configure the builder role in ~/.config/local-agent-bridge/github-apps.json");
 for (const provider of ["claude", "codex", "antigravity"]) {
+  check(`GitHub ${provider} writer App config`, () => configuredGitHubWriter(provider), `configure roles.writers.${provider}, or retain the compatibility builder role, in ~/.config/local-agent-bridge/github-apps.json`);
   check(`GitHub ${provider} reviewer App config`, () => configuredGitHubReviewer(provider), `configure roles.reviewers.${provider} in ~/.config/local-agent-bridge/github-apps.json`);
 }
 check("GitHub reviewer credential config", () => {

@@ -8,6 +8,7 @@ import { builderMcpInputSchema } from "./builder-contract.mjs";
 
 const repository = process.env.GITHUB_BUILDER_REPOSITORY;
 const configuredExpectedLogin = process.env.GITHUB_BUILDER_EXPECTED_LOGIN;
+const writerProvider = process.env.GITHUB_BUILDER_WRITER_PROVIDER || null;
 const headSha = process.env.GITHUB_BUILDER_HEAD_SHA;
 const prNumber = process.env.GITHUB_BUILDER_PR_NUMBER
   ? Number.parseInt(process.env.GITHUB_BUILDER_PR_NUMBER, 10)
@@ -39,8 +40,22 @@ const trustedReviewAppIds = [
   ...Object.values(appRoles.roles?.reviewers || {}).map((reviewer) => reviewer.appId),
 ].filter(Boolean).map(Number);
 
+const initialCredential = await createInstallationToken({ role: "builder", writerProvider, repository });
+if (initialCredential.expectedLogin !== expectedLogin) {
+  throw new Error(`Configured builder identity ${initialCredential.expectedLogin} does not match authorized identity ${expectedLogin}.`);
+}
+const authority = {
+  provider: initialCredential.provider || writerProvider,
+  roleLabel: initialCredential.roleLabel,
+  login: initialCredential.expectedLogin,
+  appId: initialCredential.appId,
+  installationId: initialCredential.installationId,
+  repository,
+  permissions: initialCredential.permissions,
+};
+
 const getToken = async () => {
-  const credential = await createInstallationToken({ role: "builder", repository });
+  const credential = await createInstallationToken({ role: "builder", writerProvider, repository });
   if (credential.expectedLogin !== expectedLogin) {
     throw new Error(`Configured builder identity ${credential.expectedLogin} does not match authorized identity ${expectedLogin}.`);
   }
@@ -54,6 +69,7 @@ const client = createBoundBuilderClient({
   receiptPath,
   repository,
   expectedLogin,
+  authority,
   headSha,
   prNumber,
   headRef,

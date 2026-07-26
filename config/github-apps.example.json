@@ -23,6 +23,35 @@
         "your-organization": 22222222
       }
     },
+    "writers": {
+      "claude": {
+        "appId": "YOUR_CLAUDE_WRITER_APP_ID",
+        "expectedLogin": "your-claude-writer[bot]",
+        "privateKeyPath": "~/.config/local-agent-bridge/github-apps/your-claude-writer.pem",
+        "installations": {
+          "your-personal-account": 13131313,
+          "your-organization": 14141414
+        }
+      },
+      "codex": {
+        "appId": "YOUR_CODEX_WRITER_APP_ID",
+        "expectedLogin": "your-codex-writer[bot]",
+        "privateKeyPath": "~/.config/local-agent-bridge/github-apps/your-codex-writer.pem",
+        "installations": {
+          "your-personal-account": 15151515,
+          "your-organization": 16161616
+        }
+      },
+      "antigravity": {
+        "appId": "YOUR_GEMINI_WRITER_APP_ID",
+        "expectedLogin": "your-gemini-writer[bot]",
+        "privateKeyPath": "~/.config/local-agent-bridge/github-apps/your-gemini-writer.pem",
+        "installations": {
+          "your-personal-account": 17171717,
+          "your-organization": 18181818
+        }
+      }
+    },
     "reviewers": {
       "claude": {
         "appId": "YOUR_CLAUDE_REVIEWER_APP_ID",

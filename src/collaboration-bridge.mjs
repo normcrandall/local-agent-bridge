@@ -567,6 +567,12 @@ const githubBuilderSchema = z.object({
   baseSha: z.string().regex(/^[0-9a-f]{40}$/i).optional(),
   headSha: z.string().regex(/^[0-9a-f]{40}$/i),
   expectedLogin: z.string().regex(GITHUB_LOGIN_PATTERN),
+  writerProvider: z.enum(WRITER_AGENTS).optional().describe("Resolved writer identity; normally assigned by the broker."),
+  expectedLogins: z.object({
+    claude: z.string().regex(GITHUB_LOGIN_PATTERN).optional(),
+    codex: z.string().regex(GITHUB_LOGIN_PATTERN).optional(),
+    antigravity: z.string().regex(GITHUB_LOGIN_PATTERN).optional(),
+  }).strict().optional(),
   headRef: z.string().min(1).optional(),
   baseRef: z.string().min(1).optional(),
   allowedOperations: z.array(z.enum(["ensure_pull_request", "read_review_threads", "reply_review_thread", "resolve_review_thread", "mark_ready", "merge", "create_branch", "push_branch", "replace_branch"])).min(1).max(9)
@@ -1018,8 +1024,23 @@ server.registerTool(
         }
         throw error;
       }
+      let writerBoundGithubBuilder = input.githubBuilder;
+      if (input.githubBuilder && effectiveMode === "work") {
+        const { configuredWriterLogin } = await import("./github-app-auth.mjs");
+        const writerProvider = writer || input.writer || startAgent;
+        const expectedLogin = await configuredWriterLogin({ provider: writerProvider });
+        const pinnedLogin = input.githubBuilder.expectedLogins?.[writerProvider] || null;
+        if (pinnedLogin && !sameGitHubAppLogin(pinnedLogin, expectedLogin)) {
+          throw new Error(`Configured ${writerProvider} writer identity ${expectedLogin} does not match the bound authorization ${pinnedLogin}.`);
+        }
+        writerBoundGithubBuilder = {
+          ...input.githubBuilder,
+          expectedLogin,
+          writerProvider,
+        };
+      }
       const effectiveGithubBuilder = workspaceHeadBuilderBinding({
-        githubBuilder: input.githubBuilder,
+        githubBuilder: writerBoundGithubBuilder,
         mode: effectiveMode,
         worktree,
       });

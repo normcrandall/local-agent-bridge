@@ -125,6 +125,7 @@ export function codexToolRequest({
       GITHUB_BUILDER_BASE_SHA: githubBuilder.baseSha || null,
       GITHUB_BUILDER_HEAD_SHA: githubBuilder.headSha,
       GITHUB_BUILDER_EXPECTED_LOGIN: githubBuilder.expectedLogin,
+      GITHUB_BUILDER_WRITER_PROVIDER: githubBuilder.writerProvider || null,
       GITHUB_BUILDER_HEAD_REF: githubBuilder.headRef || null,
       GITHUB_BUILDER_BASE_REF: githubBuilder.baseRef || null,
       GITHUB_BUILDER_ALLOWED_OPERATIONS: githubBuilder.allowedOperations?.join(",") || null,

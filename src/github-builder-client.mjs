@@ -872,7 +872,15 @@ export function createBoundBuilderClient({
   }
 
   function appIdentity(receiptLogin) {
-    return { expectedLogin, verifiedLogin: receiptLogin || cachedVerifiedLogin || expectedLogin };
+    return {
+      expectedLogin,
+      verifiedLogin: receiptLogin || cachedVerifiedLogin || expectedLogin,
+      ...(boundAuthority ? {
+        appId: boundAuthority.appId,
+        installationId: boundAuthority.installationId,
+        repository: boundAuthority.repository,
+      } : {}),
+    };
   }
 
   function branchReceipt({ operation, ref, requestedSha, expectedOldSha = null, observedRemoteSha, outcome, idempotent, verifiedLogin: receiptLogin, reconciled = false }) {
@@ -1544,6 +1552,7 @@ export function createBoundBuilderClient({
       prNumber,
       headSha: activeHeadSha,
       authorizationHeadSha,
+      ...(boundAuthority ? { writerAuthority: boundAuthority } : {}),
     };
   }
 
