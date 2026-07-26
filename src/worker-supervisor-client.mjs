@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import process from "node:process";
 import { collaborationDirectory } from "./collaboration-store.mjs";
 import { sanitizeWorkerEnvironment, supervisorEndpoint } from "./worker-supervisor-protocol.mjs";
+import { processProbe } from "./process-identity-probe.mjs";
 
 const PROTOCOL_VERSION = 1;
 
@@ -124,20 +125,10 @@ async function ensureSupervisor({ runtimeRoot, workspaceRoot, stateDirectory, en
 
 async function stopLegacySupervisor({ previous, runtimeRoot, stateDirectory }) {
   const metadata = JSON.parse(await readFile(join(stateDirectory, "supervisor.json"), "utf8"));
-  const processProbeBinary = process.env.BRIDGE_SUPERVISOR_PS_BIN || "/bin/ps";
-  const processProbe = (field) => {
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const result = spawnSync(processProbeBinary, ["-p", String(previous.supervisorPid), "-o", `${field}=`], {
-        encoding: "utf8",
-        timeout: 2_000,
-      });
-      const value = result.status === 0 ? result.stdout?.trim() : "";
-      if (value) return value;
-    }
-    return null;
-  };
-  const command = processProbe("command");
-  const observedStart = processProbe("lstart");
+  const commandRes = processProbe(previous.supervisorPid, "command");
+  const observedStartRes = processProbe(previous.supervisorPid, "lstart");
+  const command = commandRes.available ? commandRes.value : null;
+  const observedStart = observedStartRes.available ? observedStartRes.value : null;
   const expectedStartedAt = metadata.startedAt || previous.startedAt;
   const observedStartedAtMs = Date.parse(observedStart || "");
   const expectedStartedAtMs = Date.parse(expectedStartedAt || "");
