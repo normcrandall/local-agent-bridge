@@ -320,6 +320,7 @@ export function createBoundBuilderClient({
   requiredReviewStatusContext = "agent-review",
   trustedReviewLogins = [],
   trustedReviewAppIds = [],
+  trustedWriterLogins = [],
   trustedHumanReviewLogins = [],
   mergeEnforcement = "broker",
   allowedOperations = ["ensure_pull_request", "read_review_threads", "reply_review_thread", "resolve_review_thread", "mark_ready"],
@@ -828,7 +829,7 @@ export function createBoundBuilderClient({
       headSha: activeHeadSha,
       repository,
       trustedReviewerLogins: trustedReviewLogins,
-      trustedWriterLogins: [expectedLogin],
+      trustedWriterLogins: [...new Set([expectedLogin, ...trustedWriterLogins])],
     });
     let enforcement = resolveGitHubMergeEnforcement({ configuredMode: mergeEnforcement });
     if (mergeEnforcement !== "broker") {

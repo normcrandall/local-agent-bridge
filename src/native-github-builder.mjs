@@ -48,6 +48,9 @@ export async function mergePullRequestWithBuilder({
     appRoles.roles?.reviewer?.appId,
     ...Object.values(appRoles.roles?.reviewers || {}).map((reviewer) => reviewer.appId),
   ].filter(Boolean).map(Number);
+  const trustedWriterLogins = Object.values(appRoles.roles?.writers || {})
+    .map((writer) => writer.expectedLogin)
+    .filter(Boolean);
   const builder = clientFactory({
     repository,
     prNumber,
@@ -60,6 +63,7 @@ export async function mergePullRequestWithBuilder({
     requiredReviewStatusContext: "agent-review",
     trustedReviewLogins,
     trustedReviewAppIds,
+    trustedWriterLogins,
     trustedHumanReviewLogins: appRoles.mergePolicy?.trustedHumanReviewers || [],
     mergeEnforcement: deliveryPolicy.decisions.configuredMergeEnforcement.value,
   });

@@ -503,6 +503,7 @@ const dispositionComment = ({
   dispositionHead = headSha,
   disposition = "fixed",
   dispositionRepository = "owner/repo",
+  writerLogin = "builder[bot]",
   isResolved = false,
 } = {}) => ({
   id: "thread-actionable",
@@ -515,14 +516,14 @@ const dispositionComment = ({
     {
       body: `Handled.\n\n${writerDispositionMarker({
         headSha: dispositionHead,
-        writerLogin: "builder[bot]",
+        writerLogin,
         disposition,
         rationale: disposition === "declined" ? "The proposed behavior conflicts with the public contract." : "",
         followUpUrl: disposition === "follow_up" ? `https://github.com/${dispositionRepository}/issues/149` : null,
         repository: dispositionRepository,
       })}`,
       url: "https://github.test/reply/actionable",
-      author: { login: "builder", __typename: "Bot" },
+      author: { login: writerLogin.replace(/\[bot\]$/i, ""), __typename: "Bot" },
     },
   ] },
 });
@@ -592,6 +593,16 @@ const followUpMerge = await createBoundBuilderClient({
 }).merge({ method: "squash" });
 assert.equal(followUpMerge.reviewReadiness.ready, true);
 assert.equal(followUpMerge.reviewReadiness.headSha, headSha);
+
+const providerWriterResolvedApi = fakeGitHub({
+  reviewThreads: [dispositionComment({ writerLogin: "claude-writer[bot]", isResolved: true })],
+});
+const providerWriterMerge = await createBoundBuilderClient({
+  ...base,
+  fetchImpl: providerWriterResolvedApi.fetchImpl,
+  trustedWriterLogins: ["claude-writer[bot]"],
+}).merge({ method: "squash" });
+assert.equal(providerWriterMerge.reviewReadiness.ready, true, "native merge must recognize dispositions from configured provider writer Apps");
 
 const foreignProviderApi = fakeGitHub({
   reviewThreads: [{
