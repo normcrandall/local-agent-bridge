@@ -425,6 +425,27 @@ export function deduplicateOperatorLanes(lanes, { now = Date.now(), includeHisto
   }).sort(compareOperatorLanes);
 }
 
+export function missionControlTabOperatorLanes(viewModel, lanes, {
+  selectedTab = "active",
+  repositoryFilter = null,
+  includeStale = false,
+  staleAfterMs = DEFAULT_STALE_AFTER_MS,
+  now = Date.now(),
+} = {}) {
+  const selected = new Set((viewModel?.collections?.[selectedTab] || [])
+    .map((lane) => lane.key || `${lane.repository}\0${lane.id}`));
+  const source = (lanes || []).filter((lane) => {
+    const key = lane.key || `${lane.repository}\0${lane.id}`;
+    return selected.has(key) && (!repositoryFilter || lane.repository === repositoryFilter);
+  });
+  const preserveTabHistory = ["reviews", "mergeTrain", "history"].includes(selectedTab);
+  return deduplicateOperatorLanes(source, {
+    now,
+    includeHistory: preserveTabHistory || (selectedTab === "needsYou" && includeStale),
+    staleAfterMs,
+  });
+}
+
 export async function loadMissionControlSnapshot({
   stateRoot,
   includeArchived = false,
@@ -1265,24 +1286,43 @@ export function windowPane(rows, contentRows, centerSelection = false, offset = 
   return visible;
 }
 
-function gridMeasurements(width, activePane) {
-  if (width >= 84) {
+function gridMeasurements(width, activePane, paneLayout = null) {
+  if (!paneLayout && width >= 84) {
     const interior = width - 4;
     const repositoryWidth = Math.max(18, Math.min(28, Math.floor(interior * 0.22)));
     const workWidth = Math.max(32, Math.min(52, Math.floor(interior * 0.38)));
-    const detailWidth = interior - repositoryWidth - workWidth;
-    return { paneIndex: null, widths: [repositoryWidth, workWidth, detailWidth] };
+    return { paneIndices: [0, 1, 2], widths: [repositoryWidth, workWidth, interior - repositoryWidth - workWidth] };
+  }
+  const attached = [0, 1, 2].filter((pane) => !paneLayout?.detached?.includes(pane));
+  const visible = paneLayout?.zoomedPane != null && attached.includes(paneLayout.zoomedPane)
+    ? [paneLayout.zoomedPane]
+    : paneLayout?.split === false
+      ? [attached.includes(activePane) ? activePane : attached[0]].filter(Number.isInteger)
+      : attached;
+  if (!visible.length) visible.push(Math.min(2, Math.max(0, activePane)));
+  if (visible.length === 1) return { paneIndices: visible, widths: [Math.max(1, width - 2)] };
+  if (width >= 84) {
+    const interior = width - visible.length - 1;
+    const weights = visible.map((pane) => paneLayout?.weights?.[pane] ?? [0.22, 0.38, 0.40][pane]);
+    const total = weights.reduce((sum, weight) => sum + weight, 0);
+    const widths = weights.map((weight) => Math.max(12, Math.floor(interior * weight / total)));
+    widths[widths.length - 1] += interior - widths.reduce((sum, paneWidth) => sum + paneWidth, 0);
+    return { paneIndices: visible, widths };
   }
   const paneIndex = Math.min(Math.max(0, activePane), 2);
-  return { paneIndex, widths: [Math.max(1, width - 2)] };
+  return { paneIndices: [paneIndex], widths: [Math.max(1, width - 2)] };
 }
 
 function gridLayout(measurements, activePane, titles, panes, contentRows, color) {
-  if (measurements.paneIndex === null) {
-    return renderGrid({ titles, panes, widths: measurements.widths, contentRows, color, activePane });
-  }
-  const paneIndex = measurements.paneIndex;
-  return renderGrid({ titles: [titles[paneIndex]], panes: [panes[paneIndex]], widths: measurements.widths, contentRows, color, activePane: 0 });
+  const indices = measurements.paneIndices;
+  return renderGrid({
+    titles: indices.map((index) => titles[index]),
+    panes: indices.map((index) => panes[index]),
+    widths: measurements.widths,
+    contentRows,
+    color,
+    activePane: Math.max(0, indices.indexOf(activePane)),
+  });
 }
 
 export function renderMissionControl(snapshot, {
@@ -1296,6 +1336,7 @@ export function renderMissionControl(snapshot, {
   activePane = 1,
   detailExpanded = false,
   detailOffset = 0,
+  paneLayout = null,
   selectedRepository = null,
   repositoryLocked = false,
   viewportState = null,
@@ -1314,18 +1355,25 @@ export function renderMissionControl(snapshot, {
   const repositoryCount = new Set(allLanes.map((lane) => lane.repository)).size;
   const headline = `${paint("AGENT BRIDGE MISSION CONTROL", "1;34", color)}  ${paint(`ACTIVE ${counts.active || 0}`, "36;1", color)}  ${paint(`NEEDS YOU ${counts.needs_user || 0}`, counts.needs_user ? "33;1" : "90", color)}  ${paint(`WAITING ${counts.waiting || 0}`, "90", color)}  ${paint(`STOPPED ${stoppedCount}`, stoppedCount ? "31;1" : "90", color)}`;
   lines.push(truncateAnsi(headline, usableWidth));
-  lines.push(truncate(`${formatLocalDateTime(snapshot.generatedAt)} · ${snapshot.mode} · ${repositoryCount} repo${repositoryCount === 1 ? "" : "s"}${snapshot.filter ? ` · ${snapshot.filter}` : ""}`, usableWidth));
+  const tabNames = ["active", "needsYou", "queue", "reviews", "mergeTrain", "history"];
+  const selectedTab = snapshot.selectedTab || ({ live: "active", attention: "needsYou", all: "history" }[snapshot.mode] || "active");
+  const tabs = tabNames.map((tab, index) => {
+    const label = `${index + 1}:${tab === "needsYou" ? "needs you" : tab === "mergeTrain" ? "merge train" : tab}`;
+    return tab === selectedTab ? paint(`[${label}]`, "1;36", color) : paint(label, "90", color);
+  }).join("  ");
+  lines.push(truncateAnsi(tabs, usableWidth));
+  lines.push(truncate(`${formatLocalDateTime(snapshot.generatedAt)} · ${repositoryCount} repo${repositoryCount === 1 ? "" : "s"}${snapshot.filter ? ` · ${snapshot.filter}` : ""}`, usableWidth));
   const quotaFooter = renderProviderQuotaFooter(snapshot.providerQuota, { width: usableWidth, color });
-  const footerRows = quotaFooter.length + (interactive ? (actionMessage ? 2 : 1) : snapshot.mode === "all" ? 1 : 0);
+  const footerRows = quotaFooter.length + (interactive ? (actionMessage ? 3 : 2) : snapshot.mode === "all" ? 1 : 0);
   const contentRows = Math.max(4, height - lines.length - footerRows - 4);
   const titles = ["REPOSITORIES", "WORK", "DETAILS"];
-  const measurements = gridMeasurements(usableWidth, activePane);
-  const detailWidth = measurements.paneIndex === null
-    ? measurements.widths[2] - 2
-    : measurements.paneIndex === 2 ? measurements.widths[0] - 2 : Math.max(20, Math.floor(usableWidth * 0.35));
-  const workWidth = measurements.paneIndex === null
-    ? measurements.widths[1] - 2
-    : measurements.paneIndex === 1 ? measurements.widths[0] - 2 : Math.max(20, Math.floor(usableWidth * 0.35));
+  const measurements = gridMeasurements(usableWidth, activePane, paneLayout);
+  const widthForPane = (pane, fallback) => {
+    const renderedIndex = measurements.paneIndices.indexOf(pane);
+    return renderedIndex >= 0 ? measurements.widths[renderedIndex] - 2 : fallback;
+  };
+  const detailWidth = widthForPane(2, Math.max(20, Math.floor(usableWidth * 0.35)));
+  const workWidth = widthForPane(1, Math.max(20, Math.floor(usableWidth * 0.35)));
   const panes = [
     windowPane(repositoryPane(snapshot, allLanes, repositories, effectiveRepository), contentRows, true),
     windowPane(workPane(lanes, effectiveSelectedIndex, now, Math.max(1, workWidth)), contentRows, true),
@@ -1341,7 +1389,9 @@ export function renderMissionControl(snapshot, {
       : activePane === 1
         ? "WORK · j/k choose lane · Enter details"
         : `DETAILS · j/k scroll · g/G ends · Enter ${detailExpanded ? "collapse" : "expand"}`;
-    lines.push(sliceDisplay(` ${paneHelp}  Tab/⇧Tab/←/→ pane  l/a/h view  o PR  c continue  x cancel  q quit`, usableWidth, { cleanValue: false }));
+    const detached = paneLayout?.detached?.length ? ` · detached ${paneLayout.detached.map((pane) => titles[pane].toLowerCase()).join(",")}` : "";
+    lines.push(sliceDisplay(` ${paneHelp}${detached}  q quit  1-6 tabs  Tab/←/→ pane`, usableWidth, { cleanValue: false }));
+    lines.push(sliceDisplay(" \\ split  +/- resize  z zoom  d detach  D reattach  o PR  c continue  x cancel", usableWidth, { cleanValue: false }));
   } else if (snapshot.mode === "all") {
     lines.push(truncate("Archive preview: bridge cleanup --older-than-days 7", usableWidth));
   }

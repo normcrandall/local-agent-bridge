@@ -18,6 +18,7 @@ import {
   loadMissionControlSnapshot,
   loadTimeline,
   missionControlRepositories,
+  missionControlTabOperatorLanes,
   missionControlVisibleLanes,
   navigationIntent,
   newlyObservedAttentionKeys,
@@ -40,6 +41,11 @@ import {
 import { PORTFOLIO_STATUSES, PORTFOLIO_STATUS_GROUPS } from "../src/portfolio-status.mjs";
 import {
   missionControlActionAvailability,
+  createMissionControlPaneLayout,
+  missionControlPaneControlIntent,
+  missionControlPaneFocusIntent,
+  missionControlPaneLayoutIntent,
+  missionControlVisiblePanes,
   missionControlConfirmation,
   missionControlCopyText,
   missionControlPlatformCommands,
@@ -63,6 +69,43 @@ assert.equal(paneFocusIntent("\t", 0), 1);
 assert.equal(paneFocusIntent("\x1b[C", 2), 0);
 assert.equal(paneFocusIntent("\x1b[D", 0), 2);
 assert.equal(paneFocusIntent("j", 1), 1);
+const defaultPaneLayout = createMissionControlPaneLayout();
+assert.equal(defaultPaneLayout.split, true);
+assert.deepEqual(defaultPaneLayout.detached, []);
+assert.equal(missionControlPaneLayoutIntent(defaultPaneLayout, "z", 2).zoomedPane, 2);
+assert.equal(missionControlPaneLayoutIntent({ ...defaultPaneLayout, zoomedPane: 2 }, "z", 2).zoomedPane, null);
+assert.deepEqual(missionControlPaneLayoutIntent(defaultPaneLayout, "d", 0).detached, [0]);
+assert.deepEqual(missionControlPaneLayoutIntent({ ...defaultPaneLayout, detached: [0] }, "d", 0).detached, []);
+assert.equal(missionControlPaneLayoutIntent(defaultPaneLayout, "\\", 1).split, false);
+const enlargedPaneLayout = missionControlPaneLayoutIntent(defaultPaneLayout, "+", 1);
+assert.ok(enlargedPaneLayout.weights[1] > defaultPaneLayout.weights[1]);
+assert.ok(missionControlPaneLayoutIntent(enlargedPaneLayout, "+", 1).weights[1] > enlargedPaneLayout.weights[1]);
+const extremePaneLayout = createMissionControlPaneLayout({ weights: [0.0001, 0.1, 1000] });
+assert.ok(extremePaneLayout.weights.every((weight) => weight >= 0.15 - Number.EPSILON && weight <= 0.7 + Number.EPSILON));
+assert.ok(Math.abs(extremePaneLayout.weights.reduce((sum, weight) => sum + weight, 0) - 1) < 1e-12);
+const zoomedDetails = missionControlPaneControlIntent(defaultPaneLayout, "z", 2);
+assert.equal(zoomedDetails.activePane, 2);
+assert.equal(missionControlPaneFocusIntent(zoomedDetails.layout, "\t", 2), 2, "focus stays on the only visible zoomed pane");
+const collapsedWork = missionControlPaneControlIntent({ ...defaultPaneLayout, split: false }, "\t", 1);
+assert.equal(collapsedWork.activePane, 2, "collapsed split mode still navigates among attached panes");
+const detachedWork = missionControlPaneControlIntent(defaultPaneLayout, "d", 1);
+assert.deepEqual(detachedWork.layout.detached, [1]);
+assert.equal(detachedWork.activePane, 2, "detaching the focused pane moves focus to a visible pane");
+assert.deepEqual(detachedWork.operation, { type: "detached", pane: 1 });
+const detachedDetails = missionControlPaneControlIntent(detachedWork.layout, "d", detachedWork.activePane);
+assert.deepEqual(detachedDetails.layout.detached, [1, 2]);
+assert.equal(detachedDetails.activePane, 0, "detaching a second pane leaves focus on the sole visible pane");
+const reattachedDetails = missionControlPaneControlIntent(detachedDetails.layout, "d", detachedDetails.activePane);
+assert.deepEqual(reattachedDetails.layout.detached, [1]);
+assert.deepEqual(reattachedDetails.operation, { type: "reattached", pane: 2 });
+const reattachedWork = missionControlPaneControlIntent(reattachedDetails.layout, "D", reattachedDetails.activePane);
+assert.deepEqual(reattachedWork.layout.detached, []);
+assert.deepEqual(reattachedWork.operation, { type: "reattached", pane: 1 });
+assert.deepEqual(missionControlPaneLayoutIntent({ ...defaultPaneLayout, detached: [0, 1] }, "d", 0).detached, [1], "d reattaches the requested detached pane");
+assert.deepEqual(missionControlPaneLayoutIntent({ ...defaultPaneLayout, detached: [0, 1] }, "D", 2).detached, [0], "D reattaches the most recently detached pane");
+const corruptAllDetached = createMissionControlPaneLayout({ detached: [0, 1, 2] });
+assert.deepEqual(corruptAllDetached.detached, [0, 1]);
+assert.deepEqual(missionControlVisiblePanes(corruptAllDetached, 1), [2], "an all-detached state must retain a visible fallback");
 assert.equal(blockedReason({ lifecyclePhase: "blocked", portfolio: { blockedBy: ["issue-672"] } }), "Waiting for issue #672 to complete.");
 assert.equal(blockedReason({ lifecyclePhase: "blocked", blocker: { error: "Reviewer provider is unavailable." } }), "Reviewer provider is unavailable.");
 assert.equal(blockedReason({ lifecyclePhase: "blocked" }), "No blocking reason was recorded by the coordinator.");
@@ -985,6 +1028,53 @@ try {
   assert.match(noColor, /│ DETAILS/);
   assert.doesNotMatch(noColor, /SELECTED LANE/);
   assert.match(noColor, /ITEM\s+AGENT\s+ROLE\s+UPDATED/);
+  assert.match(noColor, /q quit/);
+  assert.match(noColor, /D reattach/);
+  const collapsedPaneOutput = renderMissionControl(attention, {
+    selectedIndex, timeline, width: 120, height: 20, color: false, activePane: 1,
+    paneLayout: { ...defaultPaneLayout, split: false },
+  });
+  assert.match(collapsedPaneOutput, /│ WORK/);
+  assert.doesNotMatch(collapsedPaneOutput, /│ REPOSITORIES|│ DETAILS/);
+  const reviewTabOutput = renderMissionControl({
+    ...attention,
+    selectedTab: "reviews",
+    operatorLanes: [{ ...attention.operatorLanes[0], id: "review-tab-only", alias: "review-tab-only", prNumber: null, issueNumber: null }],
+  }, { width: 120, height: 20, color: false });
+  assert.match(reviewTabOutput, /\[4:reviews\]/);
+  assert.match(reviewTabOutput, /review-tab-only/);
+  const mergeTabOutput = renderMissionControl({
+    ...attention,
+    selectedTab: "mergeTrain",
+    operatorLanes: [{ ...attention.operatorLanes[0], id: "merge-tab-only", alias: "merge-tab-only", prNumber: null, issueNumber: null }],
+  }, { width: 120, height: 20, color: false });
+  assert.match(mergeTabOutput, /\[5:merge train\]/);
+  assert.match(mergeTabOutput, /merge-tab-only/);
+  const staleTabAt = Date.parse("2026-07-26T18:00:00.000Z");
+  const staleReviewLane = {
+    ...attention.operatorLanes[0],
+    id: "stale-review-tab", alias: "stale-review-tab", prNumber: null, issueNumber: null,
+    key: "veliqon/example\0stale-review-tab", mode: "review", lifecyclePhase: "reviewing",
+    createdAt: new Date(staleTabAt - 30 * 60 * 60 * 1_000).toISOString(),
+    updatedAt: new Date(staleTabAt - 25 * 60 * 60 * 1_000).toISOString(),
+  };
+  const staleMergeLane = {
+    ...staleReviewLane,
+    id: "stale-merge-tab", alias: "stale-merge-tab", key: "veliqon/example\0stale-merge-tab",
+    mode: "work", lifecyclePhase: "integrating", mergeTrain: { queued: true },
+  };
+  assert.equal(missionControlTabOperatorLanes({ collections: { reviews: [staleReviewLane] } }, [staleReviewLane], {
+    selectedTab: "reviews", now: staleTabAt, staleAfterMs: 24 * 60 * 60 * 1_000,
+  }).length, 1, "a stale review remains visible in the selected Reviews tab");
+  assert.equal(missionControlTabOperatorLanes({ collections: { mergeTrain: [staleMergeLane] } }, [staleMergeLane], {
+    selectedTab: "mergeTrain", now: staleTabAt, staleAfterMs: 24 * 60 * 60 * 1_000,
+  }).length, 1, "a stale integration remains visible in the selected Merge Train tab");
+  const allDetachedFallback = renderMissionControl(attention, {
+    width: 120, height: 20, color: false, activePane: 2,
+    paneLayout: { detached: [0, 1, 2], split: true },
+  });
+  assert.match(allDetachedFallback, /│ DETAILS/);
+  assert.doesNotMatch(allDetachedFallback, /^┌┐$/m, "a corrupt all-detached layout must render a real fallback pane");
   assert.match(noColor, /WORK · j\/k choose lane · Enter details/);
 
   const trustDiagnosticLane = {

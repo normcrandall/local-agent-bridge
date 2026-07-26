@@ -113,25 +113,26 @@ export function createMissionControlSubscriptionClient({
     });
   };
 
-  const resync = async (reason = "snapshot") => {
-    const snapshot = await snapshotReader(transport);
+  const resync = async (reason = "snapshot", signal) => {
+    const snapshot = await snapshotReader({ ...transport, signal });
     eventState = createMissionControlEventState(snapshot);
     if (reason !== "bootstrap") resyncCount += 1;
     await publish(reason, 0);
     return { status: reason, eventCount: 0, cursor: eventState.cursor };
   };
 
-  const pollOnce = async () => {
+  const pollOnce = async ({ signal } = {}) => {
     if (stopped) return { status: "stopped", eventCount: 0, cursor: eventState?.cursor ?? null };
-    if (!eventState) return resync("bootstrap");
+    if (!eventState) return resync("bootstrap", signal);
     const result = await eventReader({
       ...transport,
       streamId: eventState.streamId,
       cursor: eventState.cursor,
       maxEvents,
       waitMs,
+      signal,
     });
-    if (result.resyncRequired) return resync(`resync:${result.reason || "server_requested"}`);
+    if (result.resyncRequired) return resync(`resync:${result.reason || "server_requested"}`, signal);
     if (!Array.isArray(result.events) || result.events.length === 0) {
       return { status: "idle", eventCount: 0, cursor: eventState.cursor };
     }
@@ -140,7 +141,7 @@ export function createMissionControlSubscriptionClient({
     for (const event of result.events) {
       next = reduceMissionControlEvent(next, event);
       if (next.sync?.status === "resync_required") {
-        return resync(`resync:${next.sync.reason || "reducer_requested"}`);
+        return resync(`resync:${next.sync.reason || "reducer_requested"}`, signal);
       }
     }
     eventState = next;
@@ -153,7 +154,7 @@ export function createMissionControlSubscriptionClient({
     running = (async () => {
       while (!stopped && !signal?.aborted) {
         try {
-          const result = await pollOnce();
+          const result = await pollOnce({ signal });
           if (result.status === "more") {
             consecutiveResyncs = 0;
             continue;

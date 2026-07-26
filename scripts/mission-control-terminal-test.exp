@@ -41,6 +41,26 @@ if {[clock milliseconds] > $redrawDeadline} {
   fail $stateRoot
 }
 set timeout 15
+expect "1:active"
+after 100
+send -- "\t"
+expect "Focused details pane."
+send -- "z"
+expect "Zoomed details pane."
+send -- "\t"
+expect "Focus remains on details pane."
+send -- "+"
+expect "Resized details pane."
+send -- "d"
+expect "Detached details pane. Focused work pane."
+send -- "D"
+expect "Reattached details pane."
+send -- "6"
+expect -exact {[6:history]}
+send -- "s"
+expect -exact {[2:needs you]}
+after 100
+set quitStarted [clock milliseconds]
 send -- "q"
 expect {
   -exact "\033\[?25h\033\[?1049l" {}
@@ -54,6 +74,7 @@ expect {
   eof { fail $stateRoot }
 }
 expect "INPUT_OK"
+if {[expr {[clock milliseconds] - $quitStarted}] >= 1000} { fail $stateRoot }
 send -- "exit\r"
 expect eof
 file delete -force $stateRoot
