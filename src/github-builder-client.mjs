@@ -199,6 +199,10 @@ function isRemoteCasRejection(stderr) {
   return /\[rejected\]|\[remote rejected\]|stale info|non-fast-forward|fetch first|already exists/.test(stderr || "");
 }
 
+function isRemotePermissionRejection(stderr) {
+  return /\b(401|403)\b|permission denied|forbidden|not authorized|authentication failed|access denied|resource not accessible/i.test(stderr || "");
+}
+
 function headers(token) {
   return {
     Accept: "application/vnd.github+json",
@@ -1038,7 +1042,7 @@ export function createBoundBuilderClient({
     operation, ref, requestedSha, expectedOldSha = null, observedRemoteSha,
     outcome, idempotent, verifiedLogin: receiptLogin, reconciled = false,
     readBackRetryCount = 0, observedIntermediateShas = [], readBackObservations = [],
-    mutationResponse = null,
+    mutationResponse = null, mutationFailure = null,
   }) {
     const identity = appIdentity(receiptLogin);
     return persistReceipt({
@@ -1058,6 +1062,7 @@ export function createBoundBuilderClient({
       observedIntermediateShas,
       ...(readBackObservations.length ? { readBackObservations } : {}),
       ...(mutationResponse ? { mutationResponse } : {}),
+      ...(mutationFailure ? { mutationFailure } : {}),
       idempotent,
       ...(reconciled ? { reconciled: true } : {}),
       appIdentity: identity,
@@ -1073,6 +1078,7 @@ export function createBoundBuilderClient({
     operation, ref, requestedSha, expectedOldSha = null, outcome, detail,
     verifiedLogin: receiptLogin, observedRemoteSha = null, readBackRetryCount = 0,
     observedIntermediateShas = [], readBackObservations = [], mutationResponse = null,
+    mutationFailure = null,
   }) {
     return persistReceipt({
       operationId: branchOperationId({ operation, ref, requestedSha, expectedOldSha }),
@@ -1088,6 +1094,7 @@ export function createBoundBuilderClient({
       observedIntermediateShas,
       ...(readBackObservations.length ? { readBackObservations } : {}),
       ...(mutationResponse ? { mutationResponse } : {}),
+      ...(mutationFailure ? { mutationFailure } : {}),
       outcome,
       deliveryOutcome: classifyDeliveryOutcome({ outcome }),
       appIdentity: appIdentity(receiptLogin),
@@ -1104,6 +1111,17 @@ export function createBoundBuilderClient({
       code: Number.isInteger(response.code) ? response.code : null,
       stdout: Buffer.isBuffer(response.stdout) ? response.stdout.toString("utf8").slice(0, 2_000) : String(response.stdout || "").slice(0, 2_000),
       stderr: String(response.stderr || "").slice(0, 2_000),
+    };
+  }
+
+  function mutationFailureEvidence(error) {
+    if (!error) return null;
+    return {
+      message: String(error.message || error).slice(0, 2_000),
+      code: Number.isInteger(error.code) ? error.code : null,
+      timedOut: error.timedOut === true,
+      stdout: Buffer.isBuffer(error.stdout) ? error.stdout.toString("utf8").slice(0, 2_000) : String(error.stdout || "").slice(0, 2_000),
+      stderr: String(error.stderr || "").slice(0, 2_000),
     };
   }
 
@@ -1188,13 +1206,39 @@ export function createBoundBuilderClient({
   async function reconcileBeforeMutation({ operation, ref, sha, encodedBranch, activeToken, verifiedLogin: receiptLogin }) {
     const pending = indeterminateRefs.get(ref);
     let currentRef;
-    try {
-      currentRef = await readRemoteBranch({ encodedBranch, activeToken });
-    } catch (error) {
-      if (pending) {
-        throw new Error(`Ref ${ref} has an indeterminate prior mutation and remote read-back is still unavailable; read-only reconciliation must succeed before retry: ${error.message}`);
+    const observations = [];
+    const intermediateShas = [];
+    let retryCount = 0;
+    for (let attempt = 1; attempt <= (pending ? refReadBackMaxAttempts : 1); attempt += 1) {
+      try {
+        currentRef = await readRemoteBranch({ encodedBranch, activeToken });
+      } catch (error) {
+        if (pending) {
+          throw new Error(`Ref ${ref} has an indeterminate prior mutation and remote read-back is still unavailable; read-only reconciliation must succeed before retry: ${error.message}`);
+        }
+        throw error;
       }
-      throw error;
+      if (!pending) break;
+      const observedSha = currentRef?.object?.sha ?? null;
+      const classification = observedSha === pending.requestedSha
+        ? "current"
+        : observedSha === null
+          ? "missing_ref"
+          : pending.expectedOldSha !== null && observedSha === pending.expectedOldSha
+            ? "stale_previous_sha"
+            : "unexpected_sha";
+      observations.push({ attempt, classification, observedSha });
+      if (classification === "current") break;
+      if (observedSha !== null) intermediateShas.push(observedSha);
+      const retryable = classification === "stale_previous_sha"
+        || (pending.operation === "create_branch" && classification === "missing_ref");
+      if (!retryable) break;
+      if (attempt === refReadBackMaxAttempts) {
+        throw new Error(`Ref ${ref} has an indeterminate prior mutation and remote read-back remained ${classification} after ${attempt} attempts; read-only reconciliation must observe a terminal ref state before retry.`);
+      }
+      const delayMs = readBackDelayMs(retryCount);
+      retryCount += 1;
+      await sleep(delayMs);
     }
     if (!pending) return { currentRef, reconciledReceipt: null };
 
@@ -1213,7 +1257,8 @@ export function createBoundBuilderClient({
           reconciledReceipt: branchReceipt({
             operation, ref, requestedSha: sha, expectedOldSha: pending.expectedOldSha,
             observedRemoteSha: observedSha, outcome: "reconciled", idempotent: false, reconciled: true,
-            verifiedLogin: receiptLogin,
+            verifiedLogin: receiptLogin, readBackRetryCount: retryCount,
+            observedIntermediateShas: intermediateShas, readBackObservations: observations,
           }),
         };
       }
@@ -1241,11 +1286,22 @@ export function createBoundBuilderClient({
     return { currentRef, reconciledReceipt: null };
   }
 
-  // Shared handling for a failed push: one bounded read-back decides between
-  // reconciled success, determinate failure, and explicit indeterminate state.
+  // A remote CAS or permission rejection is determinate: the server refused
+  // the mutation. Every other Git transport failure is ambiguous (the remote
+  // may have accepted the receive-pack before the response was lost), so it
+  // must use the same bounded read-back reconciliation as a successful push.
   async function resolvePushFailure({ operation, ref, sha, expectedOldSha, encodedBranch, activeToken, error, verifiedLogin: receiptLogin }) {
+    const determinateRejection = isRemoteCasRejection(error.stderr) || isRemotePermissionRejection(error.stderr);
+    if (!determinateRejection) {
+      return verifyMutation({
+        operation, ref, sha, expectedOldSha, encodedBranch, activeToken,
+        verifiedLogin: receiptLogin, outcome: "reconciled", mutationFailure: error,
+      });
+    }
+
     let readBack = null;
     let readBackError = null;
+    const failureEvidence = mutationFailureEvidence(error);
     try {
       readBack = await readRemoteBranch({ encodedBranch, activeToken });
     } catch (caught) {
@@ -1256,7 +1312,7 @@ export function createBoundBuilderClient({
       recordFailureReceipt({
         operation, ref, requestedSha: sha, expectedOldSha, outcome: "indeterminate",
         detail: `push transport failed and remote read-back is unavailable: ${readBackError.message}`,
-        verifiedLogin: receiptLogin,
+        verifiedLogin: receiptLogin, mutationFailure: failureEvidence,
       });
       throw new Error(`Mutation outcome for ${ref} is indeterminate: the push transport failed (${error.message}) and remote read-back is unavailable (${readBackError.message}). Perform read-only reconciliation before any retry.`);
     }
@@ -1264,11 +1320,19 @@ export function createBoundBuilderClient({
       return branchReceipt({
         operation, ref, requestedSha: sha, expectedOldSha, observedRemoteSha: sha,
         outcome: "reconciled", idempotent: false, reconciled: true, verifiedLogin: receiptLogin,
+        mutationFailure: failureEvidence,
       });
     }
     recordFailureReceipt({
       operation, ref, requestedSha: sha, expectedOldSha, outcome: "failed",
       detail: error.message, verifiedLogin: receiptLogin,
+      observedRemoteSha: readBack?.object?.sha ?? null,
+      readBackObservations: [{
+        attempt: 1,
+        classification: readBack?.object?.sha === expectedOldSha ? "stale_previous_sha" : readBack ? "unexpected_sha" : "missing_ref",
+        observedSha: readBack?.object?.sha ?? null,
+      }],
+      mutationFailure: failureEvidence,
     });
     if (isRemoteCasRejection(error.stderr)) {
       throw new Error(operation === "create_branch"
@@ -1293,9 +1357,11 @@ export function createBoundBuilderClient({
   // state is absence; missing refs are therefore retryable only for create.
   async function verifyMutation({
     operation, ref, sha, expectedOldSha, encodedBranch, activeToken,
-    verifiedLogin: receiptLogin, outcome, mutationResponse,
+    verifiedLogin: receiptLogin, outcome, mutationResponse, mutationFailure,
   }) {
     const responseEvidence = mutationResponseEvidence(mutationResponse);
+    const failureEvidence = mutationFailureEvidence(mutationFailure);
+    const ambiguousTransport = failureEvidence !== null;
     const observations = [];
     const intermediateShas = [];
     let retryCount = 0;
@@ -1313,6 +1379,7 @@ export function createBoundBuilderClient({
         observations.push({ attempt, classification, error: String(error.message || error).slice(0, 500), status: error.status ?? null });
         const evidence = {
           mutationResponse: responseEvidence,
+          mutationFailure: failureEvidence,
           readBackRetryCount: retryCount,
           observedIntermediateShas: intermediateShas,
           readBackObservations: observations,
@@ -1324,9 +1391,10 @@ export function createBoundBuilderClient({
           verifiedLogin: receiptLogin, readBackRetryCount: retryCount,
           observedIntermediateShas: intermediateShas, readBackObservations: observations,
           mutationResponse: responseEvidence,
+          mutationFailure: failureEvidence,
         });
         throwReadBackFailure(
-          `Mutation for ${ref} completed at the transport but remote read-back failed (${classification}); state is indeterminate and requires read-only reconciliation before retry: ${error.message}`,
+          `Mutation outcome for ${ref} is indeterminate: ${ambiguousTransport ? `the push transport failed (${failureEvidence.message}) and ` : ""}remote read-back failed (${classification}): ${error.message}. Perform read-only reconciliation before any retry.`,
           evidence,
         );
       }
@@ -1345,6 +1413,7 @@ export function createBoundBuilderClient({
           outcome, idempotent: false, verifiedLogin: receiptLogin,
           readBackRetryCount: retryCount, observedIntermediateShas: intermediateShas,
           readBackObservations: observations, mutationResponse: responseEvidence,
+          mutationFailure: failureEvidence, reconciled: ambiguousTransport,
         });
       }
       if (observedSha !== null) intermediateShas.push(observedSha);
@@ -1360,27 +1429,30 @@ export function createBoundBuilderClient({
 
       const evidence = {
         mutationResponse: responseEvidence,
+        mutationFailure: failureEvidence,
         readBackRetryCount: retryCount,
         observedIntermediateShas: intermediateShas,
         readBackObservations: observations,
       };
       const exhausted = retryable;
-      if (exhausted) {
+      const uncertain = exhausted || ambiguousTransport;
+      if (uncertain) {
         indeterminateRefs.set(ref, { operation, requestedSha: sha, expectedOldSha, recordedAt: new Date().toISOString() });
       }
       recordFailureReceipt({
         operation, ref, requestedSha: sha, expectedOldSha,
-        outcome: exhausted ? "indeterminate" : "failed",
-        detail: exhausted
-          ? `read-back remained ${classification} after ${attempt} attempts; expected ${sha}, last observed ${observedSha || "none"}`
+        outcome: uncertain ? "indeterminate" : "failed",
+        detail: uncertain
+          ? `${ambiguousTransport ? `push transport failed (${failureEvidence.message}); ` : ""}read-back remained ${classification} after ${attempt} attempts; expected ${sha}, last observed ${observedSha || "none"}`
           : `read-back ${classification}: expected ${sha}, found ${observedSha || "none"}`,
         verifiedLogin: receiptLogin, observedRemoteSha: observedSha,
         readBackRetryCount: retryCount, observedIntermediateShas: intermediateShas,
         readBackObservations: observations, mutationResponse: responseEvidence,
+        mutationFailure: failureEvidence,
       });
       throwReadBackFailure(
-        exhausted
-          ? `Read-back validation remained stale after ${attempt} attempts: expected ${sha}, found ${observedSha || "none"}; state is indeterminate and requires read-only reconciliation before retry.`
+        uncertain
+          ? `Mutation outcome for ${ref} is indeterminate: ${ambiguousTransport ? `the push transport failed (${failureEvidence.message}) and ` : ""}read-back remained ${classification} after ${attempt} attempts; expected ${sha}, found ${observedSha || "none"}. Perform read-only reconciliation before any retry.`
           : `Read-back validation failed (${classification}): expected ${sha}, found ${observedSha || "none"}.`,
         evidence,
       );

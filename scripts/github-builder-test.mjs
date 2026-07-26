@@ -137,6 +137,7 @@ git(["push", bareRepoPath, `${baseCommitSha}:refs/heads/readback-missing`], { cw
 git(["push", bareRepoPath, `${baseCommitSha}:refs/heads/readback-auth`], { cwd: localRepoPath });
 git(["push", bareRepoPath, `${baseCommitSha}:refs/heads/readback-transport`], { cwd: localRepoPath });
 git(["push", bareRepoPath, `${baseCommitSha}:refs/heads/readback-exhausted`], { cwd: localRepoPath });
+git(["push", bareRepoPath, `${baseCommitSha}:refs/heads/readback-backoff`], { cwd: localRepoPath });
 git(["push", bareRepoPath, `${divergedSha}:refs/heads/readback-replace-exhausted`], { cwd: localRepoPath });
 
 // Git smart-HTTP servers that enforce exact Basic credentials from the askpass
@@ -1379,6 +1380,32 @@ assert.deepEqual(staleReplace.readBackObservations.map(({ classification }) => c
 assert.deepEqual(replaceReadBackDelays, [100]);
 assert.equal(gitOut(["rev-parse", "refs/heads/readback-replace"], { cwd: bareRepoPath }), headSha);
 
+const cappedBackoffDelays = [];
+const cappedBackoff = await createBoundBuilderClient({
+  ...base,
+  headRef: "readback-backoff",
+  fetchImpl: fakeGitHub({
+    branchShas: { "readback-backoff": [baseCommitSha, baseCommitSha, baseCommitSha, baseCommitSha, baseCommitSha, baseCommitSha, headSha] },
+  }).fetchImpl,
+  sleep: async (delayMs) => { cappedBackoffDelays.push(delayMs); },
+  random: () => 0.5,
+  refReadBackMaxAttempts: 6,
+}).pushBranch({ ref: "refs/heads/readback-backoff", sha: headSha, oldSha: baseCommitSha });
+assert.equal(cappedBackoff.outcome, "fast_forwarded");
+assert.equal(cappedBackoff.readBackRetryCount, 5);
+assert.deepEqual(cappedBackoffDelays, [100, 200, 400, 800, 1_000]);
+
+for (const invalidOptions of [
+  { refReadBackMaxAttempts: 0 },
+  { refReadBackMaxAttempts: 11 },
+  { refReadBackBaseDelayMs: -1 },
+  { refReadBackBaseDelayMs: 10_001 },
+  { sleep: null },
+  { random: null },
+]) {
+  assert.throws(() => createBoundBuilderClient({ ...base, ...invalidOptions, fetchImpl: fakeGitHub().fetchImpl }));
+}
+
 // Non-stale read-back failures never consume the retry budget. The thrown
 // error and durable terminal receipt retain both transport and observation
 // evidence so a coordinator can reconcile without guessing or re-pushing.
@@ -1532,6 +1559,58 @@ assert.equal(lostResponse.reconciled, true);
 assert.equal(lostResponse.outcome, "reconciled");
 assert.equal(lostResponse.observedRemoteSha, headSha);
 assert.equal(gitOut(["rev-parse", "refs/heads/lost-response-branch"], { cwd: bareRepoPath }), headSha);
+
+const lossyStaleReceiptPath = path.join(tmpDir, "lossy-stale-readback.jsonl");
+const lossyStaleDelays = [];
+const lossyStale = await createBoundBuilderClient({
+  ...base,
+  headRef: "lossy-stale-readback",
+  fetchImpl: fakeGitHub({ branchShas: { "lossy-stale-readback": [null, null, headSha] } }).fetchImpl,
+  transportUrl: lossyTransportUrl,
+  receiptPath: lossyStaleReceiptPath,
+  sleep: async (delayMs) => { lossyStaleDelays.push(delayMs); },
+  random: () => 0.5,
+}).createBranch({ ref: "refs/heads/lossy-stale-readback", sha: headSha });
+assert.equal(lossyStale.outcome, "reconciled");
+assert.equal(lossyStale.reconciled, true);
+assert.equal(lossyStale.readBackRetryCount, 1);
+assert.deepEqual(lossyStale.readBackObservations.map(({ classification }) => classification), ["missing_ref", "current"]);
+assert.deepEqual(lossyStaleDelays, [100]);
+assert.match(lossyStale.mutationFailure.message, /failed|exit code|hung up|reset/i);
+assert.equal(gitOut(["rev-parse", "refs/heads/lossy-stale-readback"], { cwd: bareRepoPath }), headSha);
+
+const lossyExhaustedReceiptPath = path.join(tmpDir, "lossy-exhausted-readback.jsonl");
+const lossyExhaustedDelays = [];
+const lossyExhaustedClient = createBoundBuilderClient({
+  ...base,
+  headRef: "lossy-exhausted-readback",
+  fetchImpl: fakeGitHub({ branchShas: { "lossy-exhausted-readback": [null, null, null] } }).fetchImpl,
+  transportUrl: lossyTransportUrl,
+  receiptPath: lossyExhaustedReceiptPath,
+  sleep: async (delayMs) => { lossyExhaustedDelays.push(delayMs); },
+  random: () => 0.5,
+  refReadBackMaxAttempts: 2,
+});
+let lossyExhaustedError = null;
+try {
+  await lossyExhaustedClient.createBranch({ ref: "refs/heads/lossy-exhausted-readback", sha: headSha });
+} catch (error) {
+  lossyExhaustedError = error;
+}
+assert.ok(lossyExhaustedError);
+assert.match(lossyExhaustedError.message, /indeterminate/i);
+assert.deepEqual(lossyExhaustedError.readBackEvidence.readBackObservations.map(({ classification }) => classification), ["missing_ref", "missing_ref"]);
+const lossyExhaustedReceipt = fs.readFileSync(lossyExhaustedReceiptPath, "utf8").trim().split("\n").map(JSON.parse).at(-1);
+assert.equal(lossyExhaustedReceipt.outcome, "indeterminate");
+assert.equal(lossyExhaustedReceipt.readBackRetryCount, 1);
+assert.match(lossyExhaustedReceipt.mutationFailure.message, /failed|exit code|hung up|reset/i);
+assert.deepEqual(lossyExhaustedDelays, [100]);
+const lossyPushAttemptsAfterExhaustion = lossyServer.pushAttempts;
+await assert.rejects(
+  lossyExhaustedClient.createBranch({ ref: "refs/heads/lossy-exhausted-readback", sha: headSha }),
+  /indeterminate prior mutation.*remained missing_ref/i,
+);
+assert.equal(lossyServer.pushAttempts, lossyPushAttemptsAfterExhaustion, "stale reconciliation must not duplicate the push");
 
 // D2. Reconciliation-unavailable: the response is lost AND remote read-back
 // fails. The client must record an explicit indeterminate state, refuse to
