@@ -62,6 +62,24 @@ async function getAllPages({ fetchImpl, apiUrl, path, token }) {
   throw new Error(`GitHub GET ${path} exceeded the pagination safety limit.`);
 }
 
+export async function assertBoundReviewHead({
+  fetchImpl = fetch,
+  apiUrl = "https://api.github.com",
+  token,
+  repository,
+  prNumber,
+  headSha,
+}) {
+  const prResponse = await fetchImpl(`${apiUrl}/repos/${repository}/pulls/${prNumber}`, {
+    headers: headers(token),
+  });
+  const pullRequest = await responseJson(prResponse, "GitHub pull request lookup");
+  if (pullRequest?.head?.sha !== headSha) {
+    throw new Error(`Pull request head changed: authorized ${headSha}, current ${pullRequest?.head?.sha || "unknown"}.`);
+  }
+  return { headSha, prNumber };
+}
+
 export async function publishBoundReviewGate({
   fetchImpl, apiUrl, token, repository, headSha, expectedLogin, reviewState, reviewUrl, context,
 }) {
@@ -125,13 +143,7 @@ export async function submitBoundReview({
     }
   }
 
-  const prResponse = await fetchImpl(`${apiUrl}/repos/${repository}/pulls/${prNumber}`, {
-    headers: headers(token),
-  });
-  const pullRequest = await responseJson(prResponse, "GitHub pull request lookup");
-  if (pullRequest?.head?.sha !== headSha) {
-    throw new Error(`Pull request head changed: authorized ${headSha}, current ${pullRequest?.head?.sha || "unknown"}.`);
-  }
+  await assertBoundReviewHead({ fetchImpl, apiUrl, token, repository, prNumber, headSha });
 
   if (comments.length) {
     const files = await getAllPages({
