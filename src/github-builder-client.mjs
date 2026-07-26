@@ -15,7 +15,7 @@ import {
 } from "./github-merge-enforcement.mjs";
 import { loadBranchReconciliationState, loadNonBranchIntents } from "./builder-operation-store.mjs";
 import { classifyDeliveryOutcome } from "./builder-contract.mjs";
-import { assertGitHubAppPermissions } from "./github-app-auth.mjs";
+import { assertGitHubAppPermissions, sameGitHubAppLogin } from "./github-app-auth.mjs";
 import {
   assertReviewThreadReadiness,
   parseReviewFinding,
@@ -372,7 +372,7 @@ export function createBoundBuilderClient({
     }
   }
   if (prNumber !== null && (!Number.isInteger(prNumber) || prNumber < 1)) throw new Error("prNumber is invalid.");
-  if (trustedHumanReviewLogins.includes(expectedLogin)) {
+  if (trustedHumanReviewLogins.some((login) => sameGitHubAppLogin(login, expectedLogin))) {
     throw new Error("The builder identity cannot be a trusted human reviewer.");
   }
   if (trustedReviewLogins.some((login) => typeof login !== "string" || !login || !login.endsWith("[bot]"))) {

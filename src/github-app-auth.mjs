@@ -25,7 +25,12 @@ export function canonicalGitHubAppLogin(login) {
 
 export function sameGitHubAppLogin(left, right) {
   if (!left || !right) return false;
-  return canonicalGitHubAppLogin(left) === canonicalGitHubAppLogin(right);
+  if (typeof left !== "string" || typeof right !== "string") return false;
+  try {
+    return canonicalGitHubAppLogin(left) === canonicalGitHubAppLogin(right);
+  } catch {
+    return false;
+  }
 }
 
 export function assertGitHubAppPermissions(role, permissions = {}) {

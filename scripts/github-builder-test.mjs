@@ -827,10 +827,12 @@ await assert.rejects(
   }).merge({ method: "squash" }),
   /neither a trusted machine review nor a trusted human approval/i,
 );
-assert.throws(
-  () => createBoundBuilderClient({ ...base, trustedHumanReviewLogins: ["builder[bot]"] }),
-  /builder identity cannot be a trusted human reviewer/i,
-);
+for (const loginVariant of ["builder", "BUILDER", "builder[bot]"]) {
+  assert.throws(
+    () => createBoundBuilderClient({ ...base, trustedHumanReviewLogins: [loginVariant] }),
+    /builder identity cannot be a trusted human reviewer/i,
+  );
+}
 await assert.rejects(
   createBoundBuilderClient({ ...base, prNumber: null, fetchImpl: api.fetchImpl }).merge({ method: "squash" }),
   /bound to a pull request/i,
