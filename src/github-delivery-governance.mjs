@@ -90,7 +90,10 @@ export function assertGithubGovernedWorkStart({
 }
 
 export function governedContinuationBuilder({ deliveryPolicy, currentBuilder, replacementBuilder, issueTarget } = {}) {
-  if (deliveryPolicy?.profile !== "github-governed") return replacementBuilder || currentBuilder || null;
+  if (deliveryPolicy?.profile !== "github-governed") {
+    if (replacementBuilder || currentBuilder) throw new Error("Local-only continuation cannot carry or add a GitHub builder.");
+    return null;
+  }
   if (!currentBuilder || !issueTarget?.repository || !issueTarget?.issueNumber) {
     throw new Error("A GitHub-governed continuation requires its original builder and immutable issue target.");
   }
@@ -100,6 +103,9 @@ export function governedContinuationBuilder({ deliveryPolicy, currentBuilder, re
   }
   if (candidate.issueNumber && candidate.issueNumber !== issueTarget.issueNumber) {
     throw new Error("GitHub-governed continuation cannot change its bound issue target.");
+  }
+  if (currentBuilder.prNumber && candidate.prNumber && candidate.prNumber !== currentBuilder.prNumber) {
+    throw new Error("GitHub-governed continuation cannot change its bound pull request.");
   }
   if (replacementBuilder?.headRef && currentBuilder.headRef && replacementBuilder.headRef !== currentBuilder.headRef) {
     throw new Error("GitHub-governed continuation cannot change its bound publication branch.");
@@ -111,6 +117,7 @@ export function governedContinuationBuilder({ deliveryPolicy, currentBuilder, re
     ...candidate,
     repository: currentBuilder.repository,
     issueNumber: issueTarget.issueNumber,
+    prNumber: currentBuilder.prNumber || candidate.prNumber,
     headRef: currentBuilder.headRef || candidate.headRef,
     baseRef: currentBuilder.baseRef || candidate.baseRef,
   };

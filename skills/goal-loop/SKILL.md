@@ -5,6 +5,8 @@ description: Build a feature, application, document, or other workspace artifact
 
 For work-mode phases, use the machine-default `github-governed` profile when the goal is bound to a GitHub issue and PR; include the hydrated issue binding, self-contained checkout, and builder App. Pass `deliveryProfile: "local-only"` only for deliberately unpublished work and omit all GitHub bindings.
 
+For governed delivery, implement and commit first, record observed verification receipts for the exact clean head, then continue with `githubBuilder.verifiedHeadSha` at that head before enabling `ensure_pull_request`.
+
 # Goal Loop
 
 Drive one concrete objective to verified completion using the persistent collaboration broker. The collaboration ID is the portable goal ID; do not depend on a chair-specific goal feature that other apps cannot inspect.

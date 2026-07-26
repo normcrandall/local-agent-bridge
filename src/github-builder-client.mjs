@@ -17,6 +17,7 @@ import { loadBranchReconciliationState, loadNonBranchIntents } from "./builder-o
 import { classifyDeliveryOutcome } from "./builder-contract.mjs";
 import { assertGitHubAppPermissions, sameGitHubAppLogin } from "./github-app-auth.mjs";
 import {
+  closingIssueReference,
   deliveryIssueSummary,
   mergedDeliverySummary,
   validateGithubGovernedPullRequest,
@@ -314,6 +315,7 @@ export function createBoundBuilderClient({
   headSha,
   prNumber = null,
   issueNumber = null,
+  verifiedHeadSha = null,
   headRef = null,
   baseRef = null,
   baseSha = null,
@@ -465,6 +467,9 @@ export function createBoundBuilderClient({
     const deliveryReceipt = issueNumber
       ? validateGithubGovernedPullRequest({ repository, issueNumber, body, headSha: activeHeadSha })
       : null;
+    if (deliveryReceipt && verifiedHeadSha !== activeHeadSha) {
+      throw new Error(`GitHub-governed publication requires a broker-verified exact head: active ${activeHeadSha}, verified ${verifiedHeadSha || "none"}.`);
+    }
     const [owner] = repository.split("/");
     const encodedRef = headRef.split("/").map(encodeURIComponent).join("/");
     const ref = await request({ ...context, path: `/repos/${repository}/git/ref/heads/${encodedRef}` });
@@ -701,6 +706,9 @@ export function createBoundBuilderClient({
     await identity();
     const pull = await boundPullRequest(context);
     const linkedIssueNumber = issueNumber;
+    if (linkedIssueNumber && !closingIssueReference(repository, linkedIssueNumber).test(String(pull.body || ""))) {
+      throw new Error(`Live pull request body no longer closes immutable issue ${repository}#${linkedIssueNumber}; refusing merge reconciliation.`);
+    }
     const prUrl = pull.html_url || `https://github.com/${repository}/pull/${prNumber}`;
     const recordMergedIssue = async (mergedSha) => {
       if (!linkedIssueNumber) return { status: "not_linked" };

@@ -23,6 +23,8 @@ When Claude is the designated work-mode writer, select `workProfile: implement` 
 
 Use the machine-default `github-governed` delivery profile for issue/PR implementation, with a hydrated issue binding, self-contained checkout, and builder App. Pass `deliveryProfile: "local-only"` only for deliberately unpublished work and omit all GitHub targets, claims, and builders.
 
+Governed publication follows a verified continuation: record observed verification receipts for the committed clean head, then set `githubBuilder.verifiedHeadSha` to that head before enabling `ensure_pull_request`.
+
 Use the same profile distinction for a Codex writer: `implement` keeps network disabled and `deliver` enables the authorized push/PR lifecycle. Pin every council run to an explicit absolute workspace; changing the chair CLI directory does not migrate stored collaboration state.
 
 Claimed autonomous work automatically preflights the eligible cloud writers in fallback order while keeping appended providers on standby. Keep the preferred writer first; standby providers consume no turns until a confirmed provider-local failure transfers the same private checkout and GitHub issue claim without consuming a successful turn. Never transfer indeterminate ownership. Set `providerFailover: { enabled: false }` only when the user explicitly requires a strict provider pin. Only all-provider transient capacity exhaustion may enter `providerRecovery`; mixed configuration, permission, authentication, quota, policy, invalid-request, or transport failures must retain their exact aggregate diagnosis.

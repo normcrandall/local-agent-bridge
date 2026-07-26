@@ -121,6 +121,26 @@ function assertAutonomousDeliveryBinding({ mode, workProfile, githubBuilder }) {
   }
 }
 
+function assertGovernedPublicationVerification({ policy, githubBuilder, repositoryEvidence, verificationPlan, requestedCommands }) {
+  const profile = policy?.deliveryProfile || policy?.profile;
+  if (profile !== "github-governed" || !githubBuilder?.allowedOperations?.includes("ensure_pull_request")) return;
+  if (!githubBuilder.verifiedHeadSha) {
+    throw new Error("GitHub-governed PR publication requires githubBuilder.verifiedHeadSha from broker verification receipts; implement and verify first, then continue with a delivery-bound phase.");
+  }
+  if (githubBuilder.verifiedHeadSha !== repositoryEvidence?.headSha) {
+    throw new Error(`GitHub-governed PR publication head ${githubBuilder.verifiedHeadSha} does not match captured repository head ${repositoryEvidence?.headSha || "unknown"}.`);
+  }
+  if (!requestedCommands?.length) {
+    throw new Error("GitHub-governed PR publication requires at least one risk-based verification command.");
+  }
+  if (verificationPlan?.pendingCommands?.length) {
+    throw new Error(`GitHub-governed PR publication is blocked until exact-head verification receipts exist for: ${verificationPlan.pendingCommands.join(", ")}.`);
+  }
+  const observedCommands = new Set((verificationPlan?.reusable || []).map((receipt) => receipt.command));
+  const missing = requestedCommands.filter((command) => !observedCommands.has(command));
+  if (missing.length) throw new Error(`GitHub-governed PR publication is missing reusable exact-head receipts for: ${missing.join(", ")}.`);
+}
+
 function projectDirectory(requested) {
   const candidate = resolve(WORKSPACE_ROOT, requested || ".");
   if (!existsSync(candidate) || !statSync(candidate).isDirectory()) {
@@ -578,6 +598,7 @@ const githubBuilderSchema = z.object({
   prNumber: z.number().int().min(1).optional(),
   baseSha: z.string().regex(/^[0-9a-f]{40}$/i).optional(),
   headSha: z.string().regex(/^[0-9a-f]{40}$/i),
+  verifiedHeadSha: z.string().regex(/^[0-9a-f]{40}$/i).optional().describe("Exact head backed by reusable broker verification receipts for every requested command."),
   expectedLogin: z.string().regex(GITHUB_LOGIN_PATTERN),
   writerProvider: z.enum(WRITER_AGENTS).optional().describe("Resolved writer identity; normally assigned by the broker."),
   expectedLogins: z.object({
@@ -1107,7 +1128,10 @@ server.registerTool(
         worktree,
       });
       if (effectiveGithubBuilder && resolvedIssueTarget) {
-        effectiveGithubBuilder.issueNumber = resolvedIssueTarget.issueNumber;
+        if (effectiveGithubBuilder.issueNumber && effectiveGithubBuilder.issueNumber !== resolvedIssueTarget.issueNumber) {
+          throw new Error(`githubBuilder issue #${effectiveGithubBuilder.issueNumber} does not match hydrated issue ${resolvedIssueTarget.repository}#${resolvedIssueTarget.issueNumber}.`);
+        }
+        if (!effectiveGithubBuilder.issueNumber) effectiveGithubBuilder.issueNumber = resolvedIssueTarget.issueNumber;
       }
       const writerHydration = effectiveMode === "work"
         ? preflightWriterHydration({
@@ -1177,6 +1201,13 @@ server.registerTool(
         store: evidenceStore,
         repositoryEvidence,
         commands: requestedVerificationCommands,
+      });
+      assertGovernedPublicationVerification({
+        policy: deliveryPolicy,
+        githubBuilder: effectiveGithubBuilder,
+        repositoryEvidence,
+        verificationPlan,
+        requestedCommands: requestedVerificationCommands,
       });
       if (verificationPlan.reusable.length) {
         resolvedTask = `${resolvedTask}\n\n${formatReusableVerification(verificationPlan.reusable)}`;
@@ -2637,6 +2668,13 @@ server.registerTool(
       store: continuationStore,
       repositoryEvidence: continuationEvidence,
       commands: requestedContinuationCommands,
+    });
+    assertGovernedPublicationVerification({
+      policy: current.deliveryPolicy,
+      githubBuilder: activeGithubBuilder,
+      repositoryEvidence: continuationEvidence,
+      verificationPlan: continuationVerificationPlan,
+      requestedCommands: requestedContinuationCommands,
     });
     const continuationMessage = [
       message,

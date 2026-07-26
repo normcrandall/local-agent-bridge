@@ -69,6 +69,16 @@ assert.throws(() => governedContinuationBuilder({
   replacementBuilder: { repository: "owner/repo", issueNumber: 153, headRef: "codex/152", baseRef: "main" },
   issueTarget: { repository: "owner/repo", issueNumber: 152 },
 }), /issue target/);
+assert.throws(() => governedContinuationBuilder({
+  deliveryPolicy: { profile: "github-governed" },
+  currentBuilder: { repository: "owner/repo", issueNumber: 152, prNumber: 175, headRef: "codex/152", baseRef: "main" },
+  replacementBuilder: { repository: "owner/repo", issueNumber: 152, prNumber: 176, headRef: "codex/152", baseRef: "main" },
+  issueTarget: { repository: "owner/repo", issueNumber: 152 },
+}), /bound pull request/);
+assert.throws(() => governedContinuationBuilder({
+  deliveryPolicy: { profile: "local-only" },
+  replacementBuilder: { repository: "owner/repo", issueNumber: 152 },
+}), /Local-only continuation/);
 
 assert.throws(
   () => assertGithubGovernedWorkStart({ policy: localPolicy, mode: "work" }),
