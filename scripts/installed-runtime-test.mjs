@@ -23,6 +23,17 @@ const isolatedGitEnvironment = {
   GIT_CONFIG_SYSTEM: "/dev/null",
   GIT_TERMINAL_PROMPT: "0",
 };
+for (const inherited of [
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_INDEX_FILE",
+  "GIT_COMMON_DIR",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_NAMESPACE",
+]) {
+  delete isolatedGitEnvironment[inherited];
+}
 
 function git(args) {
   return execFileSync("git", args, {
@@ -66,6 +77,8 @@ try {
     encoding: "utf8",
     env: isolatedGitEnvironment,
   });
+  assert.equal(missingRemoteMain.error, undefined,
+    "the portability fixture must be able to run git before checking for origin/main");
   assert.notEqual(missingRemoteMain.status, 0,
     "the portability fixture must not accidentally gain an origin/main ref");
 
@@ -82,6 +95,7 @@ try {
   const source = await inspectSource({ sourceRoot: checkoutRoot });
   const provenanceSource = {
     ...source,
+    root: resolve(temporary, "installer-workspace-that-moved"),
     commit: installedCommit,
     dirty: false,
     dirtyEntries: [],
@@ -126,6 +140,8 @@ try {
     "a remote-free checkout must still reject an installed commit that is not contained in local main");
   assert.match(driftedRuntime.stderr, /not contained in main/,
     "the failure should retain the concrete unmerged-runtime diagnosis");
+  assert.match(driftedRuntime.stderr, new RegExp(divergedCommit),
+    "the failure should identify the exact unmerged installed commit");
 
   await writeInstalledProvenance(runtimeRoot, buildProvenance({
     source: provenanceSource,
