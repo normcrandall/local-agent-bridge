@@ -15,6 +15,7 @@ import {
   extractLinkedPullRequests,
   hydrateClaimedIssueTask,
   hydrationRetryDelayMs,
+  RETRY_AFTER_EXCEEDS_BUDGET,
   isAgentBridgeClaimComment,
   isRetryableHydrationFailure,
 } from "../src/claimed-issue-context.mjs";
@@ -220,7 +221,7 @@ assert.equal(hydrationRetryDelayMs(
   { headers: new Headers({ "retry-after": "Tue, 21 Jul 2026 10:03:03 GMT" }) },
   { attempt: 1, now: () => Date.parse("2026-07-21T10:03:00Z") },
 ), 3_000);
-assert.equal(hydrationRetryDelayMs({ retryAfter: "99" }, { attempt: 1 }), 5_000);
+assert.equal(hydrationRetryDelayMs({ retryAfter: "99" }, { attempt: 1 }), RETRY_AFTER_EXCEEDS_BUDGET);
 
 const dependencies = {
   blockedBy: [{ number: 145, state: "open", title: "Parent lane" }],
@@ -424,6 +425,7 @@ const retried = await hydrateClaimedIssueTask({
   task: "Implement issue #42.",
   capturedAt: "2026-07-21T10:03:00Z",
   sleep: async () => {},
+  random: () => 1,
 });
 assert.equal(timelineAttempts, 3);
 assert.equal(retried.metadata.provenance.sources.find((source) => source.name === "linkedPullRequests").attempts, 3);
@@ -462,6 +464,71 @@ assert.deepEqual(
   [2_000],
 );
 
+let throttled403Attempts = 0;
+const throttled403 = await hydrateClaimedIssueTask({
+  client: stubClient({
+    async getIssue() {
+      throttled403Attempts += 1;
+      if (throttled403Attempts === 1) {
+        const error = httpError("secondary rate limit", 403);
+        error.retryAfter = "1";
+        throw error;
+      }
+      return issue;
+    },
+  }),
+  repository: "owner/private",
+  issueNumber: 42,
+  task: "Implement issue #42.",
+  sleep: async () => {},
+});
+assert.equal(throttled403Attempts, 2);
+assert.deepEqual(
+  throttled403.metadata.provenance.sources.find((source) => source.name === "issue").failureClassifications,
+  ["transient_rate_limit"],
+);
+
+let optionalThrottleAttempts = 0;
+const optionalThrottle = await hydrateClaimedIssueTask({
+  client: stubClient({
+    async getIssueProjectItems() {
+      optionalThrottleAttempts += 1;
+      if (optionalThrottleAttempts === 1) {
+        const error = httpError("secondary rate limit", 403);
+        error.retryAfter = "1";
+        throw error;
+      }
+      return projectItems;
+    },
+  }),
+  repository: "owner/private",
+  issueNumber: 42,
+  task: "Implement issue #42.",
+  sleep: async () => {},
+});
+assert.equal(optionalThrottleAttempts, 2);
+assert.deepEqual(optionalThrottle.metadata.degradedFields, [], "a throttled optional read is never persisted as permission degradation");
+
+let overBudgetAttempts = 0;
+await assert.rejects(
+  hydrateClaimedIssueTask({
+    client: stubClient({
+      async getIssue() {
+        overBudgetAttempts += 1;
+        const error = httpError("rate limited", 429);
+        error.retryAfter = "60";
+        throw error;
+      },
+    }),
+    repository: "owner/private",
+    issueNumber: 42,
+    task: "Implement issue #42.",
+    sleep: async () => assert.fail("an over-budget Retry-After must not retry early"),
+  }),
+  /transient_rate_limit,retry_after_exceeds_budget/,
+);
+assert.equal(overBudgetAttempts, 1);
+
 // The two idempotent required reads used to establish the issue identity and
 // trusted discussion both retry bounded transient failures and expose why.
 for (const [method, source] of [["getIssue", "issue"], ["getIssueComments", "comments"]]) {
@@ -483,6 +550,7 @@ for (const [method, source] of [["getIssue", "issue"], ["getIssueComments", "com
       issueNumber: 42,
       task: "Implement issue #42.",
       sleep: async () => {},
+      random: () => 1,
     });
     assert.equal(attempts, 2);
     assert.deepEqual(

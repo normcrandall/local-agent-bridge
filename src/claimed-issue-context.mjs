@@ -337,6 +337,20 @@ export const DEFAULT_ISSUE_HYDRATION_ATTEMPTS = 3;
 export const MAX_ISSUE_HYDRATION_ATTEMPTS = 5;
 export const DEFAULT_ISSUE_HYDRATION_BACKOFF_MS = 250;
 export const MAX_ISSUE_HYDRATION_BACKOFF_MS = 5_000;
+export const RETRY_AFTER_EXCEEDS_BUDGET = Symbol("retry_after_exceeds_budget");
+
+function isRateLimitedHydrationFailure(error) {
+  const status = Number(error?.status);
+  if (status === 429) return true;
+  if (status !== 403) return false;
+  const retryAfter = error?.retryAfterSeconds
+    ?? error?.retryAfter
+    ?? error?.headers?.get?.("retry-after")
+    ?? error?.headers?.["retry-after"]
+    ?? error?.response?.headers?.get?.("retry-after");
+  return retryAfter !== null && retryAfter !== undefined
+    || /\brate limit|secondary rate|abuse detection/i.test(String(error?.message || ""));
+}
 
 // A deterministic HTTP answer is authoritative and must not be retried. Only a
 // rate limit, a server fault, or a transport failure without a status can be
@@ -344,13 +358,13 @@ export const MAX_ISSUE_HYDRATION_BACKOFF_MS = 5_000;
 export function isRetryableHydrationFailure(error) {
   const status = Number(error?.status);
   if (!Number.isFinite(status)) return true;
-  return status === 429 || (status >= 500 && status <= 599);
+  return isRateLimitedHydrationFailure(error) || (status >= 500 && status <= 599);
 }
 
 export function classifyHydrationFailure(error) {
   const status = Number(error?.status);
   if (!Number.isFinite(status)) return "transient_network";
-  if (status === 429) return "transient_rate_limit";
+  if (isRateLimitedHydrationFailure(error)) return "transient_rate_limit";
   if (status >= 500 && status <= 599) return "transient_server";
   return "deterministic_http";
 }
@@ -360,6 +374,7 @@ export function hydrationRetryDelayMs(error, {
   now = Date.now,
   baseDelayMs = DEFAULT_ISSUE_HYDRATION_BACKOFF_MS,
   maxDelayMs = MAX_ISSUE_HYDRATION_BACKOFF_MS,
+  random = () => 1,
 } = {}) {
   const rawRetryAfter = error?.retryAfterSeconds
     ?? error?.retryAfter
@@ -376,14 +391,20 @@ export function hydrationRetryDelayMs(error, {
       if (Number.isFinite(timestamp)) retryAfterMs = Math.max(0, timestamp - now());
     }
   }
-  const exponential = Math.max(0, baseDelayMs) * (2 ** Math.max(0, Number(attempt || 1) - 1));
-  return Math.min(Math.max(0, maxDelayMs), Math.round(retryAfterMs ?? exponential));
+  const cap = Math.max(0, maxDelayMs);
+  if (retryAfterMs !== null) {
+    return retryAfterMs > cap ? RETRY_AFTER_EXCEEDS_BUDGET : Math.round(retryAfterMs);
+  }
+  const exponential = Math.min(cap, Math.max(0, baseDelayMs) * (2 ** Math.max(0, Number(attempt || 1) - 1)));
+  const jitter = Math.max(0, Math.min(1, Number(random()) || 0));
+  return Math.round((exponential / 2) + (jitter * exponential / 2));
 }
 
 // Retry exhaustion, a server fault, and a transport failure are never an empty
 // set: they fail the whole hydration closed. Only a permission denial or an
 // absent endpoint may degrade, and only for a source declared optional.
 function degradationReason(error) {
+  if (isRateLimitedHydrationFailure(error)) return null;
   const status = Number(error?.status);
   if (status === 403 || status === 401) return `permission denied (HTTP ${status})`;
   if (status === 404 || status === 410) return `unavailable on this GitHub deployment (HTTP ${status})`;
@@ -393,7 +414,7 @@ function degradationReason(error) {
 
 async function readSource({
   name, endpoint, required, unsupportedIsDegraded = false, read, attempts,
-  degradations, sleep, now, baseDelayMs, maxDelayMs,
+  degradations, sleep, now, baseDelayMs, maxDelayMs, random,
 }) {
   const record = {
     name, endpoint, status: "ok", attempts: 0,
@@ -412,7 +433,11 @@ async function readSource({
       record.failureClassifications.push(classifyHydrationFailure(error));
       if (!isRetryableHydrationFailure(error)) break;
       if (attempt < attempts) {
-        const delayMs = hydrationRetryDelayMs(error, { attempt, now, baseDelayMs, maxDelayMs });
+        const delayMs = hydrationRetryDelayMs(error, { attempt, now, baseDelayMs, maxDelayMs, random });
+        if (delayMs === RETRY_AFTER_EXCEEDS_BUDGET) {
+          record.failureClassifications.push("retry_after_exceeds_budget");
+          break;
+        }
         record.retryDelaysMs.push(delayMs);
         await sleep(delayMs);
       }
@@ -446,6 +471,7 @@ export async function hydrateClaimedIssueTask({
   now = Date.now,
   baseDelayMs = DEFAULT_ISSUE_HYDRATION_BACKOFF_MS,
   maxDelayMs = MAX_ISSUE_HYDRATION_BACKOFF_MS,
+  random = Math.random,
   authority = null,
 }) {
   try {
@@ -460,7 +486,7 @@ export async function hydrateClaimedIssueTask({
       const collect = async (options) => {
         const { value, record } = await readSource({
           ...options, attempts: boundedAttempts, degradations,
-          sleep, now, baseDelayMs, maxDelayMs,
+          sleep, now, baseDelayMs, maxDelayMs, random,
         });
         records.push(record);
         return value;
