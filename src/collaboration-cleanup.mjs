@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import { processProbe } from "./process-identity-probe.mjs";
 
 export const TERMINAL_COLLABORATION_STATUSES = new Set([

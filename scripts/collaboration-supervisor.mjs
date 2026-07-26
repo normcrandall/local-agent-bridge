@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { randomUUID } from "node:crypto";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { chmod, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { createConnection, createServer } from "node:net";
 import { basename, resolve } from "node:path";
