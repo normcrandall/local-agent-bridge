@@ -107,13 +107,16 @@ function classifyFailure(failure = {}) {
   const statusCode = Number.isInteger(failure.statusCode) ? failure.statusCode : null;
   const terminalKinds = new Set(["authentication", "authorization", "policy", "invalid_request"]);
   const retryKinds = new Set(["network", "timeout", "connection", "rate_limit", "server"]);
+  // GitHub reports secondary throttling as HTTP 403. The adapter has the
+  // response body and Retry-After context needed to distinguish that from an
+  // authorization failure, so honor its explicit classification first.
+  if (kind === "rate_limit" || statusCode === 429) return { terminal: false, classification: "rate_limit" };
   if (terminalKinds.has(kind)) return { terminal: true, classification: kind };
   if (statusCode === 401) return { terminal: true, classification: "authentication" };
   if (statusCode === 403) return { terminal: true, classification: "authorization" };
   if (statusCode !== null && statusCode >= 400 && statusCode < 500 && statusCode !== 429) {
     return { terminal: true, classification: "invalid_request" };
   }
-  if (statusCode === 429 || kind === "rate_limit") return { terminal: false, classification: "rate_limit" };
   if ((statusCode !== null && statusCode >= 500 && statusCode <= 599) || retryKinds.has(kind)) {
     return { terminal: false, classification: kind || "server" };
   }

@@ -92,19 +92,35 @@ function checkpointKey(checkpoint) {
   ].join(":");
 }
 
+function retryAfterMilliseconds(error) {
+  const raw = error?.retryAfterSeconds
+    ?? error?.retryAfter
+    ?? error?.response?.headers?.get?.("retry-after")
+    ?? null;
+  if (raw === null || raw === undefined || String(raw).trim() === "") return null;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1_000);
+  const timestamp = Date.parse(String(raw));
+  return Number.isFinite(timestamp) ? Math.max(0, timestamp - Date.now()) : null;
+}
+
 function failureDetails(error) {
   const statusCode = [error?.status, error?.statusCode, error?.cause?.status]
     .find((candidate) => Number.isInteger(candidate)) || null;
   const code = String(error?.code || error?.cause?.code || "");
+  const message = String(error?.message || error || "invalid request").slice(0, 1_024);
+  const retryAfterMs = retryAfterMilliseconds(error);
+  const rateLimited = statusCode === 429
+    || (statusCode === 403 && (retryAfterMs !== null || /secondary rate limit|rate limit|abuse detection/i.test(message)));
   let kind = "invalid_request";
-  if (statusCode === 429) kind = "rate_limit";
+  if (rateLimited) kind = "rate_limit";
   else if (statusCode >= 500) kind = "server";
   else if (statusCode === 401) kind = "authentication";
   else if (statusCode === 403) kind = "authorization";
   else if (/TIMEOUT|ABORT|ETIMEDOUT/i.test(code)) kind = "timeout";
   else if (/ECONN|ENET|EAI_AGAIN|FETCH|SOCKET|UND_ERR_/i.test(code)
     || (error instanceof TypeError && /fetch failed|network|socket|terminated/i.test(String(error.message)))) kind = "network";
-  return { kind, statusCode, message: String(error?.message || error || kind).slice(0, 1_024) };
+  return { kind, statusCode, message, ...(retryAfterMs === null ? {} : { retryAfterMs }) };
 }
 
 export function createRepositoryRuntimeJournal({
@@ -173,13 +189,18 @@ export function createRepositoryRuntimeJournal({
     return results;
   }
 
-  async function redriveAuthorityFailures() {
+  async function redriveAuthorityFailures({ authorityRestored = false, maxRedrives = 1 } = {}) {
+    if (!authorityRestored) return { redriven: 0, eligible: 0, exhausted: 0 };
+    if (!Number.isInteger(maxRedrives) || maxRedrives < 0) {
+      throw new Error("maxRedrives must be a non-negative integer.");
+    }
     const inspection = await outbox.inspect();
     const eligible = inspection.deadLetter.filter((entry) => {
       const classification = entry.failure?.classification;
       const statusCode = entry.failure?.statusCode;
       return ["authentication", "authorization"].includes(classification)
-        || [401, 403, 404].includes(statusCode);
+        && [401, 403].includes(statusCode)
+        && entry.claimCount <= maxRedrives;
     });
     const redriven = [];
     for (const entry of eligible) {
@@ -190,7 +211,16 @@ export function createRepositoryRuntimeJournal({
         if (error?.code !== "ENTRY_NOT_DEAD_LETTER") throw error;
       }
     }
-    return { redriven: redriven.length };
+    const authorityFailures = inspection.deadLetter.filter((entry) => {
+      const classification = entry.failure?.classification;
+      return ["authentication", "authorization"].includes(classification)
+        && [401, 403].includes(entry.failure?.statusCode);
+    });
+    return {
+      redriven: redriven.length,
+      eligible: eligible.length,
+      exhausted: authorityFailures.length - eligible.length,
+    };
   }
 
   return Object.freeze({

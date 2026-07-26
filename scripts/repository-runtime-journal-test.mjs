@@ -197,8 +197,10 @@ try {
   assert.equal((await authority.inspect()).deadLetter.length, 1);
 
   authority = authorityRuntime();
-  assert.equal((await authority.redriveAuthorityFailures()).redriven, 1,
-    "a new worker with restored authority must explicitly re-drive the dead letter");
+  assert.equal((await authority.redriveAuthorityFailures()).redriven, 0,
+    "a routine checkpoint must not infer that GitHub authority was restored");
+  assert.equal((await authority.redriveAuthorityFailures({ authorityRestored: true })).redriven, 1,
+    "a new bound credential may explicitly re-drive the dead letter once");
   result = await authority.publishPending({
     workerId: "worker-with-restored-authority",
     async publish() { return { restored: true }; },
@@ -206,6 +208,87 @@ try {
   assert.equal(result[0].status, "published");
   assert.equal((await authority.inspect()).acknowledged.length, 1,
     "the original idempotency key must become acknowledged after authority is restored");
+
+  const revokedDirectory = join(root, "revoked-authority");
+  const revokedRuntime = () => createRepositoryRuntimeJournal({
+    workspace: root,
+    directory: revokedDirectory,
+    repository: "veliqon/example",
+    issueNumber: 231,
+    now,
+    maxAttempts: 4,
+  });
+  let revoked = revokedRuntime();
+  await revoked.enqueue({
+    collaborationId: "bridge-revoked-authority",
+    phase: "completed",
+    writer: "codex",
+    headSha: advancedHead,
+    terminal: true,
+  });
+  const rejectAuthority = async () => {
+    const error = new Error("resource forbidden");
+    error.status = 403;
+    throw error;
+  };
+  await revoked.publishPending({ workerId: "revoked-first", publish: rejectAuthority });
+  assert.equal((await revoked.redriveAuthorityFailures({ authorityRestored: true })).redriven, 1);
+  await revoked.publishPending({ workerId: "revoked-second", publish: rejectAuthority });
+  const bounded = await revoked.redriveAuthorityFailures({ authorityRestored: true });
+  assert.deepEqual(bounded, { redriven: 0, eligible: 0, exhausted: 1 },
+    "a permanently revoked credential must remain dead-lettered after one bounded redrive");
+
+  const hiddenDirectory = join(root, "hidden-resource");
+  const hidden = createRepositoryRuntimeJournal({
+    workspace: root,
+    directory: hiddenDirectory,
+    repository: "veliqon/example",
+    issueNumber: 231,
+    now,
+  });
+  await hidden.enqueue({
+    collaborationId: "bridge-hidden-resource",
+    phase: "completed",
+    writer: "codex",
+    headSha: advancedHead,
+    terminal: true,
+  });
+  await hidden.publishPending({ workerId: "hidden-first", async publish() {
+    const error = new Error("not found");
+    error.status = 404;
+    throw error;
+  } });
+  assert.equal((await hidden.redriveAuthorityFailures({ authorityRestored: true })).redriven, 0,
+    "permission-shaped 404 responses require operator diagnosis rather than automatic redrive");
+
+  const throttledDirectory = join(root, "secondary-rate-limit");
+  const throttled = createRepositoryRuntimeJournal({
+    workspace: root,
+    directory: throttledDirectory,
+    repository: "veliqon/example",
+    issueNumber: 231,
+    now,
+    maxAttempts: 4,
+    baseBackoffMs: 50,
+    maxBackoffMs: 5_000,
+  });
+  await throttled.enqueue({
+    collaborationId: "bridge-secondary-rate-limit",
+    phase: "working",
+    writer: "codex",
+    headSha: advancedHead,
+  });
+  result = await throttled.publishPending({ workerId: "throttled-worker", async publish() {
+    const error = new Error("You have exceeded a secondary rate limit");
+    error.status = 403;
+    error.retryAfter = "2";
+    throw error;
+  } });
+  assert.equal(result[0].status, "retry_scheduled", "secondary 403 throttling must not dead-letter");
+  const throttledState = repositoryJournalPublicationState(await throttled.inspect());
+  assert.equal(throttledState.offline, false, "rate limiting is not a network outage");
+  assert.equal(throttledState.rateLimited, true);
+  assert.equal(throttledState.publicationState, "rate_limited");
 
   const offlineDirectory = join(root, "offline-backoff");
   const offlineRuntime = createRepositoryRuntimeJournal({

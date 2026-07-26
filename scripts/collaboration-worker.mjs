@@ -76,7 +76,6 @@ let workerHeadSha = null;
 
 async function checkpointClaim({ phase, summary, writer, previousWriter = null, kind = "refresh", terminal = false } = {}) {
   if (!claimClient || !claimJournal || !state?.issueClaim) return { queued: false, publication: [] };
-  await claimJournal.redriveAuthorityFailures();
   const metadata = claimWorkspaceMetadata(state);
   workerHeadSha = metadata.headSha;
   const queued = await claimJournal.enqueue({
@@ -292,6 +291,10 @@ try {
       issueNumber: state.issueClaim.issueNumber,
       pullRequestNumber: state.githubBuilder?.prNumber || state.githubReview?.prNumber || null,
     });
+    // A newly minted, repository-bound credential is the only automatic
+    // authority-restoration signal. Redrive is persistently bounded by the
+    // outbox claim count, so a revoked App cannot loop on every checkpoint.
+    await claimJournal.redriveAuthorityFailures({ authorityRestored: true });
   }
 
   state = await updateCollaboration(workspaceRoot, id, (current) => ({

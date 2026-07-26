@@ -39,15 +39,24 @@ export async function publishRepositoryLifecycleCheckpoint({
 export function repositoryJournalPublicationState(inspection) {
   const pending = inspection?.pending || [];
   const deadLetter = inspection?.deadLetter || [];
+  const offline = pending.some((entry) => entry.status === "backoff"
+    && ["network", "timeout", "connection"].includes(entry.failure?.classification));
+  const rateLimited = pending.some((entry) => entry.status === "backoff"
+    && entry.failure?.classification === "rate_limit");
   return {
     pendingPublications: pending.length,
     deadLetterPublications: deadLetter.length,
-    offline: pending.some((entry) => entry.status === "backoff"),
+    offline,
+    rateLimited,
     attentionRequired: deadLetter.length > 0,
     publicationState: deadLetter.length > 0
       ? "authority_required"
-      : pending.length > 0
+      : rateLimited
+        ? "rate_limited"
+        : offline
         ? "offline"
+        : pending.length > 0
+          ? "pending"
         : "synchronized",
   };
 }
