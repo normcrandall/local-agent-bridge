@@ -91,7 +91,7 @@ try {
     if (args[0] === "cat-file") return "";
     if (args[0] === "merge-base") {
       const candidate = args.at(-1);
-      if (cwd === recordedCheckout && candidate === "main") {
+      if (cwd === recordedCheckout && candidate === "origin/main") {
         throw Object.assign(new Error("not an ancestor"), { code: 1 });
       }
       return "";
@@ -105,8 +105,8 @@ try {
   });
   assert.deepEqual(
     { contains: located.contains, sourceRoot: located.sourceRoot, candidate: located.candidate },
-    { contains: true, sourceRoot: recordedCheckout, candidate: "origin/main" },
-    "a stale local main must not hide a containing origin/main in the provenance checkout",
+    { contains: false, sourceRoot: recordedCheckout, candidate: "origin/main" },
+    "a remote main that excludes the installed commit must not be overridden by local or unrelated refs",
   );
   const recovered = await locateCommitOnMain({
     ancestor: "installed123",

@@ -85,21 +85,21 @@ export async function containsCommit({ sourceRoot, ancestor, candidate, runGit =
 export async function locateCommitOnMain({
   ancestor,
   sourceRoots = [],
-  candidates = ["main", "origin/main"],
+  candidates = ["origin/main", "main"],
   runGit = defaultGitRunner,
 } = {}) {
   const roots = [...new Set(sourceRoots
     .filter((root) => typeof root === "string" && root.trim())
     .map((root) => resolve(root)))];
-  let definitive = null;
   for (const sourceRoot of roots) {
     for (const candidate of candidates) {
       const contains = await containsCommit({ sourceRoot, ancestor, candidate, runGit });
-      if (contains === true) return { contains, sourceRoot, candidate, checkedRoots: roots };
-      if (contains === false && !definitive) definitive = { contains, sourceRoot, candidate, checkedRoots: roots };
+      // A real answer from the preferred checkout/ref is authoritative. Only
+      // an unavailable ref/root may fall through to a less durable source.
+      if (contains !== null) return { contains, sourceRoot, candidate, checkedRoots: roots };
     }
   }
-  return definitive || { contains: null, sourceRoot: null, candidate: null, checkedRoots: roots };
+  return { contains: null, sourceRoot: null, candidate: null, checkedRoots: roots };
 }
 
 /**

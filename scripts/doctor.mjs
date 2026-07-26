@@ -11,7 +11,18 @@ import {
 import { DEFAULT_OLLAMA_CONFIG, DEFAULT_OLLAMA_MODEL } from "../src/ollama-review.mjs";
 
 const root = resolve(import.meta.dirname, "..");
-const projectRoot = resolve(process.env.AGENT_BRIDGE_WORKSPACE || process.cwd());
+const selectedChecks = new Set(String(process.env.AGENT_BRIDGE_DOCTOR_CHECKS || "")
+  .split(",")
+  .map((label) => label.trim())
+  .filter(Boolean));
+const requestedProjectRoot = resolve(process.env.AGENT_BRIDGE_WORKSPACE || process.cwd());
+const resolvedProjectRoot = spawnSync("git", ["rev-parse", "--show-toplevel"], {
+  cwd: requestedProjectRoot,
+  encoding: "utf8",
+});
+const projectRoot = resolvedProjectRoot.status === 0
+  ? resolve(resolvedProjectRoot.stdout.trim())
+  : requestedProjectRoot;
 let failed = false;
 
 function configuredOllamaModel() {
@@ -21,6 +32,7 @@ function configuredOllamaModel() {
 }
 
 function check(label, test, detail = "") {
+  if (selectedChecks.size && !selectedChecks.has(label)) return;
   try {
     if (!test()) throw new Error(detail || "check failed");
     console.log(`OK   ${label}`);
@@ -336,7 +348,8 @@ check("Global user attention signalling", () => {
   return resolve(parsed.stateRoot) === expectedStateRoot && Array.isArray(parsed.pending);
 }, "run npm run install:global to install the needs_user notification and attention CLI");
 
-const installedRuntimeRoot = resolve(homedir(), ".local/share/agent-bridge/runtime");
+const installedRuntimeRoot = resolve(process.env.AGENT_BRIDGE_INSTALLED_RUNTIME_ROOT
+  || resolve(homedir(), ".local/share/agent-bridge/runtime"));
 const installedProvenance = await readInstalledProvenance(installedRuntimeRoot);
 const observedDigest = installedProvenance
   ? await computeRuntimeDigest(installedRuntimeRoot).catch(() => null)
