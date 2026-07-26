@@ -118,15 +118,14 @@ export function createReviewBenchmarkReport(records, filters = {}) {
     groups.set(targetKey(record), group);
   }
 
-  const findingCatalog = new Map(reviewRuns.flatMap((run) => run.findings.map((finding) => [`${targetKey(run)}\u0000${finding.key}`, finding])));
   const adjudicationInputs = new Map((filters.adjudications ?? []).map((entry) => {
     const key = `${String(entry.repository).toLowerCase()}\u0000${String(entry.headSha).toLowerCase()}`;
-    return [key, (entry.findingAdjudications ?? []).map((decision) => ({ ...decision, finding: decision.finding ?? findingCatalog.get(`${key}\u0000${decision.findingKey}`) }))];
+    return [key, entry.findingAdjudications ?? []];
   }));
   for (const record of ledgerAdjudications) {
     const key = targetKey(record);
     const decisions = new Map((adjudicationInputs.get(key) ?? []).map((entry) => [entry.findingKey, entry]));
-    decisions.set(record.findingKey, { ...record, finding: record.finding ?? findingCatalog.get(`${key}\u0000${record.findingKey}`) });
+    decisions.set(record.findingKey, record);
     adjudicationInputs.set(key, [...decisions.values()]);
   }
   const targets = [...groups.values()].map((runs) => {
@@ -161,6 +160,9 @@ export function createReviewBenchmarkReport(records, filters = {}) {
         duplicateRate: hasAdjudication ? row.duplicateRate : null,
         uniqueValidFindings: hasAdjudication ? row.uniqueValidFindings : null,
         exactHeadCompletionRate: row.exactHeadCompletionRate,
+        exactHeadCompletionCoverage: row.exactHeadCompletionCoverage,
+        contractBindingCoverage: row.contractBindingCoverage,
+        adjudicationCoverage: row.adjudicationCoverage,
         reliability: row.reliability,
         outcomes: row.outcomes,
         latencyMs: row.latencyMs,

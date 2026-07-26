@@ -41,6 +41,7 @@ export function aggregateReviewBenchmarks(adjudications) {
         falseNegatives: 0, unadjudicated: 0, duplicates: 0, advisories: 0, blockingTruePositives: 0,
         blockingFalseNegatives: 0, uniqueValidFindings: 0, validCitations: 0, evidenceSupported: 0,
         actionable: 0, findings: 0, severityCalibrated: 0, severityEvaluated: 0, exactHeadCompleted: 0,
+        exactHeadObserved: 0, contractBound: 0, adjudicationComplete: 0,
         timeouts: 0, emptyResponses: 0, invalidEnvelopes: 0, recoveries: 0, fallbacks: 0,
         laterCiFailures: 0, reviewFollowUps: 0, revertedFixes: 0, postMergeDefects: 0, escapedIssues: 0,
         latencies: [], localWallTimes: [], inputTokens: [], outputTokens: [], costs: [], peakMemory: [],
@@ -58,10 +59,18 @@ export function aggregateReviewBenchmarks(adjudications) {
       aggregate.validCitations += result.validCitationCount ?? 0;
       aggregate.evidenceSupported += result.supportedCount ?? 0;
       aggregate.actionable += result.actionableCount ?? 0;
-      aggregate.findings += result.truePositives.length + result.falsePositives.length + result.unadjudicated.length + (result.duplicateFindings?.length ?? 0) + (result.advisoryFindings?.length ?? 0);
+      const currentFindingCount = result.truePositives.length
+        + result.falsePositives.length
+        + result.unadjudicated.length
+        + (result.duplicateFindings?.length ?? 0)
+        + (result.advisoryFindings?.length ?? 0);
+      aggregate.findings += currentFindingCount;
       aggregate.severityCalibrated += result.severityCalibratedCount ?? 0;
       aggregate.severityEvaluated += result.severityEvaluatedCount ?? 0;
-      aggregate.exactHeadCompleted += result.exactHeadComplete ? 1 : 0;
+      aggregate.exactHeadObserved += result.exactHeadComplete == null ? 0 : 1;
+      aggregate.exactHeadCompleted += result.exactHeadComplete === true ? 1 : 0;
+      aggregate.contractBound += result.contractBound ? 1 : 0;
+      aggregate.adjudicationComplete += result.adjudicationComplete ? 1 : 0;
       aggregate.timeouts += result.reliability?.timedOut ? 1 : 0;
       aggregate.emptyResponses += result.reliability?.emptyResponse ? 1 : 0;
       aggregate.invalidEnvelopes += result.reliability?.invalidEnvelope ? 1 : 0;
@@ -84,6 +93,12 @@ export function aggregateReviewBenchmarks(adjudications) {
 
   const providers = [...cohorts.values()].map((entry) => {
     const adjudicatedFindingCount = entry.truePositives + entry.falsePositives + entry.falseNegatives;
+    const exactHeadCompletionCoverage = ratio(entry.exactHeadObserved, entry.runs);
+    const exactHeadCompletionRate = ratio(entry.exactHeadCompleted, entry.exactHeadObserved);
+    const contractBindingCoverage = ratio(entry.contractBound, entry.runs);
+    const adjudicationCoverage = ratio(entry.adjudicationComplete, entry.runs);
+    const evidenceComplete = exactHeadCompletionCoverage === 1 && exactHeadCompletionRate === 1
+      && contractBindingCoverage === 1 && adjudicationCoverage === 1;
     return Object.freeze({
       provider: entry.provider, model: entry.model, repository: entry.repository, repositoryCohort: entry.repositoryCohort,
       runs: entry.runs, truePositives: entry.truePositives, falsePositives: entry.falsePositives,
@@ -95,8 +110,9 @@ export function aggregateReviewBenchmarks(adjudications) {
       duplicateRate: ratio(entry.duplicates, entry.findings),
       citationValidity: ratio(entry.validCitations, entry.findings), evidenceSupport: ratio(entry.evidenceSupported, entry.findings),
       actionability: ratio(entry.actionable, entry.findings), severityCalibration: ratio(entry.severityCalibrated, entry.severityEvaluated),
-      uniqueValidFindings: entry.uniqueValidFindings, exactHeadCompletionRate: ratio(entry.exactHeadCompleted, entry.runs),
-      confidence: confidenceLabel(entry.runs, adjudicatedFindingCount), adjudicatedFindingCount,
+      uniqueValidFindings: entry.uniqueValidFindings, exactHeadCompletionRate, exactHeadCompletionCoverage,
+      contractBindingCoverage, adjudicationCoverage,
+      confidence: evidenceComplete ? confidenceLabel(entry.runs, adjudicatedFindingCount) : "incomplete", adjudicatedFindingCount,
       reliability: Object.freeze({ timeouts: entry.timeouts, emptyResponses: entry.emptyResponses, invalidEnvelopes: entry.invalidEnvelopes, recoveries: entry.recoveries, fallbacks: entry.fallbacks }),
       outcomes: Object.freeze({ laterCiFailures: entry.laterCiFailures, reviewFollowUps: entry.reviewFollowUps, revertedFixes: entry.revertedFixes, postMergeDefects: entry.postMergeDefects, escapedIssues: entry.escapedIssues }),
       latencyMs: summarize(entry.latencies), localWallTimeMs: summarize(entry.localWallTimes),

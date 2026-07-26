@@ -183,7 +183,7 @@ export function normalizeReviewEnvelope(input) {
     localProvider,
     mode: "shadow-review",
     authority: "non-authorizing",
-    exactHeadComplete: booleanMetric(input.exactHeadComplete, "exactHeadComplete", true),
+    exactHeadComplete: booleanMetric(input.exactHeadComplete, "exactHeadComplete", null),
     verdict: optionalString(input.verdict, "verdict", { max: 50 })?.toUpperCase() ?? null,
     findings: [...findingsByKey.values()].sort(compareFindings),
     reviewArtifact: normalizeReviewArtifact(input.reviewArtifact),
@@ -192,11 +192,6 @@ export function normalizeReviewEnvelope(input) {
     outcomes: normalizeOutcomes(input.outcomes),
   };
   return Object.freeze(normalized);
-}
-
-function findingKeys(values, field) {
-  if (!Array.isArray(values)) throw new TypeError(`${field} must be an array`);
-  return new Set(values.map((value) => typeof value === "string" ? requiredString(value, field) : normalizeFinding(value).key));
 }
 
 function normalizeAdjudications(values, observedKeys) {
@@ -211,10 +206,11 @@ function normalizeAdjudications(values, observedKeys) {
     if (!/^[0-9a-f]{64}$/.test(findingKey) || !observedKeys.has(findingKey)) throw new Error(`adjudication references unknown finding: ${findingKey}`);
     const status = requiredString(value.status, "findingAdjudication.status", { max: 20 }).toLowerCase();
     if (!ADJUDICATION_STATES.includes(status)) throw new TypeError(`unsupported adjudication state: ${status}`);
+    if (status === "accepted" && !normalizedFinding) throw new Error("accepted adjudication requires the chair-assigned normalized finding");
     const evidence = Array.isArray(value.evidence) ? value.evidence.map((entry) => requiredString(entry, "findingAdjudication.evidence", { max: 1_000 })) : [];
     if (status !== "unresolved" && evidence.length === 0) throw new Error(`${status} adjudication requires chair verification or implementation/re-review evidence`);
     const duplicateOf = status === "duplicate" ? requiredString(value.duplicateOf, "findingAdjudication.duplicateOf", { max: 64 }) : null;
-    result.set(findingKey, Object.freeze({ findingKey, status, evidence, duplicateOf }));
+    result.set(findingKey, Object.freeze({ findingKey, finding: normalizedFinding, status, evidence, duplicateOf }));
   }
   return result;
 }
@@ -244,6 +240,7 @@ export function normalizeBenchmarkAdjudication(input) {
   if (!/^[0-9a-f]{64}$/.test(findingKey)) throw new TypeError("findingKey must be a normalized 64-character finding key");
   if (finding && finding.key !== findingKey) throw new Error("adjudication findingKey does not match its normalized finding");
   const transition = transitionFindingAdjudication(input.previousStatus ? { status: input.previousStatus } : null, input);
+  if (transition.status === "accepted" && !finding) throw new Error("accepted adjudication requires the chair-assigned normalized finding");
   return Object.freeze({
     schemaVersion: REVIEW_BENCHMARK_SCHEMA_VERSION, recordType: "finding_adjudication", ...target,
     adjudicationId: requiredString(input.adjudicationId, "adjudicationId", { max: 200 }),
@@ -275,11 +272,6 @@ export function normalizeBenchmarkOutcome(input) {
   });
 }
 
-function severityCalibrated(finding, status) {
-  if (!["accepted", "rejected"].includes(status)) return null;
-  return status === "accepted" ? finding.severity !== "unspecified" : !finding.blocking;
-}
-
 export function adjudicateReviewRuns(runs, options = {}) {
   if (!Array.isArray(runs) || runs.length === 0) throw new TypeError("runs must contain at least one review envelope");
   const normalizedRuns = runs.map(normalizeReviewEnvelope);
@@ -296,16 +288,15 @@ export function adjudicateReviewRuns(runs, options = {}) {
   const contractDigests = new Set(normalizedRuns.map((run) => run.contractDigest ?? "missing"));
   const evidenceDigests = new Set(normalizedRuns.map((run) => run.evidenceSurfaceDigest ?? "missing"));
   if (contractDigests.size > 1 || evidenceDigests.size > 1) throw new Error("all benchmark runs must use the same prompt contract and bounded evidence surface digests");
-  const legacyAccepted = findingKeys(options.acceptedFindings ?? [], "acceptedFindings");
-  const legacyRejected = findingKeys(options.rejectedFindings ?? [], "rejectedFindings");
-  for (const key of legacyAccepted) if (legacyRejected.has(key)) throw new Error(`finding ${key} cannot be both accepted and rejected`);
+  if (options.acceptedFindings !== undefined || options.rejectedFindings !== undefined) {
+    throw new Error("acceptedFindings/rejectedFindings are unsupported; use evidenced findingAdjudications");
+  }
   const adjudications = normalizeAdjudications(options.findingAdjudications ?? [], new Set(observedFindings.keys()));
-  for (const key of legacyAccepted) adjudications.set(key, { findingKey: key, status: "accepted", evidence: ["legacy adjudication input"], duplicateOf: null });
-  for (const key of legacyRejected) adjudications.set(key, { findingKey: key, status: "rejected", evidence: ["legacy adjudication input"], duplicateOf: null });
   const accepted = new Set([...adjudications.values()].filter((entry) => entry.status === "accepted").map((entry) => entry.findingKey));
 
   const results = normalizedRuns.map((run) => {
     const observed = new Set(run.findings.map((finding) => finding.key));
+    const runFindings = new Map(run.findings.map((finding) => [finding.key, finding]));
     const byStatus = Object.fromEntries(ADJUDICATION_STATES.map((status) => [status, []]));
     for (const key of observed) byStatus[adjudications.get(key)?.status ?? "unresolved"].push(key);
     for (const keys of Object.values(byStatus)) keys.sort();
@@ -315,17 +306,19 @@ export function adjudicateReviewRuns(runs, options = {}) {
     const validCitationCount = run.findings.filter((finding) => finding.citationValid === true).length;
     const supportedCount = run.findings.filter((finding) => finding.evidenceSupported === true).length;
     const actionableCount = run.findings.filter((finding) => finding.actionable === true || finding.proposedFix).length;
-    const calibrated = run.findings.map((finding) => severityCalibrated(finding, adjudications.get(finding.key)?.status)).filter((value) => value != null);
+    const severityComparisons = truePositives.map((key) => runFindings.get(key)?.severity === adjudications.get(key)?.finding?.severity);
     return Object.freeze({
       provider: run.provider, model: run.model, repositoryCohort: run.repositoryCohort, runId: run.runId,
       latencyMs: run.latencyMs, performance: run.performance, reliability: run.reliability, exactHeadComplete: run.exactHeadComplete,
       outcomes: run.outcomes,
       truePositives, falsePositives, falseNegatives, unadjudicated: byStatus.unresolved,
       duplicateFindings: byStatus.duplicate, advisoryFindings: byStatus.advisory,
-      blockingTruePositives: truePositives.filter((key) => observedFindings.get(key)?.blocking),
-      blockingFalseNegatives: falseNegatives.filter((key) => observedFindings.get(key)?.blocking),
+      blockingTruePositives: truePositives.filter((key) => runFindings.get(key)?.blocking),
+      blockingFalseNegatives: falseNegatives.filter((key) => adjudications.get(key)?.finding?.blocking),
       validCitationCount, supportedCount, actionableCount,
-      severityCalibratedCount: calibrated.filter(Boolean).length, severityEvaluatedCount: calibrated.length,
+      severityCalibratedCount: severityComparisons.filter(Boolean).length, severityEvaluatedCount: severityComparisons.length,
+      contractBound: Boolean(run.contractDigest && run.evidenceSurfaceDigest),
+      adjudicationComplete: run.findings.every((finding) => (adjudications.get(finding.key)?.status ?? "unresolved") !== "unresolved"),
     });
   }).sort((left, right) => left.provider.localeCompare(right.provider) || (left.model ?? "").localeCompare(right.model ?? "") || left.runId.localeCompare(right.runId));
 

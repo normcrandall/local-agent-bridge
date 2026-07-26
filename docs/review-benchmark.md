@@ -49,6 +49,8 @@ npm run review-benchmark:report -- --ledger .bridge/evaluation/reviews.jsonl --p
 
 Reports include precision, defect and blocking-defect recall, citation/evidence/actionability rates, severity calibration, duplicate rate, unique valid findings, exact-head completion, reliability, performance, and observed downstream outcomes. Missing observations remain `null`; the report does not turn missing data into success.
 
+Severity calibration compares each provider's label with the chair-assigned severity on an accepted finding. Exact-head completion reports both rate and observation coverage. Contract/evidence binding and adjudication coverage are also explicit; any incomplete binding, unknown or failed exact-head completion, or incomplete adjudication forces the cohort confidence to `incomplete` regardless of sample count.
+
 Confidence is intentionally conservative and cohort-specific:
 
 | Label | Minimum sample |

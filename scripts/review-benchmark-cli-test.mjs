@@ -27,6 +27,9 @@ function record(overrides = {}) {
     timestamp: "2026-07-26T12:00:00-04:00",
     latencyMs: 120,
     localProvider: true,
+    exactHeadComplete: true,
+    contractDigest: "c".repeat(64),
+    evidenceSurfaceDigest: "e".repeat(64),
     findings: [{ path: "src/a.mjs", line: 4, severity: "high", summary: "Possible loss" }],
     ...overrides,
   };
@@ -76,7 +79,7 @@ try {
 
   const adjudications = join(scratch, "adjudications.json");
   await writeFile(adjudications, JSON.stringify([{ repository: "veliqon/example", headSha: head, findingAdjudications: [{
-    findingKey: normalizeFinding(record().findings[0]).key, status: "accepted", evidence: ["fixed and re-reviewed"],
+    findingKey: normalizeFinding(record().findings[0]).key, finding: record().findings[0], status: "accepted", evidence: ["fixed and re-reviewed"],
   }] }]));
   const adjudicatedRun = run(["--ledger", ledger, "--repository", "veliqon/example", "--adjudications", adjudications, "--json"]);
   assert.equal(adjudicatedRun.status, 0, adjudicatedRun.stderr);
@@ -90,7 +93,7 @@ try {
   await appendReviewBenchmarkRecord(ledger, {
     schemaVersion: 1, recordType: "finding_adjudication", repository: "veliqon/example", headSha: head,
     adjudicationId: "decision-1", timestamp: "2026-07-26T17:00:00Z", findingKey,
-    status: "accepted", evidence: ["regression test and exact-head re-review"],
+    finding: record().findings[0], status: "accepted", evidence: ["regression test and exact-head re-review"],
   });
   await appendReviewBenchmarkRecord(ledger, {
     schemaVersion: 1, recordType: "review_outcome", repository: "veliqon/example", headSha: head,

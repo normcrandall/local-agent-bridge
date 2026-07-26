@@ -27,6 +27,9 @@ const base = {
   timestamp,
   latencyMs: 100,
   localProvider: true,
+  exactHeadComplete: true,
+  contractDigest: "c".repeat(64),
+  evidenceSurfaceDigest: "e".repeat(64),
   findings: [rejectedFinding, acceptedFinding, acceptedFinding],
 };
 
@@ -34,6 +37,7 @@ const normalized = normalizeReviewEnvelope(base);
 assert.equal(normalized.repository, "veliqon/example");
 assert.equal(normalized.authority, "non-authorizing", "local records are unconditionally non-authorizing");
 assert.equal(normalized.mode, "shadow-review");
+assert.equal(normalizeReviewEnvelope({ ...base, exactHeadComplete: undefined }).exactHeadComplete, null, "missing exact-head completion is unknown, never success");
 assert.deepEqual(normalizeReviewEnvelope({ ...base, reviewArtifact: {
   kind: "github-review", reference: "https://github.com/veliqon/example/pull/1#pullrequestreview-1", digest: "1".repeat(64),
 } }).reviewArtifact, { kind: "github-review", reference: "https://github.com/veliqon/example/pull/1#pullrequestreview-1", digest: "1".repeat(64) });
@@ -74,6 +78,7 @@ try {
   await appendReviewBenchmarkRecord(ledgerPath, {
     schemaVersion: 1, recordType: "finding_adjudication", repository, headSha,
     adjudicationId: "decision-1", timestamp, findingKey: observedKey, status: "accepted",
+    finding: acceptedFinding,
     evidence: ["chair verified with implementation and re-review evidence"],
   });
   await assert.rejects(appendReviewBenchmarkRecord(ledgerPath, {
@@ -132,10 +137,10 @@ try {
   });
   const acceptedKey = normalizeFinding(acceptedFinding).key;
   const rejectedKey = normalizeFinding(rejectedFinding).key;
-  const adjudication = adjudicateReviewRuns([base, cloudRun], {
-    acceptedFindings: [acceptedFinding],
-    rejectedFindings: [rejectedKey],
-  });
+  const adjudication = adjudicateReviewRuns([base, cloudRun], { findingAdjudications: [
+    { findingKey: acceptedKey, finding: acceptedFinding, status: "accepted", evidence: ["verified by implementation and re-review"] },
+    { findingKey: rejectedKey, status: "rejected", evidence: ["chair disproved the claim"] },
+  ] });
   assert.deepEqual(adjudication.results.map((entry) => entry.provider), ["claude", "qwen"]);
   assert.deepEqual(adjudication.results[0].truePositives, [acceptedKey]);
   assert.deepEqual(adjudication.results[1].falsePositives, [rejectedKey]);
@@ -143,6 +148,7 @@ try {
     () => adjudicateReviewRuns([base, { ...cloudRun, headSha: "b".repeat(40) }]),
     /same exact repository and head SHA/,
   );
+  assert.throws(() => adjudicateReviewRuns([base], { acceptedFindings: [acceptedFinding] }), /unsupported/);
   assert.throws(
     () => adjudicateReviewRuns([base, { ...cloudRun, contractDigest: "1".repeat(64) }]),
     /same prompt contract/,
@@ -184,6 +190,47 @@ try {
     max: 300,
     mean: 200,
   }, "latency selection sorts samples and uses deterministic nearest-rank percentiles");
+  assert.equal(latencyReport.providers[0].exactHeadCompletionCoverage, 0);
+  assert.equal(latencyReport.providers[0].exactHeadCompletionRate, null);
+  assert.equal(latencyReport.providers[0].contractBindingCoverage, 0);
+  assert.equal(latencyReport.providers[0].adjudicationCoverage, 0);
+  assert.equal(latencyReport.providers[0].confidence, "incomplete", "unbound or unadjudicated cohorts cannot earn confidence");
+
+  const multiRunCohort = aggregateReviewBenchmarks([{
+    repository: "veliqon/example",
+    results: [
+      {
+        provider: "qwen", model: "qwen3.6", repositoryCohort: "node-services", runId: "cohort-1", latencyMs: 100,
+        truePositives: ["tp-1"], falsePositives: ["fp-1"], falseNegatives: ["fn-1"], unadjudicated: ["open-1"],
+        duplicateFindings: ["duplicate-1"], advisoryFindings: [], blockingTruePositives: ["tp-1"], blockingFalseNegatives: ["fn-1"],
+        uniqueValidFindings: ["tp-1"], validCitationCount: 2, supportedCount: 1, actionableCount: 3,
+        severityCalibratedCount: 1, severityEvaluatedCount: 2, exactHeadComplete: true, contractBound: true, adjudicationComplete: true,
+      },
+      {
+        provider: "qwen", model: "qwen3.6", repositoryCohort: "node-services", runId: "cohort-2", latencyMs: 200,
+        truePositives: ["tp-2"], falsePositives: [], falseNegatives: [], unadjudicated: [],
+        duplicateFindings: [], advisoryFindings: ["advisory-1"], blockingTruePositives: [], blockingFalseNegatives: [],
+        uniqueValidFindings: [], validCitationCount: 1, supportedCount: 2, actionableCount: 1,
+        severityCalibratedCount: 1, severityEvaluatedCount: 1, exactHeadComplete: false, contractBound: true, adjudicationComplete: true,
+      },
+    ],
+  }]).providers[0];
+  assert.equal(multiRunCohort.runs, 2);
+  assert.equal(multiRunCohort.precision, 2 / 3);
+  assert.equal(multiRunCohort.recall, 2 / 3);
+  assert.equal(multiRunCohort.blockingRecall, 1 / 2);
+  assert.equal(multiRunCohort.duplicateRate, 1 / 6);
+  assert.equal(multiRunCohort.citationValidity, 1 / 2);
+  assert.equal(multiRunCohort.evidenceSupport, 1 / 2);
+  assert.equal(multiRunCohort.actionability, 2 / 3);
+  assert.equal(multiRunCohort.severityCalibration, 2 / 3);
+  assert.equal(multiRunCohort.exactHeadCompletionRate, 1 / 2);
+  assert.equal(multiRunCohort.exactHeadCompletionCoverage, 1);
+  assert.equal(multiRunCohort.contractBindingCoverage, 1);
+  assert.equal(multiRunCohort.adjudicationCoverage, 1);
+  assert.equal(multiRunCohort.confidence, "incomplete", "a failed exact-head run prevents quality confidence");
+  assert.equal(multiRunCohort.uniqueValidFindings, 1);
+  assert.deepEqual(multiRunCohort.latencyMs, { min: 100, median: 100, p95: 200, max: 200, mean: 150 });
 
   const richFinding = normalizeFinding({
     path: "src/c.mjs", startLine: 10, endLine: 12, severity: "critical", claim: "Authorization can be bypassed",
@@ -195,7 +242,7 @@ try {
     reliability: { recoveryCount: 1, fallbackCount: 2 }, outcomes: { laterCiFailures: 1, postMergeDefects: 1 },
   });
   const richAdjudication = adjudicateReviewRuns([richRun], { findingAdjudications: [{
-    findingKey: richFinding.key, status: "accepted", evidence: ["chair verified and regression test added"],
+    findingKey: richFinding.key, finding: richFinding, status: "accepted", evidence: ["chair verified and regression test added"],
   }] });
   const richReport = aggregateReviewBenchmarks([richAdjudication]).providers[0];
   assert.equal(richReport.repositoryCohort, "node-services");
@@ -206,6 +253,21 @@ try {
   assert.equal(richReport.reliability.recoveries, 1);
   assert.equal(richReport.outcomes.postMergeDefects, 1);
   assert.equal(richReport.localWallTimeMs.median, 150);
+
+  const sharedClaim = { path: "src/order.mjs", line: 7, claim: "Shared defect", proposedFix: "Fix it", citationValid: true };
+  const lowRun = normalizeReviewEnvelope({ ...base, provider: "alpha", runId: "alpha", findings: [{ ...sharedClaim, severity: "low", blocking: false }] });
+  const criticalRun = normalizeReviewEnvelope({ ...base, provider: "beta", runId: "beta", findings: [{ ...sharedClaim, severity: "critical", blocking: true }] });
+  const emptyRun = normalizeReviewEnvelope({ ...base, provider: "gamma", runId: "gamma", findings: [] });
+  const chairFinding = normalizeFinding({ ...sharedClaim, severity: "medium", blocking: true });
+  const orderOptions = { findingAdjudications: [{ findingKey: chairFinding.key, finding: chairFinding, status: "accepted", evidence: ["chair-confirmed defect"] }] };
+  const forward = adjudicateReviewRuns([lowRun, criticalRun, emptyRun], orderOptions).results;
+  const reversed = adjudicateReviewRuns([criticalRun, lowRun, emptyRun], orderOptions).results;
+  assert.deepEqual(forward, reversed, "provider order cannot change blocking or severity metrics");
+  assert.equal(forward.find((row) => row.provider === "alpha").blockingTruePositives.length, 0);
+  assert.equal(forward.find((row) => row.provider === "beta").blockingTruePositives.length, 1);
+  assert.equal(forward.find((row) => row.provider === "gamma").blockingFalseNegatives.length, 1, "missed blocking severity comes from chair adjudication");
+  assert.equal(forward.find((row) => row.provider === "alpha").severityCalibratedCount, 0);
+  assert.equal(forward.find((row) => row.provider === "beta").severityCalibratedCount, 0);
 } finally {
   await rm(root, { recursive: true, force: true });
 }
