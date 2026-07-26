@@ -154,7 +154,10 @@ export function createMissionControlSubscriptionClient({
       while (!stopped && !signal?.aborted) {
         try {
           const result = await pollOnce();
-          if (result.status === "more") continue;
+          if (result.status === "more") {
+            consecutiveResyncs = 0;
+            continue;
+          }
           if (result.status.startsWith("resync:")) {
             consecutiveResyncs += 1;
             const backoffMs = Math.min(5_000, Math.max(25, reconnectDelayMs) * (2 ** Math.min(4, consecutiveResyncs - 1)));

@@ -125,4 +125,33 @@ assert.equal(consecutiveResyncReads, 3, "repeated resync requests remain recover
 assert.ok(resyncClient.snapshot.resyncCount >= 2);
 assert.ok(resyncClient.snapshot.consecutiveResyncs >= 2, "consecutive resyncs are tracked and back off instead of busy-looping");
 
+let paginatedRecoveryReads = 0;
+const paginatedRecoveryAbort = new AbortController();
+const paginatedRecoveryClient = createMissionControlSubscriptionClient({
+  runtimeRoot: "/runtime",
+  workspaceRoot: "/workspace",
+  stateRoot: "/state",
+  waitMs: 0,
+  reconnectDelayMs: 0,
+  snapshotReader: async () => snapshot(0, "running"),
+  eventReader: async () => {
+    paginatedRecoveryReads += 1;
+    if (paginatedRecoveryReads === 1) {
+      return { streamId, cursor: 0, events: [], resyncRequired: true, reason: "retention_window_exceeded" };
+    }
+    if (paginatedRecoveryReads === 2) {
+      return { streamId, cursor: 1, events: [laneEvent(1, "working")], resyncRequired: false, hasMore: true };
+    }
+    paginatedRecoveryAbort.abort();
+    return { streamId, cursor: 1, events: [], resyncRequired: true, reason: "retention_window_exceeded" };
+  },
+});
+await paginatedRecoveryClient.run({ signal: paginatedRecoveryAbort.signal });
+assert.equal(paginatedRecoveryReads, 3);
+assert.equal(
+  paginatedRecoveryClient.snapshot.consecutiveResyncs,
+  1,
+  "a healthy paginated batch resets the resync backoff before a later gap",
+);
+
 console.log("Mission Control live-client tests passed: ordered batching, reconnect cursor reuse, bounded gap resync/backoff, and redraw coalescing are verified.");

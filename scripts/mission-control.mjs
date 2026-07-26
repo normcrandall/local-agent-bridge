@@ -119,7 +119,6 @@ let selectedIndex = 0;
 let selectedId = null;
 let drawing = false;
 let redrawPending = false;
-let pendingDrawOverride = null;
 let stopped = false;
 let promptOpen = false;
 let timer = null;
@@ -265,7 +264,7 @@ function subscriptionSnapshot(viewModel) {
       ? matching.filter((lane) => ["needs_user", "waiting"].includes(lane.operatorCategory))
       : liveSource;
   const operatorLanes = deduplicateOperatorLanes(modeSource, {
-    includeHistory: view === "all",
+    includeHistory: view === "all" || (view === "attention" && includeStale),
     staleAfterMs: staleAfterHours * 60 * 60 * 1000,
   });
   const counts = {
@@ -302,7 +301,6 @@ async function draw(currentOverride = null) {
   if (stopped) return;
   if (drawing) {
     redrawPending = true;
-    if (currentOverride) pendingDrawOverride = currentOverride;
     return;
   }
   drawing = true;
@@ -352,10 +350,11 @@ async function draw(currentOverride = null) {
   } finally {
     drawing = false;
     if (redrawPending && !stopped) {
-      const nextOverride = pendingDrawOverride;
       redrawPending = false;
-      pendingDrawOverride = null;
-      queueMicrotask(() => { void draw(nextOverride); });
+      // Always derive a coalesced replay from the newest subscribed model. An
+      // override captured while the prior draw was in flight may already be
+      // older than a subsequently delivered event batch.
+      queueMicrotask(() => { void draw(null); });
     }
   }
 }
