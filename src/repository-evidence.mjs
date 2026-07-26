@@ -29,6 +29,32 @@ export async function readRepositoryHead(workspace) {
   return git(workspace, ["rev-parse", "HEAD"]);
 }
 
+export async function captureActualRepositoryFootprint({ workspace, baseSha = null } = {}) {
+  if (!workspace) throw new Error("Actual repository footprint capture requires a workspace.");
+  const headSha = await readRepositoryHead(workspace);
+  const committed = baseSha
+    ? (await gitPayload(workspace, ["diff", "--name-only", `${baseSha}...${headSha}`])).value.split("\n").filter(Boolean)
+    : [];
+  const unstaged = (await gitPayload(workspace, ["diff", "--name-only"])).value.split("\n").filter(Boolean);
+  const staged = (await gitPayload(workspace, ["diff", "--cached", "--name-only"])).value.split("\n").filter(Boolean);
+  const untracked = (await gitPayload(workspace, ["ls-files", "--others", "--exclude-standard"])).value.split("\n").filter(Boolean);
+  return {
+    version: 1,
+    paths: [...new Set([...committed, ...staged, ...unstaged, ...untracked])].sort(),
+    symbols: [],
+    contracts: [],
+    resources: [],
+    blockers: [],
+    evidence: {
+      source: "git",
+      baseSha,
+      headSha,
+      dirty: staged.length > 0 || unstaged.length > 0 || untracked.length > 0,
+      capturedAt: new Date().toISOString(),
+    },
+  };
+}
+
 export function isMissingRepositoryHead(error) {
   const message = `${error?.message || ""}\n${error?.stderr || ""}`;
   return /ambiguous argument ['"]?HEAD|unknown revision or path not in the working tree|bad revision ['"]?HEAD|Needed a single revision/i.test(message);
