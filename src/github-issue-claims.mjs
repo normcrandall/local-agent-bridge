@@ -242,9 +242,6 @@ function canonicalAuthority(authority) {
     appId: String(authority.appId),
     installationId: Number(authority.installationId),
     repository: authority.repository,
-    permissions: Object.fromEntries(
-      Object.entries(authority.permissions || {}).sort(([left], [right]) => left.localeCompare(right)),
-    ),
   };
 }
 

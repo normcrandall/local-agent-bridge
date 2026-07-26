@@ -174,13 +174,22 @@ export function createAgentPool({
       const priorWriterLogin = githubBuilder.writerProvider && githubBuilder.writerProvider !== agent
         ? appRoles.roles?.writers?.[githubBuilder.writerProvider]?.expectedLogin || null
         : null;
+      let authorizedBy = null;
       if (explicitlyPinnedLogin && !sameGitHubAppLogin(explicitlyPinnedLogin, credential.expectedLogin)) {
         throw new Error(`Configured ${agent} writer identity ${credential.expectedLogin} does not match the bound authorization ${explicitlyPinnedLogin}.`);
       }
-      if (!explicitlyPinnedLogin && githubBuilder.expectedLogin
-        && !sameGitHubAppLogin(githubBuilder.expectedLogin, credential.expectedLogin)
-        && !sameGitHubAppLogin(githubBuilder.expectedLogin, compatibilityLogin)
-        && !sameGitHubAppLogin(githubBuilder.expectedLogin, priorWriterLogin)) {
+      // A per-provider expectedLogins pin is the explicit authorization for
+      // that provider and deliberately supersedes the compatibility/top-level
+      // login. Both values originate in the same trusted builder binding.
+      if (explicitlyPinnedLogin) {
+        authorizedBy = "explicit_provider_pin";
+      } else if (sameGitHubAppLogin(githubBuilder.expectedLogin, credential.expectedLogin)) {
+        authorizedBy = "resolved_writer_identity";
+      } else if (sameGitHubAppLogin(githubBuilder.expectedLogin, compatibilityLogin)) {
+        authorizedBy = "compatibility_builder";
+      } else if (sameGitHubAppLogin(githubBuilder.expectedLogin, priorWriterLogin)) {
+        authorizedBy = "prior_writer_failover";
+      } else if (githubBuilder.expectedLogin) {
         throw new Error(`Configured ${agent} writer identity ${credential.expectedLogin} is not authorized by the builder binding ${githubBuilder.expectedLogin}.`);
       }
       const { expectedLogins: _expectedLogins, requestedLogin, rebindReason, ...baseBinding } = githubBuilder;
@@ -202,9 +211,13 @@ export function createAgentPool({
           login: credential.expectedLogin,
           requestedLogin: requestedLogin || githubBuilder.expectedLogin || null,
           resolvedLogin: credential.expectedLogin,
-          rebindReason: priorWriterLogin
-            ? "provider_failover"
-            : rebindReason || (credential.provider ? "provider_writer_selection" : "compatibility_builder_fallback"),
+          rebindReason: sameGitHubAppLogin(requestedLogin || githubBuilder.expectedLogin, credential.expectedLogin)
+            ? null
+            : authorizedBy === "explicit_provider_pin"
+              ? "explicit_provider_pin"
+              : authorizedBy === "prior_writer_failover"
+                ? "provider_failover"
+                : rebindReason || (credential.provider ? "provider_writer_selection" : "compatibility_builder_fallback"),
           removedOperations: (baseBinding.allowedOperations || []).filter((operation) => operation === "merge"),
           appId: credential.appId,
           installationId: credential.installationId,
@@ -321,7 +334,12 @@ export function createAgentPool({
         || Number(fresh.installationId) !== Number(credential.installationId)) {
         throw new Error(`Configured ${agent} writer authority changed while the collaboration was running.`);
       }
-      return { token: fresh.token, verifiedLogin: fresh.verifiedLogin };
+      return {
+        token: fresh.token,
+        verifiedLogin: fresh.verifiedLogin,
+        expiresAt: fresh.expiresAt,
+        permissions: fresh.permissions,
+      };
     };
     return builderClientFactory({
       ...activeGithubBuilder,

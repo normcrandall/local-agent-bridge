@@ -369,7 +369,12 @@ async function runTests() {
   assert.ok(mock.getRefs().has("refs/tags/claims/issue-42-generation-1"));
   assert.ok(mock.getComments()[0].body.includes("Summary: Claim acquired before provider work starts."));
   let acquired = (await parseClaims(client, 42))[0];
-  assert.deepEqual(acquired.data.authority, baseClientConfig.authority);
+  assert.deepEqual(acquired.data.authority, {
+    login: baseClientConfig.authority.login,
+    appId: baseClientConfig.authority.appId,
+    installationId: baseClientConfig.authority.installationId,
+    repository: baseClientConfig.authority.repository,
+  });
   assert.equal(acquired.data.lifecyclePolicy.labels.queued, "workflow:queued");
   assert.equal(acquired.data.lifecycle.labelPolicy.queued, "workflow:queued");
   assert.equal(acquired.data.lifecycle.state, "queued", "the first published claim comment already contains its lifecycle ledger");
@@ -421,18 +426,18 @@ async function runTests() {
     workspaceRoot: tempWorkspaceRoot,
   });
   acquired = (await parseClaims(client, 42))[0];
-  assert.deepEqual(acquired.data.authority, baseClientConfig.authority);
+  assert.equal(acquired.data.authority.permissions, undefined, "claim identity must not embed time-varying token permissions");
 
-  const reorderedAuthority = {
+  const changedPermissionAuthority = {
     ...baseClientConfig.authority,
-    permissions: Object.fromEntries(Object.entries(baseClientConfig.authority.permissions).reverse()),
+    permissions: { ...baseClientConfig.authority.permissions, contents: "read" },
   };
-  const reorderedClient = createBoundBuilderClient({ ...baseClientConfig, authority: reorderedAuthority });
+  const changedPermissionClient = createBoundBuilderClient({ ...baseClientConfig, authority: changedPermissionAuthority });
   assert.equal((await rebindIssueClaim({
-    client: reorderedClient,
+    client: changedPermissionClient,
     issueNumber: 42,
     collaborationId: "bridge-11111111-2222-3333-4444-555555555555",
-  })).rebound, false);
+  })).rebound, false, "permission observations must not churn stable claim identity or its bounded history");
 
   await acquireClaimLease({
     client,

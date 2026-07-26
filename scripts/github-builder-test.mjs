@@ -330,6 +330,122 @@ assert.equal((await createAndContinue.reviewThreads())[0].id, "thread-1");
 assert.equal(createAndContinue.binding().prNumber, 42);
 const threads = await builder.reviewThreads();
 assert.equal(threads[0].id, "thread-1");
+
+// A bound client backed by a token factory reuses only a safely unexpired
+// credential, refreshes before expiry, and teaches its authority receipt the
+// permissions observed on the minted installation token. This pins the token
+// lifecycle at the client seam so hoisting a client cannot retain a stale token.
+{
+  let tokenMints = 0;
+  let nowMs = Date.parse("2026-07-26T00:00:00.000Z");
+  const refreshApi = fakeGitHub();
+  const refreshReceiptPath = path.join(tmpDir, "refresh-token-receipts.jsonl");
+  const refreshClient = createBoundBuilderClient({
+    ...base,
+    token: null,
+    verifiedLogin: null,
+    fetchImpl: refreshApi.fetchImpl,
+    getToken: async () => ({
+      token: `ghs_refresh_${++tokenMints}`,
+      verifiedLogin: "builder[bot]",
+      expiresAt: new Date(nowMs + 600_000).toISOString(),
+      permissions: { contents: "write", issues: "write", metadata: "read", pull_requests: "write" },
+    }),
+    authority: {
+      login: "builder[bot]",
+      appId: "1",
+      installationId: 101,
+      repository: "owner/repo",
+      permissions: {},
+    },
+    receiptPath: refreshReceiptPath,
+    now: () => nowMs,
+  });
+  await refreshClient.reviewThreads();
+  await refreshClient.reviewThreads();
+  assert.equal(tokenMints, 1, "operations may reuse a credential while it remains safely before expiry");
+
+  let releaseConcurrentMint;
+  let concurrentMints = 0;
+  const concurrentMintBarrier = new Promise((resolve) => { releaseConcurrentMint = resolve; });
+  const concurrentClient = createBoundBuilderClient({
+    ...base,
+    token: null,
+    verifiedLogin: null,
+    fetchImpl: fakeGitHub().fetchImpl,
+    getToken: async () => {
+      concurrentMints += 1;
+      await concurrentMintBarrier;
+      return {
+        token: "ghs_concurrent",
+        verifiedLogin: "builder[bot]",
+        expiresAt: new Date(nowMs + 600_000).toISOString(),
+        permissions: { contents: "write", issues: "write", metadata: "read", pull_requests: "write" },
+      };
+    },
+    authority: {
+      login: "builder[bot]", appId: "1", installationId: 101, repository: "owner/repo", permissions: {},
+    },
+    now: () => nowMs,
+  });
+  const concurrentOperations = [concurrentClient.reviewThreads(), concurrentClient.reviewThreads()];
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(concurrentMints, 1, "concurrent operations must share one in-flight token mint");
+  releaseConcurrentMint();
+  await Promise.all(concurrentOperations);
+
+  let noExpiryMints = 0;
+  const noExpiryClient = createBoundBuilderClient({
+    ...base,
+    token: null,
+    verifiedLogin: null,
+    fetchImpl: fakeGitHub().fetchImpl,
+    getToken: async () => ({
+      token: `ghs_no_expiry_${++noExpiryMints}`,
+      verifiedLogin: "builder[bot]",
+      permissions: { contents: "write", issues: "write", metadata: "read", pull_requests: "write" },
+    }),
+    authority: {
+      login: "builder[bot]", appId: "1", installationId: 101, repository: "owner/repo", permissions: {},
+    },
+    now: () => nowMs,
+  });
+  await noExpiryClient.reviewThreads();
+  await noExpiryClient.reviewThreads();
+  assert.equal(noExpiryMints, 2, "a credential without expiresAt must be refreshed for every operation");
+
+  nowMs += 301_000;
+  await refreshClient.reviewThreads();
+  assert.equal(tokenMints, 2, "the client must refresh before the cached credential reaches expiry");
+  assert.deepEqual(refreshClient.binding().writerAuthority.permissions, {
+    contents: "write", issues: "write", metadata: "read", pull_requests: "write",
+  });
+  await refreshClient.ensurePullRequest({ title: "Refresh receipt", body: "Observed permissions" });
+  assert.equal(tokenMints, 2, "the safely unexpired replacement credential should be reused");
+  const refreshReceipts = fs.readFileSync(refreshReceiptPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(refreshReceipts.at(-1).appIdentity.permissions, {
+    contents: "write", issues: "write", metadata: "read", pull_requests: "write",
+  }, "durable mutation receipts must carry the permissions observed on the operation token");
+
+  const downgradedClient = createBoundBuilderClient({
+    ...base,
+    token: null,
+    verifiedLogin: null,
+    fetchImpl: fakeGitHub().fetchImpl,
+    getToken: async () => ({
+      token: "ghs_downgraded",
+      verifiedLogin: "builder[bot]",
+      expiresAt: new Date(nowMs + 600_000).toISOString(),
+      permissions: { contents: "read", issues: "write", metadata: "read", pull_requests: "write" },
+    }),
+    authority: {
+      login: "builder[bot]", appId: "1", installationId: 101, repository: "owner/repo", permissions: {},
+    },
+    now: () => nowMs,
+  });
+  await assert.rejects(downgradedClient.reviewThreads(), /lacks required permissions: contents:write/,
+    "observed authority evidence must fail closed below the builder permission floor");
+}
 const replied = await builder.replyReviewThread({ threadId: "thread-1", body: "Fixed." });
 assert.equal(replied.url, "https://github.test/comment/1");
 assert.match(api.calls.find((call) => call.body?.variables?.body)?.body.variables.body, /agent-bridge-builder:reply/);
