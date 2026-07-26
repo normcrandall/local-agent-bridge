@@ -243,7 +243,7 @@ export async function findCollaborationByIdentity(root, identityKey, {
   const candidates = await listCollaborations(root, { limit: 10_000 });
   for (const candidate of candidates) {
     if (!allowed.has(candidate.status)) continue;
-    if (candidate.identityKey && candidate.identityKey !== identityKey) continue;
+    if (candidate.identityKey !== identityKey) continue;
     const state = await readCollaboration(root, candidate.id);
     if (state.identityKey === identityKey) {
       await atomicWriteJson(identityIndexPath(root, identityKey), { id: state.id, identityKey, updatedAt: state.updatedAt });

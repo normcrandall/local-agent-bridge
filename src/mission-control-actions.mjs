@@ -60,6 +60,24 @@ export function missionControlPlatformCommands(platform = process.platform) {
   };
 }
 
+export function runClipboardCopy(input, { commands = missionControlPlatformCommands().copy, run } = {}) {
+  const attempts = [];
+  for (const candidate of commands) {
+    const result = run(candidate, input) || {};
+    attempts.push({
+      command: candidate.command,
+      status: Number.isInteger(result.status) ? result.status : null,
+      errorCode: result.error?.code || null,
+    });
+    if (!result.error && result.status === 0) return { copied: true, command: candidate.command, attempts };
+  }
+  return { copied: false, command: null, attempts };
+}
+
+export function missionControlShouldRedraw({ promptOpen = false, stopped = false } = {}) {
+  return !promptOpen && !stopped;
+}
+
 export function missionControlPrUrl(lane) {
   if (!missionControlActionAvailability(lane).openPr) return null;
   return `https://github.com/${lane.repository}/pull/${lane.prNumber}`;
