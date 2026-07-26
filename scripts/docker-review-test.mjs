@@ -16,7 +16,7 @@ import {
   probeDockerModelRunnerContract,
   runDockerModelReview,
 } from "../src/docker-review.mjs";
-import { executeLocalReviewTool, runLocalReview } from "../src/ollama-review.mjs";
+import { executeLocalReviewTool, parseLocalReviewToolArguments, runLocalReview } from "../src/ollama-review.mjs";
 import { dockerToolRequest } from "../src/tool-requests.mjs";
 import { runConversation } from "../src/talk-protocol.mjs";
 import { selectRoles } from "../src/operations.mjs";
@@ -56,12 +56,33 @@ try {
       if (url.endsWith("/api/tags")) {
         return { ok: true, json: async () => ({ models: [{ name: "ai/qwen2.5-coder" }] }) };
       }
-      return { ok: true, json: async () => ({ message: { role: "assistant", content: "OK" } }) };
+      return {
+        ok: true,
+        json: async () => ({
+          message: {
+            role: "assistant",
+            content: "",
+            tool_calls: [{ function: { name: "bridge_contract_probe", arguments: {} } }],
+          },
+        }),
+      };
     },
   });
   assert.equal(contract.chatCompatible, true);
+  assert.equal(contract.toolCallingCompatible, true);
   assert.deepEqual(contractRequests.map(({ url }) => new URL(url).pathname), ["/api/tags", "/api/chat"]);
-  assert.equal(JSON.parse(contractRequests[1].request.body).stream, false);
+  const contractBody = JSON.parse(contractRequests[1].request.body);
+  assert.equal(contractBody.stream, false);
+  assert.equal(contractBody.tools[0].function.name, "bridge_contract_probe");
+  await assert.rejects(
+    probeDockerModelRunnerContract({
+      model: "ai/qwen2.5-coder",
+      fetchImpl: async (url) => url.endsWith("/api/tags")
+        ? { ok: true, json: async () => ({ models: [{ name: "ai/qwen2.5-coder" }] }) }
+        : { ok: true, json: async () => ({ message: { role: "assistant", content: "OK" } }) },
+    }),
+    /did not preserve the requested tool call/,
+  );
 
   await assert.rejects(
     runLocalReview({
@@ -130,28 +151,58 @@ try {
   assert.equal(result.timing.apiCalls, 2);
   assert.equal(result.timing.toolCalls, 1);
 
+  assert.deepEqual(parseLocalReviewToolArguments(""), {});
+  assert.deepEqual(parseLocalReviewToolArguments("   \t"), {});
   for (const malformedArguments of ["{not-json", "[]", "true", "null", null]) {
-    await assert.rejects(
-      runDockerModelReview({
-        prompt: "Review malformed tool arguments.",
-        cwd: ".",
-        workspaceRoot: repository,
+    const malformedRequests = [];
+    const malformedResponses = [
+      {
         model: "ai/qwen2.5-coder",
-        fallbackModels: [],
-        fetchImpl: async () => ({
-          ok: true,
-          json: async () => ({
-            model: "ai/qwen2.5-coder",
-            message: {
-              role: "assistant",
-              content: "",
-              tool_calls: [{ function: { name: "read_file", arguments: malformedArguments } }],
-            },
-          }),
-        }),
-      }),
-      /(?:malformed JSON arguments|arguments must be a JSON object)/,
-    );
+        message: {
+          role: "assistant",
+          content: "",
+          tool_calls: [{ function: { name: "read_file", arguments: malformedArguments } }],
+        },
+      },
+      { model: "ai/qwen2.5-coder", message: { role: "assistant", content: "Recovered review." } },
+    ];
+    const recovered = await runDockerModelReview({
+      prompt: "Review malformed tool arguments.",
+      cwd: ".",
+      workspaceRoot: repository,
+      model: "ai/qwen2.5-coder",
+      fallbackModels: [],
+      fetchImpl: async (_url, request) => {
+        malformedRequests.push(JSON.parse(request.body));
+        return { ok: true, json: async () => malformedResponses.shift() };
+      },
+    });
+    assert.equal(recovered.result, "Recovered review.");
+    const toolResult = JSON.parse(malformedRequests[1].messages.at(-1).content);
+    assert.match(toolResult.error, /(?:malformed JSON arguments|arguments must be a JSON object)/);
+  }
+
+  for (const emptyArguments of ["", "   "]) {
+    const emptyResponses = [
+      {
+        model: "ai/qwen2.5-coder",
+        message: {
+          role: "assistant",
+          content: "",
+          tool_calls: [{ function: { name: "workspace_summary", arguments: emptyArguments } }],
+        },
+      },
+      { model: "ai/qwen2.5-coder", message: { role: "assistant", content: "No findings." } },
+    ];
+    const accepted = await runDockerModelReview({
+      prompt: "Review with a no-argument tool.",
+      cwd: ".",
+      workspaceRoot: repository,
+      model: "ai/qwen2.5-coder",
+      fallbackModels: [],
+      fetchImpl: async () => ({ ok: true, json: async () => emptyResponses.shift() }),
+    });
+    assert.equal(accepted.result, "No findings.");
   }
 
   process.env.AGENT_BRIDGE_DOCKER_MODEL_RUNNER_CONFIG = join(repository, "missing-docker-config.json");
@@ -168,12 +219,12 @@ try {
   assert.equal(defaultModelResponse.result, "No findings.");
   process.env.AGENT_BRIDGE_DOCKER_MODEL_RUNNER_CONFIG = configPath;
 
-  const dockerStatus = spawnSync("docker", ["model", "status"], {
+  const dockerStatus = process.env.AGENT_BRIDGE_LIVE_DOCKER_CONTRACT === "1" && spawnSync("docker", ["model", "status"], {
     encoding: "utf8",
     timeout: 10_000,
     stdio: "ignore",
   });
-  if (dockerStatus.status === 0) {
+  if (dockerStatus && dockerStatus.status === 0) {
     const liveConfiguration = await loadDockerModelRunnerConfig({
       configPath: DEFAULT_DOCKER_MODEL_RUNNER_CONFIG,
       environment: {},
@@ -185,7 +236,7 @@ try {
     });
     console.log(`Live Docker Model Runner contract passed for ${liveConfiguration.model}.`);
   } else {
-    console.log("Live Docker Model Runner contract skipped: docker model status is unavailable.");
+    console.log("Live Docker Model Runner contract skipped; set AGENT_BRIDGE_LIVE_DOCKER_CONTRACT=1 to enable it.");
   }
 
   assert.throws(

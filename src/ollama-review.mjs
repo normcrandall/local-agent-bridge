@@ -264,8 +264,10 @@ export const executeOllamaReviewTool = executeLocalReviewTool;
 export function parseLocalReviewToolArguments(rawArguments, { providerLabel = "Local reviewer", toolName = "unknown" } = {}) {
   let parsed = rawArguments;
   if (typeof parsed === "string") {
+    const trimmed = parsed.trim();
+    if (!trimmed) return {};
     try {
-      parsed = JSON.parse(parsed);
+      parsed = JSON.parse(trimmed);
     } catch (error) {
       throw new Error(`${providerLabel} tool ${toolName} supplied malformed JSON arguments: ${error.message}`);
     }
@@ -441,13 +443,15 @@ export async function runLocalReview({
         toolCalls += 1;
         if (toolCalls > MAX_TOOL_CALLS) throw new Error(`${providerLabel} exceeded the ${MAX_TOOL_CALLS}-call review tool budget.`);
         const name = call?.function?.name;
-        const args = parseLocalReviewToolArguments(call?.function?.arguments, { providerLabel, toolName: name });
-        onProgress(toolSummary(name, args));
+        let args;
         let content;
         const toolStartedAt = Date.now();
         try {
+          args = parseLocalReviewToolArguments(call?.function?.arguments, { providerLabel, toolName: name });
+          onProgress(toolSummary(name, args));
           content = JSON.stringify(executeLocalReviewTool({ cwd: actualCwd, name, arguments: args }));
         } catch (error) {
+          onProgress(`${providerLabel} supplied an invalid ${name || "unknown"} tool request; returning the bounded error for correction.`);
           content = JSON.stringify({ error: error.message });
         }
         timing.toolCalls += 1;
