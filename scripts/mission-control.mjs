@@ -41,6 +41,9 @@ process.stdout.on("error", (error) => {
 });
 
 const args = process.argv.slice(2);
+const MISSION_CONTROL_REFRESH_DEFAULT_MS = 60_000;
+const MISSION_CONTROL_REFRESH_MIN_MS = 100;
+const MISSION_CONTROL_REFRESH_MAX_MS = 3_600_000;
 const value = (flag, fallback = null) => {
   const index = args.indexOf(flag);
   return index >= 0 && index + 1 < args.length ? args[index + 1] : fallback;
@@ -57,11 +60,24 @@ function usage() {
   process.stdout.write(`  --include-stale     Include stale attention and portfolio items\n`);
   process.stdout.write(`  --stale-after-hours N  Collapse attention items older than N hours (default: 24)\n`);
   process.stdout.write(`  --repo OWNER/REPO   Filter to one repository\n`);
-  process.stdout.write(`  --refresh-ms N      Maximum idle redraw interval (minimum/default: 60000)\n`);
+  process.stdout.write(`  --refresh-ms N      Maximum idle redraw interval in ms (range: 100-3600000; default: 60000)\n`);
   process.stdout.write(`  --state-root PATH   Read a different bridge state directory\n`);
   process.stdout.write(`  --no-color          Disable ANSI colors\n`);
   process.stdout.write(`  --quota             Include a synchronous quota reading in one-shot output\n`);
   process.stdout.write(`  --no-quota          Disable provider quota probes and footer\n`);
+}
+
+function parseRefreshMs() {
+  const index = args.indexOf("--refresh-ms");
+  const raw = index < 0 ? String(MISSION_CONTROL_REFRESH_DEFAULT_MS) : args[index + 1];
+  if (typeof raw !== "string" || !/^\d+$/.test(raw)) {
+    throw new Error(`--refresh-ms must be an integer between ${MISSION_CONTROL_REFRESH_MIN_MS} and ${MISSION_CONTROL_REFRESH_MAX_MS} milliseconds.`);
+  }
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed < MISSION_CONTROL_REFRESH_MIN_MS || parsed > MISSION_CONTROL_REFRESH_MAX_MS) {
+    throw new Error(`--refresh-ms must be between ${MISSION_CONTROL_REFRESH_MIN_MS} and ${MISSION_CONTROL_REFRESH_MAX_MS} milliseconds; received ${raw}.`);
+  }
+  return parsed;
 }
 
 if (args.includes("--help") || args.includes("-h")) {
@@ -71,7 +87,13 @@ if (args.includes("--help") || args.includes("-h")) {
 
 const stateRoot = resolve(value("--state-root", process.env.BRIDGE_COLLABORATION_DIR || resolve(homedir(), ".local/share/agent-bridge/state")));
 const repositoryFilter = value("--repo");
-const refreshMs = Math.max(60_000, Number.parseInt(value("--refresh-ms", "60000"), 10) || 60_000);
+let refreshMs;
+try {
+  refreshMs = parseRefreshMs();
+} catch (error) {
+  process.stderr.write(`Mission Control option error: ${error.message}\n`);
+  process.exit(2);
+}
 let view = args.includes("--all") ? "all" : args.includes("--attention") ? "attention" : "live";
 let includeStale = args.includes("--include-stale");
 const staleAfterHours = Math.max(1, Number.parseInt(value("--stale-after-hours", "24"), 10) || 24);
