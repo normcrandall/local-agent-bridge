@@ -45,19 +45,21 @@ try {
     digest: await computeRuntimeDigest(runtimeRoot),
     entries: ["src", "scripts", "package.json", "package-lock.json"],
   }));
+  const doctorEnvironment = {
+    ...process.env,
+    AGENT_BRIDGE_INSTALLED_RUNTIME_ROOT: runtimeRoot,
+    AGENT_BRIDGE_DOCTOR_CHECKS: [
+      "Codex project config",
+      "Claude project config",
+      "Global runtime provenance",
+      "Global runtime integrity",
+      "Global runtime drift from main",
+    ].join(","),
+  };
+  delete doctorEnvironment.AGENT_BRIDGE_WORKSPACE;
   execFileSync(process.execPath, [resolve(runtimeRoot, "scripts/doctor.mjs")], {
     cwd: nestedCaller,
-    env: {
-      ...process.env,
-      AGENT_BRIDGE_INSTALLED_RUNTIME_ROOT: runtimeRoot,
-      AGENT_BRIDGE_DOCTOR_CHECKS: [
-        "Codex project config",
-        "Claude project config",
-        "Global runtime provenance",
-        "Global runtime integrity",
-        "Global runtime drift from main",
-      ].join(","),
-    },
+    env: doctorEnvironment,
     stdio: "inherit",
   });
   console.log("Installed runtime smoke test passed without relying on source-control metadata.");

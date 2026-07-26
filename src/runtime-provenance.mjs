@@ -91,8 +91,8 @@ export async function locateCommitOnMain({
   const roots = [...new Set(sourceRoots
     .filter((root) => typeof root === "string" && root.trim())
     .map((root) => resolve(root)))];
-  for (const sourceRoot of roots) {
-    for (const candidate of candidates) {
+  for (const candidate of candidates) {
+    for (const sourceRoot of roots) {
       const contains = await containsCommit({ sourceRoot, ancestor, candidate, runGit });
       // A real answer from the preferred checkout/ref is authoritative. Only
       // an unavailable ref/root may fall through to a less durable source.
