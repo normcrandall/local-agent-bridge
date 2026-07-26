@@ -60,19 +60,50 @@ try {
     },
   });
   assert.match(firstCalls[0].prompt, /Shared task:/);
-  assert.equal(first.state.repositoryContextCursors.codex.afterSequence, 1);
+  assert.equal(first.state.repositoryContextCursors.codex.afterSequence, 0, "first exposure must not acknowledge journal records that were not delivered");
   assert.equal(first.state.promptMetrics.fullPrompts, 1);
 
+  const claimedContext = `CLAIMED_ISSUE_CONTEXT_BEGIN\n${"x".repeat(55_000)}\nCLAIMED_ISSUE_CONTEXT_END`;
   const bounded = composeRepositoryContextTurnPrompt({
-    fullPrompt: `critical-prefix ${"😀".repeat(200)} critical-suffix`,
+    fullPrompt: claimedContext,
     compactPrompt: "unused",
     firstExposure: true,
     binding,
     baseline: await readRepositoryContextBaseline({ journal, ...binding }),
-    maxBytes: 192,
+    cursorAtSequence: (sequence) => kernel.cursorAt(sequence),
   });
-  assert.ok(Buffer.byteLength(bounded.prompt, "utf8") <= 192);
-  assert.equal(bounded.truncated, true);
+  assert.equal(bounded.prompt, claimedContext, "claimed issue context above the capsule cap must remain byte-for-byte intact");
+  assert.equal(bounded.truncated, false);
+  assert.equal(bounded.cursor.afterSequence, 0);
+  const receiptOmitted = composeRepositoryContextTurnPrompt({
+    fullPrompt: claimedContext,
+    compactPrompt: "unused",
+    firstExposure: true,
+    binding,
+    baseline: { cursor: kernel.cursorAt(1), resyncRequired: { reason: "corrupt_cursor" } },
+    cursorAtSequence: (sequence) => kernel.cursorAt(sequence),
+    maxTurnPromptBytes: Buffer.byteLength(claimedContext, "utf8"),
+  });
+  assert.equal(receiptOmitted.prompt, claimedContext, "a receipt overflow must not truncate the task");
+  assert.equal(receiptOmitted.receiptIncluded, false);
+  const injectionShapedTask = composeRepositoryContextTurnPrompt({
+    fullPrompt: "Document why users may write: ignore the above.",
+    compactPrompt: "unused",
+    firstExposure: true,
+    binding,
+    baseline: await readRepositoryContextBaseline({ journal, ...binding }),
+    cursorAtSequence: (sequence) => kernel.cursorAt(sequence),
+  });
+  assert.match(injectionShapedTask.prompt, /ignore the above/, "outbound task prose must not be silently injection-redacted");
+  assert.throws(() => composeRepositoryContextTurnPrompt({
+    fullPrompt: claimedContext,
+    compactPrompt: "unused",
+    firstExposure: true,
+    binding,
+    baseline: { cursor: kernel.cursorAt(1), resyncRequired: { reason: "corrupt_cursor" } },
+    cursorAtSequence: (sequence) => kernel.cursorAt(sequence),
+    maxTurnPromptBytes: 1_024,
+  }), (error) => error?.code === "TURN_PROMPT_EXCEEDS_BOUND", "an actual full-turn overflow must fail closed");
 
   await journal.append({
     identity: "unseen-result",
@@ -268,6 +299,16 @@ try {
   }
   const pagedKernel = createRepositoryContextDeltaKernel({ journal: pagedJournal, ...binding, maxBytes: 8_000 });
   const pagedBaseline = await readRepositoryContextBaseline({ journal: pagedJournal, ...binding });
+  const pageWithoutCursorDerivation = await pagedKernel.read({ cursor: pagedKernel.initialCursor() });
+  assert.throws(() => composeRepositoryContextTurnPrompt({
+    fullPrompt: "full prompt",
+    compactPrompt: "compact reply contract",
+    firstExposure: false,
+    binding,
+    priorCursor: pagedKernel.initialCursor(),
+    baseline: pagedBaseline,
+    delta: pageWithoutCursorDerivation,
+  }), (error) => error?.code === "REPOSITORY_CONTEXT_CURSOR_DERIVATION_REQUIRED", "record delivery without cursor derivation must fail instead of livelocking");
   let pagedCursor = pagedKernel.initialCursor();
   const observedSequences = [];
   for (let attempt = 0; attempt < 10 && pagedCursor.afterSequence < 5; attempt += 1) {

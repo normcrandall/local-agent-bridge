@@ -532,7 +532,7 @@ try {
           baseline,
           delta,
           cursorAtSequence: (sequence) => repositoryContextKernel.cursorAt(sequence),
-          maxBytes: state.repositoryContext?.maxPromptBytes,
+          maxTurnPromptBytes: state.repositoryContext?.maxPromptBytes,
         });
       }
       : null,
@@ -549,6 +549,8 @@ try {
         proposedCursorAfterSequence: prepared.cursor?.afterSequence ?? null,
         resyncReason: prepared.receipt?.reason || null,
         truncated: prepared.truncated === true,
+        promptRedacted: prepared.promptRedacted === true,
+        receiptIncluded: prepared.receiptIncluded !== false,
       });
     },
     onPromptDelivered: async ({ agent, turn, prepared, state: runtimeState }) => {
@@ -573,6 +575,8 @@ try {
         cursorAfterSequence: prepared.cursor?.afterSequence ?? null,
         resyncReason: prepared.receipt?.reason || null,
         truncated: prepared.truncated === true,
+        promptRedacted: prepared.promptRedacted === true,
+        receiptIncluded: prepared.receiptIncluded !== false,
       });
     },
     send: async (call) => {

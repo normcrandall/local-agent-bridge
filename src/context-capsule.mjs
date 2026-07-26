@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { collaborationDirectory } from "./collaboration-store.mjs";
 
 const DEFAULT_CAP_BYTES = 50 * 1024; // 50 KB
+const DEFAULT_TURN_PROMPT_MAX_BYTES = 256 * 1024; // 256 KB
 export const REPOSITORY_CONTEXT_RESYNC_RECEIPT_VERSION = 1;
 
 export function resolveCapsuleMaxBytes(configured) {
@@ -16,6 +17,25 @@ export function resolveCapsuleMaxBytes(configured) {
     return DEFAULT_CAP_BYTES;
   }
   return Math.min(val, DEFAULT_CAP_BYTES);
+}
+
+export function resolveTurnPromptMaxBytes(configured) {
+  if (configured === undefined || configured === null) {
+    return DEFAULT_TURN_PROMPT_MAX_BYTES;
+  }
+  const value = typeof configured === "number" ? configured : Number(configured);
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    return DEFAULT_TURN_PROMPT_MAX_BYTES;
+  }
+  return value;
+}
+
+function promptBoundError(actualBytes, maxBytes) {
+  const error = new Error(`Full collaboration turn prompt is ${actualBytes} bytes and exceeds the configured ${maxBytes}-byte bound.`);
+  error.code = "TURN_PROMPT_EXCEEDS_BOUND";
+  error.actualBytes = actualBytes;
+  error.maxBytes = maxBytes;
+  return error;
 }
 
 function boundedUtf8(text, maxBytes) {
@@ -99,31 +119,44 @@ export function composeRepositoryContextTurnPrompt({
   delta = null,
   cursorAtSequence = null,
   maxBytes,
+  maxTurnPromptBytes,
 } = {}) {
   const cap = resolveCapsuleMaxBytes(maxBytes);
-  const safeFull = redactSecretsAndInjectionFromText(String(fullPrompt || ""));
-  const safeCompact = redactSecretsAndInjectionFromText(String(compactPrompt || ""));
-  const boundedFull = boundedUtf8(safeFull, cap);
-  const fullBytes = Buffer.byteLength(boundedFull.text, "utf8");
+  const turnPromptCap = resolveTurnPromptMaxBytes(maxTurnPromptBytes);
+  // The task contract and claimed-issue delimiters are already authoritative
+  // outbound prompt material. Preserve their wording while still removing
+  // credentials; injection-shaped prose must not be silently rewritten here.
+  const originalFull = String(fullPrompt || "");
+  const originalCompact = String(compactPrompt || "");
+  const safeFull = redactSecretsFromText(originalFull);
+  const safeCompact = redactSecretsFromText(originalCompact);
+  const fullBytes = Buffer.byteLength(safeFull, "utf8");
+  if (fullBytes > turnPromptCap) throw promptBoundError(fullBytes, turnPromptCap);
+  const promptRedacted = safeFull !== originalFull || safeCompact !== originalCompact;
   const baselineCursor = baseline?.cursor || null;
 
   if (firstExposure) {
     const receipt = baseline?.resyncRequired
       ? createRepositoryContextResyncReceipt({ reason: baseline.resyncRequired.reason, binding })
       : null;
-    const prompt = receipt
-      ? boundedUtf8(`${boundedFull.text}\n\nRepository context resync receipt:\n${JSON.stringify(receipt)}`, cap).text
-      : boundedFull.text;
+    const withReceipt = receipt
+      ? `${safeFull}\n\nRepository context resync receipt:\n${JSON.stringify(receipt)}`
+      : safeFull;
+    // The receipt is already persisted separately. Never damage the task just
+    // to fit the receipt into the provider prompt.
+    const prompt = Buffer.byteLength(withReceipt, "utf8") <= turnPromptCap ? withReceipt : safeFull;
     const promptBytes = Buffer.byteLength(prompt, "utf8");
     return {
       prompt,
       kind: "full",
-      cursor: baselineCursor,
+      cursor: typeof cursorAtSequence === "function" ? cursorAtSequence(0) : priorCursor,
       receipt,
       fullPromptBytes: fullBytes,
       promptBytes,
       avoidedBytes: 0,
-      truncated: boundedFull.truncated,
+      truncated: false,
+      promptRedacted,
+      receiptIncluded: !receipt || prompt === withReceipt,
       eventCount: 0,
     };
   }
@@ -140,7 +173,8 @@ export function composeRepositoryContextTurnPrompt({
       skipped,
     });
     const suffix = `\n\nRepository context resync receipt:\n${JSON.stringify(receipt)}`;
-    const prompt = boundedUtf8(`${boundedFull.text}${suffix}`, cap).text;
+    const withReceipt = `${safeFull}${suffix}`;
+    const prompt = Buffer.byteLength(withReceipt, "utf8") <= turnPromptCap ? withReceipt : safeFull;
     const promptBytes = Buffer.byteLength(prompt, "utf8");
     return {
       prompt,
@@ -150,12 +184,19 @@ export function composeRepositoryContextTurnPrompt({
       fullPromptBytes: fullBytes,
       promptBytes,
       avoidedBytes: Math.max(0, fullBytes - promptBytes),
-      truncated: boundedFull.truncated,
+      truncated: false,
+      promptRedacted,
+      receiptIncluded: prompt === withReceipt,
       eventCount: 0,
     };
   }
 
   const records = delta?.records || [];
+  if (records.length && typeof cursorAtSequence !== "function") {
+    const error = new Error("cursorAtSequence is required when repository context records are present.");
+    error.code = "REPOSITORY_CONTEXT_CURSOR_DERIVATION_REQUIRED";
+    throw error;
+  }
   const cursorForRecords = (selected) => {
     if (!selected.length) return priorCursor;
     if (selected.length === records.length) return delta?.cursor || priorCursor;
@@ -195,7 +236,8 @@ export function composeRepositoryContextTurnPrompt({
       baselineCursor: exactCursor,
       skipped: [exactSkippedRecord],
     });
-    const prompt = boundedUtf8(`${safeCompact}\n\nRepository context resync receipt:\n${JSON.stringify(receipt)}`, cap).text;
+    const boundedPrompt = boundedUtf8(`${safeCompact}\n\nRepository context resync receipt:\n${JSON.stringify(receipt)}`, cap);
+    const prompt = boundedPrompt.text;
     const promptBytes = Buffer.byteLength(prompt, "utf8");
     return {
       prompt,
@@ -205,7 +247,9 @@ export function composeRepositoryContextTurnPrompt({
       fullPromptBytes: fullBytes,
       promptBytes,
       avoidedBytes: Math.max(0, fullBytes - promptBytes),
-      truncated: promptBytes >= cap,
+      truncated: boundedPrompt.truncated,
+      promptRedacted,
+      receiptIncluded: !boundedPrompt.truncated,
       eventCount: 0,
     };
   }
@@ -228,6 +272,8 @@ export function composeRepositoryContextTurnPrompt({
       promptBytes,
       avoidedBytes: Math.max(0, fullBytes - promptBytes),
       truncated: false,
+      promptRedacted,
+      receiptIncluded: true,
       eventCount: count,
     };
   }
@@ -251,7 +297,8 @@ export function composeRepositoryContextTurnPrompt({
         baselineCursor: exactCursor,
         skipped: [auditSkip],
       });
-      const prompt = boundedUtf8(`${safeCompact}\n\nRepository context resync receipt:\n${JSON.stringify(receipt)}`, cap).text;
+      const boundedPrompt = boundedUtf8(`${safeCompact}\n\nRepository context resync receipt:\n${JSON.stringify(receipt)}`, cap);
+      const prompt = boundedPrompt.text;
       const promptBytes = Buffer.byteLength(prompt, "utf8");
       return {
         prompt,
@@ -261,7 +308,9 @@ export function composeRepositoryContextTurnPrompt({
         fullPromptBytes: fullBytes,
         promptBytes,
         avoidedBytes: Math.max(0, fullBytes - promptBytes),
-        truncated: promptBytes >= cap,
+        truncated: boundedPrompt.truncated,
+        promptRedacted,
+        receiptIncluded: !boundedPrompt.truncated,
         eventCount: 0,
       };
     }
@@ -275,7 +324,8 @@ export function composeRepositoryContextTurnPrompt({
       baselineCursor,
       skipped,
     });
-    const prompt = boundedUtf8(`${boundedFull.text}\n\nRepository context resync receipt:\n${JSON.stringify(receipt)}`, cap).text;
+    const withReceipt = `${safeFull}\n\nRepository context resync receipt:\n${JSON.stringify(receipt)}`;
+    const prompt = Buffer.byteLength(withReceipt, "utf8") <= turnPromptCap ? withReceipt : safeFull;
     const promptBytes = Buffer.byteLength(prompt, "utf8");
     return {
       prompt,
@@ -285,7 +335,9 @@ export function composeRepositoryContextTurnPrompt({
       fullPromptBytes: fullBytes,
       promptBytes,
       avoidedBytes: Math.max(0, fullBytes - promptBytes),
-      truncated: boundedFull.truncated,
+      truncated: false,
+      promptRedacted,
+      receiptIncluded: prompt === withReceipt,
       eventCount: 0,
     };
   }
@@ -299,6 +351,8 @@ export function composeRepositoryContextTurnPrompt({
     promptBytes,
     avoidedBytes: Math.max(0, fullBytes - promptBytes),
     truncated: false,
+    promptRedacted,
+    receiptIncluded: true,
     eventCount: 0,
   };
 }
@@ -327,7 +381,7 @@ export function getSafeCapsulePath(root, id) {
   return capsulePath;
 }
 
-export function redactSecretsAndInjectionFromText(text) {
+export function redactSecretsFromText(text) {
   if (typeof text !== "string") return text;
   let redacted = text;
 
@@ -359,6 +413,12 @@ export function redactSecretsAndInjectionFromText(text) {
     redacted = redacted.replace(genericSecretRegex, "$1<REDACTED_SECRET>$3");
   }
 
+  return redacted;
+}
+
+export function redactSecretsAndInjectionFromText(text) {
+  let redacted = redactSecretsFromText(text);
+  if (typeof redacted !== "string") return redacted;
   const promptInjectionRegex = /ignore (?:all )?previous instructions|system override|you are now a|ignore the above/gi;
   if (promptInjectionRegex.test(redacted)) {
     redacted = redacted.replace(promptInjectionRegex, "<REDACTED_PROMPT_INJECTION>");
