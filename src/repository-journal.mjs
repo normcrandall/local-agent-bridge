@@ -95,6 +95,20 @@ function recordContent(record) {
   return content;
 }
 
+function canonicalRecordLine(record) {
+  return JSON.stringify({
+    version: record.version,
+    sequence: record.sequence,
+    identity: record.identity,
+    binding: record.binding,
+    recordedAt: record.recordedAt,
+    payload: record.payload,
+    fingerprint: record.fingerprint,
+    previousDigest: record.previousDigest,
+    digest: record.digest,
+  });
+}
+
 function validateRecord(record, { line, previous = null, expectedRepository = null } = {}) {
   const fail = (message, code = "CORRUPT_RECORD") => {
     throw new RepositoryJournalError(`Repository journal record at line ${line} ${message}`, { code, line });
@@ -163,6 +177,12 @@ function inspectRaw(raw) {
         previous: records.at(-1) || null,
         expectedRepository: repository,
       });
+      if (canonicalRecordLine(validated) !== lines[index]) {
+        throw new RepositoryJournalError(`Repository journal record at line ${index + 1} is not canonically encoded.`, {
+          code: "NON_CANONICAL_RECORD",
+          line: index + 1,
+        });
+      }
       repository ||= validated.binding.repository;
       records.push(validated);
     }
@@ -196,7 +216,10 @@ async function ownerIsAlive(pid) {
   }
 }
 
-async function acquireLock(path, { timeoutMs, retryMs }) {
+export async function acquireRepositoryJournalLock(path, {
+  timeoutMs = DEFAULT_LOCK_TIMEOUT_MS,
+  retryMs = DEFAULT_LOCK_RETRY_MS,
+} = {}) {
   const token = randomUUID();
   const deadline = Date.now() + timeoutMs;
   while (Date.now() <= deadline) {
@@ -214,11 +237,11 @@ async function acquireLock(path, { timeoutMs, retryMs }) {
     } catch (error) {
       if (error.code !== "EEXIST") throw error;
       try {
-        const [owner, info] = await Promise.all([
-          readFile(path, "utf8").then(JSON.parse),
-          stat(path),
-        ]);
-        if (!(await ownerIsAlive(owner.pid)) && Date.now() - info.mtimeMs > STALE_LOCK_MS) {
+        const [rawOwner, info] = await Promise.all([readFile(path, "utf8"), stat(path)]);
+        let owner = null;
+        try { owner = JSON.parse(rawOwner); } catch {}
+        const ownerAlive = owner ? await ownerIsAlive(owner.pid) : false;
+        if (!ownerAlive && Date.now() - info.mtimeMs > STALE_LOCK_MS) {
           await unlink(path).catch(() => {});
           continue;
         }
@@ -301,7 +324,7 @@ export function createRepositoryJournal({
     const binding = normalizeBinding({ repository, issueNumber, pullRequestNumber, headSha });
     const normalizedPayload = canonicalize(payload);
     const fingerprint = digest({ identity: normalizedIdentity, binding, payload: normalizedPayload });
-    const release = await acquireLock(lockPath, { timeoutMs: lockTimeoutMs, retryMs: lockRetryMs });
+    const release = await acquireRepositoryJournalLock(lockPath, { timeoutMs: lockTimeoutMs, retryMs: lockRetryMs });
     try {
       const records = strictRecords(inspectRaw(await readRaw(path)));
       if (records.length && records[0].binding.repository !== binding.repository) {
@@ -384,7 +407,7 @@ export function createRepositoryJournal({
       throw new RepositoryJournalError("prepare must be a function when supplied.", { code: "INVALID_RETENTION_PLAN" });
     }
     await initialize();
-    const release = await acquireLock(lockPath, { timeoutMs: lockTimeoutMs, retryMs: lockRetryMs });
+    const release = await acquireRepositoryJournalLock(lockPath, { timeoutMs: lockTimeoutMs, retryMs: lockRetryMs });
     let temporary = null;
     try {
       await cleanOrphanRetentionTemps();
