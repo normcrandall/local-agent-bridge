@@ -8,9 +8,22 @@ import { resolveModelRoute } from "./model-policy.mjs";
 
 export const DEFAULT_OLLAMA_CONFIG = resolve(homedir(), ".config/local-agent-bridge/ollama.json");
 export const DEFAULT_OLLAMA_MODEL = "qwen3.6:latest";
+export const OLLAMA_CONFIG_VERSION = 1;
 export const OLLAMA_PROBE_TIMEOUT_MS = 5_000;
 export const DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434";
 export const DEFAULT_LOCAL_MODEL_KEEP_ALIVE = "30m";
+
+export function normalizeOllamaModelName(value) {
+  const model = String(value || "").trim().toLowerCase();
+  return model && !model.includes(":") ? `${model}:latest` : model;
+}
+
+export function ollamaModelIsInstalled(model, installedModels = []) {
+  const expected = normalizeOllamaModelName(model);
+  return Boolean(expected) && installedModels.some((installed) => (
+    normalizeOllamaModelName(installed) === expected
+  ));
+}
 
 const MAX_FILE_LINES = 400;
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
@@ -33,7 +46,7 @@ export async function loadOllamaConfig({
   let configured = {};
   try {
     configured = JSON.parse(await readFile(configPath, "utf8"));
-    if (configured.version !== 1) throw new Error("Unsupported Ollama config version.");
+    if (configured.version !== OLLAMA_CONFIG_VERSION) throw new Error("Unsupported Ollama config version.");
   } catch (error) {
     if (error.code !== "ENOENT") throw new Error(`Unable to read Ollama config at ${configPath}: ${error.message}`);
   }
@@ -66,8 +79,7 @@ export async function probeOllama({ model, baseUrl, fetchImpl = fetch, timeoutMs
   if (!response.ok) throw new Error(`Ollama health check returned HTTP ${response.status}.`);
   const payload = await response.json();
   const models = (payload.models || []).map((entry) => entry.name || entry.model).filter(Boolean);
-  const installed = models.includes(selectedModel)
-    || (!selectedModel.includes(":") && models.includes(`${selectedModel}:latest`));
+  const installed = ollamaModelIsInstalled(selectedModel, models);
   if (!installed) {
     throw new Error(`Ollama model ${selectedModel} is not installed. Run: ollama pull ${selectedModel}`);
   }
