@@ -8,8 +8,10 @@ import { join } from "node:path";
 import { prepareWriterCheckout } from "../src/writer-checkout.mjs";
 import {
   inspectWriterRetirement,
+  inspectLocalDefaultBranchUpdate,
   preflightWriterHydration,
   recoverExactSha,
+  retirementFailureState,
   updateLocalDefaultBranch,
 } from "../src/writer-lifecycle.mjs";
 
@@ -28,7 +30,8 @@ try {
   git(source, "config", "user.name", "Bridge Test");
   git(source, "config", "user.email", "bridge@example.invalid");
   writeFileSync(join(source, "README.md"), "base\n");
-  git(source, "add", "README.md");
+  writeFileSync(join(source, ".gitignore"), ".agent-bridge-write-probe-*\n");
+  git(source, "add", "README.md", ".gitignore");
   git(source, "commit", "-m", "Base");
   git(source, "remote", "add", "origin", remote);
   git(source, "push", "-u", "origin", "main");
@@ -41,6 +44,9 @@ try {
     base: baseSha,
     checkoutRoot: join(temporary, "writers"),
   });
+  writeFileSync(join(checkout.path, ".agent-bridge-write-probe-stale"), "stale\n");
+  mkdirSync(join(checkout.path, ".agent-bridge-write-probe-stale-directory"));
+  writeFileSync(join(checkout.path, ".agent-bridge-write-probe-stale-directory", "nested"), "stale\n");
   const hydration = preflightWriterHydration({
     workspace: checkout.path,
     expectedRemoteUrl: remote,
@@ -49,12 +55,21 @@ try {
       repository: "norm/example",
       headSha: baseSha,
       expectedLogin: "builder[bot]",
+      allowedOperations: ["push_branch", "ensure_pull_request"],
     },
   });
   assert.equal(hydration.status, "complete");
   assert.equal(hydration.proofs.workspaceWrite, true);
   assert.equal(hydration.proofs.indexWrite, true);
   assert.equal(hydration.proofs.scratchRefRemoved, true);
+  assert.deepEqual(new Set(hydration.staleProbesRemoved), new Set([
+    ".agent-bridge-write-probe-stale",
+    ".agent-bridge-write-probe-stale-directory",
+  ]));
+  assert.equal(hydration.publicationRoute.configured, true);
+  assert.equal(hydration.publicationRoute.authorized, true);
+  assert.equal(hydration.publicationRoute.proven, false);
+  assert.equal(hydration.publicationRoute.provenBy, null);
   assert.equal(JSON.parse(readFileSync(hydration.receiptPath, "utf8")).status, "complete");
 
   git(checkout.path, "remote", "set-url", "origin", `${remote}-moved`);
@@ -102,12 +117,53 @@ try {
   assert.equal(mainUpdate.disposition, "fast_forwarded");
   assert.equal(git(source, "rev-parse", "main"), writerHead);
 
+  writeFileSync(join(checkout.path, "second.txt"), "second\n");
+  git(checkout.path, "add", "second.txt");
+  git(checkout.path, "commit", "-m", "Second");
+  const secondHead = git(checkout.path, "rev-parse", "HEAD");
+  git(checkout.path, "push", "origin", "HEAD:refs/heads/second");
+  git(source, "checkout", "--detach");
+  const linkedMain = join(temporary, "linked-main");
+  git(source, "worktree", "add", linkedMain, "main");
+  assert.throws(() => inspectLocalDefaultBranchUpdate({
+    workspace: source,
+    defaultBranch: "main",
+    mergedSha: secondHead,
+  }), /checked out in another worktree/);
+  git(source, "worktree", "remove", linkedMain);
+
+  const failedState = retirementFailureState({
+    status: "indeterminate",
+    workspaceOperation: { id: "retire-1", stage: "verified" },
+  }, {
+    operationId: "retire-1",
+    previousStatus: "completed",
+    workspaceExists: true,
+    error: "deterministic failure",
+    at: "2026-01-01T00:00:00.000Z",
+  });
+  assert.equal(failedState.status, "completed");
+  assert.equal(failedState.workspaceOperation, null);
+  assert.equal(failedState.workspaceRetirementFailure.stage, "verified");
+  const missingState = retirementFailureState({
+    status: "indeterminate",
+    workspaceOperation: { id: "retire-2", stage: "removing" },
+  }, {
+    operationId: "retire-2",
+    previousStatus: "completed",
+    workspaceExists: false,
+    error: "state write failed after removal",
+    at: "2026-01-01T00:00:00.000Z",
+  });
+  assert.equal(missingState.status, "indeterminate");
+  assert.equal(missingState.workspaceOperation.status, "reconciliation_required");
+
   git(checkout.path, "remote", "set-url", "origin", `${remote}-moved`);
   assert.throws(() => inspectWriterRetirement({
     workspace: checkout.path,
-    expectedHeadSha: writerHead,
+    expectedHeadSha: secondHead,
     expectedRemoteUrl: remote,
-    mergedSha: writerHead,
+    mergedSha: secondHead,
     branch: checkout.branch,
   }), /origin moved/);
 } finally {

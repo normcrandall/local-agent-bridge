@@ -77,9 +77,11 @@ import { collaborationAlias, collaborationIdentity } from "./collaboration-ident
 import { runWorkspaceRecipe, workspaceRecipePlan } from "./workspace-operations.mjs";
 import {
   inspectWriterRetirement,
+  inspectLocalDefaultBranchUpdate,
   preflightWriterHydration,
   recordWriterHydrationFailure,
   recoverExactSha,
+  retirementFailureState,
   updateLocalDefaultBranch,
 } from "./writer-lifecycle.mjs";
 import { verifyCollaborationRetirement } from "./state-cleanup.mjs";
@@ -526,6 +528,9 @@ const verificationCommandsSchema = z.array(
 ).max(20).optional().describe(
   "Exact shell gates delegated reviewers should run when their provider sandbox permits them.",
 );
+const verificationRoleSchema = z.enum(["quick", "full", "prePublish", "integration", "preRetire"]).optional().describe(
+  "Repository-owned named verification role whose resolved commands are added to this phase.",
+);
 const workCommandsSchema = z.array(
   z.string().trim().min(1).max(500).refine((command) => !/[\r\n]/.test(command), "Commands must be single-line."),
 ).max(50).optional().describe(
@@ -708,6 +713,7 @@ server.registerTool(
       modelFallbacks: modelFallbacksSchema,
       allowClaudeFable: allowClaudeFableSchema,
       providerConcurrency: providerConcurrencySchema,
+      verificationRole: verificationRoleSchema,
       verificationCommands: verificationCommandsSchema,
       workCommands: workCommandsSchema,
       workProfile: workProfileSchema,
@@ -773,6 +779,17 @@ server.registerTool(
     }
     if (writer && !delegatedAgents.includes(writer)) throw new Error("writer must be included in delegated agents.");
     const requestedWorkspace = projectDirectory(input.workspace);
+    const selectedVerificationRole = input.verificationRole || null;
+    const policyVerificationCommands = selectedVerificationRole
+      ? (await resolveDeliveryPolicy({ workspace: requestedWorkspace })).verificationRoles[selectedVerificationRole]
+      : [];
+    const requestedVerificationCommands = [...new Set([
+      ...policyVerificationCommands,
+      ...(input.verificationCommands || []),
+    ])];
+    if (requestedVerificationCommands.length > 20) {
+      throw new Error("Resolved verification role and explicit commands exceed the 20-command phase limit.");
+    }
     const canonicalIssueClaim = input.issueClaim
       ? { ...input.issueClaim, expectedLogin: canonicalGitHubAppLogin(input.issueClaim.expectedLogin) }
       : null;
@@ -807,7 +824,7 @@ server.registerTool(
     let resolvedTask = input.task;
     let issueContext = null;
     let repositoryEvidence = null;
-    let verificationPlan = { reusable: [], pendingCommands: input.verificationCommands || [], avoidedCommands: 0, estimatedAvoidedMs: 0 };
+    let verificationPlan = { reusable: [], pendingCommands: requestedVerificationCommands, avoidedCommands: 0, estimatedAvoidedMs: 0 };
     const evidenceStore = createEvidenceStore({ directory: EVIDENCE_ROOT });
 
     // The explicit issue target is authoritative for what this lane implements.
@@ -1058,7 +1075,7 @@ server.registerTool(
       verificationPlan = await resolveVerificationPlan({
         store: evidenceStore,
         repositoryEvidence,
-        commands: input.verificationCommands || [],
+        commands: requestedVerificationCommands,
       });
       if (verificationPlan.reusable.length) {
         resolvedTask = `${resolvedTask}\n\n${formatReusableVerification(verificationPlan.reusable)}`;
@@ -1083,7 +1100,8 @@ server.registerTool(
         modelFallbacks: input.modelFallbacks || {},
         allowClaudeFable: input.allowClaudeFable === true,
         providerConcurrency: await loadProviderConcurrency({ overrides: input.providerConcurrency || {} }),
-        requestedVerificationCommands: input.verificationCommands || [],
+        verificationRole: selectedVerificationRole,
+        requestedVerificationCommands,
         verificationCommands: verificationPlan.pendingCommands,
         verificationReceipts: verificationPlan.reusable,
         workCommands: input.workCommands || [],
@@ -1417,6 +1435,11 @@ server.registerTool(
     if (observedHead !== expectedHeadSha) {
       throw new Error(`Writer retirement HEAD changed after inspection: expected ${expectedHeadSha}, observed ${observedHead}.`);
     }
+    const cleanupDescriptor = current.worktree.cleanup;
+    if (cleanupDescriptor?.strategy !== "remove-directory"
+      || realpathSync(cleanupDescriptor.path) !== actualWorkspace) {
+      throw new Error("Writer retirement cleanup descriptor does not match the recorded workspace.");
+    }
 
     let operation = current.workspaceOperation;
     if (!resuming) {
@@ -1427,6 +1450,17 @@ server.registerTool(
       if (retirement.github?.outcome !== "merged" || !retirement.github.mergedSha) {
         throw new Error("Writer retirement requires a merged pull request with an exact merged SHA.");
       }
+      const sourceWorkspace = realpathSync(current.worktree.sourceWorkspace || actualWorkspace);
+      const deliveryPolicy = await resolveDeliveryPolicy({ workspace: sourceWorkspace });
+      const recipeOptions = { approvalWorkspace: sourceWorkspace };
+      const preRetirePlan = workspaceRecipePlan(actualWorkspace, "preRetire", recipeOptions);
+      if (preRetirePlan.commands.length && !preRetirePlan.executable) {
+        throw new Error("Writer retirement preRetire recipe is configured but not machine-approved.");
+      }
+      const namedPreRetire = deliveryPolicy.verificationRoles.preRetire || [];
+      if (namedPreRetire.length && JSON.stringify(namedPreRetire) !== JSON.stringify(preRetirePlan.commands)) {
+        throw new Error("Writer retirement verificationRoles.preRetire must exactly match the approved preRetire workspace recipe.");
+      }
       operation = {
         id: `writer-retirement-${randomUUID()}`,
         type: "retire_writer_checkout",
@@ -1436,6 +1470,17 @@ server.registerTool(
         previousStatus,
         reservedAt: new Date().toISOString(),
         github: retirement.github,
+        sourceWorkspace,
+        retirementPolicy: {
+          updateLocalDefaultBranch: deliveryPolicy.retirement.updateLocalDefaultBranch,
+          source: deliveryPolicy.decisions.retirement.source,
+        },
+        preRetirePlan: {
+          commands: preRetirePlan.commands,
+          approved: preRetirePlan.approved,
+          projectPath: preRetirePlan.projectPath,
+          approvalsPath: preRetirePlan.approvalsPath,
+        },
       };
       current = await updateCollaboration(WORKSPACE_ROOT, id, (latest) => {
         if (latest.workspaceOperation || latest.runtime?.activeCall
@@ -1476,24 +1521,11 @@ server.registerTool(
         });
       }
       if (operation.stage === "verified") {
-        const sourceWorkspace = current.worktree.sourceWorkspace || actualWorkspace;
-        const deliveryPolicy = await resolveDeliveryPolicy({ workspace: sourceWorkspace });
-        const defaultBranch = deliveryPolicy.productFacts.defaultBranch || "main";
-        const localMain = updateLocalDefaultBranch({
-          workspace: sourceWorkspace,
-          defaultBranch,
-          mergedSha: operation.github.mergedSha,
-        });
-        await advance("main_updated", {
-          localMain,
-          verificationRoles: deliveryPolicy.verificationRoles,
-        });
-      }
-      if (operation.stage === "main_updated") {
-        const recipeOptions = { approvalWorkspace: current.worktree.sourceWorkspace || actualWorkspace };
+        const recipeOptions = { approvalWorkspace: operation.sourceWorkspace };
         const plan = workspaceRecipePlan(actualWorkspace, "preRetire", recipeOptions);
-        if (plan.commands.length && !plan.executable) {
-          throw new Error("Writer retirement preRetire recipe is configured but not machine-approved.");
+        if (JSON.stringify(plan.commands) !== JSON.stringify(operation.preRetirePlan.commands)
+          || plan.executable !== (operation.preRetirePlan.commands.length > 0)) {
+          throw new Error("Writer retirement preRetire recipe or approval changed after reservation; restart retirement after inspection.");
         }
         const preRetire = plan.executable
           ? runWorkspaceRecipe(actualWorkspace, "preRetire", recipeOptions)
@@ -1501,9 +1533,45 @@ server.registerTool(
         if (!preRetire.ok) {
           throw new Error(`Writer retirement preRetire recipe failed: ${preRetire.results.find((result) => result.exitCode !== 0)?.command || "unknown command"}.`);
         }
-        await advance("pre_retire_passed", { preRetire });
+        const postRecipeInspection = inspectWriterRetirement({
+          workspace: actualWorkspace,
+          expectedHeadSha,
+          expectedRemoteUrl: current.worktree.remote?.url || null,
+          mergedSha: operation.github.mergedSha,
+          branch: current.worktree.branch,
+        });
+        await advance("pre_retire_passed", { preRetire, postRecipeInspection });
       }
       if (operation.stage === "pre_retire_passed") {
+        if (operation.retirementPolicy.updateLocalDefaultBranch) {
+          const deliveryPolicy = await resolveDeliveryPolicy({ workspace: operation.sourceWorkspace });
+          const defaultBranch = deliveryPolicy.productFacts.defaultBranch || "main";
+          const localMainPlan = inspectLocalDefaultBranchUpdate({
+            workspace: operation.sourceWorkspace,
+            defaultBranch,
+            mergedSha: operation.github.mergedSha,
+          });
+          await advance("main_update_reserved", { localMain: localMainPlan });
+        } else {
+          await advance("main_updated", {
+            localMain: {
+              disposition: "skipped_policy_disabled",
+              policySource: operation.retirementPolicy.source,
+              updatedSha: operation.github.mergedSha,
+            },
+          });
+        }
+      }
+      if (operation.stage === "main_update_reserved") {
+        const localMain = updateLocalDefaultBranch({
+          workspace: operation.sourceWorkspace,
+          defaultBranch: operation.localMain.branch,
+          mergedSha: operation.github.mergedSha,
+          expectedPreviousSha: operation.localMain.previousSha,
+        });
+        await advance("main_updated", { localMain });
+      }
+      if (operation.stage === "main_updated") {
         const receipt = {
           status: "removing",
           cleanedPath: actualWorkspace,
@@ -1520,7 +1588,7 @@ server.registerTool(
       }
       cleanupWriterCheckout({
         workspace: actualWorkspace,
-        expectedPath: actualWorkspace,
+        expectedPath: expectedWorkspace,
         discardChanges: false,
       });
       const completedAt = new Date().toISOString();
@@ -1542,17 +1610,12 @@ server.registerTool(
       });
       return toolResponse({ collaborationId: id, status: current.status, retirementReceipt: receipt, resumed: resuming });
     } catch (error) {
-      await updateCollaboration(WORKSPACE_ROOT, id, (latest) => latest.workspaceOperation?.id === operation.id
-        ? {
-          ...latest,
-          status: "indeterminate",
-          workspaceOperation: {
-            ...latest.workspaceOperation,
-            failedAt: new Date().toISOString(),
-            error: error.message,
-          },
-        }
-        : latest);
+      await updateCollaboration(WORKSPACE_ROOT, id, (latest) => retirementFailureState(latest, {
+        operationId: operation.id,
+        previousStatus,
+        workspaceExists: existsSync(actualWorkspace),
+        error: error.message,
+      }));
       throw error;
     }
   },
@@ -2139,6 +2202,7 @@ server.registerTool(
       modelFallbacks: modelFallbacksSchema,
       allowClaudeFable: allowClaudeFableSchema.optional(),
       providerConcurrency: providerConcurrencySchema,
+      verificationRole: verificationRoleSchema,
       verificationCommands: verificationCommandsSchema,
       workCommands: workCommandsSchema,
       workProfile: workProfileSchema.optional(),
@@ -2164,6 +2228,7 @@ server.registerTool(
     modelFallbacks,
     allowClaudeFable,
     providerConcurrency,
+    verificationRole,
     verificationCommands,
     workCommands,
     workProfile,
@@ -2273,10 +2338,19 @@ server.registerTool(
         worktree: resolvedContinuationIssueClaim.worktree || current.workspace,
       });
     }
-    const requestedContinuationCommands = verificationCommands
-      || current.requestedVerificationCommands
-      || current.verificationCommands
-      || [];
+    const selectedVerificationRole = verificationRole || current.verificationRole || null;
+    const roleChanged = verificationRole !== undefined && verificationRole !== current.verificationRole;
+    const requestedContinuationCommands = roleChanged || verificationCommands
+      ? [...new Set([
+        ...(selectedVerificationRole
+          ? (await resolveDeliveryPolicy({ workspace: current.worktree?.sourceWorkspace || current.workspace })).verificationRoles[selectedVerificationRole]
+          : []),
+        ...(verificationCommands || []),
+      ])]
+      : current.requestedVerificationCommands || current.verificationCommands || [];
+    if (requestedContinuationCommands.length > 20) {
+      throw new Error("Resolved verification role and explicit commands exceed the 20-command phase limit.");
+    }
     const continuationStore = createEvidenceStore({ directory: EVIDENCE_ROOT });
     const activeGithubReview = githubReview || current.githubReview || null;
     const activeGithubBuilder = githubBuilder
@@ -2345,6 +2419,7 @@ server.registerTool(
           : previous.modelFallbacks || {},
         allowClaudeFable: allowClaudeFable === true,
         providerConcurrency: resolvedProviderConcurrency,
+        verificationRole: selectedVerificationRole,
         requestedVerificationCommands: requestedContinuationCommands,
         verificationCommands: continuationVerificationPlan.pendingCommands,
         verificationReceipts: continuationVerificationPlan.reusable,

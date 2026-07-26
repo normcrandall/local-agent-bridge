@@ -32,6 +32,9 @@
   "resourceRules": {
     "maxParallelLanes": 3
   },
+  "retirement": {
+    "updateLocalDefaultBranch": false
+  },
   "providerConcurrency": {
     "claude": { "work": 2, "review": 4 }
   },

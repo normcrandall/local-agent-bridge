@@ -100,12 +100,14 @@ export function prepareWriterCheckout({
   if (existsSync(path)) {
     const hydrationPath = join(path, ".git", "agent-bridge-hydration.json");
     if (existsSync(hydrationPath)) {
+      let receipt;
       try {
-        const receipt = JSON.parse(readFileSync(hydrationPath, "utf8"));
-        throw new Error(`Writer checkout has a durable hydration receipt (${receipt.status || "unknown"} at ${receipt.stage || "complete"}); inspect and recover or retire ${path} before retrying.`);
-      } catch (error) {
-        if (/durable hydration receipt/.test(error.message)) throw error;
+        receipt = JSON.parse(readFileSync(hydrationPath, "utf8"));
+      } catch {
         throw new Error(`Writer checkout has an unreadable interrupted hydration receipt at ${hydrationPath}; diagnose it before retrying.`);
+      }
+      if (["reserved", "failed"].includes(receipt.status)) {
+        throw new Error(`Writer checkout has an interrupted hydration receipt (${receipt.status} at ${receipt.stage || "unknown"}); inspect and recover or retire ${path} before retrying.`);
       }
     }
     throw new Error(`Writer checkout already exists: ${path}`);

@@ -20,12 +20,17 @@ const cleanWorkspace = join(root, ".bridge", "test-workspaces", stateDirectory.s
 const unbornWorkspace = `${cleanWorkspace}-unborn`;
 await mkdir(cleanWorkspace, { recursive: true });
 await writeFile(join(cleanWorkspace, "README.md"), "# Clean collaboration fixture\n");
+await mkdir(join(cleanWorkspace, ".agent-bridge"), { recursive: true });
+await writeFile(join(cleanWorkspace, ".agent-bridge", "delivery-policy.json"), `${JSON.stringify({
+  version: 1,
+  verificationRoles: { quick: ["git diff --check"] },
+}, null, 2)}\n`);
 for (const args of [
   ["init", "-q"],
   ["config", "user.email", "bridge@example.test"],
   ["config", "user.name", "Bridge Test"],
   ["remote", "add", "origin", "https://github.com/veliqon/collaboration-fixture.git"],
-  ["add", "README.md"],
+  ["add", "README.md", ".agent-bridge/delivery-policy.json"],
   ["commit", "-qm", "fixture"],
 ]) {
   const result = spawnSync("git", args, { cwd: cleanWorkspace, encoding: "utf8" });
@@ -156,6 +161,20 @@ try {
     "update_portfolio_item",
     "wait_for_portfolio_lane",
   ]);
+  const namedVerification = await firstClient.callTool({
+    name: "start_collaboration",
+    arguments: {
+      task: "Resolve a repository-owned named verification role",
+      workspace: cleanWorkspace,
+      agents: ["claude"],
+      maxTurns: 1,
+      verificationRole: "quick",
+    },
+  });
+  assert.notEqual(namedVerification.isError, true, namedVerification.content?.map((item) => item.text || "").join("\n"));
+  assert.equal(namedVerification.structuredContent.verificationRole, "quick");
+  assert.deepEqual(namedVerification.structuredContent.requestedVerificationCommands, ["git diff --check"]);
+  await waitForStop(firstClient, namedVerification.structuredContent.id);
   const targetSha = "a".repeat(40);
   const firstHead = "b".repeat(40);
   const plannedPortfolio = await firstClient.callTool({

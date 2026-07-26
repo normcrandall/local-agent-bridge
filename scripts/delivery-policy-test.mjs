@@ -123,6 +123,7 @@ try {
     },
     pathRules: { protectedPaths: ["docs/generated/**"], writableRoots: ["src"] },
     resourceRules: { maxParallelLanes: 3 },
+    retirement: { updateLocalDefaultBranch: true },
     providerConcurrency: {
       claude: { work: 2 },   // narrower than the machine ceiling of 4
       codex: { work: 50 },   // broadening attempt: must be ignored
@@ -161,6 +162,9 @@ try {
   assert.deepEqual(policy.verificationRoles.integration, ["npm run smoke"]);
   assert.deepEqual(policy.verificationRoles.preRetire, ["npm run test:cleanup"]);
   assert.equal(policy.resourceRules.maxParallelLanes, 3);
+  assert.equal(policy.retirement.updateLocalDefaultBranch, true);
+  assert.equal(policy.surfaces.cleanup.updateLocalDefaultBranch, true);
+  assert.equal(policy.decisions.retirement.source, "repository_policy");
 
   // Concurrency narrows through repository then per-run, and never broadens.
   assert.equal(policy.concurrency.claude.work, 1);
@@ -224,6 +228,7 @@ try {
     environment: governed.environment,
     options: {
       productFacts: { defaultBranch: "attacker-controlled" },
+      retirement: { updateLocalDefaultBranch: false },
       resourceRules: { maxParallelLanes: 100, timeouts: { review: 999999 } },
     },
   });
@@ -231,6 +236,7 @@ try {
   assert.equal(narrowedResources.resourceRules.maxParallelLanes, 3);
   assert.deepEqual(narrowedResources.resourceRules.timeouts, {});
   assert.ok(rejectionFor(narrowedResources, "productFacts"));
+  assert.ok(rejectionFor(narrowedResources, "retirement"));
   assert.ok(rejectionFor(narrowedResources, "resourceRules.timeouts"));
 
   const lowerLaneLimit = await resolveDeliveryPolicy({

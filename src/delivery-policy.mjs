@@ -74,6 +74,7 @@ export const REPOSITORY_OWNED_DOMAINS = Object.freeze([
   "pathRules",
   "resourceRules",
   "concurrencyNarrowing",
+  "retirement",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -829,6 +830,20 @@ export async function resolveDeliveryPolicy({
     rejections,
   });
 
+  const retirement = resolveOwnedValue(ledger, "retirement", {
+    machineDefault: { updateLocalDefaultBranch: false },
+    layers: [{ level: "repository_policy", value: repoPolicy.retirement }],
+    detailFor: () => `Writer-retirement behavior comes from ${repoOrigin}.`,
+  });
+  retirement.updateLocalDefaultBranch = retirement.updateLocalDefaultBranch === true;
+  if (perRun.retirement !== undefined) {
+    rejections.push({
+      origin: "per_run_narrowing",
+      field: "retirement",
+      reason: "Writer-retirement behavior is repository-owned; per-run input cannot authorize mutation of a source checkout.",
+    });
+  }
+
   const repoPaths = Array.isArray(repoPolicy.pathRules?.protectedPaths) ? repoPolicy.pathRules.protectedPaths : [];
   let writableRoots = null;
   if (repoPolicy.pathRules?.writableRoots !== undefined) {
@@ -910,6 +925,7 @@ export async function resolveDeliveryPolicy({
     productFacts,
     lifecycleMappings,
     verificationRoles,
+    retirement,
     pathRules,
     resourceRules,
     workspaceRecipe: ledger.decisions.workspaceRecipe.value,
@@ -971,6 +987,7 @@ export function deliverySurfaces(policy) {
       preRetireRecipe: policy.workspaceRecipe.phases.preRetire,
       protectedPaths: policy.pathRules.protectedPaths,
       requiresGitHubRetirementCheck: githubGoverned,
+      updateLocalDefaultBranch: policy.retirement.updateLocalDefaultBranch,
     },
     missionControl: {
       deliveryProfile: policy.deliveryProfile,

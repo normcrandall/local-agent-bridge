@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import {
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -35,6 +36,9 @@ function contained(root, candidate, label) {
 }
 
 function publicationRoute(githubBuilder, remoteUrl) {
+  const allowedOperations = new Set(githubBuilder?.allowedOperations || []);
+  const builderCanPublish = allowedOperations.has("push_branch")
+    && allowedOperations.has("ensure_pull_request");
   if (githubBuilder?.allowWorkspaceHead === true
     && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(githubBuilder.repository || "")
     && SHA_PATTERN.test(githubBuilder.headSha || "")) {
@@ -42,12 +46,32 @@ function publicationRoute(githubBuilder, remoteUrl) {
       kind: "bound_builder_app",
       repository: githubBuilder.repository,
       expectedLogin: githubBuilder.expectedLogin || null,
-      authorized: true,
+      configured: true,
+      authorized: builderCanPublish,
+      proven: false,
+      provenBy: null,
+      requiredOperations: ["push_branch", "ensure_pull_request"],
     };
   }
   return remoteUrl
-    ? { kind: "configured_remote_handoff", remote: "origin", authorized: true }
-    : { kind: "none", authorized: false };
+    ? { kind: "configured_remote_handoff", remote: "origin", configured: true, authorized: false, proven: false, provenBy: null }
+    : { kind: "none", configured: false, authorized: false, proven: false, provenBy: null };
+}
+
+function removeStaleHydrationProbes(root) {
+  const prefix = ".agent-bridge-write-probe-";
+  const removed = [];
+  for (const name of readdirSync(root)) {
+    if (!name.startsWith(prefix)) continue;
+    const path = contained(root, join(root, name), "Stale writer probe");
+    try {
+      rmSync(path, { recursive: true, force: true });
+      removed.push(name);
+    } catch (error) {
+      throw new Error(`Unable to remove stale writer hydration probe ${path}: ${error.message}`);
+    }
+  }
+  return removed;
 }
 
 export function recordWriterHydrationFailure({ workspace, stage, error, now = () => new Date().toISOString() }) {
@@ -97,6 +121,7 @@ export function preflightWriterHydration({
   const receiptPath = contained(gitDirectory, join(gitDirectory, "agent-bridge-hydration.json"), "Hydration receipt");
   const resolvedHead = git(root, ["rev-parse", "--verify", "HEAD^{commit}"], { optional: true });
   const head = resolvedHead.ok ? resolvedHead.output : null;
+  const staleProbesRemoved = removeStaleHydrationProbes(root);
   writeFileSync(receiptPath, `${JSON.stringify({
     operationId,
     status: "reserved",
@@ -117,11 +142,14 @@ export function preflightWriterHydration({
       throw new Error(`Writer origin moved after checkout creation: expected ${expectedRemoteUrl}, observed ${remoteUrl}.`);
     }
     route = publicationRoute(githubBuilder, remoteUrl);
-    if (!route.authorized) throw new Error("Writer hydration could not prove an authorized publication route.");
+    if (!route.configured) throw new Error("Writer hydration requires a configured publication route.");
+    if (route.kind === "bound_builder_app" && !route.authorized) {
+      throw new Error("Writer hydration requires the bound builder App to authorize push_branch and ensure_pull_request.");
+    }
     writeFileSync(probePath, `agent-bridge hydration ${operationId}\n`, { flag: "wx" });
     const indexEnvironment = { GIT_INDEX_FILE: scratchIndex };
     git(root, head ? ["read-tree", head] : ["read-tree", "--empty"], { environment: indexEnvironment });
-    git(root, ["add", "--", probePath], { environment: indexEnvironment });
+    git(root, ["add", "--force", "--", probePath], { environment: indexEnvironment });
     treeSha = git(root, ["write-tree"], { environment: indexEnvironment }).output;
     const identityEnvironment = {
       GIT_AUTHOR_NAME: "Agent Bridge Preflight",
@@ -157,6 +185,7 @@ export function preflightWriterHydration({
     headSha: head,
     remote: { name: "origin", url: remoteUrl },
     publicationRoute: route,
+    staleProbesRemoved,
     proofs: {
       workspaceWrite: true,
       indexWrite: true,
@@ -225,7 +254,24 @@ export function recoverExactSha({ workspace, sha, remote = "origin" }) {
   return { sha, source: `${remote}:exact-sha`, fetched: true };
 }
 
-export function updateLocalDefaultBranch({
+function listedWorktrees(root) {
+  const output = git(root, ["worktree", "list", "--porcelain"], { optional: true });
+  if (!output.ok) throw new Error(`Unable to inspect local worktrees: ${output.output}`);
+  const records = [];
+  let current = null;
+  for (const line of output.output.split("\n")) {
+    if (line.startsWith("worktree ")) {
+      if (current) records.push(current);
+      current = { path: line.slice("worktree ".length) };
+    } else if (current && line.startsWith("branch ")) {
+      current.branch = line.slice("branch ".length);
+    }
+  }
+  if (current) records.push(current);
+  return records;
+}
+
+export function inspectLocalDefaultBranchUpdate({
   workspace,
   defaultBranch = "main",
   mergedSha,
@@ -236,27 +282,66 @@ export function updateLocalDefaultBranch({
     recoverExactSha({ workspace: root, sha: mergedSha });
   }
   const current = git(root, ["rev-parse", "--verify", ref], { optional: true });
-  if (current.ok) {
+  if (current.ok && current.output !== mergedSha) {
     const ancestor = git(root, ["merge-base", "--is-ancestor", current.output, mergedSha], { optional: true });
     if (!ancestor.ok) {
       throw new Error(`Local ${defaultBranch} cannot be fast-forwarded safely to ${mergedSha}.`);
     }
-    const checkedOut = git(root, ["branch", "--show-current"], { optional: true }).output === defaultBranch;
-    if (checkedOut) {
-      if (git(root, ["status", "--porcelain=v1", "--untracked-files=all"]).output) {
-        throw new Error(`Local ${defaultBranch} is dirty and cannot be updated safely.`);
-      }
-      git(root, ["merge", "--ff-only", mergedSha]);
-    } else {
-      git(root, ["update-ref", ref, mergedSha, current.output]);
-    }
-  } else {
-    git(root, ["update-ref", ref, mergedSha, "0".repeat(40)]);
+  }
+  const checkedOut = listedWorktrees(root).filter((entry) => entry.branch === ref);
+  if (checkedOut.some((entry) => realpathSync(resolve(entry.path)) !== root)) {
+    throw new Error(`Local ${defaultBranch} is checked out in another worktree and cannot be updated safely.`);
+  }
+  if (checkedOut.length && git(root, ["status", "--porcelain=v1", "--untracked-files=all"]).output) {
+    throw new Error(`Local ${defaultBranch} is dirty and cannot be updated safely.`);
   }
   return {
     branch: defaultBranch,
     previousSha: current.ok ? current.output : null,
     updatedSha: mergedSha,
+    checkedOut: checkedOut.length > 0,
     disposition: current.ok && current.output === mergedSha ? "already_current" : "fast_forwarded",
+  };
+}
+
+export function updateLocalDefaultBranch({
+  workspace,
+  defaultBranch = "main",
+  mergedSha,
+  expectedPreviousSha,
+}) {
+  const root = realpathSync(resolve(workspace));
+  const ref = `refs/heads/${defaultBranch}`;
+  const plan = inspectLocalDefaultBranchUpdate({ workspace: root, defaultBranch, mergedSha });
+  if (plan.previousSha === mergedSha) return plan;
+  if (expectedPreviousSha !== undefined && plan.previousSha !== expectedPreviousSha) {
+    throw new Error(`Local ${defaultBranch} changed after retirement preflight: expected ${expectedPreviousSha || "missing"}, observed ${plan.previousSha || "missing"}.`);
+  }
+  if (plan.checkedOut) git(root, ["merge", "--ff-only", mergedSha]);
+  else git(root, ["update-ref", ref, mergedSha, plan.previousSha || "0".repeat(40)]);
+  return plan;
+}
+
+export function retirementFailureState(state, { operationId, previousStatus, workspaceExists, error, at = new Date().toISOString() }) {
+  if (state.workspaceOperation?.id !== operationId) return state;
+  const failure = { operationId, stage: state.workspaceOperation.stage, failedAt: at, error };
+  if (workspaceExists) {
+    return {
+      ...state,
+      status: previousStatus,
+      workspaceOperation: null,
+      workspaceRetirementFailure: failure,
+    };
+  }
+  return {
+    ...state,
+    status: "indeterminate",
+    workspaceOperation: {
+      ...state.workspaceOperation,
+      status: "reconciliation_required",
+      failedAt: at,
+      error,
+    },
+    workspaceRetirementFailure: failure,
   };
 }
