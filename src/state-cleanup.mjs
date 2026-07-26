@@ -5,7 +5,7 @@ import {
   readCollaboration,
 } from "./collaboration-store.mjs";
 import { LIVE_COLLABORATION_STATUSES } from "./collaboration-cleanup.mjs";
-import { archivePortfolio, listPortfolios } from "./portfolio-store.mjs";
+import { archivePortfolio, listPortfolios, readPortfolio } from "./portfolio-store.mjs";
 import { PORTFOLIO_STATUS_GROUPS } from "./portfolio-status.mjs";
 import { auditHostActivityArtifacts, pruneHostActivityArtifacts } from "./host-activity-store.mjs";
 import {
@@ -51,7 +51,7 @@ function pendingHandoff(state) {
     && !["complete", "completed", "none"].includes(state.completion.nextAction);
 }
 
-function collaborationProtectionReasons(state) {
+export function collaborationProtectionReasons(state) {
   const reasons = [];
   if (LIVE_COLLABORATION_STATUSES.has(state.status)) reasons.push(`status:${state.status}`);
   if (state.status === "indeterminate") reasons.push("indeterminate_ownership");
@@ -62,6 +62,46 @@ function collaborationProtectionReasons(state) {
   if (pendingHandoff(state)) reasons.push("unacknowledged_handoff");
   if (state.workspaceOperation) reasons.push("workspace_operation");
   return reasons;
+}
+
+function requiresDurableDeliveryProof(state) {
+  const binding = collaborationRetirementBinding(state);
+  return binding.workspaceProofRequired || Boolean(binding.repository || binding.prNumber || binding.issueNumber);
+}
+
+export async function archiveVerifiedCollaboration(workspaceRoot, id, {
+  expectedUpdatedAt = null,
+  verifyGithubOutcome,
+  inspectWorkspace,
+  githubVerification,
+} = {}) {
+  const state = await readCollaboration(workspaceRoot, id);
+  if (expectedUpdatedAt && state.updatedAt !== expectedUpdatedAt) {
+    throw new Error(`Cannot archive ${id}: state changed after cleanup audit.`);
+  }
+  if (!SAFE_COLLABORATION_ARCHIVE_STATUSES.has(state.status)) {
+    throw new Error(`Cannot archive ${id}: status ${state.status || "unknown"} is not archive-ready.`);
+  }
+  const protectionReasons = collaborationProtectionReasons(state);
+  if (protectionReasons.length) {
+    throw new Error(`Cannot archive ${id}: collaboration is protected (${protectionReasons.join(", ")}).`);
+  }
+  let retirement = { safe: true, reasons: [], github: null, workspace: null, reason: "local_terminal_record" };
+  if (requiresDurableDeliveryProof(state)) {
+    retirement = await verifyCollaborationRetirement(state, {
+      verifyGithubOutcome,
+      inspectWorkspace,
+      githubVerification,
+    });
+    if (!retirement.safe) {
+      throw new Error(`Cannot archive ${id}: retirement verification failed (${retirement.reasons.join(", ")}).`);
+    }
+  }
+  const archived = await archiveCollaboration(workspaceRoot, id, {
+    expectedUpdatedAt: state.updatedAt,
+    archiveMetadata: { retiredAt: new Date().toISOString(), retirement },
+  });
+  return { ...archived, retirement };
 }
 
 function collaborationSummary(state, reasons = [], retirement = null) {
@@ -117,7 +157,7 @@ export async function verifyCollaborationRetirement(state, {
   return { safe: true, reasons: [], github, workspace };
 }
 
-function portfolioSummary(state, reasons = []) {
+function portfolioSummary(state, reasons = [], retirement = null) {
   return {
     id: state.id,
     status: state.status,
@@ -127,7 +167,59 @@ function portfolioSummary(state, reasons = []) {
     itemCount: Array.isArray(state.items) ? state.items.length : 0,
     revision: state.revision ?? null,
     reasons,
+    retirement,
   };
+}
+
+export async function verifyPortfolioRetirement(state, options = {}) {
+  const items = Array.isArray(state.items) ? state.items : [];
+  const evidence = [];
+  for (const item of items) {
+    if (!PORTFOLIO_STATUS_GROUPS.terminal.includes(item.status)) {
+      return { safe: false, reasons: [`item_not_terminal:${item.id}`], items: evidence };
+    }
+    const repository = item.repository || state.repository;
+    const hasCheckout = Boolean(item.worktree);
+    const hasPullRequestDelivery = Boolean(item.prNumber && item.headSha && repository);
+    const hasIssueDelivery = Boolean(item.issueNumber && repository);
+    const hasDelivery = hasPullRequestDelivery || hasIssueDelivery;
+    if (item.status === "merged" && !hasPullRequestDelivery) {
+      return { safe: false, reasons: [`item_delivery_binding_missing:${item.id}`], items: evidence };
+    }
+    if (hasCheckout && !hasDelivery) {
+      return { safe: false, reasons: [`item_checkout_unrecoverable:${item.id}`], items: evidence };
+    }
+    if (!hasDelivery) {
+      evidence.push({ id: item.id, safe: true, reason: "local_terminal_item" });
+      continue;
+    }
+    const synthetic = {
+      id: `${state.id}:${item.id}`,
+      status: "completed",
+      mode: hasCheckout || item.writer ? "work" : "review",
+      writer: item.writer || null,
+      writerCheckout: hasCheckout ? { path: item.worktree } : null,
+      githubReview: hasPullRequestDelivery ? {
+        repository,
+        prNumber: item.prNumber,
+        headSha: item.headSha,
+      } : null,
+      issueClaim: hasIssueDelivery ? {
+        repository,
+        issueNumber: item.issueNumber,
+        headSha: item.headSha || null,
+        branch: item.branch || null,
+        worktree: item.worktree || null,
+      } : null,
+      branch: item.branch || null,
+    };
+    const retirement = await verifyCollaborationRetirement(synthetic, options);
+    evidence.push({ id: item.id, ...retirement });
+    if (!retirement.safe) {
+      return { safe: false, reasons: retirement.reasons.map((reason) => `item:${item.id}:${reason}`), items: evidence };
+    }
+  }
+  return { safe: true, reasons: [], items: evidence };
 }
 
 export async function auditBridgeCleanup(options = {}) {
@@ -162,8 +254,15 @@ export async function auditBridgeCleanup(options = {}) {
 
   const retirementEligible = [];
   for (const state of collaborations) {
-    const isOld = dateMs(state.updatedAt) > 0 && dateMs(state.updatedAt) <= cutoff;
+    const updatedAtMs = dateMs(state.updatedAt);
     const reasons = collaborationProtectionReasons(state);
+    if (!updatedAtMs) {
+      const missingTimestampReasons = [...new Set([...reasons, "missing_updated_at"])];
+      if (reasons.length) protectedCollaborations.push(collaborationSummary(state, missingTimestampReasons));
+      else staleCollaborations.push(collaborationSummary(state, missingTimestampReasons));
+      continue;
+    }
+    const isOld = updatedAtMs <= cutoff;
     if (!isOld || reasons.length) {
       if (reasons.length) protectedCollaborations.push(collaborationSummary(state, reasons));
       continue;
@@ -193,8 +292,11 @@ export async function auditBridgeCleanup(options = {}) {
     const items = Array.isArray(state.items) ? state.items : [];
     const terminal = state.status === "complete"
       && items.every((item) => PORTFOLIO_STATUS_GROUPS.terminal.includes(item.status));
-    if (terminal && Number.isInteger(state.revision)) portfolioArchiveCandidates.push(portfolioSummary(state));
-    else {
+    if (terminal && Number.isInteger(state.revision)) {
+      const retirement = await verifyPortfolioRetirement(state, options);
+      if (retirement.safe) portfolioArchiveCandidates.push(portfolioSummary(state, [], retirement));
+      else stalePortfolios.push(portfolioSummary(state, retirement.reasons, retirement));
+    } else {
       const reasons = [];
       if (!terminal) reasons.push(`status:${state.status || "unknown"}`);
       if (!Number.isInteger(state.revision)) reasons.push("missing_revision");
@@ -242,13 +344,12 @@ export async function applyBridgeCleanup(options = {}) {
   const failedPortfolios = [];
   for (const candidate of audit.collaborationArchiveCandidates) {
     try {
-      const current = await readCollaboration(options.workspaceRoot, candidate.id);
-      if (current.updatedAt !== candidate.updatedAt) throw new Error("collaboration changed after cleanup audit");
-      const protectionReasons = collaborationProtectionReasons(current);
-      if (protectionReasons.length) throw new Error(`collaboration is protected: ${protectionReasons.join(", ")}`);
-      const retirement = await verifyCollaborationRetirement(current, options);
-      if (!retirement.safe) throw new Error(`retirement verification failed: ${retirement.reasons.join(", ")}`);
-      archivedCollaborations.push(await archiveCollaboration(options.workspaceRoot, candidate.id, { expectedUpdatedAt: candidate.updatedAt }));
+      archivedCollaborations.push(await archiveVerifiedCollaboration(options.workspaceRoot, candidate.id, {
+        expectedUpdatedAt: candidate.updatedAt,
+        verifyGithubOutcome: options.verifyGithubOutcome,
+        inspectWorkspace: options.inspectWorkspace,
+        githubVerification: options.githubVerification,
+      }));
     } catch (error) {
       failedCollaborations.push({ id: candidate.id, error: error.message });
     }
@@ -256,6 +357,10 @@ export async function applyBridgeCleanup(options = {}) {
   const portfolioRoot = process.env.BRIDGE_PORTFOLIO_DIR || resolve(options.stateRoot, "portfolios");
   for (const candidate of audit.portfolioArchiveCandidates) {
     try {
+      const current = await readPortfolio(portfolioRoot, candidate.id);
+      if (current.revision !== candidate.revision) throw new Error("portfolio changed after cleanup audit");
+      const retirement = await verifyPortfolioRetirement(current, options);
+      if (!retirement.safe) throw new Error(`portfolio retirement verification failed: ${retirement.reasons.join(", ")}`);
       archivedPortfolios.push(await archivePortfolio(portfolioRoot, candidate.id, { expectedRevision: candidate.revision }));
     } catch (error) {
       failedPortfolios.push({ id: candidate.id, error: error.message });

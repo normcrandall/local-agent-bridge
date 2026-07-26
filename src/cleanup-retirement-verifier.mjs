@@ -134,7 +134,7 @@ export async function verifyCollaborationGitHubOutcome(state, {
       return { safe: false, reason: "pull_request_open", outcome: "open", githubHeadSha, ...binding };
     }
     let remoteHeadSha = null;
-    const headRepository = pull?.head?.repo?.full_name || binding.repository;
+    const headRepository = pull?.head?.repo?.full_name || null;
     const headBranch = pull?.head?.ref || binding.branch;
     if (headRepository === binding.repository && headBranch) {
       remoteHeadSha = await remoteBranchHead({ apiUrl, fetchImpl, token, repository: headRepository, branch: headBranch });

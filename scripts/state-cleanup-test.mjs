@@ -7,7 +7,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { archiveCollaboration } from "../src/collaboration-store.mjs";
 import { archivePortfolio } from "../src/portfolio-store.mjs";
-import { applyBridgeCleanup, auditBridgeCleanup, formatCleanupReport } from "../src/state-cleanup.mjs";
+import {
+  applyBridgeCleanup,
+  archiveVerifiedCollaboration,
+  auditBridgeCleanup,
+  formatCleanupReport,
+  verifyPortfolioRetirement,
+} from "../src/state-cleanup.mjs";
 import {
   inspectCollaborationWorkspace,
   verifyCollaborationGitHubOutcome,
@@ -34,6 +40,7 @@ const ids = {
   unpublishedWork: "bridge-dddddddd-dddd-4ddd-8ddd-dddddddddddd",
   unavailableGitHub: "bridge-eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
   missingBinding: "bridge-12121212-1212-4212-8212-121212121212",
+  missingUpdatedAt: "bridge-14141414-1414-4414-8414-141414141414",
 };
 
 async function writeCollaboration(id, state) {
@@ -87,6 +94,7 @@ try {
     githubReview: { repository: "norm/example", prNumber: 6, headSha: "6".repeat(40) },
   });
   await writeCollaboration(ids.missingBinding, { status: "completed" });
+  await writeCollaboration(ids.missingUpdatedAt, { status: "completed", updatedAt: "not-a-date" });
   const oldHostSession = "expired-native-host-session";
   await recordHostActivity(stateRoot, {
     provider: "codex",
@@ -111,9 +119,10 @@ try {
     id: completePortfolio,
     status: "complete",
     revision: 1,
+    repository: "norm/example",
     createdAt: old,
     updatedAt: old,
-    items: [{ id: "1", status: "merged" }],
+    items: [{ id: "1", status: "merged", prNumber: 20, headSha: "2".repeat(40) }],
   })}\n`);
   await writeFile(join(process.env.BRIDGE_PORTFOLIO_DIR, `${blockedPortfolio}.json`), `${JSON.stringify({
     id: blockedPortfolio,
@@ -146,6 +155,7 @@ try {
   assert.ok(audit.protectedCollaborations.some((entry) => entry.id === ids.unpublishedWork && entry.reasons.includes("workspace_head_unpublished")));
   assert.ok(audit.protectedCollaborations.some((entry) => entry.id === ids.unavailableGitHub && entry.reasons.includes("github_outcome_unavailable")));
   assert.ok(audit.protectedCollaborations.some((entry) => entry.id === ids.missingBinding && entry.reasons.includes("github_binding_missing")));
+  assert.ok(audit.staleCollaborations.some((entry) => entry.id === ids.missingUpdatedAt && entry.reasons.includes("missing_updated_at")));
   assert.deepEqual(audit.stalePortfolios.map((entry) => entry.id), [blockedPortfolio]);
   assert.equal(audit.hostActivityCleanupCandidates.length, 1);
   assert.equal(audit.hostActivityCleanupCandidates[0].type, "state");
@@ -153,6 +163,17 @@ try {
   assert.match(formatCleanupReport(audit), /never auto-cancelled/);
   assert.match(formatCleanupReport(audit), /pull_request_open/);
   assert.doesNotThrow(() => formatCleanupReport({ ...audit, protectedCollaborations: undefined }));
+  await assert.rejects(
+    () => archiveVerifiedCollaboration(stateRoot, ids.needsUser, { expectedUpdatedAt: old }),
+    /status needs_user is not archive-ready/,
+  );
+  const localTerminal = "bridge-13131313-1313-4313-8313-131313131313";
+  await writeCollaboration(localTerminal, { status: "agreed" });
+  const localArchived = await archiveVerifiedCollaboration(stateRoot, localTerminal, { expectedUpdatedAt: old });
+  assert.equal(localArchived.retirement.reason, "local_terminal_record");
+  const localArchivedState = JSON.parse(await readFile(join(stateRoot, "archive", `${localTerminal}.json`), "utf8"));
+  assert.equal(localArchivedState.status, "agreed");
+  assert.equal(localArchivedState.archiveMetadata.retirement.reason, "local_terminal_record");
 
   const applied = await applyBridgeCleanup(options);
   assert.equal(applied.archivedCollaborations.length, 2);
@@ -201,6 +222,12 @@ try {
         head: { sha: "a".repeat(40), ref: "codex/gone", repo: { full_name: "norm/example" } },
       }), { status: 200 });
     }
+    if (path === "/repos/norm/example/pulls/12") {
+      return new Response(JSON.stringify({
+        state: "closed", merged: false,
+        head: { sha: "b".repeat(40), ref: "codex/deleted-fork", repo: null },
+      }), { status: 200 });
+    }
     if (path === "/repos/norm/example/issues/11") {
       return new Response(JSON.stringify({
         state: "closed", html_url: "https://github.com/norm/example/issues/11",
@@ -233,11 +260,41 @@ try {
   }, { fetchImpl: fakeFetch, getInstallationToken: fakeToken });
   assert.equal(verifiedClosedUnrecoverable.safe, false);
   assert.equal(verifiedClosedUnrecoverable.reason, "pull_request_closed_head_unrecoverable");
+  const verifiedDeletedFork = await verifyCollaborationGitHubOutcome({
+    githubReview: { repository: "norm/example", prNumber: 12, headSha: "b".repeat(40) },
+  }, { fetchImpl: fakeFetch, getInstallationToken: fakeToken });
+  assert.equal(verifiedDeletedFork.safe, false);
+  assert.equal(verifiedDeletedFork.reason, "pull_request_closed_head_unrecoverable");
+  assert.equal(verifiedDeletedFork.remoteHeadSha, null);
   const verifiedClosedIssue = await verifyCollaborationGitHubOutcome({
     issueClaim: { repository: "norm/example", issueNumber: 11 },
   }, { fetchImpl: fakeFetch, getInstallationToken: fakeToken });
   assert.equal(verifiedClosedIssue.safe, true);
   assert.equal(verifiedClosedIssue.reason, "issue_closed");
+
+  const issueOnlyChecks = [];
+  const issueOnlyPortfolio = {
+    id: "helm-issue-only",
+    repository: "norm/example",
+    items: [{ id: "issue-11", status: "completed", issueNumber: 11 }],
+  };
+  const issueOnlyRetirement = await verifyPortfolioRetirement(issueOnlyPortfolio, {
+    verifyGithubOutcome: async (state) => {
+      issueOnlyChecks.push(state);
+      return { safe: true, reason: "issue_closed", outcome: "closed" };
+    },
+    inspectWorkspace: async () => ({ safe: true, reason: "workspace_proof_not_required" }),
+  });
+  assert.equal(issueOnlyRetirement.safe, true);
+  assert.equal(issueOnlyChecks.length, 1);
+  assert.equal(issueOnlyChecks[0].issueClaim.repository, "norm/example");
+  assert.equal(issueOnlyChecks[0].issueClaim.issueNumber, 11);
+  const openIssueRetirement = await verifyPortfolioRetirement(issueOnlyPortfolio, {
+    verifyGithubOutcome: async () => ({ safe: false, reason: "issue_open", outcome: "open" }),
+    inspectWorkspace: async () => ({ safe: true, reason: "workspace_proof_not_required" }),
+  });
+  assert.equal(openIssueRetirement.safe, false);
+  assert.deepEqual(openIssueRetirement.reasons, ["item:issue-11:issue_open"]);
 
   const changedOutcomeId = "bridge-fafafafa-fafa-4afa-8afa-fafafafafafa";
   await writeCollaboration(changedOutcomeId, {

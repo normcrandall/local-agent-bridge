@@ -11,13 +11,11 @@ import { mergePullRequestWithBuilder } from "./native-github-builder.mjs";
 import {
   appendEvent,
   acquireIdentityLock,
-  archiveCollaboration,
   collaborationDirectory,
   collaborationView,
   createCollaboration,
   findCollaborationByIdentity,
   listCollaborations,
-  pruneTerminalCollaborations,
   readCollaboration,
   releaseOwnedCollaborationLocks,
   updateCollaboration,
@@ -93,7 +91,7 @@ import {
   retirementFailureState,
   updateLocalDefaultBranch,
 } from "./writer-lifecycle.mjs";
-import { verifyCollaborationRetirement } from "./state-cleanup.mjs";
+import { applyBridgeCleanup, archiveVerifiedCollaboration, verifyCollaborationRetirement } from "./state-cleanup.mjs";
 import { resolveDeliveryPolicy } from "./delivery-policy.mjs";
 import { assertGithubGovernedWorkStart, governedContinuationBuilder } from "./github-delivery-governance.mjs";
 import { readMergeDeliveryReceipt, recordMergeDeliveryReceipt } from "./merge-delivery-receipts.mjs";
@@ -2976,22 +2974,31 @@ server.registerTool(
   "archive_collaboration",
   {
     title: "Archive collaboration",
-    description: "Move one terminal collaboration state and JSONL history into the local archive. Running and indeterminate work is retained.",
+    description: "Archive one terminal collaboration only after pending attention, GitHub outcome, and checkout recoverability are verified.",
     inputSchema: { collaborationId, expectedUpdatedAt: z.string().optional() },
   },
-  async ({ collaborationId: id, expectedUpdatedAt }) => toolResponse(await archiveCollaboration(WORKSPACE_ROOT, id, { expectedUpdatedAt })),
+  async ({ collaborationId: id, expectedUpdatedAt }) => toolResponse(await archiveVerifiedCollaboration(WORKSPACE_ROOT, id, { expectedUpdatedAt })),
 );
 
 server.registerTool(
   "prune_collaborations",
   {
     title: "Prune old collaborations",
-    description: "Archive terminal collaborations older than the retention period; never touches active or indeterminate work.",
+    description: "Archive old terminal collaborations only after pending attention, GitHub outcome, and checkout recoverability are verified.",
     inputSchema: { olderThanDays: z.number().int().min(1).max(3650).default(30) },
   },
   async ({ olderThanDays }) => {
-    const archived = await pruneTerminalCollaborations(WORKSPACE_ROOT, { olderThanDays });
-    return toolResponse({ archived, count: archived.length });
+    const cleanup = await applyBridgeCleanup({
+      workspaceRoot: WORKSPACE_ROOT,
+      stateRoot: collaborationDirectory(WORKSPACE_ROOT),
+      olderThanDays,
+    });
+    return toolResponse({
+      archived: cleanup.archivedCollaborations,
+      count: cleanup.archivedCollaborations.length,
+      preserved: cleanup.protectedCollaborations,
+      failed: cleanup.failedCollaborations,
+    });
   },
 );
 

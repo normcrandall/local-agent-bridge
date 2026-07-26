@@ -1,4 +1,4 @@
-const TERMINAL = new Set(["agreed", "completed", "merged", "needs_user", "failed", "cancelled", "budget", "turn_limit", "obsolete"]);
+const TERMINAL = new Set(["agreed", "completed", "merged", "failed", "cancelled", "budget", "turn_limit", "obsolete"]);
 
 export function resolveMissionControlSelection(lanes, selectedId, selectedIndex) {
   if (!Array.isArray(lanes) || lanes.length === 0) return null;
@@ -23,6 +23,10 @@ export function missionControlConfirmation(pending, { key, lane, now = Date.now(
 export function missionControlActionAvailability(lane) {
   if (!lane) return { openPr: false, copy: false, continue: false, cancel: false, archive: false, acknowledgeWake: false };
   const collaboration = lane.type === "collaboration";
+  const pendingWake = lane.coordinatorWake
+    && ["pending", "delivered"].includes(lane.coordinatorWake.status);
+  const pendingHandoff = lane.handoff?.acknowledged === false
+    && !["complete", "completed", "none"].includes(lane.handoff?.nextAction);
   return {
     openPr: Boolean(lane.repository && lane.prNumber),
     copy: true,
@@ -30,7 +34,10 @@ export function missionControlActionAvailability(lane) {
       && lane.handoff?.acknowledged !== false
       && !(lane.coordinatorWake?.actionable && lane.coordinatorWake.status !== "acknowledged"),
     cancel: collaboration && ["queued", "running", "recovering", "cancelling"].includes(lane.lifecyclePhase),
-    archive: collaboration && TERMINAL.has(lane.lifecyclePhase) && lane.lifecyclePhase !== "indeterminate",
+    archive: collaboration && TERMINAL.has(lane.lifecyclePhase)
+      && lane.lifecyclePhase !== "indeterminate"
+      && !pendingWake
+      && !pendingHandoff,
     acknowledgeWake: collaboration
       && lane.coordinatorWake?.actionable === false
       && Boolean(lane.coordinatorWake?.sequence && lane.coordinatorWake.status !== "acknowledged"),

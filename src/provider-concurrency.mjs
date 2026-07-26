@@ -254,13 +254,15 @@ async function registerWaiter(directory, entry) {
   }
 }
 
-async function collaborationStillOwnsCapacity(root, collaborationId) {
+async function collaborationCapacityState(root, collaborationId, stateDirectory = collaborationDirectory(root)) {
   try {
-    const statePath = resolve(collaborationDirectory(root), `${collaborationId}.json`);
+    const statePath = resolve(stateDirectory, `${collaborationId}.json`);
     const state = JSON.parse(await readFile(statePath, "utf8"));
-    return ["queued", "running", "recovering", "cancelling", "indeterminate"].includes(state.status);
-  } catch {
-    return false;
+    return ["queued", "running", "recovering", "cancelling", "indeterminate"].includes(state.status)
+      ? "live"
+      : "terminal";
+  } catch (error) {
+    return error.code === "ENOENT" ? "missing" : "unknown";
   }
 }
 
@@ -274,35 +276,74 @@ async function ownerAlive(pid) {
   }
 }
 
-async function removeStaleEntry(root, path) {
+async function capacityEntryIsLive(root, path, stateDirectory = collaborationDirectory(root)) {
   try {
     const entry = JSON.parse(await readFile(path, "utf8"));
-    if (await collaborationStillOwnsCapacity(root, entry.collaborationId)) return false;
-    if (await ownerAlive(entry.pid)) return false;
-    await unlink(path);
-    return true;
+    const collaborationState = await collaborationCapacityState(root, entry.collaborationId, stateDirectory);
+    if (collaborationState === "live") return true;
+    if (collaborationState === "terminal") return false;
+    return ownerAlive(entry.pid);
   } catch (error) {
-    if (error.code === "ENOENT") return true;
+    if (error.code === "ENOENT") return false;
     try {
       const info = await stat(path);
-      if (Date.now() - info.mtimeMs <= 30_000) return false;
-      await unlink(path);
-      return true;
+      return Date.now() - info.mtimeMs <= 30_000;
     } catch {
       return false;
     }
   }
 }
 
-async function liveEntries(root, directory, suffix) {
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  const names = (await readdir(directory)).filter((name) => name.endsWith(suffix)).sort();
+async function removeStaleEntry(root, path, stateDirectory = collaborationDirectory(root)) {
+  if (await capacityEntryIsLive(root, path, stateDirectory)) return false;
+  try {
+    await unlink(path);
+    return true;
+  } catch (error) {
+    return error.code === "ENOENT";
+  }
+}
+
+async function liveEntries(root, directory, suffix, { stateDirectory = collaborationDirectory(root), reap = true } = {}) {
+  if (reap) await mkdir(directory, { recursive: true, mode: 0o700 });
+  let names = [];
+  try {
+    names = (await readdir(directory)).filter((name) => name.endsWith(suffix)).sort();
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
   const live = [];
   for (const name of names) {
     const path = resolve(directory, name);
-    if (!(await removeStaleEntry(root, path))) live.push({ name, path });
+    const retain = reap
+      ? !(await removeStaleEntry(root, path, stateDirectory))
+      : await capacityEntryIsLive(root, path, stateDirectory);
+    if (retain) live.push({ name, path });
   }
   return live;
+}
+
+export async function providerCapacitySnapshot(root, {
+  limits = null,
+  stateDirectory = collaborationDirectory(root),
+  reap = true,
+} = {}) {
+  const configured = limits || await loadProviderConcurrency();
+  return Object.fromEntries(await Promise.all(PROVIDER_NAMES.map(async (provider) => {
+    const roles = await Promise.all(["work", "review"].map(async (role) => {
+      const directory = resolve(stateDirectory, "capacity", provider, role);
+      const [slots, waiters] = await Promise.all([
+        liveEntries(root, directory, ".slot", { stateDirectory, reap }),
+        liveEntries(root, directory, ".wait", { stateDirectory, reap }),
+      ]);
+      return [role, {
+        limit: configured[provider][role],
+        inUse: slots.length,
+        queued: waiters.length,
+      }];
+    }));
+    return [provider, Object.fromEntries(roles)];
+  })));
 }
 
 async function countOwnedSlots(root, directory, collaborationId) {
