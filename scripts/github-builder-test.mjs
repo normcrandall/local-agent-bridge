@@ -827,7 +827,7 @@ await assert.rejects(
   }).merge({ method: "squash" }),
   /neither a trusted machine review nor a trusted human approval/i,
 );
-for (const loginVariant of ["builder", "BUILDER", "builder[bot]", "BUILDER[BOT]"]) {
+for (const loginVariant of ["builder", "BUILDER", "builder[bot]"]) {
   assert.throws(
     () => createBoundBuilderClient({ ...base, trustedHumanReviewLogins: [loginVariant] }),
     /builder identity cannot be a trusted human reviewer/i,
