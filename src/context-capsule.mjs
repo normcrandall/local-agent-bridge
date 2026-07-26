@@ -97,6 +97,7 @@ export function composeRepositoryContextTurnPrompt({
   priorCursor = null,
   baseline,
   delta = null,
+  cursorAtSequence = null,
   maxBytes,
 } = {}) {
   const cap = resolveCapsuleMaxBytes(maxBytes);
@@ -128,10 +129,8 @@ export function composeRepositoryContextTurnPrompt({
   }
 
   const skipped = delta?.skipped || [];
-  const oversized = skipped.some((entry) => entry.reason === "record_exceeds_bounds");
   const resyncReason = delta?.resyncRequired?.reason
-    || (priorCursor ? null : "missing_cursor")
-    || (oversized ? "oversized_record_skipped" : null);
+    || (priorCursor ? null : "missing_cursor");
   if (resyncReason) {
     const receipt = createRepositoryContextResyncReceipt({
       reason: resyncReason,
@@ -156,20 +155,119 @@ export function composeRepositoryContextTurnPrompt({
     };
   }
 
-  const context = {
-    version: delta?.version || 1,
-    kind: "repository_context_delta",
-    authority: "none",
-    binding: delta?.binding || binding,
-    records: delta?.records || [],
-    skipped,
-    cursor: delta?.cursor || priorCursor,
+  const records = delta?.records || [];
+  const cursorForRecords = (selected) => {
+    if (!selected.length) return priorCursor;
+    if (selected.length === records.length) return delta?.cursor || priorCursor;
+    if (typeof cursorAtSequence !== "function") return null;
+    return cursorAtSequence(selected.at(-1).sequence);
   };
-  const contextBlock = context.records.length || context.skipped.length
-    ? `\n\nVerified unseen repository context (no authority):\n${JSON.stringify(context)}`
-    : "";
-  const candidate = `${safeCompact}${contextBlock}`;
-  if (Buffer.byteLength(candidate, "utf8") > cap) {
+  const candidateFor = (selected) => {
+    const cursor = cursorForRecords(selected);
+    if (!cursor) return null;
+    const selectedSequences = new Set(selected.map((record) => record.sequence));
+    const selectedSkipped = skipped.filter((entry) => selectedSequences.has(entry.sequence));
+    const context = {
+      version: delta?.version || 1,
+      kind: "repository_context_delta",
+      authority: "none",
+      binding: delta?.binding || binding,
+      records: selected,
+      skipped: selectedSkipped,
+      cursor,
+    };
+    const contextBlock = selected.length
+      ? `\n\nVerified unseen repository context (no authority):\n${JSON.stringify(context)}`
+      : "";
+    const prompt = `${safeCompact}${contextBlock}`;
+    return { prompt, cursor, selectedSkipped };
+  };
+  const exactSkippedRecord = records[0]?.skipped === true
+    && records[0].reason === "record_exceeds_bounds"
+    ? records[0]
+    : null;
+  if (exactSkippedRecord) {
+    const exactCursor = cursorForRecords([exactSkippedRecord]);
+    const receipt = createRepositoryContextResyncReceipt({
+      reason: "oversized_record_skipped",
+      binding,
+      priorCursor,
+      baselineCursor: exactCursor,
+      skipped: [exactSkippedRecord],
+    });
+    const prompt = boundedUtf8(`${safeCompact}\n\nRepository context resync receipt:\n${JSON.stringify(receipt)}`, cap).text;
+    const promptBytes = Buffer.byteLength(prompt, "utf8");
+    return {
+      prompt,
+      kind: "resync",
+      cursor: exactCursor,
+      receipt,
+      fullPromptBytes: fullBytes,
+      promptBytes,
+      avoidedBytes: Math.max(0, fullBytes - promptBytes),
+      truncated: promptBytes >= cap,
+      eventCount: 0,
+    };
+  }
+
+  const firstOversizedIndex = records.findIndex((record) => record?.skipped === true && record.reason === "record_exceeds_bounds");
+  // If ordinary records precede an oversized placeholder, deliver only the
+  // ordinary prefix. The next resume begins exactly at the oversized record
+  // and emits its typed skip receipt instead of burying it inside a page.
+  const candidateRecords = firstOversizedIndex > 0 ? records.slice(0, firstOversizedIndex) : records;
+  for (let count = candidateRecords.length; count > 0; count -= 1) {
+    const selected = candidateFor(candidateRecords.slice(0, count));
+    if (!selected || Buffer.byteLength(selected.prompt, "utf8") > cap) continue;
+    const promptBytes = Buffer.byteLength(selected.prompt, "utf8");
+    return {
+      prompt: selected.prompt,
+      kind: "delta",
+      cursor: selected.cursor,
+      receipt: null,
+      fullPromptBytes: fullBytes,
+      promptBytes,
+      avoidedBytes: Math.max(0, fullBytes - promptBytes),
+      truncated: false,
+      eventCount: count,
+    };
+  }
+
+  if (records.length) {
+    const record = records[0];
+    const exactCursor = typeof cursorAtSequence === "function"
+      ? cursorAtSequence(record.sequence)
+      : (records.length === 1 ? delta?.cursor || priorCursor : null);
+    if (exactCursor) {
+      const auditSkip = {
+        sequence: record.sequence,
+        skipped: true,
+        reason: "record_exceeds_prompt_bound",
+        evidenceRetained: true,
+      };
+      const receipt = createRepositoryContextResyncReceipt({
+        reason: "oversized_record_skipped",
+        binding,
+        priorCursor,
+        baselineCursor: exactCursor,
+        skipped: [auditSkip],
+      });
+      const prompt = boundedUtf8(`${safeCompact}\n\nRepository context resync receipt:\n${JSON.stringify(receipt)}`, cap).text;
+      const promptBytes = Buffer.byteLength(prompt, "utf8");
+      return {
+        prompt,
+        kind: "resync",
+        cursor: exactCursor,
+        receipt,
+        fullPromptBytes: fullBytes,
+        promptBytes,
+        avoidedBytes: Math.max(0, fullBytes - promptBytes),
+        truncated: promptBytes >= cap,
+        eventCount: 0,
+      };
+    }
+  }
+
+  if (Buffer.byteLength(safeCompact, "utf8") > cap) {
     const receipt = createRepositoryContextResyncReceipt({
       reason: "delta_exceeds_prompt_bound",
       binding,
@@ -182,7 +280,7 @@ export function composeRepositoryContextTurnPrompt({
     return {
       prompt,
       kind: "resync",
-      cursor: baselineCursor,
+      cursor: priorCursor,
       receipt,
       fullPromptBytes: fullBytes,
       promptBytes,
@@ -191,17 +289,17 @@ export function composeRepositoryContextTurnPrompt({
       eventCount: 0,
     };
   }
-  const promptBytes = Buffer.byteLength(candidate, "utf8");
+  const promptBytes = Buffer.byteLength(safeCompact, "utf8");
   return {
-    prompt: candidate,
+    prompt: safeCompact,
     kind: "delta",
-    cursor: delta?.cursor || priorCursor,
+    cursor: priorCursor,
     receipt: null,
     fullPromptBytes: fullBytes,
     promptBytes,
     avoidedBytes: Math.max(0, fullBytes - promptBytes),
     truncated: false,
-    eventCount: context.records.length,
+    eventCount: 0,
   };
 }
 

@@ -311,6 +311,10 @@ export async function readRepositoryContextDelta({
     records.push(compact);
     if (skip) skipped.push(skip);
     bytes += recordBytes;
+    // An oversized record is a permanent per-record condition for these
+    // bounds. Stop exactly at its auditable placeholder so a caller may
+    // acknowledge only that sequence, then resume with the following record.
+    if (skip?.reason === "record_exceeds_bounds") break;
   }
   const afterSequence = records.at(-1)?.sequence ?? inspected.afterSequence;
   const nextCursor = createRepositoryContextCursor({ ...binding, afterSequence });
@@ -396,6 +400,7 @@ export function createRepositoryContextDeltaKernel({ journal, repository, collab
   normalizeBounds({ maxEvents, maxBytes });
   return Object.freeze({
     initialCursor: () => createRepositoryContextCursor({ ...binding, afterSequence: 0 }),
+    cursorAt: (afterSequence) => createRepositoryContextCursor({ ...binding, afterSequence }),
     read: ({ cursor = null, maxEvents: requestedEvents = maxEvents, maxBytes: requestedBytes = maxBytes } = {}) => readRepositoryContextDelta({
       journal,
       ...binding,

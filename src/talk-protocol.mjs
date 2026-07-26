@@ -184,6 +184,7 @@ export async function runConversation({
   collaborationId = null,
   preparePrompt = null,
   onPromptPrepared = async () => {},
+  onPromptDelivered = async () => {},
 }) {
   if (!task?.trim()) throw new Error("A task is required.");
   if (!Number.isInteger(maxTurns) || maxTurns < 1 || maxTurns > 20) {
@@ -274,9 +275,6 @@ export async function runConversation({
       });
       if (prepared?.prompt) prompt = prepared.prompt;
       promptKind = prepared?.kind || promptKind;
-      if (prepared?.cursor) repositoryContextCursors[agent] = prepared.cursor;
-      if (prepared?.receipt) contextResyncReceipts.push({ ...prepared.receipt, agent, turn: number });
-      if (contextResyncReceipts.length > 20) contextResyncReceipts.splice(0, contextResyncReceipts.length - 20);
     }
     promptMetrics.charactersSent += prompt.length;
     promptMetrics.bytesSent += Buffer.byteLength(prompt, "utf8");
@@ -370,6 +368,12 @@ export async function runConversation({
         };
       }
       continue;
+    }
+    if (prepared) {
+      if (prepared.cursor) repositoryContextCursors[agent] = prepared.cursor;
+      if (prepared.receipt) contextResyncReceipts.push({ ...prepared.receipt, agent, turn: number });
+      if (contextResyncReceipts.length > 20) contextResyncReceipts.splice(0, contextResyncReceipts.length - 20);
+      await onPromptDelivered({ agent, turn: number, prepared, state: stateSnapshot() });
     }
     sessions[agent] = response.sessionId || sessions[agent];
 

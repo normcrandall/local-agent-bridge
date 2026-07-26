@@ -531,11 +531,27 @@ try {
           priorCursor: cursor,
           baseline,
           delta,
+          cursorAtSequence: (sequence) => repositoryContextKernel.cursorAt(sequence),
           maxBytes: state.repositoryContext?.maxPromptBytes,
         });
       }
       : null,
-    onPromptPrepared: async ({ agent, turn, prepared, state: runtimeState }) => {
+    onPromptPrepared: async ({ agent, turn, prepared }) => {
+      await appendEvent(workspaceRoot, id, {
+        type: "repository_context_prompt_prepared",
+        at: new Date().toISOString(),
+        agent,
+        turn,
+        promptKind: prepared.kind,
+        promptBytes: prepared.promptBytes,
+        avoidedBytes: prepared.avoidedBytes,
+        eventCount: prepared.eventCount,
+        proposedCursorAfterSequence: prepared.cursor?.afterSequence ?? null,
+        resyncReason: prepared.receipt?.reason || null,
+        truncated: prepared.truncated === true,
+      });
+    },
+    onPromptDelivered: async ({ agent, turn, prepared, state: runtimeState }) => {
       await updateCollaboration(workspaceRoot, id, (current) => ({
         ...current,
         runtime: {
@@ -546,7 +562,7 @@ try {
         },
       }));
       await appendEvent(workspaceRoot, id, {
-        type: "repository_context_prompt_prepared",
+        type: "repository_context_prompt_delivered",
         at: new Date().toISOString(),
         agent,
         turn,
