@@ -51,7 +51,13 @@ export async function readReviewBenchmarkLedger(path) {
   }
   return contents.split("\n").filter(Boolean).map((line, index) => {
     try {
-      return normalizeReviewEnvelope(JSON.parse(line));
+      const parsed = JSON.parse(line);
+      if (!Object.hasOwn(parsed, "schemaVersion")) {
+        const error = new Error("review benchmark ledger record is missing schemaVersion");
+        error.code = "UNSUPPORTED_REVIEW_BENCHMARK_SCHEMA";
+        throw error;
+      }
+      return normalizeReviewEnvelope(parsed);
     } catch (error) {
       error.message = `invalid benchmark ledger record at line ${index + 1}: ${error.message}`;
       throw error;

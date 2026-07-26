@@ -72,6 +72,14 @@ export function normalizeReviewEnvelope(input) {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     throw new TypeError("review envelope must be an object");
   }
+  if (input.schemaVersion !== undefined && input.schemaVersion !== REVIEW_BENCHMARK_SCHEMA_VERSION) {
+    const error = new Error(`unsupported review benchmark schema version: ${String(input.schemaVersion)}`);
+    error.code = "UNSUPPORTED_REVIEW_BENCHMARK_SCHEMA";
+    throw error;
+  }
+  if (input.localProvider !== undefined && typeof input.localProvider !== "boolean") {
+    throw new TypeError("localProvider must be a boolean when supplied");
+  }
   const target = validateBenchmarkTarget(input.repository, input.headSha);
   const timestamp = requiredString(input.timestamp, "timestamp");
   if (!Number.isFinite(Date.parse(timestamp))) {
