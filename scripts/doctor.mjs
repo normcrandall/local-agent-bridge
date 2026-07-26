@@ -24,6 +24,43 @@ function sameRealPath(left, right) {
   }
 }
 
+function resolvedPath(value) {
+  try {
+    return realpathSync(value);
+  } catch {
+    return null;
+  }
+}
+
+function resolvedHomeDirectory() {
+  try {
+    return resolvedPath(homedir());
+  } catch {
+    return null;
+  }
+}
+
+function implicitGitEnvironment() {
+  const environment = {
+    ...process.env,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_OPTIONAL_LOCKS: "0",
+    GIT_TERMINAL_PROMPT: "0",
+  };
+  for (const inherited of [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+  ]) {
+    delete environment[inherited];
+  }
+  return environment;
+}
+
 function implicitWorkingDirectory() {
   const cwd = resolve(process.cwd());
   const logical = String(process.env.PWD || "").trim();
@@ -41,7 +78,7 @@ const resolvedProjectRoot = explicitProjectRoot
   : spawnSync("git", ["-c", "core.fsmonitor=false", "rev-parse", "--show-toplevel"], {
       cwd: requestedProjectRoot,
       encoding: "utf8",
-      env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0" },
+      env: implicitGitEnvironment(),
     });
 const discoveredProjectRoot = resolvedProjectRoot?.status === 0
   ? resolve(resolvedProjectRoot.stdout.trim())
@@ -52,13 +89,17 @@ let workspaceSelection = explicitProjectRoot
   : `implicit cwd ${projectRoot}`;
 
 if (!explicitProjectRoot && discoveredProjectRoot) {
-  const requestedRealRoot = realpathSync(requestedProjectRoot);
-  const discoveredRealRoot = realpathSync(discoveredProjectRoot);
-  const homeRealRoot = realpathSync(homedir());
-  if (discoveredRealRoot === homeRealRoot && requestedRealRoot !== homeRealRoot) {
+  const requestedRealRoot = resolvedPath(requestedProjectRoot);
+  const discoveredRealRoot = resolvedPath(discoveredProjectRoot);
+  const homeRealRoot = resolvedHomeDirectory();
+  if (!requestedRealRoot) {
+    workspaceSelection += "; retained because the implicit cwd could not be resolved safely";
+  } else if (!discoveredRealRoot) {
+    workspaceSelection += ` retained; Git top-level ${discoveredProjectRoot} could not be resolved safely`;
+  } else if (!homeRealRoot) {
+    workspaceSelection += "; retained because the home-directory repository boundary could not be verified";
+  } else if (discoveredRealRoot === homeRealRoot && requestedRealRoot !== homeRealRoot) {
     workspaceSelection += ` retained; Git top-level ${discoveredProjectRoot} is the home-directory repository boundary`;
-  } else if (requestedProjectRoot !== requestedRealRoot) {
-    workspaceSelection += ` retained; Git top-level ${discoveredProjectRoot} crosses a symlink boundary`;
   } else if (!isWithin(discoveredRealRoot, requestedRealRoot)) {
     workspaceSelection += ` retained; Git top-level ${discoveredProjectRoot} is not an ancestor of cwd`;
   } else {

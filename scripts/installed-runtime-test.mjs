@@ -207,6 +207,44 @@ try {
   assert.match(homeBoundaryRun.stderr, /projects\/application\/\.codex\/config\.toml|projects\/application\/\.mcp\.json/,
     "project checks should remain bound to the nested caller");
 
+  const missingHome = resolve(temporary, "missing-home");
+  const missingHomeRun = spawnSync(process.execPath, [resolve(runtimeRoot, "scripts/doctor.mjs")], {
+    cwd: nestedCaller,
+    env: {
+      ...doctorEnvironment,
+      HOME: missingHome,
+      PWD: nestedCaller,
+      AGENT_BRIDGE_DOCTOR_CHECKS: "Codex project config,Claude project config",
+    },
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  assert.equal(missingHomeRun.signal, null, "an unresolvable HOME must not crash doctor during module initialization");
+  assert.equal(missingHomeRun.status, 1,
+    "doctor must retain the nested caller when it cannot verify the home-directory repository boundary");
+  assert.match(missingHomeRun.stdout, /home-directory repository boundary could not be verified/,
+    "doctor should disclose why an unresolvable HOME prevented normalization");
+  assert.doesNotMatch(missingHomeRun.stderr, /ENOENT|uncaught/i,
+    "an unresolvable HOME should produce normal failed checks rather than an import-time exception");
+
+  const redirectedGitRun = spawnSync(process.execPath, [resolve(runtimeRoot, "scripts/doctor.mjs")], {
+    cwd: nestedCaller,
+    env: {
+      ...doctorEnvironment,
+      PWD: nestedCaller,
+      GIT_DIR: resolve(fakeHome, ".git"),
+      GIT_WORK_TREE: fakeHome,
+      AGENT_BRIDGE_DOCTOR_CHECKS: "Codex project config,Claude project config",
+    },
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  assert.equal(redirectedGitRun.status, 0, redirectedGitRun.stderr);
+  assert.match(redirectedGitRun.stdout, /normalized to Git top-level/,
+    "doctor should ignore inherited Git repository-location variables during implicit discovery");
+  assert.match(redirectedGitRun.stdout, new RegExp(checkoutRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+    "doctor should normalize to the caller's repository rather than the inherited GIT_WORK_TREE");
+
   const symlinkCaller = resolve(temporary, "logical-workspace");
   await symlink(nestedCaller, symlinkCaller);
   const symlinkBoundaryRun = spawnSync(process.execPath, [resolve(runtimeRoot, "scripts/doctor.mjs")], {
@@ -219,10 +257,9 @@ try {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });
-  assert.equal(symlinkBoundaryRun.status, 1,
-    "a logical symlink cwd must not silently normalize to the physical repository root");
-  assert.match(symlinkBoundaryRun.stdout, /crosses a symlink boundary/,
-    "doctor should disclose why it retained the logical symlink workspace");
+  assert.equal(symlinkBoundaryRun.status, 0, symlinkBoundaryRun.stderr);
+  assert.match(symlinkBoundaryRun.stdout, /normalized to Git top-level/,
+    "a safe logical symlink cwd should normalize after resolved-path containment succeeds");
   console.log("Installed runtime smoke test passed with a fetch-less checkout, retained drift rejection, and bounded implicit workspace discovery.");
 } finally {
   await rm(temporary, { recursive: true, force: true });
