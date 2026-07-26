@@ -1272,11 +1272,13 @@ function gridMeasurements(width, activePane, paneLayout = null) {
     const workWidth = Math.max(32, Math.min(52, Math.floor(interior * 0.38)));
     return { paneIndices: [0, 1, 2], widths: [repositoryWidth, workWidth, interior - repositoryWidth - workWidth] };
   }
-  const visible = paneLayout?.zoomedPane != null
+  const attached = [0, 1, 2].filter((pane) => !paneLayout?.detached?.includes(pane));
+  const visible = paneLayout?.zoomedPane != null && attached.includes(paneLayout.zoomedPane)
     ? [paneLayout.zoomedPane]
     : paneLayout?.split === false
-      ? [activePane]
-      : [0, 1, 2].filter((pane) => !paneLayout?.detached?.includes(pane));
+      ? [attached.includes(activePane) ? activePane : attached[0]].filter(Number.isInteger)
+      : attached;
+  if (!visible.length) visible.push(Math.min(2, Math.max(0, activePane)));
   if (visible.length === 1) return { paneIndices: visible, widths: [Math.max(1, width - 2)] };
   if (width >= 84) {
     const interior = width - visible.length - 1;
@@ -1367,7 +1369,7 @@ export function renderMissionControl(snapshot, {
         ? "WORK · j/k choose lane · Enter details"
         : `DETAILS · j/k scroll · g/G ends · Enter ${detailExpanded ? "collapse" : "expand"}`;
     const detached = paneLayout?.detached?.length ? ` · detached ${paneLayout.detached.map((pane) => titles[pane].toLowerCase()).join(",")}` : "";
-    lines.push(sliceDisplay(` ${paneHelp}${detached}  1-6 tabs  Tab/←/→ pane  \\ split  +/- resize  z zoom  d detach  o PR  c continue  x cancel  q quit`, usableWidth, { cleanValue: false }));
+    lines.push(sliceDisplay(` ${paneHelp}${detached}  1-6 tabs  Tab/←/→ pane  \\ split  +/- resize  z zoom  d detach  D reattach  o PR  c continue  x cancel  q quit`, usableWidth, { cleanValue: false }));
   } else if (snapshot.mode === "all") {
     lines.push(truncate("Archive preview: bridge cleanup --older-than-days 7", usableWidth));
   }

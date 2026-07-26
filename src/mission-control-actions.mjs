@@ -13,9 +13,29 @@ export function createMissionControlPaneLayout(value = {}) {
   const zoomedPane = Number.isInteger(value.zoomedPane) && value.zoomedPane >= 0 && value.zoomedPane < 3
     ? value.zoomedPane
     : null;
-  const detached = [...new Set((Array.isArray(value.detached) ? value.detached : [])
+  let detached = [...new Set((Array.isArray(value.detached) ? value.detached : [])
     .filter((pane) => Number.isInteger(pane) && pane >= 0 && pane < 3))];
+  // A persisted or caller-supplied corrupt layout must never produce an empty
+  // console. Keep the most recently listed pane visible as a safe fallback.
+  if (detached.length === MISSION_CONTROL_PANE_IDS.length) detached = detached.slice(0, -1);
   return { split: value.split !== false, weights: normalized, zoomedPane, detached };
+}
+
+export function missionControlVisiblePanes(layout, activePane = 1) {
+  const current = createMissionControlPaneLayout(layout);
+  const pane = Math.min(2, Math.max(0, Number.isInteger(activePane) ? activePane : 1));
+  const attached = [0, 1, 2].filter((candidate) => !current.detached.includes(candidate));
+  if (current.zoomedPane != null && attached.includes(current.zoomedPane)) return [current.zoomedPane];
+  if (current.split === false) return [attached.includes(pane) ? pane : attached[0]];
+  return attached.length ? attached : [pane];
+}
+
+export function missionControlPaneFocusIntent(layout, key, activePane) {
+  const visible = missionControlVisiblePanes(layout, activePane);
+  const current = visible.includes(activePane) ? activePane : visible[0];
+  if (!["\t", "\x1b[C", "\x1b[Z", "\x1b[D"].includes(key) || visible.length === 1) return current;
+  const direction = key === "\t" || key === "\x1b[C" ? 1 : -1;
+  return visible[(visible.indexOf(current) + direction + visible.length) % visible.length];
 }
 
 /** Pure keyboard transition for the interactive pane layout. */
@@ -24,9 +44,11 @@ export function missionControlPaneLayoutIntent(layout, key, activePane) {
   const pane = Math.min(2, Math.max(0, Number.isInteger(activePane) ? activePane : 1));
   if (key === "\\") return { ...current, split: !current.split, zoomedPane: null };
   if (key === "z") return { ...current, zoomedPane: current.zoomedPane === pane ? null : pane };
-  if (key === "d") {
-    const detached = current.detached.includes(pane)
-      ? current.detached.filter((candidate) => candidate !== pane)
+  if (key === "d" || key === "D") {
+    const attached = [0, 1, 2].filter((candidate) => !current.detached.includes(candidate));
+    const shouldReattach = key === "D" || attached.length <= 1 || current.detached.includes(pane);
+    const detached = shouldReattach
+      ? current.detached.slice(0, -1)
       : [...current.detached, pane];
     return { ...current, detached, zoomedPane: current.zoomedPane === pane ? null : current.zoomedPane };
   }
@@ -47,6 +69,23 @@ export function missionControlPaneLayoutIntent(layout, key, activePane) {
     weights[visible[index]] -= delta * direction * (capacity[index] / totalCapacity);
   }
   return createMissionControlPaneLayout({ ...current, weights });
+}
+
+export function missionControlPaneControlIntent(layout, key, activePane) {
+  const previous = createMissionControlPaneLayout(layout);
+  if (["\t", "\x1b[C", "\x1b[Z", "\x1b[D"].includes(key)) {
+    return { layout: previous, activePane: missionControlPaneFocusIntent(previous, key, activePane) };
+  }
+  const next = missionControlPaneLayoutIntent(previous, key, activePane);
+  const visible = missionControlVisiblePanes(next, activePane);
+  const detachedPane = next.detached.find((pane) => !previous.detached.includes(pane));
+  const reattachedPane = previous.detached.find((pane) => !next.detached.includes(pane));
+  const operation = detachedPane != null
+    ? { type: "detached", pane: detachedPane }
+    : reattachedPane != null ? { type: "reattached", pane: reattachedPane } : null;
+  if (visible.includes(activePane)) return { layout: next, activePane, operation };
+  const nextPane = [1, 2, 0].find((pane) => visible.includes(pane)) ?? visible[0];
+  return { layout: next, activePane: nextPane, operation };
 }
 
 export function resolveMissionControlSelection(lanes, selectedId, selectedIndex) {

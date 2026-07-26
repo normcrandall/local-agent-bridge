@@ -14,7 +14,6 @@ import {
   missionControlVisibleLanes,
   navigationIntent,
   newlyObservedAttentionKeys,
-  paneFocusIntent,
   renderMissionControl,
   renderSnapshot,
 } from "../src/mission-control.mjs";
@@ -23,7 +22,7 @@ import {
   missionControlConfirmation,
   missionControlCopyText,
   createMissionControlPaneLayout,
-  missionControlPaneLayoutIntent,
+  missionControlPaneControlIntent,
   missionControlPlatformCommands,
   missionControlPrUrl,
   missionControlShouldRedraw,
@@ -254,14 +253,6 @@ function subscriptionSnapshot(viewModel) {
     }
   }
   const matching = [...all.values()].filter((lane) => !repositoryFilter || lane.repository === repositoryFilter);
-  const liveRepositories = new Set(matching
-    .filter((lane) => lane.operatorCategory === "active")
-    .map((lane) => lane.repository));
-  const liveSource = matching.filter((lane) => {
-    if (["active", "needs_user"].includes(lane.operatorCategory)) return true;
-    return lane.operatorCategory === "waiting"
-      && (liveRepositories.size === 0 || liveRepositories.has(lane.repository));
-  });
   const selectedCollection = viewModel.collections?.[selectedTab] || [];
   const selectedKeys = new Set(selectedCollection.map((lane) => lane.key || `${lane.repository}\0${lane.id}`));
   const modeSource = matching.filter((lane) => selectedKeys.has(lane.key || `${lane.repository}\0${lane.id}`));
@@ -391,16 +382,17 @@ async function handleKey(key) {
     pendingConfirmation = null;
   }
   else if (key === "\t" || key === "\x1b[C") {
-    activePane = paneFocusIntent(key, activePane);
-    actionMessage = null;
+    ({ layout: paneLayout, activePane } = missionControlPaneControlIntent(paneLayout, key, activePane));
+    actionMessage = `Focused ${["repositories", "work", "details"][activePane]} pane.`;
   }
   else if (key === "\x1b[Z" || key === "\x1b[D") {
-    activePane = paneFocusIntent(key, activePane);
-    actionMessage = null;
+    ({ layout: paneLayout, activePane } = missionControlPaneControlIntent(paneLayout, key, activePane));
+    actionMessage = `Focused ${["repositories", "work", "details"][activePane]} pane.`;
   }
   else if (key === "\r" || key === "\n") {
-    if (activePane === 0) activePane = 1;
-    else if (activePane === 1) activePane = 2;
+    if (activePane === 0 || activePane === 1) {
+      ({ layout: paneLayout, activePane } = missionControlPaneControlIntent(paneLayout, "\t", activePane));
+    }
     else {
       detailExpanded = !detailExpanded;
       detailOffset = 0;
@@ -437,11 +429,15 @@ async function handleKey(key) {
     pendingConfirmation = null;
     detailOffset = 0;
   }
-  else if (["\\", "+", "=", "-", "_", "z", "d"].includes(key)) {
-    paneLayout = missionControlPaneLayoutIntent(paneLayout, key, activePane);
-    const paneName = ["repositories", "work", "details"][activePane];
-    actionMessage = key === "d"
-      ? `${paneLayout.detached.includes(activePane) ? "Detached" : "Reattached"} ${paneName} pane.`
+  else if (["\\", "+", "=", "-", "_", "z", "d", "D"].includes(key)) {
+    const controlledPane = activePane;
+    const control = missionControlPaneControlIntent(paneLayout, key, activePane);
+    ({ layout: paneLayout, activePane } = control);
+    const paneName = ["repositories", "work", "details"][controlledPane];
+    actionMessage = key === "d" || key === "D"
+      ? control.operation
+        ? `${control.operation.type === "detached" ? "Detached" : "Reattached"} ${["repositories", "work", "details"][control.operation.pane]} pane.${control.operation.type === "detached" ? ` Focused ${["repositories", "work", "details"][activePane]} pane.` : ""}`
+        : "Pane layout unchanged."
       : key === "z"
         ? `${paneLayout.zoomedPane == null ? "Restored split view from" : "Zoomed"} ${paneName} pane.`
         : key === "\\"

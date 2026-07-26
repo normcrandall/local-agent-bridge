@@ -16,17 +16,17 @@ expect "QUOTA"
 expect "1:active"
 after 100
 send -- "\t"
-expect "DETAILS"
+expect "Focused details pane."
 send -- "z"
 expect "Zoomed details pane."
 send -- "+"
 expect "Resized details pane."
 send -- "d"
-expect "Detached details pane."
-send -- "d"
+expect "Detached details pane. Focused work pane."
+send -- "D"
 expect "Reattached details pane."
 send -- "6"
-expect "6:history"
+expect -exact {[6:history]}
 after 100
 send -- "q"
 expect {
