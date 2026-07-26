@@ -9,6 +9,17 @@ export const MISSION_CONTROL_SUBSCRIPTION_MAX_BATCH = 100;
 export const MISSION_CONTROL_SUBSCRIPTION_MAX_WAIT_MS = 5_000;
 export const MISSION_CONTROL_EVENT_RETENTION = 512;
 export const MISSION_CONTROL_SNAPSHOT_MAX_BYTES = 16 * 1024 * 1024;
+export const MISSION_CONTROL_SUBSCRIPTION_MAX_WAITERS = 32;
+
+class MissionControlSnapshotTooLargeError extends Error {
+  constructor(actualBytes, maxBytes) {
+    super(`Mission Control snapshot exceeded the ${maxBytes} byte transport limit (${actualBytes} bytes).`);
+    this.name = "MissionControlSnapshotTooLargeError";
+    this.code = "MISSION_CONTROL_SNAPSHOT_TOO_LARGE";
+    this.actualBytes = actualBytes;
+    this.maxBytes = maxBytes;
+  }
+}
 
 function canonical(value) {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
@@ -37,10 +48,10 @@ function stableClone(value) {
   return value;
 }
 
-function projectSnapshot(snapshot) {
+function projectSnapshot(snapshot, maxBytes = MISSION_CONTROL_SNAPSHOT_MAX_BYTES) {
   const lanes = Array.isArray(snapshot?.lanes) ? snapshot.lanes : [];
   const repositories = (Array.isArray(snapshot?.repositories) ? snapshot.repositories : [])
-    .map(({ repository, ...entry }) => ({ ...entry, id: repository }))
+    .map(({ repository, ...entry }) => stableClone({ ...entry, id: repository }))
     .filter((entry) => entry.id);
   const repositoryIds = new Set(repositories.map((entry) => entry.id));
   const normalizedLanes = lanes
@@ -80,8 +91,9 @@ function projectSnapshot(snapshot) {
     providers: [...providers.values()],
     quotas: [],
   });
-  if (Buffer.byteLength(JSON.stringify(projected)) > MISSION_CONTROL_SNAPSHOT_MAX_BYTES) {
-    throw new Error("Mission Control snapshot exceeded the 16 MiB transport limit.");
+  const actualBytes = Buffer.byteLength(JSON.stringify(projected));
+  if (actualBytes > maxBytes) {
+    throw new MissionControlSnapshotTooLargeError(actualBytes, maxBytes);
   }
   return projected;
 }
@@ -103,29 +115,62 @@ export function missionControlEventProjection(snapshot) {
 }
 
 export class MissionControlEventStream {
+  #activeSubscribers = 0;
   #events = [];
+  #degraded = null;
   #initialized = false;
   #loadSnapshot;
   #refresh = Promise.resolve();
   #retention;
+  #maxSnapshotBytes;
+  #maxWaiters;
   #sequence = 0;
   #snapshot = null;
   #streamId;
   #waiters = new Set();
 
-  constructor({ loadSnapshot, retention = MISSION_CONTROL_EVENT_RETENTION, streamId = `mission-control-${randomUUID()}` } = {}) {
+  constructor({
+    loadSnapshot,
+    retention = MISSION_CONTROL_EVENT_RETENTION,
+    streamId = `mission-control-${randomUUID()}`,
+    maxSnapshotBytes = MISSION_CONTROL_SNAPSHOT_MAX_BYTES,
+    maxWaiters = MISSION_CONTROL_SUBSCRIPTION_MAX_WAITERS,
+  } = {}) {
     if (typeof loadSnapshot !== "function") throw new Error("Mission Control event stream requires a snapshot loader.");
     if (!Number.isSafeInteger(retention) || retention < 1 || retention > 10_000) {
       throw new Error("Mission Control event retention must be an integer between 1 and 10000.");
     }
+    if (!Number.isSafeInteger(maxSnapshotBytes) || maxSnapshotBytes < 1) {
+      throw new Error("Mission Control snapshot limit must be a positive safe integer.");
+    }
+    if (!Number.isSafeInteger(maxWaiters) || maxWaiters < 1 || maxWaiters > 10_000) {
+      throw new Error("Mission Control waiter limit must be an integer between 1 and 10000.");
+    }
     this.#loadSnapshot = loadSnapshot;
     this.#retention = retention;
     this.#streamId = streamId;
+    this.#maxSnapshotBytes = maxSnapshotBytes;
+    this.#maxWaiters = maxWaiters;
   }
 
   get cursor() { return this.#sequence; }
 
   get streamId() { return this.#streamId; }
+
+  get status() {
+    return {
+      streamId: this.#streamId,
+      cursor: this.#sequence,
+      degraded: Boolean(this.#degraded),
+      degradedReason: this.#degraded?.reason || null,
+      degradedAt: this.#degraded?.at || null,
+      snapshotBytes: this.#degraded?.actualBytes || null,
+      snapshotLimitBytes: this.#maxSnapshotBytes,
+      waitingSubscribers: this.#waiters.size,
+      activeSubscribers: this.#activeSubscribers,
+      maxWaitingSubscribers: this.#maxWaiters,
+    };
+  }
 
   #envelope(type, payload, identity = {}) {
     this.#sequence += 1;
@@ -163,9 +208,33 @@ export class MissionControlEventStream {
     this.#waiters.clear();
   }
 
+  #enterDegraded(error) {
+    if (this.#degraded?.reason === "snapshot_too_large") return;
+    const at = new Date().toISOString();
+    this.#degraded = {
+      reason: "snapshot_too_large",
+      at,
+      actualBytes: error.actualBytes,
+    };
+    this.#append(this.#envelope("resync.required", {
+      reason: "snapshot_too_large",
+      actualBytes: error.actualBytes,
+      maxBytes: error.maxBytes,
+    }));
+    this.#notify();
+  }
+
   async refresh() {
     const operation = this.#refresh.then(async () => {
-      const next = projectSnapshot(await this.#loadSnapshot());
+      let next;
+      try {
+        next = projectSnapshot(await this.#loadSnapshot(), this.#maxSnapshotBytes);
+      } catch (error) {
+        if (error?.code !== "MISSION_CONTROL_SNAPSHOT_TOO_LARGE") throw error;
+        this.#enterDegraded(error);
+        return;
+      }
+      this.#degraded = null;
       if (!this.#initialized) {
         this.#snapshot = next;
         this.#initialized = true;
@@ -206,6 +275,7 @@ export class MissionControlEventStream {
 
   async snapshot() {
     await this.refresh();
+    if (this.#degraded) return this.#resync(this.#degraded.reason).resyncEvent;
     return this.#snapshotEnvelope();
   }
 
@@ -228,12 +298,17 @@ export class MissionControlEventStream {
     };
   }
 
-  #read(streamId, cursor, maxEvents) {
+  #validateRead(streamId, cursor, maxEvents) {
     if (typeof streamId !== "string" || !streamId) throw new Error("Mission Control subscription requires a streamId.");
     if (!Number.isSafeInteger(cursor) || cursor < 0) throw new Error("Mission Control subscription cursor must be a non-negative safe integer.");
     if (!Number.isSafeInteger(maxEvents) || maxEvents < 1 || maxEvents > MISSION_CONTROL_SUBSCRIPTION_MAX_BATCH) {
       throw new Error(`Mission Control subscription batch must be between 1 and ${MISSION_CONTROL_SUBSCRIPTION_MAX_BATCH}.`);
     }
+  }
+
+  #read(streamId, cursor, maxEvents) {
+    this.#validateRead(streamId, cursor, maxEvents);
+    if (this.#degraded) return this.#resync(this.#degraded.reason);
     if (streamId !== this.#streamId) return this.#resync("stream_changed");
     if (cursor > this.#sequence) throw new Error("Mission Control subscription cursor is ahead of the stream.");
     const earliest = this.#events[0]?.sequence ?? this.#sequence + 1;
@@ -252,24 +327,33 @@ export class MissionControlEventStream {
     if (!Number.isSafeInteger(waitMs) || waitMs < 0 || waitMs > MISSION_CONTROL_SUBSCRIPTION_MAX_WAIT_MS) {
       throw new Error(`Mission Control subscription wait must be between 0 and ${MISSION_CONTROL_SUBSCRIPTION_MAX_WAIT_MS}ms.`);
     }
-    await this.refresh();
-    let result = this.#read(streamId, cursor, maxEvents);
-    if (result.resyncRequired || result.events.length || waitMs === 0 || signal?.aborted) return result;
-    await new Promise((resolvePromise) => {
-      let settled = false;
-      const finish = () => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        this.#waiters.delete(finish);
-        signal?.removeEventListener("abort", finish);
-        resolvePromise();
-      };
-      const timer = setTimeout(finish, waitMs);
-      this.#waiters.add(finish);
-      signal?.addEventListener("abort", finish, { once: true });
-    });
-    result = this.#read(streamId, cursor, maxEvents);
-    return result;
+    this.#validateRead(streamId, cursor, maxEvents);
+    if (waitMs > 0 && this.#activeSubscribers >= this.#maxWaiters) {
+      return this.#read(streamId, cursor, maxEvents);
+    }
+    if (waitMs > 0) this.#activeSubscribers += 1;
+    try {
+      await this.refresh();
+      let result = this.#read(streamId, cursor, maxEvents);
+      if (result.resyncRequired || result.events.length || waitMs === 0 || signal?.aborted) return result;
+      await new Promise((resolvePromise) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          this.#waiters.delete(finish);
+          signal?.removeEventListener("abort", finish);
+          resolvePromise();
+        };
+        const timer = setTimeout(finish, waitMs);
+        this.#waiters.add(finish);
+        signal?.addEventListener("abort", finish, { once: true });
+      });
+      result = this.#read(streamId, cursor, maxEvents);
+      return result;
+    } finally {
+      if (waitMs > 0) this.#activeSubscribers -= 1;
+    }
   }
 }

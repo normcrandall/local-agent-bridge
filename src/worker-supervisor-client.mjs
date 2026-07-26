@@ -202,6 +202,12 @@ export async function readMissionControlEvents({
   workspaceRoot = resolve(process.env.BRIDGE_WORKSPACE_ROOT || runtimeRoot),
   stateDirectory = resolve(process.env.BRIDGE_COLLABORATION_DIR || collaborationDirectory(workspaceRoot)),
 } = {}) {
+  if (!Number.isSafeInteger(waitMs) || waitMs < 0 || waitMs > 5_000) {
+    throw new Error("Mission Control subscription wait must be between 0 and 5000ms.");
+  }
+  if (!Number.isSafeInteger(maxEvents) || maxEvents < 1 || maxEvents > 100) {
+    throw new Error("Mission Control subscription batch must be between 1 and 100.");
+  }
   const endpoint = supervisorEndpoint(stateDirectory);
   await ensureSupervisor({ runtimeRoot, workspaceRoot, stateDirectory, endpoint });
   return request(endpoint, {
@@ -210,7 +216,7 @@ export async function readMissionControlEvents({
     cursor,
     maxEvents,
     waitMs,
-  }, Math.min(7_000, Math.max(1_000, Number(waitMs) + 1_000)));
+  }, Math.min(15_000, Math.max(5_000, waitMs + 5_000)));
 }
 
 export async function refreshSupervisor({

@@ -53,7 +53,15 @@ const missionControlStream = new MissionControlEventStream({
     includeStale: true,
   }),
 });
-let missionControlStreamActive = false;
+const configuredMissionControlIdleMs = Number.parseInt(process.env.BRIDGE_MISSION_CONTROL_IDLE_MS || "60000", 10);
+const missionControlIdleMs = Number.isSafeInteger(configuredMissionControlIdleMs) && configuredMissionControlIdleMs >= 250
+  ? configuredMissionControlIdleMs
+  : 60_000;
+let missionControlLastReadAt = 0;
+
+function touchMissionControlStream() {
+  missionControlLastReadAt = Date.now();
+}
 
 function processAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 1) return false;
@@ -405,6 +413,8 @@ if (process.platform !== "win32") await rm(endpoint, { force: true });
 
 const server = createServer((socket) => {
   let buffer = "";
+  const socketAbort = new AbortController();
+  socket.once("close", () => socketAbort.abort());
   socket.on("data", (chunk) => {
     buffer += chunk.toString("utf8");
     if (buffer.length > 1_000_000) {
@@ -418,8 +428,6 @@ const server = createServer((socket) => {
     const raw = buffer.slice(0, newline);
     buffer = buffer.slice(newline + 1);
     void (async () => {
-      const requestAbort = new AbortController();
-      socket.once("close", () => requestAbort.abort());
       try {
         const request = JSON.parse(raw);
         if (request.protocol !== PROTOCOL_VERSION) throw new Error("Unsupported supervisor protocol version.");
@@ -439,6 +447,7 @@ const server = createServer((socket) => {
             monitoredWorkers: monitored.size,
             workerPids: [...monitored.keys()].sort((left, right) => left - right),
             modelWarmth: modelWarmthStatus,
+            missionControl: missionControlStream.status,
           };
         } else if (request.type === "start") {
           result = await serializeStart(request.collaborationId, () => startWorker({
@@ -448,16 +457,16 @@ const server = createServer((socket) => {
             workerEnvironment: request.workerEnvironment,
           }));
         } else if (request.type === "mission_control_snapshot") {
-          missionControlStreamActive = true;
+          touchMissionControlStream();
           result = await missionControlStream.snapshot();
         } else if (request.type === "mission_control_subscribe") {
-          missionControlStreamActive = true;
+          touchMissionControlStream();
           result = await missionControlStream.read({
             streamId: request.streamId,
             cursor: request.cursor,
             maxEvents: request.maxEvents,
             waitMs: request.waitMs,
-            signal: requestAbort.signal,
+            signal: socketAbort.signal,
           });
         } else if (request.type === "refresh") {
           refreshing = true;
@@ -570,7 +579,9 @@ const attentionMonitor = setInterval(() => { void scanAttention(); }, 60_000);
 attentionMonitor.unref();
 
 const missionControlMonitor = setInterval(() => {
-  if (missionControlStreamActive) void missionControlStream.refresh().catch(() => {});
+  if (Date.now() - missionControlLastReadAt <= missionControlIdleMs) {
+    void missionControlStream.refresh().catch(() => {});
+  }
 }, 250);
 missionControlMonitor.unref();
 

@@ -37,6 +37,67 @@ await kernel.refresh();
 assert.equal((await kernel.read({ streamId: kernelSnapshot.streamId, cursor: 0, maxEvents: 10 })).resyncRequired, true, "slow readers must resynchronize after bounded retention advances");
 assert.equal((await kernel.read({ streamId: "mission-control-old", cursor: kernel.cursor, maxEvents: 10 })).reason, "stream_changed");
 
+let oversizedSource = eventSource();
+const recoverableKernel = new MissionControlEventStream({
+  loadSnapshot: async () => oversizedSource,
+  maxSnapshotBytes: 1_024,
+  streamId: "mission-control-recoverable",
+});
+const recoverableSnapshot = await recoverableKernel.snapshot();
+oversizedSource = {
+  ...eventSource("running"),
+  lanes: [{ ...eventSource("running").lanes[0], objective: "x".repeat(2_000) }],
+};
+await recoverableKernel.refresh();
+assert.equal(recoverableKernel.status.degradedReason, "snapshot_too_large");
+assert.equal((await recoverableKernel.snapshot()).type, "resync.required", "oversized snapshots must degrade to a recoverable protocol event");
+assert.equal((await recoverableKernel.read({
+  streamId: recoverableSnapshot.streamId,
+  cursor: recoverableSnapshot.cursor,
+  maxEvents: 10,
+})).reason, "snapshot_too_large");
+oversizedSource = eventSource("running", "2026-07-26T12:00:03.000Z");
+assert.equal((await recoverableKernel.snapshot()).type, "snapshot", "a smaller projection must recover without restarting the supervisor");
+assert.equal(recoverableKernel.status.degraded, false);
+
+let boundedLoads = 0;
+const boundedKernel = new MissionControlEventStream({
+  loadSnapshot: async () => { boundedLoads += 1; return eventSource(); },
+  maxWaiters: 1,
+  streamId: "mission-control-bounded",
+});
+const boundedSnapshot = await boundedKernel.snapshot();
+const firstAbort = new AbortController();
+const firstWaiter = boundedKernel.read({
+  streamId: boundedSnapshot.streamId,
+  cursor: boundedSnapshot.cursor,
+  maxEvents: 10,
+  waitMs: 1_000,
+  signal: firstAbort.signal,
+});
+await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+assert.equal(boundedKernel.status.waitingSubscribers, 1);
+assert.equal(boundedKernel.status.activeSubscribers, 1);
+const loadsBeforeOverCapacity = boundedLoads;
+const secondStartedAt = Date.now();
+const overCapacity = await boundedKernel.read({
+  streamId: boundedSnapshot.streamId,
+  cursor: boundedSnapshot.cursor,
+  maxEvents: 10,
+  waitMs: 1_000,
+});
+assert.ok(Date.now() - secondStartedAt < 500, "over-cap subscribers must degrade to an immediate read");
+assert.deepEqual(overCapacity.events, []);
+assert.equal(boundedLoads, loadsBeforeOverCapacity, "over-cap subscribers must not queue another snapshot disk read");
+const loadsBeforeInvalidRead = boundedLoads;
+await assert.rejects(
+  boundedKernel.read({ streamId: boundedSnapshot.streamId, cursor: -1, maxEvents: 10 }),
+  /cursor must be a non-negative/i,
+);
+assert.equal(boundedLoads, loadsBeforeInvalidRead, "invalid subscribe input must not trigger a snapshot load");
+firstAbort.abort();
+await firstWaiter;
+
 // Keep the Unix socket path below Darwin's sockaddr_un limit.
 const temporary = await mkdtemp(join(tmpdir(), "bmc-"));
 const stateDirectory = join(temporary, "state");
@@ -103,6 +164,7 @@ const previousEnvironment = {
   workerPath: process.env.BRIDGE_SUPERVISOR_WORKER_PATH,
   testOutput: process.env.BRIDGE_SUPERVISOR_TEST_OUTPUT,
   retention: process.env.BRIDGE_MISSION_CONTROL_EVENT_RETENTION,
+  idleMs: process.env.BRIDGE_MISSION_CONTROL_IDLE_MS,
 };
 let supervisorPid = null;
 let workerPid = null;
@@ -111,6 +173,7 @@ try {
   process.env.BRIDGE_SUPERVISOR_WORKER_PATH = join(runtimeRoot, "scripts/worker-supervisor-test-worker.mjs");
   process.env.BRIDGE_SUPERVISOR_TEST_OUTPUT = temporary;
   process.env.BRIDGE_MISSION_CONTROL_EVENT_RETENTION = "8";
+  process.env.BRIDGE_MISSION_CONTROL_IDLE_MS = "250";
   const options = { runtimeRoot, workspaceRoot: workspace, stateDirectory };
 
   const started = await startSupervisedWorker({ collaborationId, ...options });
@@ -149,6 +212,12 @@ try {
   assert.equal(validateMissionControlEventEnvelope(stale.resyncEvent).type, "resync.required");
   assert.ok(stale.events.length === 0, "a stale cursor must never receive a partial batch");
 
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 400));
+  const cursorBeforeIdle = (await getSupervisorStatus(options)).missionControl.cursor;
+  await writeState({ status: "queued", updatedAt: "2026-07-26T12:00:09.000Z" });
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 400));
+  assert.equal((await getSupervisorStatus(options)).missionControl.cursor, cursorBeforeIdle, "the 4 Hz stream monitor must idle out when no reader remains");
+
   await assert.rejects(
     readMissionControlEvents({ ...options, streamId: snapshot.streamId, cursor, maxEvents: 101, waitMs: 0 }),
     /batch must be between/i,
@@ -164,7 +233,7 @@ try {
   assert.equal((await getSupervisorStatus(options)).supervisorPid, supervisorPid);
 
   const replacement = validateMissionControlEventEnvelope(await getMissionControlEventSnapshot(options));
-  assert.equal(replacement.cursor, cursor, "resync snapshot must describe the exact current stream head");
+  assert.ok(replacement.cursor >= cursor, "resync snapshot must describe the current stream head after any idle-period change");
   assert.deepEqual((await readMissionControlEvents({ ...options, streamId: replacement.streamId, cursor: replacement.cursor, maxEvents: 10 })).events, []);
 
   console.log("Mission Control subscription tests passed: owner-only bootstrap, ordered resume, resync, multi-reader, disconnect, backpressure, malformed input, and bounded lifetime are verified.");
@@ -177,6 +246,7 @@ try {
     BRIDGE_SUPERVISOR_WORKER_PATH: previousEnvironment.workerPath,
     BRIDGE_SUPERVISOR_TEST_OUTPUT: previousEnvironment.testOutput,
     BRIDGE_MISSION_CONTROL_EVENT_RETENTION: previousEnvironment.retention,
+    BRIDGE_MISSION_CONTROL_IDLE_MS: previousEnvironment.idleMs,
   })) {
     if (value === undefined) delete process.env[key]; else process.env[key] = value;
   }
