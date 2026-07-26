@@ -17,6 +17,11 @@ import { loadBranchReconciliationState, loadNonBranchIntents } from "./builder-o
 import { classifyDeliveryOutcome } from "./builder-contract.mjs";
 import { assertGitHubAppPermissions, sameGitHubAppLogin } from "./github-app-auth.mjs";
 import {
+  deliveryIssueSummary,
+  mergedDeliverySummary,
+  validateGithubGovernedPullRequest,
+} from "./github-delivery-governance.mjs";
+import {
   assertReviewThreadReadiness,
   parseReviewFinding,
   parseWriterDisposition,
@@ -24,6 +29,7 @@ import {
 } from "./github-review-threads.mjs";
 
 const LFS_POINTER_REGEX = /^version https:\/\/git-lfs\.github\.com\/spec\/v1\r?\noid sha256:[0-9a-f]{64}\r?\nsize [0-9]+\r?\n$/;
+const SHA_PATTERN = /^[0-9a-f]{40}$/i;
 const MAX_PUSH_FILES = 2000;
 const PROTECTED_BRANCH_NAMES = ["main", "master", "production", "release", "develop"];
 const TOKEN_REFRESH_SKEW_MS = 300_000;
@@ -455,6 +461,9 @@ export function createBoundBuilderClient({
     authorize("ensure_pull_request");
     if (!headRef || !baseRef) throw new Error("Creating or updating a pull request requires bound headRef and baseRef.");
     await identity();
+    const deliveryReceipt = issueNumber
+      ? validateGithubGovernedPullRequest({ repository, issueNumber, body, headSha: activeHeadSha })
+      : null;
     const [owner] = repository.split("/");
     const encodedRef = headRef.split("/").map(encodeURIComponent).join("/");
     const ref = await request({ ...context, path: `/repos/${repository}/git/ref/heads/${encodedRef}` });
@@ -484,7 +493,21 @@ export function createBoundBuilderClient({
     if (pull?.head?.sha !== activeHeadSha) throw new Error("GitHub returned a pull request at an unexpected head SHA.");
     prNumber = pull.number;
     context.prNumber = pull.number;
-    return { operation: "ensure_pull_request", prNumber: pull.number, url: pull.html_url, headSha: activeHeadSha, authorizationHeadSha, login: expectedLogin };
+    if (deliveryReceipt) {
+      const marker = "<!-- agent-bridge-delivery:v1 -->";
+      const comments = await request({ ...context, path: `/repos/${repository}/issues/${issueNumber}/comments?per_page=100` });
+      const existingSummary = comments.find((comment) => sameGitHubAppLogin(comment.user?.login, expectedLogin) && String(comment.body || "").includes(marker));
+      const summaryBody = deliveryIssueSummary(deliveryReceipt, { prNumber: pull.number, prUrl: pull.html_url });
+      await request({
+        ...context,
+        path: existingSummary
+          ? `/repos/${repository}/issues/comments/${existingSummary.id}`
+          : `/repos/${repository}/issues/${issueNumber}/comments`,
+        method: existingSummary ? "PATCH" : "POST",
+        body: { body: summaryBody },
+      });
+    }
+    return { operation: "ensure_pull_request", prNumber: pull.number, url: pull.html_url, headSha: activeHeadSha, authorizationHeadSha, login: expectedLogin, deliveryReceipt };
   }
 
   async function loadReviewThreads() {
@@ -671,9 +694,38 @@ export function createBoundBuilderClient({
     if (!prNumber) throw new Error("Merge requires a builder session bound to a pull request.");
     await identity();
     const pull = await boundPullRequest(context);
+    const linkedIssueNumber = issueNumber || (() => {
+      const match = String(pull.body || "").match(/(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#([1-9][0-9]*)\b/i);
+      return match ? Number.parseInt(match[1], 10) : null;
+    })();
+    const prUrl = pull.html_url || `https://github.com/${repository}/pull/${prNumber}`;
+    const recordMergedIssue = async (mergedSha) => {
+      if (!linkedIssueNumber) return { status: "not_linked" };
+      const marker = "<!-- agent-bridge-merge:v1 -->";
+      try {
+        const comments = await request({ ...context, path: `/repos/${repository}/issues/${linkedIssueNumber}/comments?per_page=100` });
+        const existingSummary = comments.find((comment) => sameGitHubAppLogin(comment.user?.login, expectedLogin) && String(comment.body || "").includes(marker));
+        const summaryBody = mergedDeliverySummary({ prNumber, prUrl, headSha: activeHeadSha, mergedSha });
+        const comment = await request({
+          ...context,
+          path: existingSummary
+            ? `/repos/${repository}/issues/comments/${existingSummary.id}`
+            : `/repos/${repository}/issues/${linkedIssueNumber}/comments`,
+          method: existingSummary ? "PATCH" : "POST",
+          body: { body: summaryBody },
+        });
+        return { status: "recorded", commentUrl: comment?.html_url || null };
+      } catch (error) {
+        return { status: "failed", error: error.message };
+      }
+    };
     if (pull.merged) {
       recordNonBranchSettled("merge", { method });
-      return { operation: "merge", prNumber, url: pull.html_url, idempotent: true, login: expectedLogin, headSha: activeHeadSha, authorizationHeadSha };
+      const mergedSha = pull.merge_commit_sha;
+      const issueRecording = SHA_PATTERN.test(mergedSha || "")
+        ? await recordMergedIssue(mergedSha)
+        : { status: "failed", error: "GitHub did not return the merged SHA for the already-merged pull request." };
+      return { operation: "merge", prNumber, url: pull.html_url, sha: mergedSha || null, idempotent: true, login: expectedLogin, headSha: activeHeadSha, authorizationHeadSha, issueRecording };
     }
     if (!trustedReviewLogins.length && !trustedHumanReviewLogins.length) {
       throw new Error("No trusted reviewer App or human reviewer identities are configured for merge authorization.");
@@ -822,9 +874,20 @@ export function createBoundBuilderClient({
       if (!response?.merged) throw new Error(`GitHub did not merge the bound pull request: ${response?.message || "unknown error"}`);
       return response;
     });
+    const issueRecording = await recordMergedIssue(merged.sha);
     return {
       operation: "merge", prNumber, sha: merged.sha, idempotent: false, login: expectedLogin, headSha: activeHeadSha, authorizationHeadSha,
-      reviewGate, reviewReadiness, mergeEnforcement: enforcement,
+      reviewGate, reviewReadiness, mergeEnforcement: enforcement, issueRecording,
+      deliveryReceipt: linkedIssueNumber ? {
+        version: 1,
+        profile: "github-governed",
+        repository,
+        issueNumber: linkedIssueNumber,
+        prNumber,
+        prUrl,
+        approvedHeadSha: activeHeadSha,
+        mergedSha: merged.sha,
+      } : null,
     };
   }
 

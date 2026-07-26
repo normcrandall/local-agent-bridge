@@ -95,6 +95,7 @@ import {
 } from "./writer-lifecycle.mjs";
 import { verifyCollaborationRetirement } from "./state-cleanup.mjs";
 import { resolveDeliveryPolicy } from "./delivery-policy.mjs";
+import { assertGithubGovernedWorkStart, governedContinuationBuilder } from "./github-delivery-governance.mjs";
 import {
   resolveProviderFailoverRoster,
 } from "./provider-failover.mjs";
@@ -571,6 +572,7 @@ const githubReviewSchema = z.object({
 );
 const githubBuilderSchema = z.object({
   repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
+  issueNumber: z.number().int().min(1).optional(),
   prNumber: z.number().int().min(1).optional(),
   baseSha: z.string().regex(/^[0-9a-f]{40}$/i).optional(),
   headSha: z.string().regex(/^[0-9a-f]{40}$/i),
@@ -712,13 +714,21 @@ server.registerTool(
     inputSchema: {
       repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
       prNumber: z.number().int().min(1),
+      issueNumber: z.number().int().min(1),
       headSha: z.string().regex(/^[0-9a-f]{40}$/i),
       method: z.enum(["merge", "squash", "rebase"]).default("squash"),
     },
   },
   async (input) => {
     blockNestedCollaboration();
-    return toolResponse(await mergePullRequestWithBuilder(input));
+    const receipt = await mergePullRequestWithBuilder({ ...input, workspace: RUNTIME_ROOT });
+    return toolResponse({
+      ...receipt,
+      deliveryComplete: receipt.deliveryReceipt ? receipt.issueRecording?.status === "recorded" : false,
+      postMergeRecoveryRequired: receipt.deliveryReceipt && receipt.issueRecording?.status !== "recorded"
+        ? "Retry merge_pull_request with the same exact head and issueNumber to reconcile the durable issue receipt before recording the portfolio merge."
+        : null,
+    });
   },
 );
 
@@ -762,6 +772,7 @@ server.registerTool(
       providerFailover: providerFailoverSchema,
       ciTracking: ciTrackingSchema,
       decisionPolicy: decisionPolicySchema,
+      deliveryProfile: z.enum(["local-only", "github-governed"]).optional().describe("Explicitly narrow this run to local-only delivery or request the machine-authorized GitHub-governed profile."),
       chair: chairSchema,
       resumeKey: z.string().trim().min(1).max(200).regex(/^[A-Za-z0-9._:/#-]+$/).optional().describe("Optional stable caller key for idempotent resume-or-start when no issue or PR binding exists."),
       resumeIfCompatible: z.boolean().default(true).describe("Return a compatible live or recoverable collaboration instead of creating a duplicate lane."),
@@ -810,9 +821,17 @@ server.registerTool(
     }
     if (writer && !delegatedAgents.includes(writer)) throw new Error("writer must be included in delegated agents.");
     const requestedWorkspace = projectDirectory(input.workspace);
+    const deliveryPolicy = await resolveDeliveryPolicy({
+      workspace: requestedWorkspace,
+      options: input.deliveryProfile ? { deliveryProfile: input.deliveryProfile } : {},
+    });
+    if (effectiveMode === "work" && deliveryPolicy.deliveryProfile === "local-only"
+      && (input.githubBuilder || input.issueClaim || input.issueTarget)) {
+      throw new Error("Local-only implementation cannot hydrate or mutate GitHub. Remove GitHub bindings or use the github-governed profile.");
+    }
     const selectedVerificationRole = input.verificationRole || null;
     const policyVerificationCommands = selectedVerificationRole
-      ? (await resolveDeliveryPolicy({ workspace: requestedWorkspace })).verificationRoles[selectedVerificationRole]
+      ? deliveryPolicy.verificationRoles[selectedVerificationRole]
       : [];
     const requestedVerificationCommands = [...new Set([
       ...policyVerificationCommands,
@@ -1072,6 +1091,9 @@ server.registerTool(
         mode: effectiveMode,
         worktree,
       });
+      if (effectiveGithubBuilder && resolvedIssueTarget) {
+        effectiveGithubBuilder.issueNumber = resolvedIssueTarget.issueNumber;
+      }
       const writerHydration = effectiveMode === "work"
         ? preflightWriterHydration({
           workspace,
@@ -1079,6 +1101,16 @@ server.registerTool(
           githubBuilder: effectiveGithubBuilder,
         })
         : null;
+      const deliveryContract = assertGithubGovernedWorkStart({
+        policy: deliveryPolicy,
+        requestedProfile: input.deliveryProfile || null,
+        mode: effectiveMode,
+        issueTarget: resolvedIssueTarget,
+        issueClaim: resolvedIssueClaim,
+        issueContext,
+        githubBuilder: effectiveGithubBuilder,
+        worktree,
+      });
       if (input.chair?.workspace && projectDirectory(input.chair.workspace) !== realpathSync(workspace)) {
         throw new Error("Native chair workspace must match the collaboration workspace.");
       }
@@ -1165,6 +1197,12 @@ server.registerTool(
         handoffPath: input.handoffPath || null,
         githubReview: input.githubReview || null,
         githubBuilder: effectiveGithubBuilder,
+        deliveryPolicy: {
+          profile: deliveryPolicy.deliveryProfile,
+          source: deliveryPolicy.decisions.deliveryProfile.source,
+          contract: deliveryContract,
+          repositoryPolicyPath: deliveryPolicy.sources.repositoryPolicy,
+        },
         issueClaim: resolvedIssueClaim,
         semanticLifecycle: resolvedIssueClaim
           ? createSemanticLifecycleRecord({
@@ -2099,11 +2137,30 @@ server.registerTool(
       expectedTargetSha: z.string().regex(/^[0-9a-f]{40}$/i),
       expectedHeadSha: z.string().regex(/^[0-9a-f]{40}$/i),
       mergedSha: z.string().regex(/^[0-9a-f]{40}$/i),
+      issueRecordingStatus: z.enum(["recorded", "not_linked", "failed"]).optional(),
     },
   },
-  async ({ portfolioId: id, expectedRevision, itemId, expectedTargetSha, expectedHeadSha, mergedSha }) => {
+  async ({ portfolioId: id, expectedRevision, itemId, expectedTargetSha, expectedHeadSha, mergedSha, issueRecordingStatus }) => {
     blockNestedCollaboration();
-    const patch = { status: "merged", summary: `Merged as ${mergedSha}` };
+    const inspectedPortfolio = await readPortfolio(PORTFOLIO_ROOT, id);
+    const inspectedItem = inspectedPortfolio.items.find((item) => item.id === String(itemId));
+    if (!inspectedItem) throw new Error(`Portfolio item ${itemId} does not exist.`);
+    const policy = await resolveDeliveryPolicy({ workspace: inspectedPortfolio.workspace });
+    if (policy.deliveryProfile === "github-governed" && issueRecordingStatus !== "recorded") {
+      throw new Error("GitHub-governed portfolio merge cannot be recorded until merge_pull_request confirms issueRecording.status=recorded.");
+    }
+    const deliveryReceipt = {
+      version: 1,
+      profile: "github-governed",
+      repository: inspectedPortfolio.repository || null,
+      issueNumber: inspectedItem.issueNumber || (Number.parseInt(String(itemId), 10) || null),
+      prNumber: inspectedItem.prNumber || null,
+      approvedHeadSha: expectedHeadSha,
+      mergedSha,
+      issueRecordingStatus: issueRecordingStatus || null,
+      recordedAt: new Date().toISOString(),
+    };
+    const patch = { status: "merged", summary: `Merged as ${mergedSha}`, deliveryReceipt };
     const updatedState = await updatePortfolioItemWithFootprintReservation(
       PORTFOLIO_ROOT,
       id,
@@ -2507,9 +2564,31 @@ server.registerTool(
     }
     const continuationStore = createEvidenceStore({ directory: EVIDENCE_ROOT });
     const activeGithubReview = githubReview || current.githubReview || null;
-    const activeGithubBuilder = githubBuilder
+    let activeGithubBuilder = githubBuilder
       ? workspaceHeadBuilderBinding({ githubBuilder, mode: current.mode, worktree: current.worktree })
       : current.githubBuilder || null;
+    const immutableIssueTarget = current.issueTarget
+      || (current.issueClaim ? { repository: current.issueClaim.repository, issueNumber: current.issueClaim.issueNumber } : null);
+    activeGithubBuilder = governedContinuationBuilder({
+      deliveryPolicy: current.deliveryPolicy,
+      currentBuilder: current.githubBuilder,
+      replacementBuilder: activeGithubBuilder,
+      issueTarget: immutableIssueTarget,
+    });
+    if (current.deliveryPolicy?.profile === "github-governed") {
+      assertGithubGovernedWorkStart({
+        policy: {
+          deliveryProfile: current.deliveryPolicy.profile,
+          decisions: { deliveryProfile: { source: current.deliveryPolicy.source } },
+        },
+        mode: current.mode,
+        issueTarget: immutableIssueTarget,
+        issueClaim: resolvedContinuationIssueClaim,
+        issueContext: current.issueContext,
+        githubBuilder: activeGithubBuilder,
+        worktree: current.worktree,
+      });
+    }
     const continuationEvidence = await captureRepositoryEvidence({
       workspace: current.workspace,
       store: continuationStore,

@@ -128,6 +128,7 @@ export function codexToolRequest({
       GITHUB_BUILDER_WRITER_PROVIDER: githubBuilder.writerProvider || null,
       GITHUB_BUILDER_HEAD_REF: githubBuilder.headRef || null,
       GITHUB_BUILDER_BASE_REF: githubBuilder.baseRef || null,
+      GITHUB_BUILDER_ISSUE_NUMBER: githubBuilder.issueNumber ? String(githubBuilder.issueNumber) : null,
       GITHUB_BUILDER_ALLOWED_OPERATIONS: githubBuilder.allowedOperations?.join(",") || null,
       GITHUB_BUILDER_OPERATIONS_BOUND: "1",
       GITHUB_BUILDER_WORKSPACE: cwd,

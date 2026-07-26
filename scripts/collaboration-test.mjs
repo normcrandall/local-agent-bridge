@@ -262,6 +262,7 @@ try {
       expectedTargetSha: targetSha,
       expectedHeadSha: firstHead,
       mergedSha: "c".repeat(40),
+      issueRecordingStatus: "recorded",
     },
   })).structuredContent;
   assert.equal(portfolio.items.find((item) => item.id === "101").status, "merged");
@@ -359,6 +360,7 @@ try {
       agents: ["claude"],
       maxTurns: 1,
       verificationCommands: ["npm test"],
+      deliveryProfile: "local-only",
     },
   });
   assert.notEqual(unbornStarted.isError, true);
@@ -392,6 +394,7 @@ try {
       allowClaudeFable: true,
       verificationCommands: ["npm test"],
       handoffPath: ".bridge/test-handoffs/collaboration-review.md",
+      deliveryProfile: "local-only",
     },
   });
   assert.notEqual(started.isError, true);
@@ -486,6 +489,7 @@ try {
       startAgent: "codex",
       chair: { provider: "codex", sessionId: "native-thread-1", workspace: root },
       maxTurns: 1,
+      deliveryProfile: "local-only",
     },
   });
   assert.notEqual(chaired.isError, true);
@@ -538,6 +542,7 @@ try {
       agents: ["codex", "claude"], taskNumber: 0, mode: "work",
       chair: { provider: "codex", sessionId: "native-thread-2", workspace: root },
       maxTurns: 1,
+      deliveryProfile: "local-only",
     },
   });
   assert.notEqual(rotatedNative.isError, true);
@@ -683,6 +688,7 @@ try {
       startAgent: "antigravity",
       writer: "antigravity",
       mode: "work",
+      deliveryProfile: "local-only",
       workProfile: "implement",
       maxTurns: 1,
     },
