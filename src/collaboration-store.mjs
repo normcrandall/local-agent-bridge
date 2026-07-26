@@ -337,7 +337,7 @@ export async function waitForCollaborationChange(root, id, afterUpdatedAt, timeo
   return readCollaboration(root, id);
 }
 
-export async function archiveCollaboration(root, id, { expectedUpdatedAt = null } = {}) {
+export async function archiveCollaboration(root, id, { expectedUpdatedAt = null, archiveMetadata = null } = {}) {
   const target = paths(root, id);
   await mkdir(target.directory, { recursive: true, mode: 0o700 });
   const release = await acquireFileLock(target.updateLock);
@@ -348,6 +348,9 @@ export async function archiveCollaboration(root, id, { expectedUpdatedAt = null 
     }
     if (["queued", "running", "recovering", "cancelling", "indeterminate"].includes(state.status)) {
       throw new Error(`Cannot archive ${id} while status is ${state.status}.`);
+    }
+    if (archiveMetadata && typeof archiveMetadata === "object") {
+      await atomicWriteJson(target.state, { ...state, archiveMetadata });
     }
     const archive = resolve(target.directory, "archive");
     await mkdir(archive, { recursive: true, mode: 0o700 });

@@ -877,6 +877,17 @@ try {
   assert.deepEqual(stableAfterHeartbeat.map((lane) => lane.id), ["active-older", "active-newer"], "heartbeat timestamps must not reorder active work");
   assert.deepEqual(stableAfterHeartbeat.map((lane) => lane.operatorStartedAt), stableBeforeHeartbeat.map((lane) => lane.operatorStartedAt));
 
+  const customStaleThreshold = deduplicateOperatorLanes([{
+    ...attention.operatorLanes[0],
+    id: "custom-stale-threshold",
+    issueNumber: 203,
+    type: "collaboration",
+    lifecyclePhase: "failed",
+    createdAt: new Date(now - 7_200_000).toISOString(),
+    updatedAt: new Date(now - 7_200_000).toISOString(),
+  }], { now, includeHistory: true, staleAfterMs: 3_600_000 });
+  assert.equal(customStaleThreshold[0].lifecycleCategory, "stale", "deduplication must honor the caller's stale threshold");
+
   const colored = renderMissionControl(attention, { selectedIndex, timeline, width: 120, height: 28, now, color: true, interactive: true });
   assert.match(colored, /\x1b\[/);
   const gridRows = colored.split("\n").map(stripAnsi).filter((line) => /^[┌├│└]/.test(line));

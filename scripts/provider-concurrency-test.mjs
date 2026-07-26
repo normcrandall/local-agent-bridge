@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -10,6 +10,7 @@ import {
   loadProviderConcurrency,
   normalizeProviderConcurrency,
   ProviderSelfDeadlockError,
+  providerCapacitySnapshot,
   releaseProviderCapacityForCollaboration,
   verificationCommandReentersProviderPool,
   verificationCommandsReenteringPool,
@@ -344,6 +345,41 @@ try {
   const afterNames = await readdir(reentryDir).catch(() => []);
   assert.equal(afterNames.filter((name) => name.endsWith(".wait")).length, beforeWait);
   assert.equal(afterNames.filter((name) => name.endsWith(".slot")).length, beforeSlot);
+
+  // A terminal collaboration no longer owns provider capacity even if its recorded
+  // worker PID is still alive (or has since been reused by another process).
+  const terminalOwner = collaborationId("f");
+  const terminalStatePath = join(root, `${terminalOwner}.json`);
+  const terminalCapacityDir = join(root, "capacity", "codex", "work");
+  const terminalSlotPath = join(terminalCapacityDir, "1.slot");
+  await mkdir(terminalCapacityDir, { recursive: true });
+  await writeFile(terminalStatePath, `${JSON.stringify({ id: terminalOwner, status: "completed" })}\n`);
+  await writeFile(terminalSlotPath, `${JSON.stringify({ collaborationId: terminalOwner, pid: process.pid })}\n`);
+  const readOnlyTerminalSnapshot = await providerCapacitySnapshot(root, {
+    limits: DEFAULT_PROVIDER_CONCURRENCY,
+    stateDirectory: root,
+    reap: false,
+  });
+  assert.equal(readOnlyTerminalSnapshot.codex.work.inUse, 0);
+  assert.equal(JSON.parse(await readFile(terminalSlotPath, "utf8")).collaborationId, terminalOwner);
+  const terminalSnapshot = await providerCapacitySnapshot(root, {
+    limits: DEFAULT_PROVIDER_CONCURRENCY,
+    stateDirectory: root,
+  });
+  assert.equal(terminalSnapshot.codex.work.inUse, 0);
+  await assert.rejects(() => readFile(terminalSlotPath), (error) => error.code === "ENOENT");
+
+  const liveOwner = collaborationId("10");
+  const liveStatePath = join(root, `${liveOwner}.json`);
+  const liveSlotPath = join(terminalCapacityDir, "1.slot");
+  await writeFile(liveStatePath, `${JSON.stringify({ id: liveOwner, status: "running" })}\n`);
+  await writeFile(liveSlotPath, `${JSON.stringify({ collaborationId: liveOwner, pid: process.pid })}\n`);
+  const liveSnapshot = await providerCapacitySnapshot(root, {
+    limits: DEFAULT_PROVIDER_CONCURRENCY,
+    stateDirectory: root,
+  });
+  assert.equal(liveSnapshot.codex.work.inUse, 1);
+  assert.equal(JSON.parse(await readFile(liveSlotPath, "utf8")).collaborationId, liveOwner);
 } finally {
   delete process.env.AGENT_BRIDGE_PROVIDER_CONCURRENCY_CONFIG;
   delete process.env.BRIDGE_COLLABORATION_DIR;

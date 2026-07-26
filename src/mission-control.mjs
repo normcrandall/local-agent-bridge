@@ -263,7 +263,7 @@ function stoppedReason(lane) {
   return clean(status).replace(/_/g, " ");
 }
 
-export function operatorLaneCategory(lane, now = Date.now()) {
+export function operatorLaneCategory(lane, now = Date.now(), staleAfterMs = DEFAULT_STALE_AFTER_MS) {
   const status = effectiveLaneStatus(lane);
   if (laneNeedsUser(lane) && attentionRequestIsFresh(lane, now)) return "needs_user";
   const attemptStatus = String(lane.lifecyclePhase || "unknown").toLowerCase();
@@ -291,8 +291,8 @@ export function operatorLaneCategory(lane, now = Date.now()) {
     ...PORTFOLIO_STATUS_GROUPS.ready,
     ...PORTFOLIO_STATUS_GROUPS.active,
     ...PORTFOLIO_STATUS_GROUPS.integration,
-  ].includes(status)) return now - dateMs(lane.updatedAt) <= DEFAULT_STALE_AFTER_MS ? "waiting" : null;
-  if (lane.handoff && !lane.handoff.acknowledged) return now - dateMs(lane.updatedAt) <= DEFAULT_STALE_AFTER_MS ? "waiting" : null;
+  ].includes(status)) return now - dateMs(lane.updatedAt) <= staleAfterMs ? "waiting" : null;
+  if (lane.handoff && !lane.handoff.acknowledged) return now - dateMs(lane.updatedAt) <= staleAfterMs ? "waiting" : null;
   return null;
 }
 
@@ -329,8 +329,8 @@ function operatorLaneIdentity(lane, issueToPr = new Map()) {
 
 const OPERATOR_CATEGORY_RANK = { needs_user: 0, active: 1, stopped: 2, waiting: 3, history: 4 };
 
-function operatorRepresentativeRank(lane, now) {
-  const category = operatorLaneCategory(lane, now) || "history";
+function operatorRepresentativeRank(lane, now, staleAfterMs = DEFAULT_STALE_AFTER_MS) {
+  const category = operatorLaneCategory(lane, now, staleAfterMs) || "history";
   const typeRank = lane.type === "collaboration" || lane.type === "combined" ? 0 : lane.type === "native_host" ? 1 : 2;
   return [OPERATOR_CATEGORY_RANK[category] ?? 9, typeRank, -dateMs(lane.updatedAt)];
 }
@@ -368,7 +368,7 @@ function compareOperatorLanes(left, right) {
     || left.operatorId.localeCompare(right.operatorId);
 }
 
-export function deduplicateOperatorLanes(lanes, { now = Date.now(), includeHistory = false } = {}) {
+export function deduplicateOperatorLanes(lanes, { now = Date.now(), includeHistory = false, staleAfterMs = DEFAULT_STALE_AFTER_MS } = {}) {
   const issueToPrCandidates = new Map();
   for (const lane of lanes || []) {
     if (!lane.issueNumber || !lane.prNumber) continue;
@@ -394,15 +394,15 @@ export function deduplicateOperatorLanes(lanes, { now = Date.now(), includeHisto
   }
   return [...groups.entries()].flatMap(([operatorId, group]) => {
     const terminalEvidence = group.filter((lane) => portfolioTerminalStatus(lane));
-    const actionable = group.filter((lane) => operatorLaneCategory(lane, now));
-    const urgent = actionable.filter((lane) => ["active", "needs_user"].includes(operatorLaneCategory(lane, now)));
+    const actionable = group.filter((lane) => operatorLaneCategory(lane, now, staleAfterMs));
+    const urgent = actionable.filter((lane) => ["active", "needs_user"].includes(operatorLaneCategory(lane, now, staleAfterMs)));
     if (terminalEvidence.length && !includeHistory && !urgent.length) return [];
     if (!terminalEvidence.length && !actionable.length && !includeHistory) return [];
     const candidates = urgent.length ? urgent : terminalEvidence.length ? terminalEvidence : actionable.length ? actionable : group;
-    const sorted = [...candidates].sort((left, right) => compareRank(operatorRepresentativeRank(left, now), operatorRepresentativeRank(right, now)));
+    const sorted = [...candidates].sort((left, right) => compareRank(operatorRepresentativeRank(left, now, staleAfterMs), operatorRepresentativeRank(right, now, staleAfterMs)));
     const representative = sorted[0];
     const providers = [...new Set(group.map((lane) => lane.activeAgent || lane.writer).filter(Boolean))];
-    const categories = [...new Set(candidates.map((lane) => operatorLaneCategory(lane, now) || "history"))]
+    const categories = [...new Set(candidates.map((lane) => operatorLaneCategory(lane, now, staleAfterMs) || "history"))]
       .sort((left, right) => (OPERATOR_CATEGORY_RANK[left] ?? 9) - (OPERATOR_CATEGORY_RANK[right] ?? 9));
     const relatedAttempts = group
       .map((lane) => ({
@@ -416,7 +416,7 @@ export function deduplicateOperatorLanes(lanes, { now = Date.now(), includeHisto
       ...representative,
       operatorId,
       operatorCategory,
-      lifecycleCategory: canonicalLifecycleCategory(representative, now),
+      lifecycleCategory: canonicalLifecycleCategory(representative, now, staleAfterMs),
       operatorStartedAt: operatorStartAt(group, representative),
       legacyOperatorCategory: operatorCategory === "stopped" ? "failed" : operatorCategory,
       relatedLaneCount: group.length,
@@ -443,7 +443,7 @@ export async function loadMissionControlSnapshot({
   const [controlPlane, hostActivities, providerCapacity] = await Promise.all([
     queryControlPlane(stateRoot, { includeArchived, now }),
     listHostActivities(stateRoot, { now }),
-    providerCapacitySnapshot(stateRoot, { stateDirectory: stateRoot }),
+    providerCapacitySnapshot(stateRoot, { stateDirectory: stateRoot, reap: false }),
   ]);
   const rawLanes = [...controlPlane.lanes, ...hostActivities.map((state) => hostActivityLane(state, now))];
   const allLanes = await mapLimit(rawLanes, 12, async (lane) => ({ ...lane, repository: await repositoryForLane(lane) }));
@@ -510,7 +510,7 @@ export async function loadMissionControlSnapshot({
   // plane. Terminal portfolio evidence may not itself be an attention lane,
   // and may be older than the stale cutoff, but it must still supersede a
   // newer stopped attempt for the same PR.
-  const categorized = matching.map((lane) => ({ lane, category: operatorLaneCategory(lane, now) }));
+  const categorized = matching.map((lane) => ({ lane, category: operatorLaneCategory(lane, now, staleAfterMs) }));
   const liveRepositories = new Set(categorized
     .filter(({ category }) => category === "active")
     .map(({ lane }) => lane.repository));
@@ -531,6 +531,7 @@ export async function loadMissionControlSnapshot({
   const operatorLanes = deduplicateOperatorLanes(operatorSource, {
     now,
     includeHistory: mode === "all" || (mode === "attention" && includeStale),
+    staleAfterMs,
   });
   const operatorCounts = { active: 0, needs_user: 0, waiting: 0, stopped: 0, failed: 0, history: 0 };
   for (const lane of operatorLanes) operatorCounts[lane.operatorCategory] = (operatorCounts[lane.operatorCategory] || 0) + 1;
@@ -1024,7 +1025,7 @@ function repositoryPane(snapshot, lanes, repositories, selectedRepository) {
   ));
   rows.push(paneLine(
     `RECOVERING ${lifecycle.recovering || 0} · TERMINAL ${lifecycle.terminal ?? snapshot.operatorCounts?.stopped ?? snapshot.operatorCounts?.failed ?? 0}`,
-    lifecycle.recovering ? CATEGORY_STYLE.active : (lifecycle.terminal ? CATEGORY_STYLE.stopped : CATEGORY_STYLE.waiting),
+    lifecycle.recovering ? CATEGORY_STYLE.active : CATEGORY_STYLE.waiting,
   ));
   if (snapshot.historicalNeedsUserCount) rows.push(paneLine(`HISTORICAL INPUT ${snapshot.historicalNeedsUserCount}`, "90"));
   if (snapshot.collapsedStale?.total) rows.push(paneLine(`STALE HIDDEN ${snapshot.collapsedStale.total} · press s`, "90"));
@@ -1152,6 +1153,7 @@ function detailPane(lane, timeline, width, now, snapshot, expanded = false) {
     if (capacity) {
       const formatRoleCapacity = (role) => {
         const value = capacity[role];
+        if (!value) return `${role} —`;
         return `${role} ${value.inUse}/${value.limit ?? "?"}${value.queued ? ` +${value.queued} queued` : ""}`;
       };
       rows.push(paneLine(`CAPACITY  ${formatRoleCapacity("work")} · ${formatRoleCapacity("review")}`, "90"));
