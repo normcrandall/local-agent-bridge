@@ -311,6 +311,10 @@ export async function readRepositoryContextDelta({
     records.push(compact);
     if (skip) skipped.push(skip);
     bytes += recordBytes;
+    // An oversized record is a permanent per-record condition for these
+    // bounds. Stop exactly at its auditable placeholder so a caller may
+    // acknowledge only that sequence, then resume with the following record.
+    if (skip?.reason === "record_exceeds_bounds") break;
   }
   const afterSequence = records.at(-1)?.sequence ?? inspected.afterSequence;
   const nextCursor = createRepositoryContextCursor({ ...binding, afterSequence });
@@ -323,6 +327,48 @@ export async function readRepositoryContextDelta({
     bytes,
     hasMore: Boolean(page.hasMore || page.records.some((record) => record.sequence > afterSequence)),
   });
+}
+
+export async function readRepositoryContextBaseline({
+  journal,
+  repository,
+  collaborationId,
+  laneId,
+} = {}) {
+  if (!journal || typeof journal.read !== "function") {
+    throw new RepositoryContextDeltaError("A repository journal with read() is required.", { code: "INVALID_JOURNAL" });
+  }
+  const binding = { repository, collaborationId, laneId };
+  try {
+    const records = await journal.read();
+    if (!Array.isArray(records) || !validateSequence(records)) {
+      return {
+        cursor: null,
+        latestSequence: null,
+        resyncRequired: resync("journal_sequence_invalid"),
+      };
+    }
+    const foreign = records.find((record) => normalizeRepository(record?.binding?.repository) !== normalizeRepository(repository));
+    if (foreign) {
+      return {
+        cursor: null,
+        latestSequence: null,
+        resyncRequired: resync("foreign_repository", { journalRepository: foreign.binding.repository }),
+      };
+    }
+    const latestSequence = records.at(-1)?.sequence ?? 0;
+    return {
+      cursor: createRepositoryContextCursor({ ...binding, afterSequence: latestSequence }),
+      latestSequence,
+      resyncRequired: null,
+    };
+  } catch (cause) {
+    return {
+      cursor: null,
+      latestSequence: null,
+      resyncRequired: resync("journal_unverifiable", { journalCode: cause?.code || null }),
+    };
+  }
 }
 
 function deltaEnvelope({ binding, cursor, bounds, records = [], skipped = [], bytes = 0, hasMore = false, resyncRequired = null }) {
@@ -354,6 +400,7 @@ export function createRepositoryContextDeltaKernel({ journal, repository, collab
   normalizeBounds({ maxEvents, maxBytes });
   return Object.freeze({
     initialCursor: () => createRepositoryContextCursor({ ...binding, afterSequence: 0 }),
+    cursorAt: (afterSequence) => createRepositoryContextCursor({ ...binding, afterSequence }),
     read: ({ cursor = null, maxEvents: requestedEvents = maxEvents, maxBytes: requestedBytes = maxBytes } = {}) => readRepositoryContextDelta({
       journal,
       ...binding,
