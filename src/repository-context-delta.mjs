@@ -325,6 +325,48 @@ export async function readRepositoryContextDelta({
   });
 }
 
+export async function readRepositoryContextBaseline({
+  journal,
+  repository,
+  collaborationId,
+  laneId,
+} = {}) {
+  if (!journal || typeof journal.read !== "function") {
+    throw new RepositoryContextDeltaError("A repository journal with read() is required.", { code: "INVALID_JOURNAL" });
+  }
+  const binding = { repository, collaborationId, laneId };
+  try {
+    const records = await journal.read();
+    if (!Array.isArray(records) || !validateSequence(records)) {
+      return {
+        cursor: null,
+        latestSequence: null,
+        resyncRequired: resync("journal_sequence_invalid"),
+      };
+    }
+    const foreign = records.find((record) => normalizeRepository(record?.binding?.repository) !== normalizeRepository(repository));
+    if (foreign) {
+      return {
+        cursor: null,
+        latestSequence: null,
+        resyncRequired: resync("foreign_repository", { journalRepository: foreign.binding.repository }),
+      };
+    }
+    const latestSequence = records.at(-1)?.sequence ?? 0;
+    return {
+      cursor: createRepositoryContextCursor({ ...binding, afterSequence: latestSequence }),
+      latestSequence,
+      resyncRequired: null,
+    };
+  } catch (cause) {
+    return {
+      cursor: null,
+      latestSequence: null,
+      resyncRequired: resync("journal_unverifiable", { journalCode: cause?.code || null }),
+    };
+  }
+}
+
 function deltaEnvelope({ binding, cursor, bounds, records = [], skipped = [], bytes = 0, hasMore = false, resyncRequired = null }) {
   return {
     version: REPOSITORY_CONTEXT_DELTA_VERSION,

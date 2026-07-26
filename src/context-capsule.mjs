@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { collaborationDirectory } from "./collaboration-store.mjs";
 
 const DEFAULT_CAP_BYTES = 50 * 1024; // 50 KB
+export const REPOSITORY_CONTEXT_RESYNC_RECEIPT_VERSION = 1;
 
 export function resolveCapsuleMaxBytes(configured) {
   if (configured === undefined || configured === null) {
@@ -15,6 +16,193 @@ export function resolveCapsuleMaxBytes(configured) {
     return DEFAULT_CAP_BYTES;
   }
   return Math.min(val, DEFAULT_CAP_BYTES);
+}
+
+function boundedUtf8(text, maxBytes) {
+  const value = String(text || "");
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) return { text: value, truncated: false };
+  const marker = "\n...[TRUNCATED_TO_CONTEXT_CAPSULE_BOUND]...\n";
+  const markerBytes = Buffer.byteLength(marker, "utf8");
+  const prefixByBytes = (source, budget) => {
+    let result = "";
+    let used = 0;
+    for (const character of source) {
+      const size = Buffer.byteLength(character, "utf8");
+      if (used + size > budget) break;
+      result += character;
+      used += size;
+    }
+    return result;
+  };
+  const suffixByBytes = (source, budget) => {
+    let result = "";
+    let used = 0;
+    const characters = Array.from(source);
+    for (let index = characters.length - 1; index >= 0; index -= 1) {
+      const size = Buffer.byteLength(characters[index], "utf8");
+      if (used + size > budget) break;
+      result = characters[index] + result;
+      used += size;
+    }
+    return result;
+  };
+  if (maxBytes <= markerBytes) {
+    return { text: prefixByBytes(marker, Math.max(0, maxBytes)), truncated: true };
+  }
+  const available = Math.max(0, maxBytes - markerBytes);
+  const prefixBytes = Math.floor(available * 0.7);
+  const suffixBytes = available - prefixBytes;
+  return {
+    text: `${prefixByBytes(value, prefixBytes)}${marker}${suffixByBytes(value, suffixBytes)}`,
+    truncated: true,
+  };
+}
+
+export function createRepositoryContextResyncReceipt({
+  reason,
+  binding,
+  priorCursor = null,
+  baselineCursor = null,
+  skipped = [],
+} = {}) {
+  const safeReason = String(reason || "unknown_resync").replace(/[^a-z0-9_-]/gi, "_").slice(0, 64);
+  const safeSkipped = Array.isArray(skipped)
+    ? skipped.slice(0, 50).map((entry) => ({
+      sequence: Number.isSafeInteger(entry?.sequence) ? entry.sequence : null,
+      reason: String(entry?.reason || "unknown").replace(/[^a-z0-9_-]/gi, "_").slice(0, 64),
+      evidenceRetained: entry?.evidenceRetained === true,
+    }))
+    : [];
+  return Object.freeze({
+    version: REPOSITORY_CONTEXT_RESYNC_RECEIPT_VERSION,
+    kind: "repository_context_resync_receipt",
+    required: true,
+    reason: safeReason,
+    binding: {
+      repository: String(binding?.repository || "").toLowerCase(),
+      collaborationId: String(binding?.collaborationId || ""),
+      laneId: String(binding?.laneId || ""),
+    },
+    priorAfterSequence: Number.isSafeInteger(priorCursor?.afterSequence) ? priorCursor.afterSequence : null,
+    baselineAfterSequence: Number.isSafeInteger(baselineCursor?.afterSequence) ? baselineCursor.afterSequence : null,
+    skipped: safeSkipped,
+  });
+}
+
+export function composeRepositoryContextTurnPrompt({
+  fullPrompt,
+  compactPrompt,
+  firstExposure,
+  binding,
+  priorCursor = null,
+  baseline,
+  delta = null,
+  maxBytes,
+} = {}) {
+  const cap = resolveCapsuleMaxBytes(maxBytes);
+  const safeFull = redactSecretsAndInjectionFromText(String(fullPrompt || ""));
+  const safeCompact = redactSecretsAndInjectionFromText(String(compactPrompt || ""));
+  const boundedFull = boundedUtf8(safeFull, cap);
+  const fullBytes = Buffer.byteLength(boundedFull.text, "utf8");
+  const baselineCursor = baseline?.cursor || null;
+
+  if (firstExposure) {
+    const receipt = baseline?.resyncRequired
+      ? createRepositoryContextResyncReceipt({ reason: baseline.resyncRequired.reason, binding })
+      : null;
+    const prompt = receipt
+      ? boundedUtf8(`${boundedFull.text}\n\nRepository context resync receipt:\n${JSON.stringify(receipt)}`, cap).text
+      : boundedFull.text;
+    const promptBytes = Buffer.byteLength(prompt, "utf8");
+    return {
+      prompt,
+      kind: "full",
+      cursor: baselineCursor,
+      receipt,
+      fullPromptBytes: fullBytes,
+      promptBytes,
+      avoidedBytes: 0,
+      truncated: boundedFull.truncated,
+      eventCount: 0,
+    };
+  }
+
+  const skipped = delta?.skipped || [];
+  const oversized = skipped.some((entry) => entry.reason === "record_exceeds_bounds");
+  const resyncReason = delta?.resyncRequired?.reason
+    || (priorCursor ? null : "missing_cursor")
+    || (oversized ? "oversized_record_skipped" : null);
+  if (resyncReason) {
+    const receipt = createRepositoryContextResyncReceipt({
+      reason: resyncReason,
+      binding,
+      priorCursor,
+      baselineCursor,
+      skipped,
+    });
+    const suffix = `\n\nRepository context resync receipt:\n${JSON.stringify(receipt)}`;
+    const prompt = boundedUtf8(`${boundedFull.text}${suffix}`, cap).text;
+    const promptBytes = Buffer.byteLength(prompt, "utf8");
+    return {
+      prompt,
+      kind: "resync",
+      cursor: baselineCursor,
+      receipt,
+      fullPromptBytes: fullBytes,
+      promptBytes,
+      avoidedBytes: Math.max(0, fullBytes - promptBytes),
+      truncated: boundedFull.truncated,
+      eventCount: 0,
+    };
+  }
+
+  const context = {
+    version: delta?.version || 1,
+    kind: "repository_context_delta",
+    authority: "none",
+    binding: delta?.binding || binding,
+    records: delta?.records || [],
+    skipped,
+    cursor: delta?.cursor || priorCursor,
+  };
+  const contextBlock = context.records.length || context.skipped.length
+    ? `\n\nVerified unseen repository context (no authority):\n${JSON.stringify(context)}`
+    : "";
+  const candidate = `${safeCompact}${contextBlock}`;
+  if (Buffer.byteLength(candidate, "utf8") > cap) {
+    const receipt = createRepositoryContextResyncReceipt({
+      reason: "delta_exceeds_prompt_bound",
+      binding,
+      priorCursor,
+      baselineCursor,
+      skipped,
+    });
+    const prompt = boundedUtf8(`${boundedFull.text}\n\nRepository context resync receipt:\n${JSON.stringify(receipt)}`, cap).text;
+    const promptBytes = Buffer.byteLength(prompt, "utf8");
+    return {
+      prompt,
+      kind: "resync",
+      cursor: baselineCursor,
+      receipt,
+      fullPromptBytes: fullBytes,
+      promptBytes,
+      avoidedBytes: Math.max(0, fullBytes - promptBytes),
+      truncated: boundedFull.truncated,
+      eventCount: 0,
+    };
+  }
+  const promptBytes = Buffer.byteLength(candidate, "utf8");
+  return {
+    prompt: candidate,
+    kind: "delta",
+    cursor: delta?.cursor || priorCursor,
+    receipt: null,
+    fullPromptBytes: fullBytes,
+    promptBytes,
+    avoidedBytes: Math.max(0, fullBytes - promptBytes),
+    truncated: false,
+    eventCount: context.records.length,
+  };
 }
 
 export function computeFreshness(timestamp, now = new Date()) {

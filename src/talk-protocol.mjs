@@ -182,6 +182,8 @@ export async function runConversation({
   shouldStop = async () => false,
   workspace = null,
   collaborationId = null,
+  preparePrompt = null,
+  onPromptPrepared = async () => {},
 }) {
   if (!task?.trim()) throw new Error("A task is required.");
   if (!Number.isInteger(maxTurns) || maxTurns < 1 || maxTurns > 20) {
@@ -211,12 +213,17 @@ export async function runConversation({
   let totalTurnCount = initialState?.turnCount ?? 0;
   let effectiveWriter = writer;
   const participantCursors = { ...(initialState?.participantCursors || {}) };
+  const repositoryContextCursors = { ...(initialState?.repositoryContextCursors || {}) };
+  const contextResyncReceipts = [...(initialState?.contextResyncReceipts || [])].slice(-20);
   const promptMetrics = {
     charactersSent: 0,
+    bytesSent: 0,
     estimatedTokensSent: 0,
     fullPrompts: 0,
     deltaPrompts: 0,
+    resyncPrompts: 0,
     avoidedCharacters: 0,
+    avoidedBytes: 0,
     ...(initialState?.promptMetrics || {}),
   };
   const turns = [];
@@ -234,6 +241,8 @@ export async function runConversation({
     agreementStreak,
     turnCount: totalTurnCount,
     participantCursors: { ...participantCursors },
+    repositoryContextCursors: { ...repositoryContextCursors },
+    contextResyncReceipts: [...contextResyncReceipts],
     promptMetrics: { ...promptMetrics },
   });
 
@@ -249,18 +258,40 @@ export async function runConversation({
       ? firstTurnPrompt({ agent, agents: activeAgents, task, mode, browser, writer: effectiveWriter })
       : replyPrompt({ agent, agents: activeAgents, task, previousAgent, previousMessage, mode, browser, writer: effectiveWriter });
     const useDelta = previousMessage !== null && Boolean(sessions[agent]);
-    const prompt = useDelta
+    let prompt = useDelta
       ? deltaReplyPrompt({ agent, previousAgent, previousMessage, mode: agentModeFor(agent, mode, effectiveWriter), browser, writer: effectiveWriter })
       : fullPrompt;
+    let promptKind = useDelta ? "delta" : "full";
+    let prepared = null;
+    if (typeof preparePrompt === "function") {
+      prepared = await preparePrompt({
+        agent,
+        fullPrompt,
+        compactPrompt: prompt,
+        firstExposure: !sessions[agent],
+        cursor: repositoryContextCursors[agent] || null,
+        turn: number,
+      });
+      if (prepared?.prompt) prompt = prepared.prompt;
+      promptKind = prepared?.kind || promptKind;
+      if (prepared?.cursor) repositoryContextCursors[agent] = prepared.cursor;
+      if (prepared?.receipt) contextResyncReceipts.push({ ...prepared.receipt, agent, turn: number });
+      if (contextResyncReceipts.length > 20) contextResyncReceipts.splice(0, contextResyncReceipts.length - 20);
+    }
     promptMetrics.charactersSent += prompt.length;
+    promptMetrics.bytesSent += Buffer.byteLength(prompt, "utf8");
     promptMetrics.estimatedTokensSent += Math.ceil(prompt.length / 4);
-    if (useDelta) {
+    if (promptKind === "delta") {
       promptMetrics.deltaPrompts += 1;
       promptMetrics.avoidedCharacters += Math.max(0, fullPrompt.length - prompt.length);
+      promptMetrics.avoidedBytes += prepared?.avoidedBytes ?? Math.max(0, Buffer.byteLength(fullPrompt, "utf8") - Buffer.byteLength(prompt, "utf8"));
+    } else if (promptKind === "resync") {
+      promptMetrics.resyncPrompts += 1;
     } else {
       promptMetrics.fullPrompts += 1;
     }
     participantCursors[agent] = totalTurnCount;
+    if (prepared) await onPromptPrepared({ agent, turn: number, prepared, state: stateSnapshot() });
     const agentMode = agentModeFor(agent, mode, effectiveWriter);
     let response;
     try {

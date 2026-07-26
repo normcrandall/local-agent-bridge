@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { realpathSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
@@ -48,6 +49,14 @@ import {
 import { publishRepositoryLifecycleCheckpoint, repositoryJournalPublicationState } from "../src/repository-lifecycle-publication.mjs";
 import { createEvidenceStore } from "../src/evidence-store.mjs";
 import { createRepositoryJournal } from "../src/repository-journal.mjs";
+import {
+  createRepositoryContextDeltaKernel,
+  readRepositoryContextBaseline,
+} from "../src/repository-context-delta.mjs";
+import {
+  composeRepositoryContextTurnPrompt,
+  redactSecretsAndInjectionFromText,
+} from "../src/context-capsule.mjs";
 import { createRepositorySnapshotCache, repositorySnapshotCacheDirectory } from "../src/repository-snapshot-cache.mjs";
 import { CLAIMED_ISSUE_CONTEXT_MARKER, assertClaimedIssueContextIntegrity } from "../src/claimed-issue-context.mjs";
 import { assertObservedVerificationEvidence, persistObservedVerificationResults } from "../src/verification-receipts.mjs";
@@ -76,6 +85,8 @@ let state = null;
 let claimClient = null;
 let claimJournal = null;
 let workerHeadSha = null;
+let repositoryContextKernel = null;
+let repositoryContextBinding = null;
 
 async function checkpointClaim({ phase, summary, writer, previousWriter = null, kind = "refresh", terminal = false } = {}) {
   if (!claimClient || !claimJournal || !state?.issueClaim) return { queued: false, publication: [] };
@@ -295,6 +306,17 @@ try {
       pullRequestNumber: state.githubBuilder?.prNumber || state.githubReview?.prNumber || null,
       collaborationId: id,
     });
+    repositoryContextBinding = {
+      repository,
+      collaborationId: id,
+      laneId: `issue-${state.issueClaim.issueNumber}`,
+    };
+    repositoryContextKernel = createRepositoryContextDeltaKernel({
+      journal: claimJournal.journal,
+      ...repositoryContextBinding,
+      maxEvents: state.repositoryContext?.maxEvents,
+      maxBytes: state.repositoryContext?.maxBytes,
+    });
     // A newly minted, repository-bound credential is the only automatic
     // authority-restoration signal. Redrive is persistently bounded by the
     // outbox claim count, so a revoked App cannot loop on every checkpoint.
@@ -492,6 +514,51 @@ try {
     initialState: state.runtime,
     workspace: workspaceRoot,
     collaborationId: id,
+    preparePrompt: repositoryContextKernel
+      ? async ({ fullPrompt, compactPrompt, firstExposure, cursor }) => {
+        const baseline = await readRepositoryContextBaseline({
+          journal: claimJournal.journal,
+          ...repositoryContextBinding,
+        });
+        const delta = firstExposure || !cursor
+          ? null
+          : await repositoryContextKernel.read({ cursor });
+        return composeRepositoryContextTurnPrompt({
+          fullPrompt,
+          compactPrompt,
+          firstExposure,
+          binding: repositoryContextBinding,
+          priorCursor: cursor,
+          baseline,
+          delta,
+          maxBytes: state.repositoryContext?.maxPromptBytes,
+        });
+      }
+      : null,
+    onPromptPrepared: async ({ agent, turn, prepared, state: runtimeState }) => {
+      await updateCollaboration(workspaceRoot, id, (current) => ({
+        ...current,
+        runtime: {
+          ...current.runtime,
+          repositoryContextCursors: runtimeState.repositoryContextCursors,
+          contextResyncReceipts: runtimeState.contextResyncReceipts,
+          promptMetrics: runtimeState.promptMetrics,
+        },
+      }));
+      await appendEvent(workspaceRoot, id, {
+        type: "repository_context_prompt_prepared",
+        at: new Date().toISOString(),
+        agent,
+        turn,
+        promptKind: prepared.kind,
+        promptBytes: prepared.promptBytes,
+        avoidedBytes: prepared.avoidedBytes,
+        eventCount: prepared.eventCount,
+        cursorAfterSequence: prepared.cursor?.afterSequence ?? null,
+        resyncReason: prepared.receipt?.reason || null,
+        truncated: prepared.truncated === true,
+      });
+    },
     send: async (call) => {
       const startedAt = new Date().toISOString();
       const capacityRole = call.mode === "work" ? "work" : "review";
@@ -917,6 +984,30 @@ try {
     onTurn: async (turn) => {
       const recordedAt = new Date().toISOString();
       await appendEvent(workspaceRoot, id, { type: "turn", at: recordedAt, ...turn });
+      if (claimJournal) {
+        const metadata = claimWorkspaceMetadata(state);
+        const safeText = (value) => redactSecretsAndInjectionFromText(String(value || "")).slice(0, 2_000);
+        const collaborationContext = {
+          collaborationId: id,
+          agent: turn.agent,
+          turn: turn.number,
+          status: turn.status,
+          summary: safeText(turn.handoff?.summary || `${turn.agent} completed turn ${turn.number} with status ${turn.status}.`),
+          artifacts: (turn.handoff?.artifacts || []).slice(0, 50).map(safeText),
+          verification: (turn.handoff?.verification || []).slice(0, 50).map(safeText),
+        };
+        const contextDigest = createHash("sha256").update(JSON.stringify(collaborationContext)).digest("hex").slice(0, 16);
+        await claimJournal.journal.append({
+          identity: `collaboration-context:${id}:turn:${turn.number}:${contextDigest}`,
+          repository: state.issueClaim.repository,
+          issueNumber: state.issueClaim.issueNumber,
+          pullRequestNumber: state.githubBuilder?.prNumber || state.githubReview?.prNumber || null,
+          headSha: metadata.headSha,
+          payload: {
+            collaborationContext,
+          },
+        });
+      }
       await updateCollaboration(workspaceRoot, id, (current) => {
         const previousUsage = current.usage?.[turn.agent] || { costUsd: 0, tokens: 0, turns: 0 };
         const observed = turn.metadata?.usage || {};
