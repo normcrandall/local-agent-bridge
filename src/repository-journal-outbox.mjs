@@ -124,6 +124,18 @@ function reconstruct(records, nowMs) {
   for (const record of records) {
     const event = outboxEvent(record);
     if (!event) continue;
+    if (event.event === "checkpoint") {
+      if (!event.item || typeof event.item !== "object" || Array.isArray(event.item)) {
+        fail("Repository outbox checkpoint is malformed.", "CORRUPT_CHECKPOINT");
+      }
+      items.set(event.keyDigest, {
+        ...canonicalize(event.item, "checkpoint.item"),
+        keyDigest: event.keyDigest,
+        binding: record.binding,
+        lastSequence: record.sequence,
+      });
+      continue;
+    }
     if (event.event === "enqueued") {
       if (!items.has(event.keyDigest)) {
         items.set(event.keyDigest, {
@@ -141,6 +153,7 @@ function reconstruct(records, nowMs) {
           failure: null,
           retryAt: null,
           terminal: false,
+          lastSequence: record.sequence,
         });
       }
       continue;
@@ -149,6 +162,7 @@ function reconstruct(records, nowMs) {
     if (!item) {
       fail("Repository outbox history is missing the enqueue record required to reconstruct an item.", "OUTBOX_HISTORY_GAP");
     }
+    item.lastSequence = record.sequence;
     if (event.event === "claimed") {
       item.claimCount = Math.max(item.claimCount, event.claimOrdinal);
       item.lease = {
@@ -238,6 +252,19 @@ export function createRepositoryJournalOutbox({
       headSha: exactHead(headSha),
     };
     const keyDigest = hash({ repository: binding.repository, idempotencyKey: normalizedKey });
+    const current = await state();
+    const currentItem = current.items.get(keyDigest);
+    if (currentItem) {
+      const equivalent = currentItem.operation === normalizedOperation
+        && currentItem.idempotencyKey === normalizedKey
+        && currentItem.payloadDigest === hash(normalizedPayload)
+        && stableJson(currentItem.payload) === stableJson(normalizedPayload)
+        && stableJson(currentItem.binding) === stableJson(binding);
+      if (!equivalent) {
+        fail(`Idempotency key ${normalizedKey} is already bound to a different operation, binding, or payload.`, "IDEMPOTENCY_CONFLICT");
+      }
+      return { entry: publicItem(currentItem, current.nowMs, maxAttempts), idempotent: true };
+    }
     const event = {
       version: REPOSITORY_JOURNAL_OUTBOX_VERSION,
       event: "enqueued",
@@ -381,5 +408,42 @@ export function createRepositoryJournalOutbox({
     };
   }
 
-  return Object.freeze({ enqueue, claim, acknowledge, ack: acknowledge, fail: recordFailure, inspect });
+  async function retain({ maxRecords }) {
+    if (typeof journal.retain !== "function") fail("The repository journal does not support retention.", "INVALID_JOURNAL");
+    millis(maxRecords, "maxRecords");
+    const snapshot = await state();
+    for (const item of snapshot.items.values()) {
+      const checkpointItem = canonicalize({
+        idempotencyKey: item.idempotencyKey,
+        operation: item.operation,
+        payload: item.payload,
+        payloadDigest: item.payloadDigest,
+        enqueuedAt: item.enqueuedAt,
+        enqueueSequence: item.enqueueSequence,
+        claimCount: item.claimCount,
+        lease: item.lease,
+        acknowledgedAt: item.acknowledgedAt,
+        failure: item.failure,
+        retryAt: item.retryAt,
+        terminal: item.terminal,
+      }, "checkpoint.item");
+      const checkpointDigest = hash(checkpointItem);
+      const event = {
+        version: REPOSITORY_JOURNAL_OUTBOX_VERSION,
+        event: "checkpoint",
+        keyDigest: item.keyDigest,
+        stateDigest: checkpointDigest,
+        item: checkpointItem,
+      };
+      await journal.append({
+        identity: eventIdentity(item.keyDigest, "checkpoint", checkpointDigest),
+        ...item.binding,
+        payload: { repositoryOutbox: event },
+      });
+    }
+    const receipt = await journal.retain({ maxRecords });
+    return { ...receipt, checkpointedItems: snapshot.items.size };
+  }
+
+  return Object.freeze({ enqueue, claim, acknowledge, ack: acknowledge, fail: recordFailure, inspect, retain });
 }

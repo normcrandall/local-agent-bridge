@@ -387,7 +387,26 @@ export function createRepositoryJournal({
       await cleanOrphanRetentionTemps();
       const records = strictRecords(inspectRaw(await readRaw(path)));
       if (records.length <= maxRecords) return { removed: 0, retained: records.length, firstSequence: records[0]?.sequence || null };
-      const retained = records.slice(-maxRecords);
+      const requestedStart = records.length - maxRecords;
+      const outboxKeys = new Set();
+      const latestOutboxCheckpoint = new Map();
+      for (let index = 0; index < records.length; index += 1) {
+        const event = records[index]?.payload?.repositoryOutbox;
+        if (!event?.keyDigest) continue;
+        outboxKeys.add(event.keyDigest);
+        if (event.event === "checkpoint") latestOutboxCheckpoint.set(event.keyDigest, index);
+      }
+      const uncoveredOutboxKeys = [...outboxKeys].filter((key) => !latestOutboxCheckpoint.has(key));
+      if (uncoveredOutboxKeys.length) {
+        throw new RepositoryJournalError(
+          "Repository journal retention would discard outbox history without a reconstruction checkpoint.",
+          { code: "RETENTION_UNSAFE" },
+        );
+      }
+      const protectedStart = latestOutboxCheckpoint.size
+        ? Math.min(...latestOutboxCheckpoint.values())
+        : requestedStart;
+      const retained = records.slice(Math.min(requestedStart, protectedStart));
       temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
       const temporaryHandle = await open(temporary, "wx", 0o600);
       try {
@@ -399,7 +418,17 @@ export function createRepositoryJournal({
       await syncDirectory(root);
       await rename(temporary, path);
       await syncDirectory(root);
-      return { removed: records.length - retained.length, retained: retained.length, firstSequence: retained[0].sequence };
+      const receipt = {
+        removed: records.length - retained.length,
+        retained: retained.length,
+        firstSequence: retained[0].sequence,
+      };
+      if (latestOutboxCheckpoint.size) {
+        receipt.requestedMaxRecords = maxRecords;
+        receipt.bounded = retained.length <= maxRecords;
+        receipt.protectedOutboxItems = latestOutboxCheckpoint.size;
+      }
+      return receipt;
     } finally {
       try {
         if (temporary) await removeRetentionTemporary(temporary);

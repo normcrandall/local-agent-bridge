@@ -164,10 +164,71 @@ try {
   const gapJournal = createRepositoryJournal({ directory: gapDirectory, now });
   const gapOutbox = createRepositoryJournalOutbox({ journal: gapJournal, now });
   await gapOutbox.enqueue({ repository: "veliqon/gap", operation: "publish", idempotencyKey: "retained-child", payload: {} });
-  const [gapLease] = await gapOutbox.claim({ workerId: "publisher" });
-  await gapJournal.retain({ maxRecords: 1 });
-  await assert.rejects(gapOutbox.inspect(), (error) => error.code === "OUTBOX_HISTORY_GAP",
-    "partial retention must fail closed rather than erase the idempotency state");
+  await gapOutbox.claim({ workerId: "publisher" });
+  await assert.rejects(gapJournal.retain({ maxRecords: 1 }), (error) => error.code === "RETENTION_UNSAFE",
+    "generic retention must refuse to trim outbox history without reconstruction checkpoints");
+
+  const retentionDirectory = join(root, "safe-retention");
+  const retentionJournal = createRepositoryJournal({ directory: retentionDirectory, now });
+  const retentionOutbox = createRepositoryJournalOutbox({
+    journal: retentionJournal,
+    now,
+    leaseMs: 1_000,
+    maxAttempts: 3,
+    baseBackoffMs: 100,
+    maxBackoffMs: 1_000,
+  });
+  await retentionOutbox.enqueue({ repository: "veliqon/retention", operation: "publish", idempotencyKey: "acknowledged", payload: { state: "ack" } });
+  let [retentionLease] = await retentionOutbox.claim({ workerId: "publisher" });
+  await retentionOutbox.ack({ leaseId: retentionLease.lease.leaseId });
+  await retentionOutbox.enqueue({ repository: "veliqon/retention", operation: "publish", idempotencyKey: "dead-letter", payload: { state: "dead" } });
+  [retentionLease] = await retentionOutbox.claim({ workerId: "publisher" });
+  await retentionOutbox.fail({ leaseId: retentionLease.lease.leaseId, failure: { kind: "policy", message: "denied" } });
+  await retentionOutbox.enqueue({ repository: "veliqon/retention", operation: "publish", idempotencyKey: "backoff", payload: { state: "backoff" } });
+  [retentionLease] = await retentionOutbox.claim({ workerId: "publisher" });
+  await retentionOutbox.fail({ leaseId: retentionLease.lease.leaseId, failure: { kind: "network", message: "reset" } });
+  await retentionOutbox.enqueue({ repository: "veliqon/retention", operation: "publish", idempotencyKey: "leased", payload: { state: "leased" } });
+  [retentionLease] = await retentionOutbox.claim({ workerId: "publisher" });
+  const leasedId = retentionLease.lease.leaseId;
+  await retentionOutbox.enqueue({ repository: "veliqon/retention", operation: "publish", idempotencyKey: "pending", payload: { state: "pending" } });
+
+  const retentionReceipt = await retentionOutbox.retain({ maxRecords: 1 });
+  assert.equal(retentionReceipt.checkpointedItems, 5);
+  assert.equal(retentionReceipt.protectedOutboxItems, 5);
+  assert.equal(retentionReceipt.bounded, false, "one checkpoint per durable item may exceed the requested record target");
+  const retainedRecords = await retentionJournal.read();
+  assert.equal(retainedRecords.every((record) => record.payload.repositoryOutbox.event === "checkpoint"), true,
+    "safe retention should compact historical transitions to current-state checkpoints");
+
+  const retentionRestart = createRepositoryJournalOutbox({
+    journal: createRepositoryJournal({ directory: retentionDirectory, now }),
+    now,
+    leaseMs: 1_000,
+    maxAttempts: 3,
+    baseBackoffMs: 100,
+    maxBackoffMs: 1_000,
+  });
+  const retainedInspection = await retentionRestart.inspect();
+  assert.deepEqual(retainedInspection.acknowledged.map((entry) => entry.idempotencyKey), ["acknowledged"]);
+  assert.deepEqual(retainedInspection.deadLetter.map((entry) => entry.idempotencyKey), ["dead-letter"]);
+  assert.deepEqual(retainedInspection.pending.map((entry) => entry.idempotencyKey), ["backoff", "leased", "pending"]);
+  await retentionRestart.ack({ leaseId: leasedId });
+  const replayedAck = await retentionRestart.enqueue({
+    repository: "veliqon/retention",
+    operation: "publish",
+    idempotencyKey: "acknowledged",
+    payload: { state: "ack" },
+  });
+  assert.equal(replayedAck.idempotent, true);
+  assert.equal(replayedAck.entry.status, "acknowledged", "compaction must preserve idempotency state");
+  await assert.rejects(retentionRestart.enqueue({
+    repository: "veliqon/retention",
+    operation: "publish",
+    idempotencyKey: "acknowledged",
+    payload: { state: "different" },
+  }), (error) => error.code === "IDEMPOTENCY_CONFLICT");
+  const secondRetention = await retentionRestart.retain({ maxRecords: 2 });
+  assert.equal(secondRetention.checkpointedItems, 5, "restart-safe retention must be idempotently repeatable");
 
   const versionDirectory = join(root, "future-version");
   const versionJournal = createRepositoryJournal({ directory: versionDirectory, now });
