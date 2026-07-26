@@ -3,6 +3,7 @@ import { createBoundBuilderClient } from "../src/github-builder-client.mjs";
 import {
   acquireClaimLease,
   createIssueClaimClient,
+  createIssueClaimHydrationClient,
   refreshClaimLease,
   releaseClaimLease,
   recoverIssueClaim,
@@ -292,6 +293,23 @@ async function runTests() {
   const client = createIssueClaimClient(claimClientArgs);
   assert.deepStrictEqual(client.authority, baseClientConfig.authority);
 
+  const hydrationClient = createIssueClaimHydrationClient(claimClientArgs);
+  assert.deepStrictEqual(hydrationClient.authority, baseClientConfig.authority);
+  await hydrationClient.getIssue(42);
+  await hydrationClient.getIssueComments(42);
+  await assert.rejects(
+    hydrationClient.addIssueLabel(42, "agent:in-progress"),
+    /GitHub builder operation is not authorized/,
+  );
+  const hydrationCannotWiden = createIssueClaimHydrationClient({
+    ...claimClientArgs,
+    allowedOperations: ["merge", "add_issue_label"],
+  });
+  await assert.rejects(
+    hydrationCannotWiden.addIssueLabel(42, "agent:in-progress"),
+    /GitHub builder operation is not authorized/,
+  );
+
   assert.throws(
     () => createIssueClaimClient({
       ...claimClientArgs,
@@ -304,7 +322,14 @@ async function runTests() {
       ...claimClientArgs,
       credential: { ...claimCredential, verifiedLogin: "other-app[bot]" },
     }),
-    /Issue-claim identity mismatch/,
+    /Issue-claim client identity mismatch/,
+  );
+  assert.throws(
+    () => createIssueClaimHydrationClient({
+      ...claimClientArgs,
+      credential: { ...claimCredential, verifiedLogin: "other-app[bot]" },
+    }),
+    /Issue-claim hydration client identity mismatch/,
   );
   const cannotWiden = createIssueClaimClient({ ...claimClientArgs, allowedOperations: ["merge"] });
   await assert.rejects(

@@ -146,13 +146,18 @@ export function getHeadShaFromWorkspace(workspacePath) {
   throw new Error(`Unable to retrieve HEAD SHA from workspace: ${workspacePath}`);
 }
 
-const ISSUE_CLAIM_OPERATIONS = Object.freeze([
+const ISSUE_CLAIM_HYDRATION_OPERATIONS = Object.freeze([
   "get_issue",
+  "get_issue_comments",
+  "get_issue_timeline",
+  "get_issue_dependencies",
+  "get_issue_project_items",
+]);
+
+const ISSUE_CLAIM_MUTATION_OPERATIONS = Object.freeze([
   "update_issue_project_single_select",
   "add_issue_label",
   "remove_issue_label",
-  "get_issue_comments",
-  "get_issue_timeline",
   "post_issue_comment",
   "update_issue_comment",
   "delete_issue_comment",
@@ -161,7 +166,12 @@ const ISSUE_CLAIM_OPERATIONS = Object.freeze([
   "release_tag_lock",
 ]);
 
-export function createIssueClaimClient({
+const ISSUE_CLAIM_OPERATIONS = Object.freeze([
+  ...ISSUE_CLAIM_HYDRATION_OPERATIONS,
+  ...ISSUE_CLAIM_MUTATION_OPERATIONS,
+]);
+
+function createCredentialBoundIssueClient({
   credential,
   repository,
   expectedLogin = credential?.expectedLogin,
@@ -170,16 +180,18 @@ export function createIssueClaimClient({
   workspace,
   apiUrl = process.env.GITHUB_BUILDER_API_URL || "https://api.github.com",
   fetchImpl = fetch,
+  allowedOperations,
+  clientLabel,
 }) {
   if (!credential?.verifiedLogin) {
-    throw new Error("Issue-claim client requires a credential-verified GitHub App login.");
+    throw new Error(`${clientLabel} requires a credential-verified GitHub App login.`);
   }
   if (!expectedLogin) {
-    throw new Error("Issue-claim client requires an expected GitHub App login.");
+    throw new Error(`${clientLabel} requires an expected GitHub App login.`);
   }
   if (!sameGitHubAppLogin(credential.verifiedLogin, expectedLogin)) {
     throw new Error(
-      `Issue-claim identity mismatch: expected ${expectedLogin}, credential verified ${credential.verifiedLogin}.`,
+      `${clientLabel} identity mismatch: expected ${expectedLogin}, credential verified ${credential.verifiedLogin}.`,
     );
   }
   return createBoundBuilderClient({
@@ -197,7 +209,55 @@ export function createIssueClaimClient({
     },
     headSha,
     issueNumber,
+    allowedOperations,
+    workspace,
+    fetchImpl,
+  });
+}
+
+export function createIssueClaimClient({
+  credential,
+  repository,
+  expectedLogin = credential?.expectedLogin,
+  headSha,
+  issueNumber,
+  workspace,
+  apiUrl = process.env.GITHUB_BUILDER_API_URL || "https://api.github.com",
+  fetchImpl = fetch,
+}) {
+  return createCredentialBoundIssueClient({
+    credential,
+    apiUrl,
+    repository,
+    expectedLogin,
+    headSha,
+    issueNumber,
     allowedOperations: ISSUE_CLAIM_OPERATIONS,
+    clientLabel: "Issue-claim client",
+    workspace,
+    fetchImpl,
+  });
+}
+
+export function createIssueClaimHydrationClient({
+  credential,
+  repository,
+  expectedLogin = credential?.expectedLogin,
+  headSha,
+  issueNumber,
+  workspace,
+  apiUrl = process.env.GITHUB_BUILDER_API_URL || "https://api.github.com",
+  fetchImpl = fetch,
+}) {
+  return createCredentialBoundIssueClient({
+    credential,
+    apiUrl,
+    repository,
+    expectedLogin,
+    headSha,
+    issueNumber,
+    allowedOperations: ISSUE_CLAIM_HYDRATION_OPERATIONS,
+    clientLabel: "Issue-claim hydration client",
     workspace,
     fetchImpl,
   });
