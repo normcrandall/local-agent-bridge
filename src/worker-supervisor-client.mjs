@@ -183,6 +183,42 @@ export async function getSupervisorStatus({
   }
 }
 
+export async function getMissionControlEventSnapshot({
+  runtimeRoot = resolve(fileURLToPath(new URL("..", import.meta.url))),
+  workspaceRoot = resolve(process.env.BRIDGE_WORKSPACE_ROOT || runtimeRoot),
+  stateDirectory = resolve(process.env.BRIDGE_COLLABORATION_DIR || collaborationDirectory(workspaceRoot)),
+} = {}) {
+  const endpoint = supervisorEndpoint(stateDirectory);
+  await ensureSupervisor({ runtimeRoot, workspaceRoot, stateDirectory, endpoint });
+  return request(endpoint, { type: "mission_control_snapshot" }, 10_000);
+}
+
+export async function readMissionControlEvents({
+  streamId,
+  cursor,
+  maxEvents = 50,
+  waitMs = 0,
+  runtimeRoot = resolve(fileURLToPath(new URL("..", import.meta.url))),
+  workspaceRoot = resolve(process.env.BRIDGE_WORKSPACE_ROOT || runtimeRoot),
+  stateDirectory = resolve(process.env.BRIDGE_COLLABORATION_DIR || collaborationDirectory(workspaceRoot)),
+} = {}) {
+  if (!Number.isSafeInteger(waitMs) || waitMs < 0 || waitMs > 5_000) {
+    throw new Error("Mission Control subscription wait must be between 0 and 5000ms.");
+  }
+  if (!Number.isSafeInteger(maxEvents) || maxEvents < 1 || maxEvents > 100) {
+    throw new Error("Mission Control subscription batch must be between 1 and 100.");
+  }
+  const endpoint = supervisorEndpoint(stateDirectory);
+  await ensureSupervisor({ runtimeRoot, workspaceRoot, stateDirectory, endpoint });
+  return request(endpoint, {
+    type: "mission_control_subscribe",
+    streamId,
+    cursor,
+    maxEvents,
+    waitMs,
+  }, Math.min(15_000, Math.max(5_000, waitMs + 5_000)));
+}
+
 export async function refreshSupervisor({
   runtimeRoot = resolve(fileURLToPath(new URL("..", import.meta.url))),
   workspaceRoot = resolve(process.env.BRIDGE_WORKSPACE_ROOT || runtimeRoot),
