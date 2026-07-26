@@ -21,6 +21,16 @@ export function assertTrustedReviewerLogins(logins = []) {
   return normalized;
 }
 
+export function configuredTrustedWriterLogins({ appRoles = null, builderRole = null } = {}) {
+  const configuredWriters = Object.values(appRoles?.roles?.writers || {})
+    .filter((role) => role?.configured && role?.expectedLoginValid)
+    .map((role) => role.expectedLogin);
+  return [...new Set([
+    builderRole?.expectedLogin,
+    ...configuredWriters,
+  ].filter(Boolean))];
+}
+
 function sameBotLogin(left, right) {
   return normalizeBotLogin(left) === normalizeBotLogin(right);
 }

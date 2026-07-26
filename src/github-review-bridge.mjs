@@ -21,6 +21,7 @@ import { createBoundBuilderClient } from "./github-builder-client.mjs";
 import {
   approvedSubmissionEvent,
   assertTrustedReviewerLogins,
+  configuredTrustedWriterLogins,
   constrainApprovalToReviewThreadState,
   createReviewerThreadController,
   evaluateReviewThreadState,
@@ -62,6 +63,7 @@ const reviewApiUrl = verifiedLogin ? "https://api.github.com" : apiUrl;
 const appConfigPath = process.env.GITHUB_APP_CONFIG || DEFAULT_GITHUB_APPS_CONFIG;
 let builderRole = null;
 let trustedReviewerLogins = [expectedLogin];
+let trustedWriterLogins = [];
 if (appCredential) {
   try {
     const roles = await inspectGitHubAppRoles({ configPath: appConfigPath });
@@ -75,6 +77,7 @@ if (appCredential) {
       repository,
       configPath: appConfigPath,
     });
+    trustedWriterLogins = configuredTrustedWriterLogins({ appRoles: roles, builderRole });
   } catch {
     // Thread resolution is optional. Missing or malformed App configuration must
     // degrade to read-only threads rather than taking down formal review.
@@ -138,7 +141,7 @@ const threadResolverClient = appCredential && builderRole
       reviewResolutionAuthority: {
         reviewerLogin: authorizingReviewerLogin,
         headSha,
-        trustedWriterLogins: [builderRole.expectedLogin],
+        trustedWriterLogins,
       },
       receiptPath: reviewThreadReceiptPath({
         repository,
@@ -154,7 +157,7 @@ const threadController = createReviewerThreadController({
   expectedLogin,
   headSha,
   repository,
-  trustedWriterLogins: builderRole ? [builderRole.expectedLogin] : [],
+  trustedWriterLogins,
   getSubmittedEvent: () => submittedEvent,
 });
 const currentReadiness = async () => evaluateReviewThreadState({
@@ -162,7 +165,7 @@ const currentReadiness = async () => evaluateReviewThreadState({
   headSha,
   repository,
   trustedReviewerLogins,
-  trustedWriterLogins: builderRole ? [builderRole.expectedLogin] : [],
+  trustedWriterLogins,
 });
 
 server.registerTool(

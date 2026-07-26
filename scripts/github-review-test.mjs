@@ -13,6 +13,7 @@ import {
   assertReviewThreadReadiness,
   assertTrustedReviewerLogins,
   approvedSubmissionEvent,
+  configuredTrustedWriterLogins,
   constrainApprovalToReviewThreadState,
   createReviewerThreadController,
   evaluateReviewThreadState,
@@ -91,6 +92,22 @@ const stateInput = {
   trustedReviewerLogins: ["reviewer-a[bot]", "reviewer-b[bot]"],
   trustedWriterLogins: ["builder[bot]"],
 };
+assert.deepEqual(
+  configuredTrustedWriterLogins({
+    builderRole: { expectedLogin: "builder[bot]" },
+    appRoles: {
+      roles: {
+        writers: {
+          claude: { configured: true, expectedLoginValid: true, expectedLogin: "claude-writer[bot]" },
+          codex: { configured: true, expectedLoginValid: true, expectedLogin: "codex-writer[bot]" },
+          invalid: { configured: true, expectedLoginValid: false, expectedLogin: "not trusted" },
+        },
+      },
+    },
+  }),
+  ["builder[bot]", "claude-writer[bot]", "codex-writer[bot]"],
+  "review readiness must trust configured provider writer Apps as well as the compatibility builder",
+);
 const unansweredState = evaluateReviewThreadState({ ...stateInput, threads: [stateThread()] });
 assert.equal(unansweredState.ready, false);
 assert.equal(unansweredState.unanswered[0].threadId, "state-thread");
