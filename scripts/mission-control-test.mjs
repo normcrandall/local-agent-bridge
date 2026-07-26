@@ -1116,6 +1116,14 @@ try {
     assert.equal(invalidRefresh.status, 2, `invalid --refresh-ms ${configured} must fail with an option error`);
     assert.match(invalidRefresh.stderr, expected);
   }
+  const missingRefresh = spawnSync(process.execPath, [resolve(import.meta.dirname, "mission-control.mjs"), "--snapshot", "--state-root", root, "--refresh-ms"], { encoding: "utf8" });
+  assert.equal(missingRefresh.status, 2, "--refresh-ms without an operand must fail with an option error");
+  assert.match(missingRefresh.stderr, /must be an integer between 100 and 3600000 milliseconds/);
+  for (const configured of ["100", "3600000"]) {
+    const boundaryRefresh = spawnSync(process.execPath, [resolve(import.meta.dirname, "mission-control.mjs"), "--snapshot", "--state-root", root, "--refresh-ms", configured], { encoding: "utf8" });
+    assert.equal(boundaryRefresh.status, 0, `boundary --refresh-ms ${configured} must be accepted`);
+    assert.match(boundaryRefresh.stdout, /AGENT BRIDGE MISSION CONTROL/);
+  }
 
   console.log("Mission Control tests passed: live defaults, native host visibility, attention/stale filtering, repository grouping, timeline rendering, and validated snapshot CLI behavior are verified.");
 } finally {

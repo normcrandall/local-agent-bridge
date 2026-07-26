@@ -20,12 +20,27 @@ spawn /bin/zsh -f
 send -- "cd '$project'; before=\$(stty -g); node scripts/mission-control.mjs --state-root '$stateRoot' --refresh-ms 250; result=\$?; after=\$(stty -g); if \[\[ \"\$before\" == \"\$after\" \]\]; then echo TERMINAL_OK:\$result; else echo TERMINAL_BAD:\$result; fi; echo INPUT_OK\r"
 expect "AGENT BRIDGE MISSION CONTROL"
 expect "QUOTA"
-after 500
-expect {
-  "AGENT BRIDGE MISSION CONTROL" {}
-  timeout { fail $stateRoot }
-  eof { fail $stateRoot }
+# Subscription bootstrap can produce one extra frame. Four additional frames
+# within one deadline require the configured 250ms idle heartbeat and fail if
+# the old silent 60-second floor returns.
+set redrawDeadline [expr {[clock milliseconds] + 2000}]
+set timeout 1
+for {set frame 0} {$frame < 4} {incr frame} {
+  while {1} {
+    if {[clock milliseconds] >= $redrawDeadline} {
+      fail $stateRoot
+    }
+    expect {
+      "AGENT BRIDGE MISSION CONTROL" { break }
+      timeout { continue }
+      eof { fail $stateRoot }
+    }
+  }
 }
+if {[clock milliseconds] > $redrawDeadline} {
+  fail $stateRoot
+}
+set timeout 15
 send -- "q"
 expect {
   -exact "\033\[?25h\033\[?1049l" {}
