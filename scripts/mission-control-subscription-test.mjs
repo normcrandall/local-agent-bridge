@@ -197,6 +197,23 @@ try {
   assert.deepEqual(first.events, second.events, "multiple readers must observe the same ordered batch");
   assert.ok(first.events.every((event, index, events) => event.sequence > snapshot.cursor && (!index || event.sequence === events[index - 1].sequence + 1)));
 
+  const abortController = new AbortController();
+  const abortStartedAt = Date.now();
+  const abortedReader = readMissionControlEvents({
+    ...options,
+    streamId: snapshot.streamId,
+    cursor: first.cursor,
+    maxEvents: 10,
+    waitMs: 5_000,
+    signal: abortController.signal,
+  });
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+  abortController.abort();
+  await assert.rejects(abortedReader, (error) => error?.name === "AbortError" && error?.code === "ABORT_ERR");
+  assert.ok(Date.now() - abortStartedAt < 500, "aborting a supervisor long poll must release the client socket promptly");
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+  assert.equal((await getSupervisorStatus(options)).missionControl.waitingSubscribers, 0, "an aborted read must release its supervisor waiter");
+
   let cursor = first.cursor;
   const emptyResume = await readMissionControlEvents({ ...options, streamId: snapshot.streamId, cursor, maxEvents: 10, waitMs: 0 });
   assert.deepEqual(emptyResume.events, [], "resume at the latest cursor must not replay old events");
@@ -236,7 +253,7 @@ try {
   assert.ok(replacement.cursor >= cursor, "resync snapshot must describe the current stream head after any idle-period change");
   assert.deepEqual((await readMissionControlEvents({ ...options, streamId: replacement.streamId, cursor: replacement.cursor, maxEvents: 10 })).events, []);
 
-  console.log("Mission Control subscription tests passed: owner-only bootstrap, ordered resume, resync, multi-reader, disconnect, backpressure, malformed input, and bounded lifetime are verified.");
+  console.log("Mission Control subscription tests passed: owner-only bootstrap, ordered resume, resync, multi-reader, abort cleanup, disconnect, backpressure, malformed input, and bounded lifetime are verified.");
 } finally {
   if (supervisorPid && alive(supervisorPid)) process.kill(supervisorPid, "SIGTERM");
   if (supervisorPid) await waitForExit(supervisorPid);

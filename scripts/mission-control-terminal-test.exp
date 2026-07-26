@@ -14,6 +14,7 @@ send -- "cd '$project'; before=\$(stty -g); node scripts/mission-control.mjs --s
 expect "AGENT BRIDGE MISSION CONTROL"
 expect "QUOTA"
 after 100
+set quitStarted [clock milliseconds]
 send -- "q"
 expect {
   -exact "\033\[?25h\033\[?1049l" {}
@@ -27,6 +28,7 @@ expect {
   eof { fail $stateRoot }
 }
 expect "INPUT_OK"
+if {[expr {[clock milliseconds] - $quitStarted}] >= 1000} { fail $stateRoot }
 send -- "exit\r"
 expect eof
 file delete -force $stateRoot
