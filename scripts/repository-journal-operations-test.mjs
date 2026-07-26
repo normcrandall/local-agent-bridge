@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFile, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRepositoryJournal } from "../src/repository-journal.mjs";
@@ -85,6 +85,54 @@ try {
   assert.equal(pendingRetention.retention.checkpointedItems, 1);
   assert.equal((await pendingOutbox.inspect()).pending.length, 1, "pending outbox work survives retention through its reconstruction checkpoint");
 
+  const leasedDirectory = join(root, "leased");
+  const leasedJournal = createRepositoryJournal({ directory: leasedDirectory });
+  const leasedOutbox = createRepositoryJournalOutbox({ journal: leasedJournal, leaseMs: 60_000 });
+  await leasedOutbox.enqueue({ repository, operation: "comment", idempotencyKey: "leased-comment", payload: { body: "leased" } });
+  await leasedOutbox.claim({ workerId: "active-worker" });
+  const leasedInspection = await createRepositoryJournalOperations({ directory: leasedDirectory }).inspect();
+  assert.equal(leasedInspection.outbox.leased, 1);
+  assert.ok(leasedInspection.protectedRecords.some((record) => record.reason.endsWith("is leased")));
+  await assert.rejects(
+    createRepositoryJournalOperations({ directory: leasedDirectory }).retain({ maxRecords: 1, apply: true }),
+    (error) => error.code === "RETENTION_PROTECTED",
+    "retention must derive leased protection from persisted outbox state",
+  );
+
+  const backoffDirectory = join(root, "backoff");
+  const backoffJournal = createRepositoryJournal({ directory: backoffDirectory });
+  const backoffOutbox = createRepositoryJournalOutbox({ journal: backoffJournal, baseBackoffMs: 60_000 });
+  await backoffOutbox.enqueue({ repository, operation: "comment", idempotencyKey: "backoff-comment", payload: { body: "backoff" } });
+  const [backoffLease] = await backoffOutbox.claim({ workerId: "retry-worker" });
+  await backoffOutbox.fail({ leaseId: backoffLease.lease.leaseId, failure: { kind: "network", message: "offline" } });
+  const backoffInspection = await createRepositoryJournalOperations({ directory: backoffDirectory }).inspect();
+  assert.equal(backoffInspection.outbox.backoff, 1);
+  await assert.rejects(
+    createRepositoryJournalOperations({ directory: backoffDirectory }).retain({ maxRecords: 1, apply: true }),
+    (error) => error.code === "RETENTION_PROTECTED",
+    "retention must derive backoff protection from persisted outbox state",
+  );
+
+  const protectedImportDirectory = join(root, "protected-import");
+  const protectedImportJournal = createRepositoryJournal({ directory: protectedImportDirectory });
+  const protectedImportOutbox = createRepositoryJournalOutbox({ journal: protectedImportJournal });
+  await protectedImportOutbox.enqueue({ repository, operation: "comment", idempotencyKey: "import-comment", payload: { body: "import" } });
+  const beforeLeasePath = join(root, "exports", "before-lease.json");
+  const protectedImportOperations = createRepositoryJournalOperations({ directory: protectedImportDirectory });
+  await protectedImportOperations.export({ output: beforeLeasePath, repository });
+  await protectedImportOutbox.claim({ workerId: "import-worker" });
+  const protectedImportPreview = await protectedImportOperations.import({ input: beforeLeasePath, repository });
+  assert.ok(protectedImportPreview.protectedLost.length > 0, "dry-run names protected leased records that would be lost");
+  await assert.rejects(
+    protectedImportOperations.import({ input: beforeLeasePath, repository, apply: true }),
+    (error) => error.code === "IMPORT_PROTECTED",
+    "import refuses only when protected persisted state would be lost",
+  );
+  const completeLeasePath = join(root, "exports", "complete-lease.json");
+  await protectedImportOperations.export({ output: completeLeasePath, repository });
+  const preservingImport = await protectedImportOperations.import({ input: completeLeasePath, repository, apply: true });
+  assert.equal(preservingImport.applied, true, "an import preserving every protected digest remains allowed");
+
   const deadDirectory = join(root, "dead-letter");
   let oldTick = 0;
   const oldNow = () => new Date(Date.UTC(2020, 0, 1, 0, 0, oldTick++)).toISOString();
@@ -104,6 +152,12 @@ try {
   await appendFile(corruptJournal.path, '{"version":1,"sequence":3');
   const corruptRaw = await readFile(corruptJournal.path, "utf8");
   const corruptOperations = createRepositoryJournalOperations({ directory: corruptDirectory });
+  const corruptArchivePath = join(root, "archive", "corrupt-journal.json");
+  const corruptArchive = await corruptOperations.archive({ output: corruptArchivePath });
+  assert.equal(corruptArchive.corrupt, true);
+  const corruptArchiveEnvelope = JSON.parse(await readFile(corruptArchivePath, "utf8"));
+  assert.equal(Buffer.from(corruptArchiveEnvelope.rawBase64, "base64").toString("utf8"), corruptRaw);
+  assert.match(corruptArchive.restoreCommand, /bridge journal restore/);
   const recoveryPreview = await corruptOperations.recover();
   assert.equal(recoveryPreview.dryRun, true);
   assert.equal(recoveryPreview.corruption.code, "TORN_TAIL");
@@ -130,6 +184,27 @@ try {
   });
   await assert.rejects(rollbackOperations.recover({ apply: true }), /recovery interrupted/);
   assert.equal(await readFile(rollbackJournal.path, "utf8"), rollbackRaw, "interrupted corruption recovery restores the original bytes");
+
+  const lockDirectory = join(root, "operator-lock");
+  const lockJournal = await addRecords(lockDirectory, 2);
+  const lockPath = join(lockDirectory, "repository-journal.lock");
+  await writeFile(lockPath, `${JSON.stringify({ pid: process.pid, token: "live" })}\n`);
+  const lockOperations = createRepositoryJournalOperations({
+    directory: lockDirectory,
+    operatorLockTimeoutMs: 25,
+    operatorLockRetryMs: 5,
+  });
+  await assert.rejects(
+    lockOperations.retain({ maxRecords: 1, apply: true }),
+    (error) => error.code === "LOCK_TIMEOUT",
+    "a live owner lock is never stolen",
+  );
+  await writeFile(lockPath, `${JSON.stringify({ pid: 999_999_999, token: "dead" })}\n`);
+  const staleAt = new Date(Date.now() - 60_000);
+  await utimes(lockPath, staleAt, staleAt);
+  const reclaimed = await lockOperations.retain({ maxRecords: 1, apply: true });
+  assert.equal(reclaimed.applied, true, "a stale dead-owner lock is reclaimed for operator recovery");
+  assert.equal((await lockJournal.read()).length, 1);
 
   const tampered = JSON.parse(await readFile(exportedPath, "utf8"));
   tampered.records[0].payload.index = 999;

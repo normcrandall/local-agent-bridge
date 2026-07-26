@@ -6,7 +6,10 @@ import { createRepositoryJournalOperations } from "../src/repository-journal-ope
 const [command = "inspect", ...args] = process.argv.slice(2);
 const value = (flag, fallback = null) => {
   const index = args.indexOf(flag);
-  return index < 0 ? fallback : args[index + 1];
+  if (index < 0) return fallback;
+  const next = args[index + 1];
+  if (next === undefined || next.startsWith("--")) throw new Error(`${flag} requires a value.`);
+  return next;
 };
 const directory = resolve(value("--directory", process.env.BRIDGE_REPOSITORY_JOURNAL_DIR || resolve(process.cwd(), ".bridge/repository-journal")));
 const operations = createRepositoryJournalOperations({ directory, receiptDirectory: value("--receipt-directory") });

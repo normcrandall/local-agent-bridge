@@ -196,7 +196,10 @@ async function ownerIsAlive(pid) {
   }
 }
 
-async function acquireLock(path, { timeoutMs, retryMs }) {
+export async function acquireRepositoryJournalLock(path, {
+  timeoutMs = DEFAULT_LOCK_TIMEOUT_MS,
+  retryMs = DEFAULT_LOCK_RETRY_MS,
+} = {}) {
   const token = randomUUID();
   const deadline = Date.now() + timeoutMs;
   while (Date.now() <= deadline) {
@@ -301,7 +304,7 @@ export function createRepositoryJournal({
     const binding = normalizeBinding({ repository, issueNumber, pullRequestNumber, headSha });
     const normalizedPayload = canonicalize(payload);
     const fingerprint = digest({ identity: normalizedIdentity, binding, payload: normalizedPayload });
-    const release = await acquireLock(lockPath, { timeoutMs: lockTimeoutMs, retryMs: lockRetryMs });
+    const release = await acquireRepositoryJournalLock(lockPath, { timeoutMs: lockTimeoutMs, retryMs: lockRetryMs });
     try {
       const records = strictRecords(inspectRaw(await readRaw(path)));
       if (records.length && records[0].binding.repository !== binding.repository) {
@@ -384,7 +387,7 @@ export function createRepositoryJournal({
       throw new RepositoryJournalError("prepare must be a function when supplied.", { code: "INVALID_RETENTION_PLAN" });
     }
     await initialize();
-    const release = await acquireLock(lockPath, { timeoutMs: lockTimeoutMs, retryMs: lockRetryMs });
+    const release = await acquireRepositoryJournalLock(lockPath, { timeoutMs: lockTimeoutMs, retryMs: lockRetryMs });
     let temporary = null;
     try {
       await cleanOrphanRetentionTemps();

@@ -1,8 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, open, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, resolve } from "node:path";
-import { createRepositoryJournal, REPOSITORY_JOURNAL_VERSION, RepositoryJournalError } from "./repository-journal.mjs";
+import {
+  acquireRepositoryJournalLock,
+  createRepositoryJournal,
+  REPOSITORY_JOURNAL_VERSION,
+  RepositoryJournalError,
+} from "./repository-journal.mjs";
 import { createRepositoryJournalOutbox } from "./repository-journal-outbox.mjs";
 
 export const REPOSITORY_JOURNAL_BUNDLE_VERSION = 1;
@@ -66,27 +71,8 @@ async function atomicWrite(path, content) {
   await syncDirectory(dirname(path));
 }
 
-async function acquireOperatorLock(directory) {
-  const lockPath = resolve(directory, LOCK_FILE);
-  let handle;
-  try {
-    handle = await open(lockPath, "wx", 0o600);
-  } catch (error) {
-    if (error.code === "EEXIST") {
-      throw new RepositoryJournalError("Repository journal is busy; no operator mutation was attempted.", { code: "LOCKED" });
-    }
-    throw error;
-  }
-  const token = randomUUID();
-  await handle.writeFile(`${JSON.stringify({ pid: process.pid, token, operator: true })}\n`, "utf8");
-  await handle.sync();
-  return async () => {
-    await handle.close().catch(() => {});
-    try {
-      const owner = JSON.parse(await readFile(lockPath, "utf8"));
-      if (owner.token === token) await unlink(lockPath);
-    } catch {}
-  };
+async function acquireOperatorLock(directory, options) {
+  return acquireRepositoryJournalLock(resolve(directory, LOCK_FILE), options);
 }
 
 function protectionReasons(value, path = "payload", reasons = []) {
@@ -122,6 +108,37 @@ function summarize(inspection) {
     lastDigest: records.at(-1)?.digest || null,
     protectedRecords,
   };
+}
+
+function outboxKeyDigest(repository, idempotencyKey) {
+  return sha256({ repository: normalizedRepository(repository), idempotencyKey });
+}
+
+async function protectedRecordsFor(journal, inspection, records = inspection.records || []) {
+  const protectedRecords = records.flatMap((record) => protectionReasons(record.payload).map((reason) => ({
+    sequence: record.sequence,
+    identity: record.identity,
+    reason,
+  })));
+  if (inspection.status !== "clean") return protectedRecords;
+  const snapshot = await createRepositoryJournalOutbox({ journal }).inspect();
+  const protectedKeys = new Map();
+  for (const item of [...snapshot.pending, ...snapshot.deadLetter]) {
+    if (!["leased", "backoff", "dead_letter"].includes(item.status)) continue;
+    protectedKeys.set(outboxKeyDigest(item.binding.repository, item.idempotencyKey), item.status);
+  }
+  for (const record of records) {
+    const keyDigest = record.payload?.repositoryOutbox?.keyDigest;
+    const status = protectedKeys.get(keyDigest);
+    if (status) {
+      protectedRecords.push({
+        sequence: record.sequence,
+        identity: record.identity,
+        reason: `outbox ${keyDigest} is ${status}`,
+      });
+    }
+  }
+  return protectedRecords;
 }
 
 function bundleFor(records, { operation, sourcePath, createdAt = new Date().toISOString() } = {}) {
@@ -207,15 +224,39 @@ async function replaceJournal(directory, records) {
   await atomicWrite(resolve(directory, JOURNAL_FILE), serializeRecords(records));
 }
 
-export function createRepositoryJournalOperations({ directory, receiptDirectory = null, hooks = {} } = {}) {
+function rawRecoveryEnvelope(raw, inspection, createdAt = new Date().toISOString()) {
+  const content = {
+    version: REPOSITORY_JOURNAL_BUNDLE_VERSION,
+    createdAt,
+    operation: "recovery-before-corruption-repair",
+    repository: inspection.records[0]?.binding.repository || null,
+    rawBase64: Buffer.from(raw, "utf8").toString("base64"),
+    rawSha256: sha256(raw),
+    validPrefix: inspection.records,
+  };
+  return { ...content, checksum: sha256(content) };
+}
+
+export function createRepositoryJournalOperations({
+  directory,
+  receiptDirectory = null,
+  hooks = {},
+  operatorLockTimeoutMs = undefined,
+  operatorLockRetryMs = undefined,
+} = {}) {
   if (!directory) throw new RepositoryJournalError("Repository journal directory is required.", { code: "INVALID_DIRECTORY" });
   const root = resolve(directory);
   const journal = createRepositoryJournal({ directory: root });
+  const lockOptions = {
+    ...(operatorLockTimeoutMs === undefined ? {} : { timeoutMs: operatorLockTimeoutMs }),
+    ...(operatorLockRetryMs === undefined ? {} : { retryMs: operatorLockRetryMs }),
+  };
 
   async function inspect() {
     const inspection = await journal.inspect();
     const result = summarize(inspection);
     if (inspection.status === "clean") {
+      result.protectedRecords = await protectedRecordsFor(journal, inspection);
       const outbox = await createRepositoryJournalOutbox({ journal }).inspect();
       result.outbox = {
         pending: outbox.pending.length,
@@ -240,8 +281,24 @@ export function createRepositoryJournalOperations({ directory, receiptDirectory 
   }
 
   async function archive({ output = null } = {}) {
-    const records = await journal.read();
     const destination = resolve(output || resolve(root, "archive", `${new Date().toISOString().replaceAll(/[:.]/g, "-")}-${randomUUID()}-repository-journal.json`));
+    const inspection = await journal.inspect();
+    if (inspection.status !== "clean") {
+      const raw = await readFile(journal.path, "utf8").catch((error) => error.code === "ENOENT" ? "" : Promise.reject(error));
+      const envelope = rawRecoveryEnvelope(raw, inspection);
+      await atomicWrite(destination, `${JSON.stringify(envelope, null, 2)}\n`);
+      return {
+        archived: true,
+        destructive: false,
+        corrupt: true,
+        output: destination,
+        checksum: envelope.checksum,
+        rawSha256: envelope.rawSha256,
+        recordCount: inspection.records.length,
+        restoreCommand: `bridge journal restore --directory ${JSON.stringify(root)} --input ${JSON.stringify(destination)} --apply`,
+      };
+    }
+    const records = inspection.records;
     const bundle = bundleFor(records, { operation: "archive", sourcePath: journal.path });
     await atomicWrite(destination, `${JSON.stringify(bundle, null, 2)}\n`);
     return { archived: true, destructive: false, output: destination, checksum: bundle.checksum, recordCount: records.length };
@@ -264,8 +321,18 @@ export function createRepositoryJournalOperations({ directory, receiptDirectory 
       replaced: summarize(current),
       recoveryReceipt: null,
     };
+    const incomingDigests = new Set(document.records.map((record) => record.digest));
+    const lost = current.records.filter((record) => !incomingDigests.has(record.digest));
+    preview.protectedLost = await protectedRecordsFor(journal, current, lost);
+    if (apply && preview.protectedLost.length) {
+      throw new RepositoryJournalError(
+        `Import refused: ${preview.protectedLost.length} protected record state(s) would be discarded.`,
+        { code: "IMPORT_PROTECTED" },
+      );
+    }
     if (!apply) return preview;
-    const release = await acquireOperatorLock(root);
+    const originalRaw = await readFile(journal.path, "utf8").catch((error) => error.code === "ENOENT" ? "" : Promise.reject(error));
+    const release = await acquireOperatorLock(root, lockOptions);
     try {
       const fresh = await journal.inspect();
       if (fresh.status !== current.status || fresh.records.at(-1)?.digest !== current.records.at(-1)?.digest) {
@@ -277,7 +344,7 @@ export function createRepositoryJournalOperations({ directory, receiptDirectory 
       await hooks.afterReplace?.(preview);
       return { ...preview, dryRun: false, applied: true };
     } catch (error) {
-      if (preview.recoveryReceipt) await replaceJournal(root, current.records).catch(() => {});
+      if (preview.recoveryReceipt) await atomicWrite(journal.path, originalRaw).catch(() => {});
       throw error;
     } finally {
       await release();
@@ -291,10 +358,12 @@ export function createRepositoryJournalOperations({ directory, receiptDirectory 
     const clone = await mkdtemp(resolve(tmpdir(), "agent-bridge-journal-retain-"));
     let receipt;
     let retainedRecords;
+    let currentProtectedRecords;
     try {
       await writeFile(resolve(clone, JOURNAL_FILE), serializeRecords(current.records), { mode: 0o600 });
       const cloneJournal = createRepositoryJournal({ directory: clone });
       const cloneOutbox = createRepositoryJournalOutbox({ journal: cloneJournal });
+      currentProtectedRecords = await protectedRecordsFor(cloneJournal, current);
       receipt = await cloneOutbox.retain({ maxRecords: limit });
       retainedRecords = await cloneJournal.read();
     } finally {
@@ -302,7 +371,9 @@ export function createRepositoryJournalOperations({ directory, receiptDirectory 
     }
     const retainedDigests = new Set(retainedRecords.map((record) => record.digest));
     const removed = current.records.filter((record) => !retainedDigests.has(record.digest));
-    const protectedRemoved = removed.flatMap((record) => protectionReasons(record.payload).map((reason) => ({ sequence: record.sequence, identity: record.identity, reason })));
+    const removedDigests = new Set(removed.map((record) => record.digest));
+    const protectedRemoved = currentProtectedRecords.filter((record) => record.sequence === null
+      || removed.some((removedRecord) => removedRecord.sequence === record.sequence && removedDigests.has(removedRecord.digest)));
     if ((receipt.droppedDeadLetterItems || 0) > 0) {
       protectedRemoved.push({ sequence: null, identity: null, reason: `${receipt.droppedDeadLetterItems} dead-letter outbox item(s)` });
     }
@@ -320,7 +391,8 @@ export function createRepositoryJournalOperations({ directory, receiptDirectory 
       recoveryReceipt: null,
     };
     if (!apply) return preview;
-    const release = await acquireOperatorLock(root);
+    const originalRaw = await readFile(journal.path, "utf8").catch((error) => error.code === "ENOENT" ? "" : Promise.reject(error));
+    const release = await acquireOperatorLock(root, lockOptions);
     try {
       const fresh = await journal.inspect();
       if (fresh.status !== "clean" || fresh.records.at(-1)?.digest !== current.records.at(-1)?.digest) {
@@ -332,7 +404,7 @@ export function createRepositoryJournalOperations({ directory, receiptDirectory 
       await hooks.afterReplace?.(preview);
       return { ...preview, dryRun: false, applied: true };
     } catch (error) {
-      if (preview.recoveryReceipt) await replaceJournal(root, current.records).catch(() => {});
+      if (preview.recoveryReceipt) await atomicWrite(journal.path, originalRaw).catch(() => {});
       throw error;
     } finally {
       await release();
@@ -354,7 +426,7 @@ export function createRepositoryJournalOperations({ directory, receiptDirectory 
       recoveryReceipt: null,
     };
     if (!apply) return preview;
-    const release = await acquireOperatorLock(root);
+    const release = await acquireOperatorLock(root, lockOptions);
     let originalRaw = null;
     let replaced = false;
     try {
@@ -369,21 +441,12 @@ export function createRepositoryJournalOperations({ directory, receiptDirectory 
       const raw = freshRaw;
       originalRaw = raw;
       const receiptPath = resolve(receiptDirectory || resolve(root, "recovery"), `${new Date().toISOString().replaceAll(/[:.]/g, "-")}-corrupt-${randomUUID()}.json`);
-      const rawReceipt = {
-        version: REPOSITORY_JOURNAL_BUNDLE_VERSION,
-        createdAt: new Date().toISOString(),
-        operation: "recovery-before-corruption-repair",
-        repository: validPrefix[0]?.binding.repository || null,
-        rawBase64: Buffer.from(raw, "utf8").toString("base64"),
-        rawSha256: sha256(raw),
-        validPrefix,
-      };
-      const envelope = { ...rawReceipt, checksum: sha256(rawReceipt) };
+      const envelope = rawRecoveryEnvelope(raw, fresh);
       await atomicWrite(receiptPath, `${JSON.stringify(envelope, null, 2)}\n`);
       preview.recoveryReceipt = {
         path: receiptPath,
         checksum: envelope.checksum,
-        rawSha256: rawReceipt.rawSha256,
+        rawSha256: envelope.rawSha256,
         recordCount: validPrefix.length,
         firstSequence: validPrefix[0]?.sequence || null,
         lastSequence: validPrefix.at(-1)?.sequence || null,
@@ -418,6 +481,7 @@ export function createRepositoryJournalOperations({ directory, receiptDirectory 
     }
     const readCurrentRaw = () => readFile(journal.path, "utf8").catch((error) => error.code === "ENOENT" ? "" : Promise.reject(error));
     const currentRaw = await readCurrentRaw();
+    const currentInspection = await journal.inspect();
     const preview = {
       operation: "restore",
       dryRun: !apply,
@@ -425,39 +489,33 @@ export function createRepositoryJournalOperations({ directory, receiptDirectory 
       rawSha256: document.rawSha256,
       byteLength: Buffer.byteLength(raw),
       replacesRawSha256: sha256(currentRaw),
+      breakGlass: true,
+      replacedStatus: currentInspection.status,
+      protectedReplaced: await protectedRecordsFor(journal, currentInspection),
       recoveryReceipt: null,
     };
     if (!apply) return preview;
-    const release = await acquireOperatorLock(root);
+    const release = await acquireOperatorLock(root, lockOptions);
     let replaced = false;
     try {
       const freshRaw = await readCurrentRaw();
       if (sha256(freshRaw) !== preview.replacesRawSha256) {
         throw new RepositoryJournalError("Journal changed after raw restore preview; retry the operation.", { code: "STATE_CHANGED" });
       }
-      const currentInspection = await journal.inspect();
-      if (currentInspection.status === "clean") {
-        preview.recoveryReceipt = await writeRecoveryReceipt(root, currentInspection.records, "restore", { receiptDirectory });
+      const freshInspection = await journal.inspect();
+      if (freshInspection.status === "clean") {
+        preview.recoveryReceipt = await writeRecoveryReceipt(root, freshInspection.records, "restore", { receiptDirectory });
       } else {
         const receiptPath = resolve(receiptDirectory || resolve(root, "recovery"), `${new Date().toISOString().replaceAll(/[:.]/g, "-")}-restore-${randomUUID()}.json`);
-        const rawReceipt = {
-          version: REPOSITORY_JOURNAL_BUNDLE_VERSION,
-          createdAt: new Date().toISOString(),
-          operation: "recovery-before-corruption-repair",
-          repository: currentInspection.records[0]?.binding.repository || null,
-          rawBase64: Buffer.from(freshRaw, "utf8").toString("base64"),
-          rawSha256: sha256(freshRaw),
-          validPrefix: currentInspection.records,
-        };
-        const envelope = { ...rawReceipt, checksum: sha256(rawReceipt) };
+        const envelope = rawRecoveryEnvelope(freshRaw, freshInspection);
         await atomicWrite(receiptPath, `${JSON.stringify(envelope, null, 2)}\n`);
         preview.recoveryReceipt = {
           path: receiptPath,
           checksum: envelope.checksum,
-          rawSha256: rawReceipt.rawSha256,
-          recordCount: currentInspection.records.length,
-          firstSequence: currentInspection.records[0]?.sequence || null,
-          lastSequence: currentInspection.records.at(-1)?.sequence || null,
+          rawSha256: envelope.rawSha256,
+          recordCount: freshInspection.records.length,
+          firstSequence: freshInspection.records[0]?.sequence || null,
+          lastSequence: freshInspection.records.at(-1)?.sequence || null,
           restoreCommand: `bridge journal restore --directory ${JSON.stringify(root)} --input ${JSON.stringify(receiptPath)} --apply`,
         };
       }
