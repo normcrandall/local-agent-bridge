@@ -766,6 +766,16 @@ const headAdvancedWorkflow = await reconcilePublishedReview({
 assert.equal(headAdvancedWorkflow.reviewResolution.complete, false);
 assert.match(headAdvancedWorkflow.reviewResolution.error.message, /head changed/i);
 assert.deepEqual(headAdvanceMutations, ["before-head-advance"], "a live head advance aborts before the next resolution mutation");
+assert.deepEqual(
+  headAdvancedWorkflow.reviewResolution.error.completedThreadIds,
+  ["before-head-advance"],
+  "a stale-head abort preserves the resolutions that already reached GitHub",
+);
+assert.deepEqual(
+  headAdvancedWorkflow.reviewResolution.error.pendingThreadIds,
+  ["after-head-advance"],
+  "a stale-head abort preserves the exact unresolved remainder for retry",
+);
 assert.equal(
   reviewThreadReceiptPath({
     repository: "owner/repo",
