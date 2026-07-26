@@ -12,6 +12,7 @@ const failureFile = process.env.BRIDGE_SUPERVISOR_TEST_PS_FAILURE_FILE;
 const logFile = process.env.BRIDGE_SUPERVISOR_TEST_PS_LOG;
 const mismatchFile = process.env.BRIDGE_SUPERVISOR_TEST_MISMATCH_FILE;
 const malformedFile = process.env.BRIDGE_SUPERVISOR_TEST_MALFORMED_FILE;
+const unavailableFile = process.env.BRIDGE_SUPERVISOR_TEST_UNAVAILABLE_FILE;
 
 const argv = process.argv.slice(2);
 if (logFile) appendFileSync(logFile, `${argv.join(" ")}\n`);
@@ -27,6 +28,9 @@ const requestedPid = powershellForm
 
 const fieldIndex = argv.indexOf("-o");
 const fieldSpec = fieldIndex >= 0 ? argv[fieldIndex + 1] : "";
+
+// Permanent probe failure: models an identity that cannot be verified at all.
+if (unavailableFile && existsSync(unavailableFile)) process.exit(75);
 
 if (failureFile && existsSync(failureFile)) {
   const raw = readFileSync(failureFile, "utf8").trim();

@@ -235,9 +235,13 @@ try {
   await writeFile(processProbeFailureFile, `${JSON.stringify({ pid: concurrent[0].workerPid, remaining: 18 })}\n`);
   await waitFor(async () => {
     const state = JSON.parse(await readFile(join(stateDirectory, `${ids[2]}.json`), "utf8"));
-    return state.status === "indeterminate" && state.lastWorkerExit?.signal === "IDENTITY_UNAVAILABLE";
-  }, "three consecutive unavailable probe intervals were not receipted", 6_000);
+    return state.status === "indeterminate" && state.lastWorkerFence?.signal === "IDENTITY_UNAVAILABLE";
+  }, "three consecutive unavailable probe intervals were not fenced", 6_000);
   assert.equal(alive(concurrent[0].workerPid), true, "identity-unavailable fencing must record, not kill, the worker");
+  const unavailableFenced = JSON.parse(await readFile(join(stateDirectory, `${ids[2]}.json`), "utf8"));
+  assert.equal(unavailableFenced.workerPid, concurrent[0].workerPid,
+    "an unverifiable live worker must keep ownership so no replacement can be started");
+  assert.equal(unavailableFenced.lastWorkerExit, undefined, "a live fenced worker must not be recorded as exited");
 
   process.kill(-first.workerPid, "SIGTERM");
   await waitFor(async () => {
@@ -263,9 +267,14 @@ try {
 
   await waitFor(async () => {
     const state = JSON.parse(await readFile(join(stateDirectory, `${ids[3]}.json`), "utf8"));
-    return state.status === "indeterminate" && state.lastWorkerExit?.signal === "IDENTITY_MISMATCH";
-  }, "adopted worker identity mismatch was not receipted", 7_000);
+    return state.status === "indeterminate" && state.lastWorkerFence?.signal === "IDENTITY_MISMATCH";
+  }, "adopted worker identity mismatch was not fenced", 7_000);
   assert.equal(alive(identityMismatch.workerPid), true, "identity fencing must record, not kill, a live mismatched PID");
+  const mismatchFenced = JSON.parse(await readFile(join(stateDirectory, `${ids[3]}.json`), "utf8"));
+  // A live mismatched worker has not exited: releasing workerPid here would let the
+  // next start request launch a duplicate writer beside the running process.
+  assert.equal(mismatchFenced.workerPid, identityMismatch.workerPid, "fencing must preserve ownership of a live PID");
+  assert.equal(mismatchFenced.lastWorkerExit, undefined, "a live fenced worker must not be recorded as exited");
 
   const cancelling = JSON.parse(await readFile(join(stateDirectory, `${ids[1]}.json`), "utf8"));
   await writeFile(join(stateDirectory, `${ids[1]}.json`), `${JSON.stringify({

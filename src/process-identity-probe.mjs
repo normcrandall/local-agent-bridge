@@ -46,11 +46,12 @@ function queryWin32Process(numericPid, { timeoutMs, powershellBinary }) {
 export function processProbe(pid, field, {
   probeBinary = process.env.BRIDGE_SUPERVISOR_PS_BIN,
   timeoutMs = 5_000,
-  // platform and powershellBinary are call-site seams for tests only. They are
-  // deliberately not env-overridable: this is a fail-closed identity path and an
-  // ambient variable must not be able to reroute it.
-  platform = process.platform,
-  powershellBinary = "powershell.exe",
+  // Test seams. The supervisor daemon is a separate process that calls this with no
+  // options, so forcing the native Win32_Process branch under test requires an env
+  // override; these carry strictly less authority than BRIDGE_SUPERVISOR_PS_BIN, which
+  // already selects the probe binary outright.
+  platform = process.env.BRIDGE_SUPERVISOR_PLATFORM || process.platform,
+  powershellBinary = process.env.BRIDGE_SUPERVISOR_POWERSHELL_BIN || "powershell.exe",
 } = {}) {
   const numericPid = typeof pid === "number" ? pid : Number.parseInt(pid, 10);
   if (!Number.isInteger(numericPid) || numericPid <= 1) {

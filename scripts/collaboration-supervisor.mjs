@@ -141,9 +141,66 @@ async function recordWorkerExit({ collaborationId, pid, code = null, signal = nu
   monitored.delete(pid);
 }
 
+// A live PID whose identity is mismatched or unverifiable has NOT exited. Routing it
+// through recordWorkerExit would null workerPid, and the next start request would then
+// see an unowned collaboration and launch a duplicate writer alongside the running one.
+// The fence therefore preserves workerPid and workerOwner, records why the worker is
+// untrusted, and leaves startWorker to reject every replacement until the PID is proven
+// dead by explicit recovery.
+async function recordWorkerFenced({ collaborationId, pid, signal, reason }) {
+  let state;
+  try {
+    state = await readCollaboration(workspaceRoot, collaborationId);
+  } catch {
+    return;
+  }
+  if (state.workerPid !== pid) return;
+  if (state.lastWorkerFence?.pid === pid && state.lastWorkerFence?.signal === signal) return;
+
+  const at = new Date().toISOString();
+  const receipt = {
+    type: "worker_fenced",
+    at,
+    receiptId: randomUUID(),
+    supervisorId,
+    pid,
+    signal,
+    reason,
+    terminalReceipt: false,
+  };
+  await appendEvent(workspaceRoot, collaborationId, receipt).catch(() => {});
+
+  const terminal = TERMINAL_COLLABORATION_STATUSES.has(state.status)
+    || state.status === "cancelling"
+    || state.cancelRequested === true;
+  if (terminal) return;
+
+  await updateCollaboration(workspaceRoot, collaborationId, (current) => ({
+    ...current,
+    status: "indeterminate",
+    error: reason,
+    // workerPid and workerOwner are deliberately left untouched: the process is alive
+    // and still owns this collaboration.
+    lastWorkerFence: receipt,
+    runtime: {
+      ...(current.runtime || {}),
+      activeCall: current.runtime?.activeCall
+        ? { ...current.runtime.activeCall, status: "indeterminate", phase: "unknown" }
+        : null,
+    },
+  })).catch(() => {});
+  await enqueueCoordinatorWake(workspaceRoot, collaborationId).catch(() => {});
+}
+
+function fenceReason({ pid, signal, identity }) {
+  return signal === "IDENTITY_UNAVAILABLE"
+    ? `Worker PID ${pid} is live but its identity could not be verified (${identity?.command?.error || identity?.observedStart?.error || "probe unavailable"}); ownership is fenced and no replacement will be started.`
+    : `Worker PID ${pid} is live but its command or start identity no longer matches the recorded owner; ownership is fenced and no replacement will be started.`;
+}
+
 function monitorWorker({ collaborationId, pid, child = null, adopted = false, workerOwner = null }) {
   monitored.set(pid, {
-    collaborationId, pid, child, adopted, workerOwner, receipted: false, checking: false, probeFailures: 0,
+    collaborationId, pid, child, adopted, workerOwner, receipted: false, checking: false, probeFailures: 0, fenced: false,
   });
   if (child) {
     child.once("exit", (code, signal) => {
@@ -170,14 +227,20 @@ async function adoptRecordedWorkers() {
         adopted: true,
       });
     } else if (identity.status === "unavailable") {
+      // A probe failure at adoption may be transient, so keep ownership and let the
+      // monitor's three-strike rule decide. Ownership is never released here.
       monitorWorker({ collaborationId: state.id, pid: state.workerPid, adopted: true, workerOwner: state.workerOwner });
     } else {
-      await recordWorkerExit({
+      // Mismatch is deterministic, not transient: fence immediately, but keep watching
+      // the PID so a real exit can still be receipted.
+      monitorWorker({ collaborationId: state.id, pid: state.workerPid, adopted: true, workerOwner: state.workerOwner });
+      const entry = monitored.get(state.workerPid);
+      if (entry) entry.fenced = true;
+      await recordWorkerFenced({
         collaborationId: state.id,
         pid: state.workerPid,
-        code: null,
         signal: "IDENTITY_MISMATCH",
-        adopted: true,
+        reason: fenceReason({ pid: state.workerPid, signal: "IDENTITY_MISMATCH", identity }),
       });
     }
   }
@@ -211,11 +274,25 @@ async function startWorker({ collaborationId, requestedRuntimeRoot, requestedWor
     };
   }
   if (Number.isInteger(state.workerPid)) {
-    if (recordedIdentity.status === "unavailable") {
-      throw new Error(`Recorded worker PID ${state.workerPid} identity could not be verified; no replacement was started.`);
-    }
-    if (recordedIdentity.status === "mismatch") {
-      throw new Error(`Recorded worker PID ${state.workerPid} is live but its command or start identity does not match; no replacement was started.`);
+    // The PID is alive but unverified. Keep watching it, persist why it is untrusted,
+    // and refuse the start: ownership stays with the running process until explicit
+    // recovery proves it dead.
+    if (recordedIdentity.status === "unavailable" || recordedIdentity.status === "mismatch") {
+      const signal = recordedIdentity.status === "unavailable" ? "IDENTITY_UNAVAILABLE" : "IDENTITY_MISMATCH";
+      if (!monitored.has(state.workerPid)) {
+        monitorWorker({ collaborationId, pid: state.workerPid, adopted: true, workerOwner: state.workerOwner });
+      }
+      const entry = monitored.get(state.workerPid);
+      if (entry) entry.fenced = true;
+      await recordWorkerFenced({
+        collaborationId,
+        pid: state.workerPid,
+        signal,
+        reason: fenceReason({ pid: state.workerPid, signal, identity: recordedIdentity }),
+      });
+      throw new Error(recordedIdentity.status === "unavailable"
+        ? `Recorded worker PID ${state.workerPid} identity could not be verified; no replacement was started.`
+        : `Recorded worker PID ${state.workerPid} is live but its command or start identity does not match; no replacement was started.`);
     }
     await recordWorkerExit({
       collaborationId,
@@ -417,23 +494,40 @@ const monitor = setInterval(() => {
       collaborationId: entry.collaborationId,
       workerOwner: entry.workerOwner,
     });
+    // Only a dead PID is a real exit. recordWorkerExit releases ownership, so it must
+    // never be reached while the process is still running.
+    if (identity.status === "dead") {
+      void recordWorkerExit({
+        collaborationId: entry.collaborationId,
+        pid: entry.pid,
+        code: null,
+        signal: "UNKNOWN",
+        adopted: true,
+      });
+      continue;
+    }
     if (identity.status === "unavailable") {
       entry.probeFailures += 1;
       entry.checking = false;
       if (entry.probeFailures < 3) continue;
     }
     if (identity.status !== "match") {
-      void recordWorkerExit({
-        collaborationId: entry.collaborationId,
-        pid: entry.pid,
-        code: null,
-        signal: identity.status === "dead" ? "UNKNOWN"
-          : identity.status === "unavailable" ? "IDENTITY_UNAVAILABLE"
-            : "IDENTITY_MISMATCH",
-        adopted: true,
-      });
+      const signal = identity.status === "unavailable" ? "IDENTITY_UNAVAILABLE" : "IDENTITY_MISMATCH";
+      entry.checking = false;
+      // The PID stays monitored while fenced so that its eventual real exit is still
+      // receipted, and so ownership is never handed to a replacement writer.
+      if (!entry.fenced) {
+        entry.fenced = true;
+        void recordWorkerFenced({
+          collaborationId: entry.collaborationId,
+          pid: entry.pid,
+          signal,
+          reason: fenceReason({ pid: entry.pid, signal, identity }),
+        });
+      }
     } else {
       entry.probeFailures = 0;
+      entry.fenced = false;
       entry.checking = false;
     }
   }

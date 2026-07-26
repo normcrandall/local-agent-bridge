@@ -20,8 +20,10 @@ const fixture = join(root, "scripts/fixtures/fake-win32-ps.mjs");
 const workerPath = join(root, "scripts/worker-supervisor-test-worker.mjs");
 const mismatchFile = join(temporary, "mismatch");
 const malformedFile = join(temporary, "malformed");
+const unavailableFile = join(temporary, "unavailable");
 const failureFile = join(temporary, "failure.json");
 const probeLog = join(temporary, "probe.log");
+const daemonProbeLog = join(temporary, "daemon-probe.log");
 
 const expectedCommand = "node.exe C:\\bridge\\scripts\\worker-supervisor-test-worker.mjs "
   + "bridge-00000000-0000-4000-8000-000000000072";
@@ -89,11 +91,17 @@ function startWorkerWithWin32Fixture(id) {
     BRIDGE_WORKSPACE_ROOT: workspace,
     BRIDGE_COLLABORATION_DIR: stateDirectory,
     BRIDGE_SUPERVISOR_WORKER_PATH: workerPath,
-    BRIDGE_SUPERVISOR_PS_BIN: fixture,
+    // Force the native Win32_Process branch inside the supervisor daemon. PS_BIN is
+    // deliberately NOT set: it would select the generic /bin/ps-shaped path and leave
+    // the Windows code under test unexecuted.
+    BRIDGE_SUPERVISOR_PLATFORM: "win32",
+    BRIDGE_SUPERVISOR_POWERSHELL_BIN: fixture,
     BRIDGE_SUPERVISOR_TEST_MISMATCH_FILE: mismatchFile,
+    BRIDGE_SUPERVISOR_TEST_UNAVAILABLE_FILE: unavailableFile,
     BRIDGE_SUPERVISOR_TEST_OUTPUT: temporary,
   };
-  delete environment.BRIDGE_SUPERVISOR_TEST_PS_LOG;
+  environment.BRIDGE_SUPERVISOR_TEST_PS_LOG = daemonProbeLog;
+  delete environment.BRIDGE_SUPERVISOR_PS_BIN;
   delete environment.BRIDGE_SUPERVISOR_TEST_PS_FAILURE_FILE;
   delete environment.BRIDGE_SUPERVISOR_TEST_MALFORMED_FILE;
   // stderr is captured rather than inherited so the expected fencing failure in the
@@ -103,6 +111,41 @@ function startWorkerWithWin32Fixture(id) {
     env: environment,
     stdio: ["ignore", "pipe", "pipe"],
   }));
+}
+
+// Runs a start that is expected to be refused, and returns the refusal text.
+function expectStartRefused(id) {
+  try {
+    const result = startWorkerWithWin32Fixture(id);
+    throw new assert.AssertionError({
+      message: `start must have been refused, but it returned ${JSON.stringify(result)}`,
+    });
+  } catch (error) {
+    if (error instanceof assert.AssertionError) throw error;
+    return `${error.stderr || ""}${error.message || ""}`;
+  }
+}
+
+// The daemon caches a successful Win32_Process lookup for 1s, so an identity flipped
+// mid-test is only observable once that window closes.
+async function settleProbeCache() {
+  await new Promise((resolvePromise) => setTimeout(resolvePromise, 1_200));
+}
+
+async function readState(id) {
+  return JSON.parse(await readFile(join(stateDirectory, `${id}.json`), "utf8"));
+}
+
+async function supervisorPid() {
+  return JSON.parse(await readFile(join(stateDirectory, "supervisor.json"), "utf8")).pid;
+}
+
+// Terminate ONLY the supervisor daemon. The worker is spawned detached, so it must
+// survive; adoption is meaningless if the restart takes the worker down with it.
+async function stopSupervisorOnly() {
+  const pid = await supervisorPid();
+  process.kill(pid, "SIGTERM");
+  await waitFor(() => !alive(pid), "supervisor daemon did not stop");
 }
 
 let startedWorkerPid = null;
@@ -156,32 +199,67 @@ try {
     "win32 termination must use taskkill with tree and force flags",
   );
 
-  // 6. Supervisor restart adopts a verified live worker instead of starting a duplicate.
+  // 6. A real supervisor restart: kill only the daemon, leave the worker running, and
+  //    require the replacement daemon to adopt the same PID through the native probe.
   await seed(testId);
   const firstStart = startWorkerWithWin32Fixture(testId);
   startedWorkerPid = firstStart.workerPid;
   assert.equal(firstStart.reused, false, "first start must launch a new worker");
   assert.equal(alive(firstStart.workerPid), true, "worker must be running");
 
-  const secondStart = startWorkerWithWin32Fixture(testId);
-  assert.equal(secondStart.reused, true, "restart must adopt the live verified worker");
-  assert.equal(secondStart.workerPid, firstStart.workerPid, "adopted worker PID must match the recorded worker");
+  const firstSupervisorPid = await supervisorPid();
+  assert.notEqual(firstSupervisorPid, firstStart.workerPid, "supervisor and worker must be distinct processes");
+  await stopSupervisorOnly();
+  assert.equal(alive(firstSupervisorPid), false, "the supervisor daemon must be stopped");
+  assert.equal(alive(firstStart.workerPid), true, "restarting the supervisor must not disturb the worker");
 
-  // 7. Once the observed identity no longer matches, the supervisor must refuse to
-  //    replace the live worker rather than starting a second writer.
+  const afterRestart = startWorkerWithWin32Fixture(testId);
+  const secondSupervisorPid = await supervisorPid();
+  assert.notEqual(secondSupervisorPid, firstSupervisorPid, "a new supervisor daemon must have been started");
+  assert.equal(afterRestart.reused, true, "the restarted supervisor must adopt the live verified worker");
+  assert.equal(afterRestart.workerPid, firstStart.workerPid, "adopted worker PID must match the pre-restart worker");
+  assert.equal(alive(firstStart.workerPid), true, "adoption must not replace the running worker");
+
+  // Prove the adoption ran through the native Win32_Process branch, not the ps override.
+  const probeCalls = readFileSync(daemonProbeLog, "utf8");
+  assert.match(probeCalls, /-NoProfile -NonInteractive -Command/, "the daemon must probe identity through PowerShell");
+  assert.match(probeCalls, /Get-CimInstance Win32_Process/, "the daemon must use the native Win32_Process query");
+  assert.doesNotMatch(probeCalls, /(^|\n)-p \d+ -o /, "the daemon must not fall back to the generic ps probe");
+
+  // 7. A mismatched identity on a live PID must not spawn a duplicate, and must not
+  //    release ownership: workerPid stays set so no later start can claim the slot.
   await writeFile(mismatchFile, "");
-  let fenced = null;
-  try {
-    startWorkerWithWin32Fixture(testId);
-  } catch (error) {
-    fenced = `${error.stderr || ""}${error.message || ""}`;
-  }
-  assert.ok(fenced, "a mismatched worker identity must refuse the start");
-  assert.match(fenced, /does not match/, "refusal must name the identity mismatch");
-  assert.match(fenced, /no replacement was started/, "refusal must confirm no duplicate writer was started");
+  await settleProbeCache();
+  const mismatchRefusal = expectStartRefused(testId);
+  assert.match(mismatchRefusal, /does not match/, "refusal must name the identity mismatch");
+  assert.match(mismatchRefusal, /no replacement was started/, "refusal must confirm no duplicate writer was started");
   assert.equal(alive(firstStart.workerPid), true, "the fenced worker must be left running, not replaced");
 
-  console.log("Windows supervisor test passed: win32 identity query, retry, fail-closed parsing, tree termination, restart adoption, and duplicate-writer fencing.");
+  const fencedState = await readState(testId);
+  assert.equal(fencedState.workerPid, firstStart.workerPid, "a fenced live worker must keep ownership of workerPid");
+  assert.ok(fencedState.workerOwner, "a fenced live worker must keep its recorded owner");
+  assert.equal(fencedState.status, "indeterminate", "fencing must surface as an indeterminate collaboration");
+  assert.equal(fencedState.lastWorkerFence?.signal, "IDENTITY_MISMATCH", "the fence reason must be persisted");
+  assert.equal(fencedState.lastWorkerExit, undefined, "a live fenced worker must not be recorded as exited");
+
+  // A second attempt must still be refused: the fence does not decay into a free slot.
+  assert.match(expectStartRefused(testId), /no replacement was started/, "a fenced worker must reject repeat starts");
+  assert.equal((await readState(testId)).workerPid, firstStart.workerPid, "repeat refusal must still preserve ownership");
+
+  // 8. The same holds when identity is missing rather than mismatched.
+  await rm(mismatchFile, { force: true });
+  await writeFile(unavailableFile, "");
+  await settleProbeCache();
+  const unavailableRefusal = expectStartRefused(testId);
+  assert.match(unavailableRefusal, /could not be verified/, "refusal must name the unverifiable identity");
+  assert.match(unavailableRefusal, /no replacement was started/, "unverifiable identity must not start a duplicate");
+  const unverifiedState = await readState(testId);
+  assert.equal(unverifiedState.workerPid, firstStart.workerPid, "an unverifiable live worker must keep ownership");
+  assert.equal(unverifiedState.lastWorkerFence?.signal, "IDENTITY_UNAVAILABLE", "the unavailable fence must be persisted");
+  assert.equal(unverifiedState.lastWorkerExit, undefined, "an unverifiable live worker must not be recorded as exited");
+  await rm(unavailableFile, { force: true });
+
+  console.log("Windows supervisor test passed: native Win32_Process adoption across a real supervisor restart, plus duplicate-writer fencing that preserves ownership on mismatched and unverifiable identity.");
 } finally {
   // The supervisor daemon outlives the client that started it and keeps writing into
   // the state directory, so stop it and wait for exit before removing the temp tree.
