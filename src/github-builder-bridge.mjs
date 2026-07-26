@@ -2,7 +2,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { canonicalGitHubAppLogin, createInstallationToken, GITHUB_LOGIN_PATTERN, inspectGitHubAppRoles } from "./github-app-auth.mjs";
+import { canonicalGitHubAppLogin, createInstallationToken, GITHUB_LOGIN_PATTERN, inspectGitHubAppRoles, loadGitHubAppRole, sameGitHubAppLogin } from "./github-app-auth.mjs";
 import { createBoundBuilderClient } from "./github-builder-client.mjs";
 import { builderMcpInputSchema } from "./builder-contract.mjs";
 
@@ -18,7 +18,9 @@ const baseRef = process.env.GITHUB_BUILDER_BASE_REF || null;
 const baseSha = process.env.GITHUB_BUILDER_BASE_SHA || null;
 const allowWorkspaceHead = process.env.GITHUB_BUILDER_ALLOW_WORKSPACE_HEAD === "1";
 const apiUrl = process.env.GITHUB_BUILDER_API_URL || "https://api.github.com";
-const allowedOperations = (process.env.GITHUB_BUILDER_ALLOWED_OPERATIONS || "ensure_pull_request,read_review_threads,reply_review_thread,resolve_review_thread,mark_ready")
+const operationsAreBound = process.env.GITHUB_BUILDER_OPERATIONS_BOUND === "1";
+const configuredOperations = process.env.GITHUB_BUILDER_ALLOWED_OPERATIONS;
+const allowedOperations = (configuredOperations ?? (operationsAreBound ? "" : "ensure_pull_request,read_review_threads,reply_review_thread,resolve_review_thread,mark_ready"))
   .split(",").map((value) => value.trim()).filter(Boolean);
 
 if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository || "")) throw new Error("GITHUB_BUILDER_REPOSITORY must be owner/name.");
@@ -40,23 +42,23 @@ const trustedReviewAppIds = [
   ...Object.values(appRoles.roles?.reviewers || {}).map((reviewer) => reviewer.appId),
 ].filter(Boolean).map(Number);
 
-const initialCredential = await createInstallationToken({ role: "builder", writerProvider, repository });
-if (initialCredential.expectedLogin !== expectedLogin) {
-  throw new Error(`Configured builder identity ${initialCredential.expectedLogin} does not match authorized identity ${expectedLogin}.`);
+const configuredRole = await loadGitHubAppRole({ role: "builder", writerProvider, expectedLogin, repository });
+if (!sameGitHubAppLogin(configuredRole.expectedLogin, expectedLogin)) {
+  throw new Error(`Configured builder identity ${configuredRole.expectedLogin} does not match authorized identity ${expectedLogin}.`);
 }
 const authority = {
-  provider: initialCredential.provider || writerProvider,
-  roleLabel: initialCredential.roleLabel,
-  login: initialCredential.expectedLogin,
-  appId: initialCredential.appId,
-  installationId: initialCredential.installationId,
+  provider: configuredRole.provider || writerProvider,
+  roleLabel: configuredRole.roleLabel,
+  login: configuredRole.expectedLogin,
+  appId: configuredRole.appId,
+  installationId: configuredRole.installationId,
   repository,
-  permissions: initialCredential.permissions,
+  permissions: {},
 };
 
 const getToken = async () => {
   const credential = await createInstallationToken({ role: "builder", writerProvider, repository });
-  if (credential.expectedLogin !== expectedLogin) {
+  if (!sameGitHubAppLogin(credential.expectedLogin, expectedLogin)) {
     throw new Error(`Configured builder identity ${credential.expectedLogin} does not match authorized identity ${expectedLogin}.`);
   }
   return { token: credential.token, verifiedLogin: credential.verifiedLogin };

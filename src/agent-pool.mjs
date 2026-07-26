@@ -124,6 +124,9 @@ export function createAgentPool({
   autonomous = false,
   writableRoots = [],
   onTiming = async () => {},
+  createCredential = createInstallationToken,
+  inspectAppRoles = inspectGitHubAppRoles,
+  builderClientFactory = createBoundBuilderClient,
   // Test-only injection points. Production callers must use the default MCP
   // client and stdio transport so provider dispatch cannot bypass its boundary.
   clientFactory = ({ name, version }) => new Client({ name, version }),
@@ -159,12 +162,13 @@ export function createAgentPool({
     if (!githubBuilder) return null;
     if (writerBindings.has(agent)) return writerBindings.get(agent);
     const promise = (async () => {
-      const credential = await createInstallationToken({
+      const mintedCredential = await createCredential({
         role: "builder",
         writerProvider: agent,
         repository: githubBuilder.repository,
       });
-      const appRoles = await inspectGitHubAppRoles();
+      const { token: _discardedToken, ...credential } = mintedCredential;
+      const appRoles = await inspectAppRoles();
       const explicitlyPinnedLogin = githubBuilder.expectedLogins?.[agent] || null;
       const compatibilityLogin = appRoles.roles?.builder?.expectedLogin || null;
       const priorWriterLogin = githubBuilder.writerProvider && githubBuilder.writerProvider !== agent
@@ -179,19 +183,29 @@ export function createAgentPool({
         && !sameGitHubAppLogin(githubBuilder.expectedLogin, priorWriterLogin)) {
         throw new Error(`Configured ${agent} writer identity ${credential.expectedLogin} is not authorized by the builder binding ${githubBuilder.expectedLogin}.`);
       }
-      const { expectedLogins: _expectedLogins, ...baseBinding } = githubBuilder;
+      const { expectedLogins: _expectedLogins, requestedLogin, rebindReason, ...baseBinding } = githubBuilder;
+      const allowedOperations = (baseBinding.allowedOperations || []).filter((operation) => operation !== "merge");
+      if (!allowedOperations.length) {
+        throw new Error("Writer bindings cannot be authorized for merge alone; merge remains with the compatibility builder.");
+      }
       return {
         credential,
         binding: {
           ...baseBinding,
           expectedLogin: credential.expectedLogin,
           writerProvider: credential.provider || agent,
-          allowedOperations: (baseBinding.allowedOperations || []).filter((operation) => operation !== "merge"),
+          allowedOperations,
         },
         authority: {
           provider: credential.provider || agent,
           roleLabel: credential.roleLabel,
           login: credential.expectedLogin,
+          requestedLogin: requestedLogin || githubBuilder.expectedLogin || null,
+          resolvedLogin: credential.expectedLogin,
+          rebindReason: priorWriterLogin
+            ? "provider_failover"
+            : rebindReason || (credential.provider ? "provider_writer_selection" : "compatibility_builder_fallback"),
+          removedOperations: (baseBinding.allowedOperations || []).filter((operation) => operation === "merge"),
           appId: credential.appId,
           installationId: credential.installationId,
           repository: githubBuilder.repository,
@@ -200,6 +214,9 @@ export function createAgentPool({
       };
     })();
     writerBindings.set(agent, promise);
+    promise.catch(() => {
+      if (writerBindings.get(agent) === promise) writerBindings.delete(agent);
+    });
     return promise;
   }
 
@@ -284,7 +301,7 @@ export function createAgentPool({
     const context = await writerBuilderContext(agent);
     const { credential } = context;
     const activeGithubBuilder = context.binding;
-    const appRoles = await inspectGitHubAppRoles();
+    const appRoles = await inspectAppRoles();
     const trustedReviewLogins = [
       appRoles.roles?.reviewer?.expectedLogin,
       ...Object.values(appRoles.roles?.reviewers || {}).map((reviewer) => reviewer.expectedLogin),
@@ -293,11 +310,23 @@ export function createAgentPool({
       appRoles.roles?.reviewer?.appId,
       ...Object.values(appRoles.roles?.reviewers || {}).map((reviewer) => reviewer.appId),
     ].filter(Boolean).map(Number);
-    return createBoundBuilderClient({
+    const getToken = async () => {
+      const fresh = await createCredential({
+        role: "builder",
+        writerProvider: agent,
+        repository: activeGithubBuilder.repository,
+      });
+      if (!sameGitHubAppLogin(fresh.expectedLogin, credential.expectedLogin)
+        || String(fresh.appId) !== String(credential.appId)
+        || Number(fresh.installationId) !== Number(credential.installationId)) {
+        throw new Error(`Configured ${agent} writer authority changed while the collaboration was running.`);
+      }
+      return { token: fresh.token, verifiedLogin: fresh.verifiedLogin };
+    };
+    return builderClientFactory({
       ...activeGithubBuilder,
       expectedLogin: credential.expectedLogin,
-      token: credential.token,
-      verifiedLogin: credential.verifiedLogin,
+      getToken,
       authority: context.authority,
       requiredReviewStatusContext: "agent-review",
       trustedReviewLogins,

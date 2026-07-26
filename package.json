@@ -28,7 +28,7 @@
     "test:claude-capabilities": "node scripts/claude-capability-guard-test.mjs",
     "test:desktop": "node scripts/desktop-launcher-test.mjs",
     "test:decisions": "node scripts/decision-policy-test.mjs",
-    "test:github-app-auth": "node scripts/github-app-auth-test.mjs",
+    "test:github-app-auth": "node scripts/github-app-auth-test.mjs && node scripts/writer-app-routing-test.mjs",
     "test:github-command-fallback": "node scripts/github-command-fallback-test.mjs",
     "test:github-builder": "node scripts/github-builder-test.mjs",
     "test:claims": "node scripts/collaboration-start-preflight-test.mjs && node scripts/github-claims-test.mjs && node scripts/claimed-issue-context-test.mjs",

@@ -1035,8 +1035,12 @@ server.registerTool(
         }
         writerBoundGithubBuilder = {
           ...input.githubBuilder,
+          requestedLogin: input.githubBuilder.expectedLogin,
           expectedLogin,
           writerProvider,
+          rebindReason: sameGitHubAppLogin(input.githubBuilder.expectedLogin, expectedLogin)
+            ? null
+            : "provider_writer_selection",
         };
       }
       const effectiveGithubBuilder = workspaceHeadBuilderBinding({
