@@ -47,6 +47,7 @@ try {
   assert.equal(fallback.dockerUnavailableReason, "service_unreachable");
   assert.doesNotMatch(JSON.stringify(fallback), new RegExp(repository));
   assert.equal(classifyDockerProbeFailure(Object.assign(new Error("request timed out"), { name: "TimeoutError" })), "probe_timeout");
+  assert.equal(classifyDockerProbeFailure(Object.assign(new Error("fetch failed"), { cause: { name: "TimeoutError" } })), "probe_timeout");
   assert.equal(classifyDockerProbeFailure(new Error("Docker Model Runner model ai/missing is not installed. Run: docker model pull ai/missing")), "model_unavailable");
   assert.equal(classifyDockerProbeFailure(new Error("Docker Model Runner health check returned HTTP 503.")), "health_check_failed");
   assert.equal(classifyDockerProbeFailure(new Error(`Unable to read Docker Model Runner config at ${privateConfigPath}: invalid JSON`)), "configuration_error");

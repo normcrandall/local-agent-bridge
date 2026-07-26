@@ -13,8 +13,10 @@ export function classifyDockerProbeFailure(error) {
   const message = String(error?.message || error || "").toLowerCase();
   const code = String(error?.code || error?.cause?.code || "").toUpperCase();
   const name = String(error?.name || "").toLowerCase();
+  const causeName = String(error?.cause?.name || "").toLowerCase();
 
-  if (name.includes("timeout") || name === "aborterror" || code === "ETIMEDOUT" || /timed?\s*out/.test(message)) {
+  if (name.includes("timeout") || causeName.includes("timeout") || name === "aborterror" || causeName === "aborterror"
+    || code === "ETIMEDOUT" || /timed?\s*out/.test(message)) {
     return "probe_timeout";
   }
   if (["ECONNREFUSED", "ECONNRESET", "ENETUNREACH", "EHOSTUNREACH", "ENOTFOUND"].includes(code)

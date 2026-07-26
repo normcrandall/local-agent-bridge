@@ -7,6 +7,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { probeDockerModelRunner, runDockerModelReview } from "./docker-review.mjs";
 import { loadDockerSession, saveDockerSession } from "./docker-session-store.mjs";
+import { classifyDockerProbeFailure } from "./local-review-priority.mjs";
 
 const WORKSPACE_ROOT = realpathSync(process.env.BRIDGE_WORKSPACE_ROOT || process.env.BRIDGE_ROOT || process.cwd());
 const sessions = new Map();
@@ -91,8 +92,17 @@ server.registerTool(
     inputSchema: { model: z.string().trim().min(1).optional() },
   },
   async ({ model }) => {
-    const result = await probeDockerModelRunner({ model });
-    return { content: [{ type: "text", text: `Docker Model Runner ${result.model} is available.` }], structuredContent: result };
+    try {
+      const result = await probeDockerModelRunner({ model });
+      return { content: [{ type: "text", text: `Docker Model Runner ${result.model} is available.` }], structuredContent: result };
+    } catch (error) {
+      const reason = classifyDockerProbeFailure(error);
+      return {
+        content: [{ type: "text", text: `Docker Model Runner is unavailable: ${reason}.` }],
+        structuredContent: { available: false, reason },
+        isError: true,
+      };
+    }
   },
 );
 
