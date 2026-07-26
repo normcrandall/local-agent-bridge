@@ -9,6 +9,7 @@ import { hostActivityLane, listHostActivities } from "./host-activity-store.mjs"
 import { PORTFOLIO_STATUSES, PORTFOLIO_STATUS_GROUPS } from "./portfolio-status.mjs";
 import { deliveryPolicyForSurface } from "./delivery-policy.mjs";
 import { providerCapacitySnapshot } from "./provider-concurrency.mjs";
+import { requiresCoordinatorAction, requiresHumanAttention } from "./human-attention-policy.mjs";
 
 const ACTIVE_STATUSES = new Set([
   "queued", "waiting_capacity", "running", "working", "recovering", "cancelling",
@@ -172,16 +173,15 @@ async function mapLimit(values, concurrency, mapper) {
 
 export function isAttentionLane(lane, now = Date.now()) {
   const status = String(lane.lifecyclePhase || "unknown").toLowerCase();
-  // Delivery completion does not make a live process or an unresolved human
-  // boundary disappear. Those remain operable until the attempt itself stops.
-  if (ACTIVE_STATUSES.has(status)) return true;
-  if (["needs_user", "indeterminate", "blocked"].includes(status)) return true;
   const delivered = portfolioTerminalStatus(lane);
+  // A live provider remains operable while winding down, but a durable merged
+  // outcome supersedes stale stopped-attempt attention metadata.
+  if (ACTIVE_STATUSES.has(status)) return true;
   if (delivered) return false;
+  if (requiresHumanAttention(lane) || requiresCoordinatorAction(lane) || ["needs_user", "blocked"].includes(status)) return true;
   if (TERMINAL_STATUSES.has(status)) return false;
   if (["failed", "budget"].includes(status)) return now - dateMs(lane.updatedAt) <= 86_400_000;
   if (lane.handoff && !lane.handoff.acknowledged) return true;
-  if (lane.coordinatorWake && !lane.coordinatorWake.acknowledged) return true;
   return false;
 }
 
@@ -198,13 +198,7 @@ export function isLiveLane(lane, now = Date.now(), heartbeatAfterMs = DEFAULT_LI
 }
 
 export function laneNeedsUser(lane) {
-  const wake = lane.coordinatorWake;
-  const lifecycle = String(lane.status || lane.lifecyclePhase || "").toLowerCase();
-  return lifecycle === "needs_user"
-    && !lane.heartbeat
-    && wake
-    && wake.status !== "acknowledged"
-    && (wake.kind === "needs_user" || wake.nextAction === "needs_user");
+  return requiresHumanAttention(lane);
 }
 
 export function isStaleLane(lane, now = Date.now(), staleAfterMs = DEFAULT_STALE_AFTER_MS) {
@@ -266,6 +260,7 @@ function stoppedReason(lane) {
 export function operatorLaneCategory(lane, now = Date.now(), staleAfterMs = DEFAULT_STALE_AFTER_MS) {
   const status = effectiveLaneStatus(lane);
   if (laneNeedsUser(lane) && attentionRequestIsFresh(lane, now)) return "needs_user";
+  if (requiresCoordinatorAction(lane)) return now - dateMs(lane.updatedAt) <= staleAfterMs ? "waiting" : null;
   const attemptStatus = String(lane.lifecyclePhase || "unknown").toLowerCase();
   if (attemptStatus === "needs_user") {
     const heartbeatAt = dateMs(lane.heartbeat?.heartbeatAt);

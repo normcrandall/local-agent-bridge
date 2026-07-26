@@ -48,7 +48,7 @@ try {
   assert.match(await readFile(fileURLToPath(actionUrl), "utf8"), /bridge' mc --attention --repo 'veliqon\/example'/);
   assert.ok(calls[0].args.some((argument) => String(argument).includes("Agent Bridge needs your input")));
   assert.ok(calls[0].args.some((argument) => String(argument).includes("veliqon/example")));
-  assert.ok(calls[0].args.some((argument) => String(argument).includes(collaboration.id.slice(0, 24))));
+  assert.ok(calls[0].args.some((argument) => String(argument).includes("PR #42")));
   assert.doesNotMatch(JSON.stringify(calls[0]), /external expense/, "lock-screen notification text must not expose the decision summary");
   const visibleNotificationArguments = calls[0].args.slice(0, calls[0].args.indexOf("-open"));
   assert.doesNotMatch(JSON.stringify(visibleNotificationArguments), new RegExp(root.split("/").at(-1)), "a known repository should replace the visible workspace fallback");
@@ -137,6 +137,30 @@ try {
   });
   const activeDelivery = await signalUserAttention(root, providerStillRunning.id, { now, platform: "darwin", run });
   assert.equal(activeDelivery.reason, "not_due_or_not_needed");
+
+  const indeterminate = await createCollaboration(root, {
+    task: "Inspect ambiguous ownership",
+    workspace: root,
+    agents: ["claude"],
+    participants: ["codex", "claude"],
+    chair: { provider: "codex", source: "native-chair" },
+    status: "indeterminate",
+    issueClaim: { repository: "veliqon/example", issueNumber: 99 },
+    coordinatorWake: {
+      sequence: 1,
+      provider: "codex",
+      kind: "indeterminate",
+      actionable: false,
+      nextAction: "needs_user",
+      status: "pending",
+      createdAt: new Date(now).toISOString(),
+    },
+  });
+  const callsBeforeIndeterminate = calls.length;
+  const indeterminateDelivery = await signalUserAttention(root, indeterminate.id, { now, platform: "darwin", run });
+  assert.equal(indeterminateDelivery.delivered, true);
+  assert.equal(calls.length, callsBeforeIndeterminate + 1);
+  assert.ok(calls.at(-1).args.some((argument) => String(argument).includes("issue #99")));
 
   const historical = await createCollaboration(root, {
     task: "Preserve an old request without alerting",

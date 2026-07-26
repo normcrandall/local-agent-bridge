@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { attentionRequestAt, attentionRequestIsFresh } from "./attention-state.mjs";
 import { repositoryForLane } from "./mission-control.mjs";
+import { requiresHumanAttention } from "./human-attention-policy.mjs";
 import {
   appendEvent,
   collaborationDirectory,
@@ -82,10 +83,13 @@ export function attentionMessage(state, { actionUrl = null, environment = proces
   const repository = attentionRepository(state);
   const workspace = state.workspace?.split("/").filter(Boolean).at(-1) || "unknown workspace";
   const bridge = clean(state.id || "unknown bridge", 24);
+  const prNumber = state.prNumber || state.github?.prNumber || state.githubReview?.prNumber || state.githubBuilder?.prNumber || state.ci?.pr;
+  const issueNumber = state.issueNumber || state.issueClaim?.issueNumber;
+  const taskContext = prNumber ? `PR #${prNumber}` : issueNumber ? `issue #${issueNumber}` : clean(state.alias || bridge, 48);
   const generic = String(environment.AGENT_BRIDGE_ATTENTION_DETAIL || "").toLowerCase() === "generic";
   return {
     title: "Agent Bridge needs your input",
-    subtitle: generic ? "Protected decision" : clean(`${repository || workspace} · ${bridge}`, 120),
+    subtitle: generic ? "Protected decision" : clean(`${repository || workspace} · ${taskContext}`, 120),
     body: generic
       ? "A provider stopped at a protected decision. Click Show or run: bridge mc --attention"
       : `A provider stopped at a protected decision. Open: bridge mc --attention${repository ? ` --repo ${repository}` : ""}`,
@@ -145,13 +149,7 @@ export async function deliverAttentionNotification(message, {
 }
 
 export function wakeNeedsUser(state) {
-  const wake = state.coordinatorWake;
-  const lifecycle = String(state.status || state.lifecyclePhase || "").toLowerCase();
-  return lifecycle === "needs_user"
-    && !state.runtime?.activeCall
-    && wake
-    && wake.status !== "acknowledged"
-    && (wake.kind === "needs_user" || wake.nextAction === "needs_user");
+  return requiresHumanAttention(state);
 }
 
 export function attentionNeedsUser(state) {
@@ -274,7 +272,7 @@ export async function scanPendingUserAttention(root, options = {}) {
   const summaries = await listCollaborations(root, { limit: 10_000 });
   const results = [];
   for (const summary of summaries) {
-    if (summary.status !== "needs_user" || summary.coordinatorWake?.kind !== "needs_user") continue;
+    if (!["needs_user", "indeterminate"].includes(summary.status)) continue;
     const state = await readCollaboration(root, summary.id).catch(() => null);
     if (!state || !attentionNeedsUser(state)) continue;
     if (!options.force && !attentionRequestIsFresh(state, options.now)) continue;
