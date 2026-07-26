@@ -35,6 +35,7 @@ const LANE_EVENT_TYPES = new Set([
 ]);
 const PORTFOLIO_EVENT_TYPES = new Set(["portfolio.updated", "portfolio.removed"]);
 const PROVIDER_EVENT_TYPES = new Set(["provider.updated", "provider.removed", "quota.updated"]);
+const REPOSITORY_OPTIONAL_EVENT_TYPES = new Set(["quota.updated", "resync.required"]);
 
 function isRecord(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -165,7 +166,7 @@ export function validateMissionControlEventEnvelope(value) {
     });
   }
 
-  if (value.type !== "resync.required" && !repository) {
+  if (!REPOSITORY_OPTIONAL_EVENT_TYPES.has(value.type) && !repository) {
     throw new Error(`${value.type} requires repository identity.`);
   }
   if (LANE_EVENT_TYPES.has(value.type) && !laneId) throw new Error(`${value.type} requires laneId.`);
@@ -176,6 +177,9 @@ export function validateMissionControlEventEnvelope(value) {
   }
   if (value.type === "resync.required" && (repository || laneId || portfolioId || providerId)) {
     throw new Error("resync.required cannot carry entity identity fields.");
+  }
+  if (value.type === "quota.updated" && (repository || laneId || portfolioId)) {
+    throw new Error("quota.updated is machine-global and cannot carry repository, lane, or portfolio identity.");
   }
 
   return Object.freeze({

@@ -7,6 +7,8 @@ import {
   validateMissionControlEventEnvelope,
 } from "./mission-control-event-protocol.mjs";
 
+export const MISSION_CONTROL_EVENT_DIGEST_RETENTION = 256;
+
 function clone(value) {
   return structuredClone(value);
 }
@@ -31,8 +33,17 @@ function requireResync(state, reason, event, expectedSequence = state.cursor + 1
   };
 }
 
-function stateFromSnapshot(event) {
+function retainedEventDigests(digests, cursor) {
+  const firstRetainedSequence = Math.max(0, cursor - MISSION_CONTROL_EVENT_DIGEST_RETENTION + 1);
+  return Object.fromEntries(Object.entries(digests || {}).filter(([sequence]) => {
+    const numericSequence = Number(sequence);
+    return numericSequence >= firstRetainedSequence && numericSequence <= cursor;
+  }));
+}
+
+function stateFromSnapshot(event, previousState = null) {
   const { repositories, portfolios, lanes, providers, quotas } = event.payload;
+  const preserveReplayEvidence = previousState?.streamId === event.streamId;
   return {
     version: MISSION_CONTROL_EVENT_PROTOCOL_VERSION,
     streamId: event.streamId,
@@ -45,7 +56,9 @@ function stateFromSnapshot(event) {
     lanes: indexed(lanes, (entry) => missionControlLaneKey(entry.repository, entry.id)),
     providers: indexed(providers, (entry) => missionControlProviderKey(entry.repository, entry.laneId, entry.id)),
     quotas: indexed(quotas, (entry) => entry.providerId),
-    appliedEventDigests: {},
+    appliedEventDigests: preserveReplayEvidence
+      ? retainedEventDigests(previousState.appliedEventDigests, event.cursor)
+      : {},
   };
 }
 
@@ -155,7 +168,7 @@ function applyDelta(state, event) {
 }
 
 function deltaIdentityFailure(state, event) {
-  if (["repository.updated", "repository.removed"].includes(event.type)) return null;
+  if (["repository.updated", "repository.removed", "quota.updated"].includes(event.type)) return null;
   if (event.repository && !state.repositories[event.repository]) return "unknown_repository";
   if (event.laneId
     && event.type !== "lane.updated"
@@ -178,9 +191,9 @@ export function reduceMissionControlEvent(currentState, envelope) {
     if (currentState
       && currentState.streamId === event.streamId
       && event.sequence < currentState.cursor) {
-      return requireResync(clone(currentState), "stale_snapshot", event, currentState.cursor);
+      return requireResync(currentState, "stale_snapshot", event, currentState.cursor);
     }
-    return stateFromSnapshot(event);
+    return stateFromSnapshot(event, currentState);
   }
   if (!currentState) {
     return requireResync({
@@ -193,7 +206,7 @@ export function reduceMissionControlEvent(currentState, envelope) {
       repositories: {}, portfolios: {}, lanes: {}, providers: {}, quotas: {}, appliedEventDigests: {},
     }, "snapshot_required", event, null);
   }
-  const state = clone(currentState);
+  const state = currentState;
   if (state.version !== MISSION_CONTROL_EVENT_PROTOCOL_VERSION) {
     throw new Error(`Unsupported reducer state version: ${String(state.version)}.`);
   }
@@ -220,7 +233,10 @@ export function reduceMissionControlEvent(currentState, envelope) {
     cursor: event.cursor,
     updatedAt: event.occurredAt,
     sync: readySync(),
-    appliedEventDigests: { ...state.appliedEventDigests, [event.sequence]: digest },
+    appliedEventDigests: retainedEventDigests({
+      ...state.appliedEventDigests,
+      [event.sequence]: digest,
+    }, event.sequence),
   };
 }
 

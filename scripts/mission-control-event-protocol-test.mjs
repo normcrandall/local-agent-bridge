@@ -9,12 +9,13 @@ import {
   validateMissionControlEventEnvelope,
 } from "../src/mission-control-event-protocol.mjs";
 import {
+  MISSION_CONTROL_EVENT_DIGEST_RETENTION,
   createMissionControlEventState,
   reduceMissionControlEvent,
   reduceMissionControlEvents,
 } from "../src/mission-control-event-reducer.mjs";
 
-const at = (second) => `2026-07-26T12:00:${String(second).padStart(2, "0")}.000Z`;
+const at = (second) => new Date(Date.parse("2026-07-26T12:00:00.000Z") + (second * 1_000)).toISOString();
 const envelope = (sequence, type, payload, identity = {}) => ({
   version: MISSION_CONTROL_EVENT_PROTOCOL_VERSION,
   streamId: "mission-control-boot-a",
@@ -69,7 +70,6 @@ const output = envelope(13, "output.appended", { text: "Review approved.", sourc
   laneId: "bridge-1",
 });
 const quota = envelope(14, "quota.updated", { weeklyRemaining: 49 }, {
-  repository: "norm/example",
   providerId: "claude",
 });
 const current = reduceMissionControlEvents(snapshot, [laneUpdate, narrativeUpdate, output, quota]);
@@ -78,6 +78,20 @@ assert.equal(current.lanes[laneKey].status, "reviewing");
 assert.equal(current.lanes[laneKey].narrative.summary, "Checking exact-head review.");
 assert.deepEqual(current.lanes[laneKey].output, [{ text: "Review approved.", source: "provider" }]);
 assert.equal(current.quotas.claude.weeklyRemaining, 49);
+assert.equal("repository" in validateMissionControlEventEnvelope(quota), false);
+assert.throws(() => validateMissionControlEventEnvelope({ ...quota, repository: "norm/example" }), /machine-global/i);
+
+const snapshotAfterDeltas = envelope(15, "snapshot", {
+  repositories: Object.values(current.repositories),
+  portfolios: Object.values(current.portfolios),
+  lanes: Object.values(current.lanes),
+  providers: Object.values(current.providers),
+  quotas: Object.values(current.quotas),
+});
+const replacedAtSameStream = reduceMissionControlEvent(current, snapshotAfterDeltas);
+const crossSnapshotDuplicate = reduceMissionControlEvent(replacedAtSameStream, quota);
+assert.deepEqual(crossSnapshotDuplicate, replacedAtSameStream,
+  "a retained duplicate delivered after a same-stream snapshot must remain idempotent");
 
 const duplicate = reduceMissionControlEvent(current, quota);
 assert.deepEqual(duplicate, current, "an exact duplicate delivery must be idempotent");
@@ -143,5 +157,60 @@ const ignoredWhileUnsynchronized = reduceMissionControlEvent(requested, envelope
   repository: "norm/example",
 }));
 assert.deepEqual(ignoredWhileUnsynchronized, requested, "only a snapshot may recover a resync-required state");
+
+const highFrequencyEvents = Array.from({ length: MISSION_CONTROL_EVENT_DIGEST_RETENTION + 5 }, (_, index) =>
+  envelope(11 + index, "repository.updated", { tick: index }, { repository: "norm/example" }));
+const bounded = highFrequencyEvents.reduce(reduceMissionControlEvent, initial);
+assert.equal(Object.keys(bounded.appliedEventDigests).length, MISSION_CONTROL_EVENT_DIGEST_RETENTION,
+  "duplicate evidence must stay within the configured replay window");
+const firstRetained = highFrequencyEvents.at(-MISSION_CONTROL_EVENT_DIGEST_RETENTION);
+assert.strictEqual(reduceMissionControlEvent(bounded, firstRetained), bounded,
+  "a duplicate at the retained boundary must remain an identity no-op");
+const expired = highFrequencyEvents.at(-(MISSION_CONTROL_EVENT_DIGEST_RETENTION + 1));
+assert.equal(reduceMissionControlEvent(bounded, expired).sync.reason, "stale_event",
+  "an unprovable duplicate outside retention must fail closed into resync");
+
+const sharedLaneUpdates = [
+  envelope(11, "attention.updated", { required: true, reason: "approval" }, {
+    repository: "norm/example", laneId: "bridge-1",
+  }),
+  envelope(12, "github.updated", { prNumber: 42, headSha: "abc123" }, {
+    repository: "norm/example", laneId: "bridge-1",
+  }),
+  envelope(13, "lifecycle.updated", { phase: "reviewing" }, {
+    repository: "norm/example", laneId: "bridge-1",
+  }),
+];
+const sharedLaneState = sharedLaneUpdates.reduce(reduceMissionControlEvent, initial);
+assert.deepEqual(sharedLaneState.lanes[laneKey].attention, { required: true, reason: "approval" });
+assert.deepEqual(sharedLaneState.lanes[laneKey].github, { prNumber: 42, headSha: "abc123" });
+assert.deepEqual(sharedLaneState.lanes[laneKey].lifecycle, { phase: "reviewing" });
+
+const removalSnapshot = envelope(30, "snapshot", {
+  repositories: [{ id: "norm/example" }],
+  portfolios: [{ id: "helm-1", repository: "norm/example" }],
+  lanes: [
+    { id: "bridge-1", repository: "norm/example" },
+    { id: "bridge-2", repository: "norm/example" },
+  ],
+  providers: [
+    { id: "claude", repository: "norm/example", laneId: "bridge-1" },
+    { id: "codex", repository: "norm/example", laneId: "bridge-2" },
+  ],
+  quotas: [{ providerId: "claude", weeklyRemaining: 48 }],
+});
+const afterLaneRemoval = reduceMissionControlEvent(createMissionControlEventState(removalSnapshot),
+  envelope(31, "lane.removed", {}, { repository: "norm/example", laneId: "bridge-1" }));
+assert.equal(afterLaneRemoval.lanes[missionControlLaneKey("norm/example", "bridge-1")], undefined);
+assert.equal(Object.values(afterLaneRemoval.providers).some((provider) => provider.laneId === "bridge-1"), false);
+assert.equal(Object.values(afterLaneRemoval.providers).some((provider) => provider.laneId === "bridge-2"), true);
+const afterRepositoryRemoval = reduceMissionControlEvent(afterLaneRemoval,
+  envelope(32, "repository.removed", {}, { repository: "norm/example" }));
+assert.deepEqual(afterRepositoryRemoval.repositories, {});
+assert.deepEqual(afterRepositoryRemoval.portfolios, {});
+assert.deepEqual(afterRepositoryRemoval.lanes, {});
+assert.deepEqual(afterRepositoryRemoval.providers, {});
+assert.equal(afterRepositoryRemoval.quotas.claude.weeklyRemaining, 48,
+  "repository removal must not erase machine-global quota state");
 
 console.log("Mission Control event protocol tests passed.");
