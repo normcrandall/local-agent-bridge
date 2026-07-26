@@ -125,6 +125,24 @@ try {
   assert.equal(afterConcurrent.session.navigation.view, "history");
   await assert.rejects(store.save(session, { expectedRevision: 1 }), (error) => error.code === "REVISION_CONFLICT");
 
+  // Concurrent recovery from a crash-left stale lock remains mutually
+  // exclusive: neither contender may remove the other's newly acquired lock.
+  await writeFile(`${store.path}.lock`, "99999999\n", { mode: 0o600 });
+  await Promise.all([
+    store.update((current) => ({
+      ...current,
+      acknowledgedInputs: { ...current.acknowledgedInputs, "repo\0recovery-a": "claim-a" },
+    })),
+    store.update((current) => ({
+      ...current,
+      acknowledgedInputs: { ...current.acknowledgedInputs, "repo\0recovery-b": "claim-b" },
+    })),
+  ]);
+  const afterStaleRecovery = await store.load();
+  assert.equal(afterStaleRecovery.revision, 5);
+  assert.equal(afterStaleRecovery.session.acknowledgedInputs["repo\0recovery-a"], "claim-a");
+  assert.equal(afterStaleRecovery.session.acknowledgedInputs["repo\0recovery-b"], "claim-b");
+
   // Partial JSON and checksum-valid-looking tampering fail soft to defaults;
   // the next atomic update recovers the same scope instead of stalling startup.
   await writeFile(store.path, '{"version":1,"partial":', { mode: 0o600 });

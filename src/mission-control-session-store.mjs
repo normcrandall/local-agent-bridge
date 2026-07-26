@@ -343,7 +343,34 @@ async function acquireLock(path, attempts) {
         const [ownerText, info] = await Promise.all([readFile(path, "utf8"), stat(path)]);
         const owner = Number.parseInt(ownerText, 10);
         if ((!processAlive(owner) && Number.isInteger(owner)) || (!Number.isInteger(owner) && Date.now() - info.mtimeMs > LOCK_STALE_MS)) {
-          await unlink(path).catch(() => {});
+          // Serialize recovery before touching the stale lock path. Without a
+          // separate exclusive recovery claim, two contenders can both inspect
+          // the dead owner and one can unlink the other's newly acquired live
+          // lock. The winner revalidates after acquiring the claim, then moves
+          // the stale inode out of the lock namespace atomically.
+          const stealPath = `${path}.steal`;
+          let stealHandle = null;
+          try {
+            stealHandle = await open(stealPath, "wx", 0o600);
+            await stealHandle.writeFile(`${process.pid}:${randomUUID()}\n`);
+            await stealHandle.sync();
+            const [currentOwnerText, currentInfo] = await Promise.all([readFile(path, "utf8"), stat(path)]);
+            const currentOwner = Number.parseInt(currentOwnerText, 10);
+            const stillStale = (!processAlive(currentOwner) && Number.isInteger(currentOwner))
+              || (!Number.isInteger(currentOwner) && Date.now() - currentInfo.mtimeMs > LOCK_STALE_MS);
+            if (stillStale) {
+              const claimPath = `${path}.stale.${process.pid}.${randomUUID()}`;
+              await rename(path, claimPath);
+              await rm(claimPath, { force: true });
+            }
+          } catch (stealError) {
+            if (!["EEXIST", "ENOENT"].includes(stealError.code)) {
+              fail("Unable to recover stale Mission Control session lock.", "LOCK_ERROR", stealError);
+            }
+          } finally {
+            await stealHandle?.close().catch(() => {});
+            if (stealHandle) await unlink(stealPath).catch(() => {});
+          }
           continue;
         }
       } catch {}
