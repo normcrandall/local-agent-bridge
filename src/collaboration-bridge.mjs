@@ -709,7 +709,7 @@ const portfolioItemSchema = z.object({
   task: z.string().min(1).max(50_000).optional(),
   priority: z.number().finite().default(0),
   phase: z.string().min(1).max(200).optional(),
-  phaseOrder: z.number().finite().default(0),
+  phaseOrder: z.number().finite().default(0).describe("Numeric phase order. Supply it explicitly with named phases; omitted values intentionally share order 0."),
   status: portfolioStatusSchema.default("ready"),
   blockedBy: z.array(z.string().min(1).max(200)).max(200).default([]),
   conflictsWith: z.array(z.string().min(1).max(200)).max(200).default([]),

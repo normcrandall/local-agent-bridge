@@ -601,6 +601,11 @@ export async function queryControlPlane(stateRoot, options = {}) {
     const portfolioItemsById = new Map(p.items.map((item) => [item.id, item]));
     for (const item of p.items) {
       const scheduledItem = p.schedule?.selected?.find((candidate) => candidate.id === item.id) || null;
+      const phaseOrder = item.phaseOrder ?? null;
+      const currentPhaseOrder = p.schedule?.currentPhaseOrder ?? null;
+      const derivedLookahead = phaseOrder !== null
+        && currentPhaseOrder !== null
+        && Number(phaseOrder) > Number(currentPhaseOrder);
       const colId = item.collaborationId;
       const matched = colId ? collaborations.find(c => c.state.id === colId) : null;
 
@@ -626,8 +631,11 @@ export async function queryControlPlane(stateRoot, options = {}) {
         priority: item.priority !== undefined ? item.priority : null,
         phase: item.phase || null,
         phaseOrder: item.phaseOrder ?? null,
-        lookahead: scheduledItem?.lookahead === true,
-        lookaheadFromPhase: scheduledItem?.lookaheadFromPhase || null,
+        lookahead: scheduledItem?.lookahead === true || item.lookahead === true || derivedLookahead,
+        lookaheadFromPhase: scheduledItem?.lookaheadFromPhase
+          || item.lookaheadFromPhase
+          || (derivedLookahead ? p.schedule?.currentPhase : null)
+          || null,
         blockedBy: item.blockedBy || [],
         blockingDependencies: (item.blockedBy || []).map((dependencyId) => {
           const dependency = portfolioItemsById.get(dependencyId);

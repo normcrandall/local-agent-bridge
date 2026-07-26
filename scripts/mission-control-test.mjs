@@ -543,8 +543,8 @@ try {
     ...missingPortfolioReason,
     portfolio: { ...missingPortfolioReason.portfolio, lookahead: true, lookaheadFromPhase: "foundation" },
   };
-  const lookaheadOutput = renderSnapshot({ ...freshPortfolioRequest, operatorLanes: [lookaheadLane] }, { width: 100, now });
-  assert.match(lookaheadOutput.replace(/[│\n]/g, " ").replace(/\s+/g, " "), /PHASE delivery · LOOKAHEAD from foun/);
+  const lookaheadOutput = renderSnapshot({ ...freshPortfolioRequest, operatorLanes: [lookaheadLane] }, { width: 160, now });
+  assert.match(lookaheadOutput.replace(/[│\n]/g, " ").replace(/\s+/g, " "), /PHASE delivery · LOOKAHEAD ahead of foun/);
   const terminalDependencyLane = {
     ...freshPortfolioRequest.operatorLanes.find((lane) => lane.portfolio?.itemId === "issue-13"),
     lifecyclePhase: "agreed",

@@ -102,6 +102,17 @@ assert.equal(crossPhaseLookahead.deferred.find((item) => item.id === "phase-two-
 assert.equal(crossPhaseLookahead.blocked.find((item) => item.id === "phase-one-blocked").reasons[0].type, "dependency",
   "phase lookahead must not weaken dependency gates");
 
+const tiedPhaseOrder = analyzePortfolio({
+  items: [
+    { id: "z-item", phase: "zeta", phaseOrder: 1, priority: 1 },
+    { id: "a-item", phase: "alpha", phaseOrder: 1, priority: 1 },
+    { id: "later", phase: "delivery", phaseOrder: 2, priority: 100 },
+  ],
+  maxParallel: 3,
+});
+assert.equal(tiedPhaseOrder.currentPhase, "alpha", "tied phase labels must not depend on caller array order");
+assert.deepEqual(tiedPhaseOrder.selected.map((item) => item.id), ["a-item", "z-item", "later"]);
+
 const defaultCapacity = analyzePortfolio({
   items: Array.from({ length: 6 }, (_, index) => ({ id: `parallel-${index}`, paths: [`src/${index}`] })),
 });

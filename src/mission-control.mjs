@@ -1117,7 +1117,7 @@ function detailPane(lane, timeline, width, now, snapshot, expanded = false) {
   if (github) rows.push(paneLine(""), paneLine(`GITHUB  ${github}`, "35"));
   if (lane.portfolio?.phase) {
     const lookahead = lane.portfolio.lookahead
-      ? ` · LOOKAHEAD from ${lane.portfolio.lookaheadFromPhase || "an earlier phase"}`
+      ? ` · LOOKAHEAD ahead of ${lane.portfolio.lookaheadFromPhase || "the current phase"}`
       : "";
     rows.push(paneLine(`PHASE  ${lane.portfolio.phase}${lookahead}`, lane.portfolio.lookahead ? "33;1" : "90"));
   }

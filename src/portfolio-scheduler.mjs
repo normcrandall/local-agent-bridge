@@ -65,6 +65,7 @@ function normalizeItem(value) {
 function schedulingOrder(left, right) {
   return left.phaseOrder - right.phaseOrder
     || right.priority - left.priority
+    || String(left.phase || "").localeCompare(String(right.phase || ""))
     || left.id.localeCompare(right.id);
 }
 
@@ -191,7 +192,9 @@ export function analyzePortfolio({ items, maxParallel = DEFAULT_MAX_PARALLEL } =
     : null;
   const currentPhase = currentPhaseOrder === null
     ? null
-    : unfinished.find((item) => item.phaseOrder === currentPhaseOrder)?.phase || null;
+    : [...unfinished]
+      .filter((item) => item.phaseOrder === currentPhaseOrder)
+      .sort(schedulingOrder)[0]?.phase || null;
   for (const item of ready) {
     const conflicts = [...active, ...integration, ...selected].flatMap((other) => schedulingConflicts(item, other));
     if (conflicts.length) deferred.push({ ...item, reasons: conflicts });

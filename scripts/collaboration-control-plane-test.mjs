@@ -165,9 +165,24 @@ try {
     status: "running",
     updatedAt: "2026-07-17T09:50:00.000Z",
     items: [
-      { id: "lane-1", status: "implementing", writer: "claude", collaborationId: colA.id, priority: 10 },
+      {
+        id: "lane-1",
+        status: "implementing",
+        writer: "claude",
+        collaborationId: colA.id,
+        priority: 10,
+        phase: "delivery",
+        phaseOrder: 2,
+        lookahead: true,
+        lookaheadFromPhase: "foundation",
+      },
       { id: "lane-2", status: "ready", writer: "codex", priority: 5 }
     ],
+    schedule: {
+      currentPhase: "foundation",
+      currentPhaseOrder: 1,
+      selected: [],
+    },
     mergeTrain: {
       targetBranch: "main",
       targetSha: "b".repeat(40),
@@ -232,6 +247,9 @@ try {
   assert.equal(lane1.portfolio.portfolioId, portfolio.id);
   assert.equal(lane1.portfolio.itemId, "lane-1");
   assert.equal(lane1.portfolio.mergeTrain.prNumber, 42);
+  assert.equal(lane1.portfolio.phase, "delivery");
+  assert.equal(lane1.portfolio.lookahead, true, "queryControlPlane preserves lookahead metadata while the lane is active");
+  assert.equal(lane1.portfolio.lookaheadFromPhase, "foundation");
 
   // Check blocker & decisionEscalation
   assert.ok(lane1.blocker.pendingDecision, "lane-1 should have a pending decision");
