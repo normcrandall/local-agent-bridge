@@ -40,6 +40,8 @@ import {
 import { PORTFOLIO_STATUSES, PORTFOLIO_STATUS_GROUPS } from "../src/portfolio-status.mjs";
 import {
   missionControlActionAvailability,
+  createMissionControlPaneLayout,
+  missionControlPaneLayoutIntent,
   missionControlConfirmation,
   missionControlCopyText,
   missionControlPlatformCommands,
@@ -63,6 +65,17 @@ assert.equal(paneFocusIntent("\t", 0), 1);
 assert.equal(paneFocusIntent("\x1b[C", 2), 0);
 assert.equal(paneFocusIntent("\x1b[D", 0), 2);
 assert.equal(paneFocusIntent("j", 1), 1);
+const defaultPaneLayout = createMissionControlPaneLayout();
+assert.equal(defaultPaneLayout.split, true);
+assert.deepEqual(defaultPaneLayout.detached, []);
+assert.equal(missionControlPaneLayoutIntent(defaultPaneLayout, "z", 2).zoomedPane, 2);
+assert.equal(missionControlPaneLayoutIntent({ ...defaultPaneLayout, zoomedPane: 2 }, "z", 2).zoomedPane, null);
+assert.deepEqual(missionControlPaneLayoutIntent(defaultPaneLayout, "d", 0).detached, [0]);
+assert.deepEqual(missionControlPaneLayoutIntent({ ...defaultPaneLayout, detached: [0] }, "d", 0).detached, []);
+assert.equal(missionControlPaneLayoutIntent(defaultPaneLayout, "\\", 1).split, false);
+const enlargedPaneLayout = missionControlPaneLayoutIntent(defaultPaneLayout, "+", 1);
+assert.ok(enlargedPaneLayout.weights[1] > defaultPaneLayout.weights[1]);
+assert.ok(missionControlPaneLayoutIntent(enlargedPaneLayout, "+", 1).weights[1] > enlargedPaneLayout.weights[1]);
 assert.equal(blockedReason({ lifecyclePhase: "blocked", portfolio: { blockedBy: ["issue-672"] } }), "Waiting for issue #672 to complete.");
 assert.equal(blockedReason({ lifecyclePhase: "blocked", blocker: { error: "Reviewer provider is unavailable." } }), "Reviewer provider is unavailable.");
 assert.equal(blockedReason({ lifecyclePhase: "blocked" }), "No blocking reason was recorded by the coordinator.");

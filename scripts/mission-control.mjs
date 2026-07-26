@@ -22,6 +22,8 @@ import {
   missionControlActionAvailability,
   missionControlConfirmation,
   missionControlCopyText,
+  createMissionControlPaneLayout,
+  missionControlPaneLayoutIntent,
   missionControlPlatformCommands,
   missionControlPrUrl,
   missionControlShouldRedraw,
@@ -132,6 +134,8 @@ let pendingConfirmation = null;
 let activePane = 1;
 let detailExpanded = false;
 let detailOffset = 0;
+let paneLayout = createMissionControlPaneLayout();
+let selectedTab = view === "attention" ? "needsYou" : view === "all" ? "history" : "active";
 let selectedRepository = repositoryFilter || null;
 const seenAttentionKeys = new Set();
 let resolveExit;
@@ -258,11 +262,9 @@ function subscriptionSnapshot(viewModel) {
     return lane.operatorCategory === "waiting"
       && (liveRepositories.size === 0 || liveRepositories.has(lane.repository));
   });
-  const modeSource = view === "all"
-    ? matching
-    : view === "attention"
-      ? matching.filter((lane) => ["needs_user", "waiting"].includes(lane.operatorCategory))
-      : liveSource;
+  const selectedCollection = viewModel.collections?.[selectedTab] || [];
+  const selectedKeys = new Set(selectedCollection.map((lane) => lane.key || `${lane.repository}\0${lane.id}`));
+  const modeSource = matching.filter((lane) => selectedKeys.has(lane.key || `${lane.repository}\0${lane.id}`));
   const operatorLanes = deduplicateOperatorLanes(modeSource, {
     includeHistory: view === "all" || (view === "attention" && includeStale),
     staleAfterMs: staleAfterHours * 60 * 60 * 1000,
@@ -276,6 +278,7 @@ function subscriptionSnapshot(viewModel) {
   return {
     generatedAt: viewModel.updatedAt || new Date().toISOString(),
     mode: view,
+    selectedTab,
     filter: repositoryFilter,
     lanes: [...all.values()],
     operatorLanes,
@@ -337,6 +340,7 @@ async function draw(currentOverride = null) {
       activePane,
       detailExpanded,
       detailOffset,
+      paneLayout,
       selectedRepository,
       repositoryLocked: Boolean(repositoryFilter),
       viewportState,
@@ -370,11 +374,21 @@ async function handleKey(key) {
   }
   if (["l", "a", "h"].includes(key)) {
     view = key === "l" ? "live" : key === "a" ? "attention" : "all";
+    selectedTab = key === "l" ? "active" : key === "a" ? "needsYou" : "history";
     selectedIndex = 0;
     selectedId = null;
     actionMessage = null;
     pendingConfirmation = null;
     detailOffset = 0;
+  }
+  else if (/^[1-6]$/u.test(key)) {
+    selectedTab = ["active", "needsYou", "queue", "reviews", "mergeTrain", "history"][Number(key) - 1];
+    view = selectedTab === "active" ? "live" : selectedTab === "history" ? "all" : "attention";
+    selectedIndex = 0;
+    selectedId = null;
+    detailOffset = 0;
+    actionMessage = null;
+    pendingConfirmation = null;
   }
   else if (key === "\t" || key === "\x1b[C") {
     activePane = paneFocusIntent(key, activePane);
@@ -422,6 +436,17 @@ async function handleKey(key) {
     actionMessage = null;
     pendingConfirmation = null;
     detailOffset = 0;
+  }
+  else if (["\\", "+", "=", "-", "_", "z", "d"].includes(key)) {
+    paneLayout = missionControlPaneLayoutIntent(paneLayout, key, activePane);
+    const paneName = ["repositories", "work", "details"][activePane];
+    actionMessage = key === "d"
+      ? `${paneLayout.detached.includes(activePane) ? "Detached" : "Reattached"} ${paneName} pane.`
+      : key === "z"
+        ? `${paneLayout.zoomedPane == null ? "Restored split view from" : "Zoomed"} ${paneName} pane.`
+        : key === "\\"
+          ? `${paneLayout.split ? "Enabled" : "Disabled"} split view.`
+          : `Resized ${paneName} pane.`;
   }
   else if (["o", "y", "c", "x", "A", "w"].includes(key)) {
     const visibleLanes = missionControlVisibleLanes(lastSnapshot || { lanes: [] }, selectedRepository);
