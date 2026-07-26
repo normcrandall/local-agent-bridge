@@ -77,6 +77,32 @@ export async function containsCommit({ sourceRoot, ancestor, candidate, runGit =
 }
 
 /**
+ * Locate a real checkout that can prove whether the installed commit belongs
+ * to main. Installed runtimes intentionally contain no Git metadata, so
+ * callers provide durable provenance and current-workspace candidates instead
+ * of attempting ancestry checks in the copied runtime itself.
+ */
+export async function locateCommitOnMain({
+  ancestor,
+  sourceRoots = [],
+  candidates = ["main", "origin/main"],
+  runGit = defaultGitRunner,
+} = {}) {
+  const roots = [...new Set(sourceRoots
+    .filter((root) => typeof root === "string" && root.trim())
+    .map((root) => resolve(root)))];
+  let definitive = null;
+  for (const sourceRoot of roots) {
+    for (const candidate of candidates) {
+      const contains = await containsCommit({ sourceRoot, ancestor, candidate, runGit });
+      if (contains === true) return { contains, sourceRoot, candidate, checkedRoots: roots };
+      if (contains === false && !definitive) definitive = { contains, sourceRoot, candidate, checkedRoots: roots };
+    }
+  }
+  return definitive || { contains: null, sourceRoot: null, candidate: null, checkedRoots: roots };
+}
+
+/**
  * Both directions of containment, so a checkout that is strictly behind the
  * installed runtime is reported differently from one that merely diverged.
  */

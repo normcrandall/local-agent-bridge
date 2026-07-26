@@ -5,12 +5,13 @@ import { spawnSync } from "node:child_process";
 import { GITHUB_LOGIN_PATTERN } from "../src/github-app-auth.mjs";
 import {
   computeRuntimeDigest,
-  containsCommit,
+  locateCommitOnMain,
   readInstalledProvenance,
 } from "../src/runtime-provenance.mjs";
 import { DEFAULT_OLLAMA_CONFIG, DEFAULT_OLLAMA_MODEL } from "../src/ollama-review.mjs";
 
 const root = resolve(import.meta.dirname, "..");
+const projectRoot = resolve(process.env.AGENT_BRIDGE_WORKSPACE || process.cwd());
 let failed = false;
 
 function configuredOllamaModel() {
@@ -111,8 +112,8 @@ check("Docker Model Runner local reviewer", () => {
 
 check("Bridge dependencies", () => existsSync(resolve(root, "node_modules/@modelcontextprotocol/sdk")), "run npm install");
 check("Playwright MCP", () => existsSync(resolve(root, "node_modules/@playwright/mcp/cli.js")), "run npm install");
-check("Codex project config", () => existsSync(resolve(root, ".codex/config.toml")));
-check("Claude project config", () => existsSync(resolve(root, ".mcp.json")));
+check("Codex project config", () => existsSync(resolve(projectRoot, ".codex/config.toml")), `missing ${resolve(projectRoot, ".codex/config.toml")}`);
+check("Claude project config", () => existsSync(resolve(projectRoot, ".mcp.json")), `missing ${resolve(projectRoot, ".mcp.json")}`);
 check("Antigravity global MCP config", () => {
   const config = JSON.parse(readFileSync(resolve(homedir(), ".gemini/config/mcp_config.json"), "utf8"));
   return Boolean(config.mcpServers?.codex && config.mcpServers?.claude_code && config.mcpServers?.ollama && config.mcpServers?.docker && config.mcpServers?.collaboration);
@@ -340,8 +341,11 @@ const installedProvenance = await readInstalledProvenance(installedRuntimeRoot);
 const observedDigest = installedProvenance
   ? await computeRuntimeDigest(installedRuntimeRoot).catch(() => null)
   : null;
-const mainContainsInstalled = installedProvenance?.commit
-  ? await containsCommit({ sourceRoot: root, ancestor: installedProvenance.commit, candidate: "main" })
+const mainComparison = installedProvenance?.commit
+  ? await locateCommitOnMain({
+      ancestor: installedProvenance.commit,
+      sourceRoots: [installedProvenance.installerWorkspace, projectRoot],
+    })
   : null;
 
 if (installedProvenance) {
@@ -371,9 +375,11 @@ check("Global runtime integrity", () => {
 
 check("Global runtime drift from main", () => {
   if (!installedProvenance?.commit) throw new Error("no installed commit recorded");
-  if (mainContainsInstalled === null) throw new Error(`cannot compare ${installedProvenance.commit} against main from ${root}`);
-  if (!mainContainsInstalled) {
-    throw new Error(`installed ${installedProvenance.commit} is not contained in main; the global runtime is running unmerged code`);
+  if (mainComparison?.contains === null) {
+    throw new Error(`cannot compare ${installedProvenance.commit} against main from ${mainComparison.checkedRoots.join(", ") || "any checkout"}`);
+  }
+  if (!mainComparison?.contains) {
+    throw new Error(`installed ${installedProvenance.commit} is not contained in ${mainComparison.candidate} from ${mainComparison.sourceRoot}; the global runtime is running unmerged code`);
   }
   return true;
 }, "fetch main and redeploy from a commit that main contains, or accept the drift deliberately");
