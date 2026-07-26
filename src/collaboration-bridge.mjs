@@ -79,6 +79,7 @@ import {
   workspaceHeadBuilderBinding,
 } from "./collaboration-start-preflight.mjs";
 import { hydrateClaimedIssueTask } from "./claimed-issue-context.mjs";
+import { createIssueClaimClient, createIssueClaimHydrationClient } from "./github-issue-claims.mjs";
 import { startSupervisedWorker } from "./worker-supervisor-client.mjs";
 import { collaborationAlias, collaborationIdentity } from "./collaboration-identity.mjs";
 import { runWorkspaceRecipe, workspaceRecipePlan } from "./workspace-operations.mjs";
@@ -926,7 +927,6 @@ server.registerTool(
     if (input.issueClaim) {
       const { acquireClaimLease } = await import("./github-issue-claims.mjs");
       const { createInstallationToken } = await import("./github-app-auth.mjs");
-      const { createBoundBuilderClient } = await import("./github-builder-client.mjs");
       const repository = input.issueClaim.repository;
       const credential = await createInstallationToken({ role: "builder", repository });
       if (!sameGitHubAppLogin(input.issueClaim.expectedLogin, credential.expectedLogin)) {
@@ -952,16 +952,13 @@ server.registerTool(
       claimHeadSha = headSha;
       claimBaseSha = revisions.baseSha;
 
-      claimClient = createBoundBuilderClient({
+      claimClient = createIssueClaimClient({
+        credential,
         apiUrl: input.issueClaim.apiUrl || process.env.GITHUB_BUILDER_API_URL || "https://api.github.com",
-        token: credential.token,
-        verifiedLogin: credential.verifiedLogin,
         repository,
         expectedLogin: credential.expectedLogin,
-        authority: resolvedIssueClaim.authority,
         headSha,
         issueNumber: input.issueClaim.issueNumber,
-        allowedOperations: ["get_issue", "add_issue_label", "remove_issue_label", "get_issue_comments", "get_issue_timeline", "get_issue_dependencies", "get_issue_project_items", "update_issue_project_single_select", "post_issue_comment", "update_issue_comment", "delete_issue_comment", "list_tag_locks", "acquire_tag_lock", "release_tag_lock"],
         workspace: requestedWorkspace,
         fetchImpl: fetch,
       });
@@ -1021,7 +1018,6 @@ server.registerTool(
       // There is no ambient-credential or unauthenticated public fallback; a
       // missing bound client fails closed before any provider launches.
       const { createInstallationToken } = await import("./github-app-auth.mjs");
-      const { createBoundBuilderClient } = await import("./github-builder-client.mjs");
       const repository = resolvedIssueTarget.repository;
       const credential = await createInstallationToken({ role: "builder", repository }).catch((error) => {
         throw new Error(`Unable to hydrate issue ${repository}#${resolvedIssueTarget.issueNumber} before provider launch: no bound builder App client is available (${error.message}).`, { cause: error });
@@ -1031,15 +1027,13 @@ server.registerTool(
         headSha: input.githubBuilder?.headSha,
         baseRef: input.worktree?.base || "HEAD",
       });
-      const readClient = createBoundBuilderClient({
+      const readClient = createIssueClaimHydrationClient({
+        credential,
         apiUrl: process.env.GITHUB_BUILDER_API_URL || "https://api.github.com",
-        token: credential.token,
-        verifiedLogin: credential.verifiedLogin,
         repository,
         expectedLogin: credential.expectedLogin,
         headSha: revisions.headSha,
         issueNumber: resolvedIssueTarget.issueNumber,
-        allowedOperations: ["get_issue", "get_issue_comments", "get_issue_timeline", "get_issue_dependencies", "get_issue_project_items"],
         workspace: requestedWorkspace,
         fetchImpl: fetch,
       });
