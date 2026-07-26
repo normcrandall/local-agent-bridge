@@ -9,11 +9,23 @@ proc fail {stateRoot} {
   exit 1
 }
 
+if {![catch {exec node [file join $project scripts mission-control.mjs] --snapshot --state-root $stateRoot --refresh-ms malformed 2>@1} malformed] || ![string match "*--refresh-ms must be an integer between 100 and 3600000 milliseconds*" $malformed]} {
+  fail $stateRoot
+}
+if {![catch {exec node [file join $project scripts mission-control.mjs] --snapshot --state-root $stateRoot --refresh-ms 99 2>@1} outOfRange] || ![string match "*--refresh-ms must be between 100 and 3600000 milliseconds; received 99*" $outOfRange]} {
+  fail $stateRoot
+}
+
 spawn /bin/zsh -f
 send -- "cd '$project'; before=\$(stty -g); node scripts/mission-control.mjs --state-root '$stateRoot' --refresh-ms 250; result=\$?; after=\$(stty -g); if \[\[ \"\$before\" == \"\$after\" \]\]; then echo TERMINAL_OK:\$result; else echo TERMINAL_BAD:\$result; fi; echo INPUT_OK\r"
 expect "AGENT BRIDGE MISSION CONTROL"
 expect "QUOTA"
-after 100
+after 500
+expect {
+  "AGENT BRIDGE MISSION CONTROL" {}
+  timeout { fail $stateRoot }
+  eof { fail $stateRoot }
+}
 send -- "q"
 expect {
   -exact "\033\[?25h\033\[?1049l" {}

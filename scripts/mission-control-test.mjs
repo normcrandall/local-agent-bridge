@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { appendFile, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -1105,7 +1105,19 @@ try {
   });
   assert.match(invalidColumnsCli, /AGENT BRIDGE MISSION CONTROL/);
 
-  console.log("Mission Control tests passed: live defaults, native host visibility, attention/stale filtering, repository grouping, timeline rendering, and snapshot CLI behavior are verified.");
+  const helpCli = execFileSync(process.execPath, [resolve(import.meta.dirname, "mission-control.mjs"), "--help"], { encoding: "utf8" });
+  assert.match(helpCli, /--refresh-ms N\s+Maximum idle redraw interval in ms \(range: 100-3600000; default: 60000\)/);
+  for (const [configured, expected] of [
+    ["not-a-number", /must be an integer between 100 and 3600000 milliseconds/],
+    ["99", /must be between 100 and 3600000 milliseconds; received 99/],
+    ["3600001", /must be between 100 and 3600000 milliseconds; received 3600001/],
+  ]) {
+    const invalidRefresh = spawnSync(process.execPath, [resolve(import.meta.dirname, "mission-control.mjs"), "--snapshot", "--state-root", root, "--refresh-ms", configured], { encoding: "utf8" });
+    assert.equal(invalidRefresh.status, 2, `invalid --refresh-ms ${configured} must fail with an option error`);
+    assert.match(invalidRefresh.stderr, expected);
+  }
+
+  console.log("Mission Control tests passed: live defaults, native host visibility, attention/stale filtering, repository grouping, timeline rendering, and validated snapshot CLI behavior are verified.");
 } finally {
   await rm(root, { recursive: true, force: true });
 }
