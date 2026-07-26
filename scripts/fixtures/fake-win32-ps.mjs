@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 // Stands in for Windows process identity probing in two shapes:
-//   ps form:         -p <pid> -o <field>=            (BRIDGE_SUPERVISOR_PS_BIN)
-//   PowerShell form: -Command <Win32_Process script> (BRIDGE_SUPERVISOR_POWERSHELL_BIN)
+//   ps form:         -p <pid> -o <field>=            (via BRIDGE_SUPERVISOR_PS_BIN)
+//   PowerShell form: -Command <Win32_Process script> (via the powershellBinary option)
 // The PowerShell form lets the win32 branch of processProbe run on POSIX so its argv,
 // ConvertTo-Json parsing, caching, and retry behaviour are covered off Windows.
 

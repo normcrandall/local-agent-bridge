@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { killProcessSafely, processProbe } from "../src/process-identity-probe.mjs";
@@ -44,6 +44,15 @@ function win32Probe(pid, field, extra = {}) {
 
 function logLines() {
   return existsSync(probeLog) ? readFileSync(probeLog, "utf8").trim().split("\n").filter(Boolean) : [];
+}
+
+async function waitFor(condition, message, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await condition()) return;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+  }
+  throw new Error(message);
 }
 
 function alive(pid) {
@@ -95,6 +104,8 @@ function startWorkerWithWin32Fixture(id) {
     stdio: ["ignore", "pipe", "pipe"],
   }));
 }
+
+let startedWorkerPid = null;
 
 try {
   // 1. Fail-closed guards that need no probe at all.
@@ -148,6 +159,7 @@ try {
   // 6. Supervisor restart adopts a verified live worker instead of starting a duplicate.
   await seed(testId);
   const firstStart = startWorkerWithWin32Fixture(testId);
+  startedWorkerPid = firstStart.workerPid;
   assert.equal(firstStart.reused, false, "first start must launch a new worker");
   assert.equal(alive(firstStart.workerPid), true, "worker must be running");
 
@@ -169,9 +181,17 @@ try {
   assert.match(fenced, /no replacement was started/, "refusal must confirm no duplicate writer was started");
   assert.equal(alive(firstStart.workerPid), true, "the fenced worker must be left running, not replaced");
 
-  if (alive(firstStart.workerPid)) killProcessSafely(firstStart.workerPid, "SIGKILL");
-
   console.log("Windows supervisor test passed: win32 identity query, retry, fail-closed parsing, tree termination, restart adoption, and duplicate-writer fencing.");
 } finally {
+  // The supervisor daemon outlives the client that started it and keeps writing into
+  // the state directory, so stop it and wait for exit before removing the temp tree.
+  if (startedWorkerPid && alive(startedWorkerPid)) killProcessSafely(startedWorkerPid, "SIGKILL");
+  try {
+    const metadata = JSON.parse(await readFile(join(stateDirectory, "supervisor.json"), "utf8"));
+    if (alive(metadata.pid)) {
+      process.kill(metadata.pid, "SIGTERM");
+      await waitFor(() => !alive(metadata.pid), "supervisor did not stop during test cleanup");
+    }
+  } catch {}
   await rm(temporary, { recursive: true, force: true });
 }

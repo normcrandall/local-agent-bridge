@@ -46,8 +46,11 @@ function queryWin32Process(numericPid, { timeoutMs, powershellBinary }) {
 export function processProbe(pid, field, {
   probeBinary = process.env.BRIDGE_SUPERVISOR_PS_BIN,
   timeoutMs = 5_000,
-  platform = process.env.BRIDGE_SUPERVISOR_PLATFORM || process.platform,
-  powershellBinary = process.env.BRIDGE_SUPERVISOR_POWERSHELL_BIN || "powershell.exe",
+  // platform and powershellBinary are call-site seams for tests only. They are
+  // deliberately not env-overridable: this is a fail-closed identity path and an
+  // ambient variable must not be able to reroute it.
+  platform = process.platform,
+  powershellBinary = "powershell.exe",
 } = {}) {
   const numericPid = typeof pid === "number" ? pid : Number.parseInt(pid, 10);
   if (!Number.isInteger(numericPid) || numericPid <= 1) {
@@ -76,8 +79,8 @@ export function processProbe(pid, field, {
 }
 
 export function killProcessSafely(pid, signal = "SIGTERM", {
-  platform = process.env.BRIDGE_SUPERVISOR_PLATFORM || process.platform,
-  taskkillBinary = process.env.BRIDGE_SUPERVISOR_TASKKILL_BIN || "taskkill.exe",
+  platform = process.platform,
+  taskkillBinary = "taskkill.exe",
 } = {}) {
   if (!Number.isInteger(pid) || pid <= 1) return false;
   // Windows has no process groups, so a plain kill would leave the worker's children
