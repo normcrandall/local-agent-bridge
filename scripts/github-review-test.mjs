@@ -20,6 +20,7 @@ import {
   evaluateReviewThreadState,
   parseReviewFinding,
   parseWriterDisposition,
+  reconcileApprovedReviewerBlockers,
   reviewFindingMarker,
   reviewReadinessReceiptIsCurrent,
   reviewThreadReceiptPath,
@@ -502,6 +503,109 @@ assert.equal(approvedSubmissionEvent("approved"), "APPROVE");
 assert.equal(approvedSubmissionEvent("COMMENTED"), null);
 assert.equal(approvedSubmissionEvent("PENDING"), null);
 assert.equal(approvedSubmissionEvent(undefined), null);
+
+const reviewerBBody = `Fix the second boundary.\n\n${reviewFindingMarker({
+  headSha: base.headSha,
+  reviewerLogin: "reviewer-b[bot]",
+  classification: "blocker",
+  fixRecommendation: "Keep the second boundary fail closed.",
+})}`;
+const suggestionBody = `Optional naming cleanup.\n\n${reviewFindingMarker({
+  headSha: base.headSha,
+  reviewerLogin: "reviewer-a[bot]",
+  classification: "suggestion",
+})}`;
+const repairedThread = (id, reviewerLogin, body = findingBody, resolved = false) => stateThread({
+  id,
+  isResolved: resolved,
+  comments: { nodes: [
+    { body, author: { login: reviewerLogin, __typename: "Bot" } },
+    { body: followUpBody, author: { login: "builder", __typename: "Bot" } },
+  ] },
+});
+let repairThreads = [
+  repairedThread("owned-blocker", "reviewer-a"),
+  repairedThread("foreign-blocker", "reviewer-b", reviewerBBody),
+  repairedThread("owned-suggestion", "reviewer-a", suggestionBody),
+];
+const repairReadiness = () => evaluateReviewThreadState({ ...stateInput, threads: repairThreads });
+const repairCalls = [];
+const repaired = await reconcileApprovedReviewerBlockers({
+  requestedEvent: "APPROVE",
+  submittedReviewState: "APPROVED",
+  expectedLogin: "reviewer-a[bot]",
+  headSha: nextHeadSha,
+  readReadiness: repairReadiness,
+  resolveThread: async ({ threadId }) => {
+    repairCalls.push(threadId);
+    repairThreads = repairThreads.map((thread) => thread.id === threadId ? { ...thread, isResolved: true } : thread);
+    return { threadId, idempotent: false };
+  },
+});
+assert.deepEqual(repairCalls, ["owned-blocker"], "approval resolves only the approving App's satisfied blocker");
+assert.equal(repaired.readiness.ready, false, "a different reviewer's unresolved blocker remains blocking");
+assert.deepEqual(repaired.readiness.unresolved.map((entry) => entry.threadId), ["foreign-blocker"]);
+
+for (const requestedEvent of ["REQUEST_CHANGES", "COMMENT"]) {
+  let called = false;
+  const skipped = await reconcileApprovedReviewerBlockers({
+    requestedEvent,
+    submittedReviewState: requestedEvent === "REQUEST_CHANGES" ? "CHANGES_REQUESTED" : "COMMENTED",
+    expectedLogin: "reviewer-a[bot]",
+    headSha: nextHeadSha,
+    readReadiness: async () => { called = true; return repairReadiness(); },
+    resolveThread: async () => { called = true; },
+  });
+  assert.equal(skipped.attempted, false);
+  assert.equal(called, false, `${requestedEvent} must not inspect or resolve blocker threads`);
+}
+await assert.rejects(
+  reconcileApprovedReviewerBlockers({
+    requestedEvent: "APPROVE",
+    submittedReviewState: "APPROVED",
+    expectedLogin: "reviewer-a[bot]",
+    headSha: nextHeadSha,
+    readReadiness: async () => ({ ...repairReadiness(), headSha: base.headSha }),
+    resolveThread: async () => assert.fail("stale authorization must not mutate"),
+  }),
+  /refused stale authorization/i,
+);
+
+let retryThreads = [
+  repairedThread("retry-one", "reviewer-a"),
+  repairedThread("retry-two", "reviewer-a"),
+];
+let crashOnce = true;
+const retryReadiness = () => evaluateReviewThreadState({ ...stateInput, threads: retryThreads });
+const retryResolver = async ({ threadId }) => {
+  retryThreads = retryThreads.map((thread) => thread.id === threadId ? { ...thread, isResolved: true } : thread);
+  if (threadId === "retry-one" && crashOnce) {
+    crashOnce = false;
+    throw new Error("simulated process loss after remote mutation");
+  }
+  return { threadId, idempotent: false };
+};
+await assert.rejects(
+  reconcileApprovedReviewerBlockers({
+    requestedEvent: "APPROVE",
+    submittedReviewState: "APPROVED",
+    expectedLogin: "reviewer-a[bot]",
+    headSha: nextHeadSha,
+    readReadiness: retryReadiness,
+    resolveThread: retryResolver,
+  }),
+  /approval published.*stopped after 0\/2/i,
+);
+const recovered = await reconcileApprovedReviewerBlockers({
+  requestedEvent: "APPROVE",
+  submittedReviewState: "APPROVED",
+  expectedLogin: "reviewer-a[bot]",
+  headSha: nextHeadSha,
+  readReadiness: retryReadiness,
+  resolveThread: retryResolver,
+});
+assert.deepEqual(recovered.resolved.map((entry) => entry.threadId), ["retry-two"]);
+assert.equal(recovered.readiness.ready, true, "retry reconciles the landed mutation and remaining blocker");
 assert.equal(
   reviewThreadReceiptPath({
     repository: "owner/repo",

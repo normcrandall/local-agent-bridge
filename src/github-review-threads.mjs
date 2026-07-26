@@ -322,6 +322,54 @@ export function approvedSubmissionEvent(reviewState) {
   return String(reviewState || "").toUpperCase() === "APPROVED" ? "APPROVE" : null;
 }
 
+export async function reconcileApprovedReviewerBlockers({
+  requestedEvent,
+  submittedReviewState,
+  expectedLogin,
+  headSha,
+  readReadiness,
+  resolveThread,
+}) {
+  if (requestedEvent !== "APPROVE" || approvedSubmissionEvent(submittedReviewState) !== "APPROVE") {
+    return { attempted: false, resolved: [], readiness: null };
+  }
+  if (!validSha(headSha)) throw new Error("Review-thread reconciliation requires a full exact-head SHA.");
+  if (!expectedLogin) throw new Error("Review-thread reconciliation requires the approving reviewer login.");
+  if (typeof readReadiness !== "function" || typeof resolveThread !== "function") {
+    throw new Error("Review-thread reconciliation requires bounded readiness and resolution operations.");
+  }
+
+  const before = await readReadiness();
+  if (before?.headSha !== headSha.toLowerCase()) {
+    throw new Error(`Review-thread reconciliation refused stale authorization: expected ${headSha.toLowerCase()}, received ${before?.headSha || "unknown"}.`);
+  }
+  const candidates = (before.unresolved || []).filter((entry) => (
+    entry.answered
+    && sameBotLogin(entry.reviewerLogin, expectedLogin)
+  ));
+  const resolved = [];
+  for (const candidate of candidates) {
+    try {
+      resolved.push(await resolveThread({ threadId: candidate.threadId }));
+    } catch (error) {
+      const failure = new Error(`Exact-head approval published, but reviewer-owned blocker reconciliation stopped after ${resolved.length}/${candidates.length}: ${error.message}`);
+      failure.cause = error;
+      failure.reviewResolution = {
+        headSha: headSha.toLowerCase(),
+        expectedLogin,
+        completedThreadIds: resolved.map((entry) => entry.threadId),
+        pendingThreadIds: candidates.slice(resolved.length).map((entry) => entry.threadId),
+      };
+      throw failure;
+    }
+  }
+  const readiness = await readReadiness();
+  if (readiness?.headSha !== headSha.toLowerCase()) {
+    throw new Error(`Review-thread reconciliation observed a stale final head: expected ${headSha.toLowerCase()}, received ${readiness?.headSha || "unknown"}.`);
+  }
+  return { attempted: true, resolved, readiness };
+}
+
 export function reviewThreadReceiptPath({ repository, prNumber, headSha, expectedLogin, stateRoot }) {
   const repositoryParts = String(repository || "").split("/");
   if (
