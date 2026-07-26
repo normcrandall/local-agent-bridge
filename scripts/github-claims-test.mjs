@@ -12,7 +12,7 @@ import {
   parseClaims
 } from "../src/github-issue-claims.mjs";
 import { createCollaboration, collaborationDirectory, readCollaboration } from "../src/collaboration-store.mjs";
-import { updatePortfolio } from "../src/portfolio-store.mjs";
+import { listPortfolios, updatePortfolio } from "../src/portfolio-store.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -1095,6 +1095,209 @@ async function runTests() {
   assert.equal(reconciledCollaboration.status, "obsolete");
   assert.equal(reconciledCollaboration.semanticLifecycle.state, "obsolete");
   assert.equal((await parseClaims(client, 42))[0].data.phase, "obsolete");
+
+  console.log("13d. Testing isolated claim failures, retained ownership, and transient recovery...");
+  const isolatedWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-claim-reconciliation-test-"));
+  const isolatedPortfolios = path.join(isolatedWorkspace, ".bridge", "portfolios");
+  fs.mkdirSync(isolatedPortfolios, { recursive: true });
+  const badPortfolioId = "helm-00000000-0000-4000-8000-000000000001";
+  const transientPortfolioId = "helm-00000000-0000-4000-8000-000000000002";
+  const noClientPortfolioId = "helm-00000000-0000-4000-8000-000000000003";
+  const malformedPortfolioId = "helm-00000000-0000-4000-8000-000000000004";
+  const goodPortfolioId = "helm-00000000-0000-4000-8000-000000000005";
+  const unwritableFailurePortfolioId = "helm-00000000-0000-4000-8000-000000000006";
+  const corruptPortfolioId = "helm-00000000-0000-4000-8000-000000000007";
+  const badCollaborationId = "bridge-00000000-0000-4000-8000-000000000001";
+  const transientCollaborationId = "bridge-00000000-0000-4000-8000-000000000002";
+  const noClientCollaborationId = "bridge-00000000-0000-4000-8000-000000000003";
+  const malformedCollaborationId = "bridge-00000000-0000-4000-8000-000000000004";
+  const goodCollaborationId = "bridge-00000000-0000-4000-8000-000000000005";
+  const unwritableFailureCollaborationId = "bridge-00000000-0000-4000-8000-000000000006";
+  const claimFor = ({ portfolio, item, collaboration, authority }) => ({
+    portfolio,
+    item,
+    writer: "codex",
+    collaboration,
+    phase: "working",
+    authority,
+    head: "1111111111111111111111111111111111111111",
+    timestamps: {
+      created: new Date().toISOString(),
+      updated: new Date(0).toISOString(),
+    },
+  });
+  const writeReconciliationPortfolio = ({ id, issueNumber, collaborationId, updatedAt }) => {
+    fs.writeFileSync(path.join(isolatedPortfolios, `${id}.json`), JSON.stringify({
+      id,
+      revision: 1,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt,
+      workspace: isolatedWorkspace,
+      items: [{
+        id: `issue-${issueNumber}`,
+        issueNumber,
+        status: "claimed",
+        collaborationId,
+      }],
+    }, null, 2));
+  };
+  writeReconciliationPortfolio({ id: badPortfolioId, issueNumber: 42, collaborationId: badCollaborationId, updatedAt: "2026-01-01T00:00:05.000Z" });
+  writeReconciliationPortfolio({ id: transientPortfolioId, issueNumber: 43, collaborationId: transientCollaborationId, updatedAt: "2026-01-01T00:00:04.000Z" });
+  writeReconciliationPortfolio({ id: noClientPortfolioId, issueNumber: 44, collaborationId: noClientCollaborationId, updatedAt: "2026-01-01T00:00:03.000Z" });
+  writeReconciliationPortfolio({ id: malformedPortfolioId, issueNumber: 45, collaborationId: malformedCollaborationId, updatedAt: "2026-01-01T00:00:02.000Z" });
+  writeReconciliationPortfolio({ id: unwritableFailurePortfolioId, issueNumber: 47, collaborationId: unwritableFailureCollaborationId, updatedAt: "2026-01-01T00:00:01.500Z" });
+  writeReconciliationPortfolio({ id: goodPortfolioId, issueNumber: 46, collaborationId: goodCollaborationId, updatedAt: "2026-01-01T00:00:01.000Z" });
+  for (const [id, issueNumber] of [
+    [badCollaborationId, 42],
+    [transientCollaborationId, 43],
+    [noClientCollaborationId, 44],
+    [malformedCollaborationId, 45],
+    [unwritableFailureCollaborationId, 47],
+    [goodCollaborationId, 46],
+  ]) {
+    await createCollaboration(isolatedWorkspace, {
+      id,
+      task: `issue-${issueNumber}`,
+      workspace: isolatedWorkspace,
+      status: "working",
+      writer: "codex",
+      issueClaim: {
+        repository: "owner/repo",
+        issueNumber,
+        expectedLogin: "builder-app[bot]",
+        headSha: "1111111111111111111111111111111111111111",
+      },
+    });
+  }
+  const badMock = createPausableMockGitHub();
+  const transientMock = createPausableMockGitHub();
+  const malformedMock = createPausableMockGitHub();
+  const goodMock = createPausableMockGitHub();
+  badMock.getRefs().set("refs/tags/claims/issue-42-generation-1", baseClientConfig.headSha);
+  badMock.setComments([{
+    id: 5003486600,
+    body: `### Agent Bridge Issue Claim Lease\n<!-- agent-bridge-issue-claim\n${JSON.stringify(claimFor({
+      portfolio: badPortfolioId,
+      item: "issue-42",
+      collaboration: badCollaborationId,
+      authority: { ...baseClientConfig.authority, appId: "legacy-app" },
+    }), null, 2)}\n-->`,
+    user: { login: "builder-app[bot]" },
+  }]);
+  transientMock.setComments([{
+    id: 5003486601,
+    body: `### Agent Bridge Issue Claim Lease\n<!-- agent-bridge-issue-claim\n${JSON.stringify(claimFor({
+      portfolio: transientPortfolioId,
+      item: "issue-43",
+      collaboration: transientCollaborationId,
+      authority: baseClientConfig.authority,
+    }), null, 2)}\n-->`,
+    user: { login: "builder-app[bot]" },
+  }]);
+  malformedMock.setComments([{
+    id: 5003486602,
+    body: "### Agent Bridge Issue Claim Lease\n<!-- agent-bridge-issue-claim\n{not valid json}\n-->",
+    user: { login: "builder-app[bot]" },
+  }]);
+  goodMock.setComments([{
+    id: 5003486603,
+    body: `### Agent Bridge Issue Claim Lease\n<!-- agent-bridge-issue-claim\n${JSON.stringify(claimFor({
+      portfolio: goodPortfolioId,
+      item: "issue-46",
+      collaboration: goodCollaborationId,
+      authority: baseClientConfig.authority,
+    }), null, 2)}\n-->`,
+    user: { login: "builder-app[bot]" },
+  }]);
+  const badClaimClient = createIssueClaimClient({ ...claimClientArgs, issueNumber: 42, workspace: isolatedWorkspace, fetchImpl: badMock.fetchImpl });
+  const transientBaseClient = createIssueClaimClient({ ...claimClientArgs, issueNumber: 43, workspace: isolatedWorkspace, fetchImpl: transientMock.fetchImpl });
+  let transientIssueReads = 0;
+  const transientClaimClient = new Proxy(transientBaseClient, {
+    get(target, property, receiver) {
+      if (property !== "getIssue") return Reflect.get(target, property, receiver);
+      return async (...args) => {
+        transientIssueReads += 1;
+        if (transientIssueReads === 1) {
+          const error = new Error("GitHub issue lifecycle temporarily unavailable");
+          error.status = 503;
+          throw error;
+        }
+        return target.getIssue(...args);
+      };
+    },
+  });
+  const malformedClaimClient = createIssueClaimClient({ ...claimClientArgs, issueNumber: 45, workspace: isolatedWorkspace, fetchImpl: malformedMock.fetchImpl });
+  const goodClaimClient = createIssueClaimClient({ ...claimClientArgs, issueNumber: 46, workspace: isolatedWorkspace, fetchImpl: goodMock.fetchImpl });
+  const reconciliationOrder = [];
+  const reconciliationClient = ({ issueNumber }) => {
+    reconciliationOrder.push(issueNumber);
+    if (issueNumber === 42) return badClaimClient;
+    if (issueNumber === 43) return transientClaimClient;
+    if (issueNumber === 44) return null;
+    if (issueNumber === 45) return malformedClaimClient;
+    if (issueNumber === 47) {
+      fs.rmSync(path.join(isolatedPortfolios, `${unwritableFailurePortfolioId}.json`));
+      return null;
+    }
+    return goodClaimClient;
+  };
+  // Pin the first-pass ordering so this regression proves that unhealthy
+  // authority records are visited before, and cannot abort, later healthy work.
+  for (const [portfolio, updatedAt] of [
+    [badPortfolioId, "2026-01-01T00:00:05.000Z"],
+    [transientPortfolioId, "2026-01-01T00:00:04.000Z"],
+    [noClientPortfolioId, "2026-01-01T00:00:03.000Z"],
+    [malformedPortfolioId, "2026-01-01T00:00:02.000Z"],
+    [unwritableFailurePortfolioId, "2026-01-01T00:00:01.500Z"],
+    [goodPortfolioId, "2026-01-01T00:00:01.000Z"],
+  ]) {
+    const portfolioFile = path.join(isolatedPortfolios, `${portfolio}.json`);
+    const state = JSON.parse(fs.readFileSync(portfolioFile, "utf8"));
+    state.updatedAt = updatedAt;
+    fs.writeFileSync(portfolioFile, `${JSON.stringify(state, null, 2)}\n`);
+  }
+  assert.deepEqual(
+    (await listPortfolios(isolatedPortfolios)).map((portfolio) => portfolio.items[0].issueNumber),
+    [42, 43, 44, 45, 47, 46],
+  );
+  fs.writeFileSync(path.join(isolatedPortfolios, `${corruptPortfolioId}.json`), "{not valid portfolio json}\n");
+  const firstSweep = await reconcileClaimsAndPortfolios(
+    isolatedWorkspace,
+    fetch,
+    reconciliationClient,
+  );
+  assert.deepEqual(reconciliationOrder, [42, 43, 44, 45, 47, 46]);
+  assert.ok(firstSweep.failures.some((failure) => failure.portfolioId === corruptPortfolioId && failure.stage === "portfolio-read"));
+  assert.ok(firstSweep.failures.some((failure) => failure.portfolioId === unwritableFailurePortfolioId && failure.recordError), "failure-recorder write errors must be reported without aborting the sweep");
+  const isolatedBadPortfolio = JSON.parse(fs.readFileSync(path.join(isolatedPortfolios, `${badPortfolioId}.json`), "utf8"));
+  let isolatedTransientPortfolio = JSON.parse(fs.readFileSync(path.join(isolatedPortfolios, `${transientPortfolioId}.json`), "utf8"));
+  const isolatedNoClientPortfolio = JSON.parse(fs.readFileSync(path.join(isolatedPortfolios, `${noClientPortfolioId}.json`), "utf8"));
+  const isolatedMalformedPortfolio = JSON.parse(fs.readFileSync(path.join(isolatedPortfolios, `${malformedPortfolioId}.json`), "utf8"));
+  const isolatedGoodPortfolio = JSON.parse(fs.readFileSync(path.join(isolatedPortfolios, `${goodPortfolioId}.json`), "utf8"));
+  assert.equal(isolatedBadPortfolio.items[0].status, "indeterminate");
+  assert.match(isolatedBadPortfolio.items[0].summary, /GitHub App ID changed/);
+  assert.match(isolatedBadPortfolio.items[0].summary, /Release the inspected claim.*reacquire/i);
+  assert.equal(badMock.getRefs().get("refs/tags/claims/issue-42-generation-1"), baseClientConfig.headSha);
+  assert.equal((await parseClaims(badClaimClient, 42))[0].data.phase, "working");
+  assert.equal(isolatedTransientPortfolio.items[0].status, "claimed");
+  assert.match(isolatedTransientPortfolio.items[0].summary, /transient GitHub failure/);
+  assert.match(isolatedTransientPortfolio.items[0].summary, /retained claim remains held.*retry automatically/i);
+  assert.doesNotMatch(transientMock.getComments()[0].body, /Reconciled local collaboration status/);
+  assert.equal(isolatedNoClientPortfolio.items[0].status, "indeterminate");
+  assert.match(isolatedNoClientPortfolio.items[0].summary, /No builder App client is configured/);
+  assert.equal(isolatedMalformedPortfolio.items[0].status, "indeterminate");
+  assert.match(isolatedMalformedPortfolio.items[0].summary, /Malformed trusted canonical claim/);
+  assert.match(isolatedMalformedPortfolio.items[0].summary, /release it without mutation.*reacquire/i);
+  assert.equal(isolatedGoodPortfolio.items[0].status, "claimed");
+  assert.match(goodMock.getComments()[0].body, /Reconciled local collaboration status working after broker restart/);
+  assert.doesNotMatch(badMock.getComments()[0].body, /Reconciled local collaboration status/);
+
+  await reconcileClaimsAndPortfolios(isolatedWorkspace, fetch, reconciliationClient);
+  isolatedTransientPortfolio = JSON.parse(fs.readFileSync(path.join(isolatedPortfolios, `${transientPortfolioId}.json`), "utf8"));
+  assert.equal(isolatedTransientPortfolio.items[0].status, "claimed");
+  assert.match(isolatedTransientPortfolio.items[0].summary, /Claim lease reconciled with local collaboration status working/);
+  assert.match(transientMock.getComments()[0].body, /Reconciled local collaboration status working after broker restart/);
+  fs.rmSync(isolatedWorkspace, { recursive: true, force: true });
 
   console.log("14. Testing fail-closed behavior for ref without comment...");
   mock.clear();
