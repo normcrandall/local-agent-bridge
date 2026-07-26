@@ -41,7 +41,10 @@ import {
 } from "../src/performance-timeline.mjs";
 import { createVerificationTimingTracker } from "../src/verification-timing.mjs";
 import { assertRepositoryEvidenceHead, captureRepositoryEvidence } from "../src/repository-evidence.mjs";
-import { createRepositoryRuntimeJournal } from "../src/repository-runtime-journal.mjs";
+import {
+  createRepositoryRuntimeJournal,
+  shouldCheckpointWorkerFailure,
+} from "../src/repository-runtime-journal.mjs";
 import { publishRepositoryLifecycleCheckpoint, repositoryJournalPublicationState } from "../src/repository-lifecycle-publication.mjs";
 import { createEvidenceStore } from "../src/evidence-store.mjs";
 import { createRepositoryJournal } from "../src/repository-journal.mjs";
@@ -1158,7 +1161,7 @@ try {
 } catch (error) {
   if (!(await scheduleProviderRecovery(error).catch(() => false))) {
     let failure = error;
-    if (claimClient) {
+    if (claimClient && shouldCheckpointWorkerFailure(error)) {
       try {
         const metadata = claimWorkspaceMetadata(state);
         workerHeadSha = metadata.headSha;

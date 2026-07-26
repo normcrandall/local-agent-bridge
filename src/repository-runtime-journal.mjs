@@ -7,6 +7,10 @@ import { compactGitHubLifecycleSummary } from "./github-lifecycle.mjs";
 
 export const REPOSITORY_RUNTIME_JOURNAL_VERSION = 1;
 
+export function shouldCheckpointWorkerFailure(error) {
+  return error?.code !== "REPOSITORY_LIFECYCLE_PUBLICATION_REJECTED";
+}
+
 const SHA = /^[0-9a-f]{40}$/i;
 const TERMINAL_PHASES = new Set(["completed", "failed", "indeterminate", "cancelled", "obsolete", "merged"]);
 
@@ -200,7 +204,7 @@ export function createRepositoryRuntimeJournal({
       const statusCode = entry.failure?.statusCode;
       return ["authentication", "authorization"].includes(classification)
         && [401, 403].includes(statusCode)
-        && entry.claimCount <= maxRedrives;
+        && entry.redriveCount < maxRedrives;
     });
     const redriven = [];
     for (const entry of eligible) {

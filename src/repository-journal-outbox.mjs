@@ -143,6 +143,8 @@ function reconstruct(records, nowMs) {
       }
       if (!Number.isInteger(checkpointItem.enqueueSequence) || checkpointItem.enqueueSequence <= 0
         || !Number.isInteger(checkpointItem.claimCount) || checkpointItem.claimCount < 0
+        || (checkpointItem.redriveCount !== undefined
+          && (!Number.isInteger(checkpointItem.redriveCount) || checkpointItem.redriveCount < 0))
         || (checkpointItem.attemptCount !== undefined
           && (!Number.isInteger(checkpointItem.attemptCount) || checkpointItem.attemptCount < 0))
         || typeof checkpointItem.terminal !== "boolean"
@@ -172,6 +174,7 @@ function reconstruct(records, nowMs) {
       items.set(event.keyDigest, {
         ...checkpointItem,
         attemptCount: checkpointItem.attemptCount ?? checkpointItem.claimCount,
+        redriveCount: checkpointItem.redriveCount ?? 0,
         keyDigest: event.keyDigest,
         binding: record.binding,
         lastSequence: record.sequence,
@@ -191,6 +194,7 @@ function reconstruct(records, nowMs) {
           enqueueSequence: record.sequence,
           claimCount: 0,
           attemptCount: 0,
+          redriveCount: 0,
           lease: null,
           acknowledgedAt: null,
           failure: null,
@@ -232,6 +236,7 @@ function reconstruct(records, nowMs) {
       item.terminal = event.terminal;
       item.lease = null;
     } else if (event.event === "requeued") {
+      item.redriveCount = Math.max(item.redriveCount || 0, event.redriveOrdinal || 1);
       item.attemptCount = 0;
       item.lease = null;
       item.acknowledgedAt = null;
@@ -259,6 +264,7 @@ function publicItem(item, nowMs, maxAttempts) {
     enqueuedAt: item.enqueuedAt,
     claimCount: item.claimCount,
     attemptCount: item.attemptCount,
+    redriveCount: item.redriveCount || 0,
     lease: item.lease,
     acknowledgedAt: item.acknowledgedAt,
     retryAt: item.retryAt,
@@ -484,6 +490,7 @@ export function createRepositoryJournalOutbox({
       event: "requeued",
       keyDigest: item.keyDigest,
       priorClaimCount: item.claimCount,
+      redriveOrdinal: (item.redriveCount || 0) + 1,
       at: snapshot.nowAt,
     };
     await journal.append({
@@ -497,6 +504,7 @@ export function createRepositoryJournalOutbox({
         ...item,
         claimCount: item.claimCount,
         attemptCount: 0,
+        redriveCount: event.redriveOrdinal,
         lease: null,
         acknowledgedAt: null,
         failure: null,
@@ -541,6 +549,7 @@ export function createRepositoryJournalOutbox({
             enqueueSequence: item.enqueueSequence,
             claimCount: item.claimCount,
             attemptCount: item.attemptCount,
+            redriveCount: item.redriveCount || 0,
             lease: item.lease,
             acknowledgedAt: item.acknowledgedAt,
             failure: item.failure,

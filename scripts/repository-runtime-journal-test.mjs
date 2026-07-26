@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createRepositoryRuntimeJournal } from "../src/repository-runtime-journal.mjs";
+import {
+  createRepositoryRuntimeJournal,
+  shouldCheckpointWorkerFailure,
+} from "../src/repository-runtime-journal.mjs";
 import {
   publishRepositoryLifecycleCheckpoint,
   repositoryJournalPublicationState,
@@ -31,6 +34,12 @@ function runtime() {
 }
 
 try {
+  assert.equal(shouldCheckpointWorkerFailure(new Error("provider failed")), true);
+  const rejectedPublication = new Error("terminal publication rejected");
+  rejectedPublication.code = "REPOSITORY_LIFECYCLE_PUBLICATION_REJECTED";
+  assert.equal(shouldCheckpointWorkerFailure(rejectedPublication), false,
+    "a rejected terminal publication must not enqueue a contradictory failed checkpoint");
+
   let adapter = runtime();
   const first = await adapter.enqueue({
     collaborationId: "bridge-11111111-2222-4333-8444-555555555555",
@@ -237,6 +246,36 @@ try {
   const bounded = await revoked.redriveAuthorityFailures({ authorityRestored: true });
   assert.deepEqual(bounded, { redriven: 0, eligible: 0, exhausted: 1 },
     "a permanently revoked credential must remain dead-lettered after one bounded redrive");
+
+  const reclaimedDirectory = join(root, "reclaimed-before-authority-failure");
+  const reclaimed = createRepositoryRuntimeJournal({
+    workspace: root,
+    directory: reclaimedDirectory,
+    repository: "veliqon/example",
+    issueNumber: 231,
+    now,
+    leaseMs: 25,
+    maxAttempts: 4,
+  });
+  await reclaimed.enqueue({
+    collaborationId: "bridge-reclaimed-authority",
+    phase: "completed",
+    writer: "codex",
+    headSha: advancedHead,
+    terminal: true,
+  });
+  const [abandonedLease] = await reclaimed.outbox.claim({ workerId: "crashed-before-publication", leaseDurationMs: 25 });
+  assert.equal(abandonedLease.claimCount, 1);
+  advance(26);
+  const [reclaimedLease] = await reclaimed.outbox.claim({ workerId: "replacement-publisher" });
+  assert.equal(reclaimedLease.claimCount, 2);
+  await reclaimed.outbox.fail({
+    leaseId: reclaimedLease.lease.leaseId,
+    failure: { statusCode: 403, message: "authority unavailable after reclaim" },
+  });
+  assert.equal((await reclaimed.redriveAuthorityFailures({ authorityRestored: true })).redriven, 1,
+    "ordinary lease reclamation must not consume the one authority-redrive allowance");
+  assert.equal((await reclaimed.inspect()).pending[0].redriveCount, 1);
 
   const hiddenDirectory = join(root, "hidden-resource");
   const hidden = createRepositoryRuntimeJournal({
