@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { collaborationAlias, collaborationIdentity } from "../src/collaboration-identity.mjs";
 import { acquireIdentityLock, archiveCollaboration, collaborationDirectory, createCollaboration, findCollaborationByIdentity, queryControlPlane, updateCollaboration } from "../src/collaboration-store.mjs";
-import { classifyWaitLane, waitForControlPlane } from "../src/control-plane-wait.mjs";
+import { classifyWaitLane, waitExitCode, waitForControlPlane } from "../src/control-plane-wait.mjs";
 
 const root = await mkdtemp(join(tmpdir(), "bridge-coordination-"));
 const workspace = join(root, "workspace");
@@ -76,6 +76,30 @@ try {
     await updateCollaboration(root, futureId, (current) => ({ ...current, status: "completed" }));
   }, 50);
   assert.equal((await waitsBeforeCreation).reached, true, "a waiter started before lane creation must observe the later terminal lane");
+
+  const anyReached = await waitForControlPlane(root, { handles: [futureId, "absent-sibling"], any: true, timeoutMs: 0 });
+  assert.equal(anyReached.reached, true);
+  assert.ok(anyReached.classifications.includes("missing"), "the absent sibling must still be classified as missing");
+  assert.equal(anyReached.missing, undefined, "a reached --any wait must not carry the structured missing outcome");
+  assert.equal(waitExitCode(anyReached), 0, "a reached sibling must not be converted into exit code 2");
+  const anyMissing = await waitForControlPlane(root, { handles: ["absent-sibling", "absent-other"], any: true, timeoutMs: 0 });
+  assert.equal(anyMissing.missing, true);
+  assert.equal(waitExitCode(anyMissing), 2);
+  assert.equal(waitExitCode({ classifications: [], timedOut: true }), 1);
+  assert.equal(waitExitCode({ classifications: ["crashed"] }), 3);
+  assert.equal(waitExitCode({ classifications: ["terminal"], reached: true }), 0);
+
+  const untargetedId = "bridge-44444444-4444-4444-8444-444444444444";
+  const targetedId = "bridge-55555555-5555-4555-8555-555555555555";
+  const workIdentity = collaborationIdentity({ workspace, mode: "work", resumeKey: "issue-117-work" });
+  const unusedIdentity = collaborationIdentity({ workspace, mode: "work", resumeKey: "issue-117-unused" });
+  assert.notEqual(workIdentity, identity);
+  assert.notEqual(workIdentity, unusedIdentity);
+  await createCollaboration(root, { id: untargetedId, workspace, status: "running", agents: ["claude"] });
+  await createCollaboration(root, { id: targetedId, identityKey: workIdentity, workspace, status: "running", agents: ["claude"] });
+  await rm(join(collaborationDirectory(root), `identity-${workIdentity}.json`), { force: true });
+  assert.equal((await findCollaborationByIdentity(root, workIdentity)).id, targetedId, "the fallback scan must still recover the targeted lane after the identity index is lost");
+  assert.equal(await findCollaborationByIdentity(root, unusedIdentity), null, "neither an untargeted lane nor a differently targeted lane may satisfy an identity lookup");
 
   await createCollaboration(root, {
     id: "bridge-11111111-2222-4222-8222-222222222222",

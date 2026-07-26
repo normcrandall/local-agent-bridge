@@ -22,7 +22,7 @@ import { appendEvent, archiveCollaboration, pruneTerminalCollaborations, readCol
 import { clearTerminalRuntime, workerCancellationMatches } from "../src/collaboration-cleanup.mjs";
 import { replayIncident, formatReplayHuman } from "../src/incident-replay.mjs";
 import { applyBridgeCleanup, auditBridgeCleanup, formatCleanupReport } from "../src/state-cleanup.mjs";
-import { waitForControlPlane } from "../src/control-plane-wait.mjs";
+import { waitExitCode, waitForControlPlane } from "../src/control-plane-wait.mjs";
 import { auditWorkspaceSweep, runWorkspaceRecipe, workspaceRecipePlan } from "../src/workspace-operations.mjs";
 import { effectiveBridgeConfig } from "../src/effective-config.mjs";
 import { deliveryPolicyExplainDocument, explainDeliveryPolicy, resolveDeliveryPolicy } from "../src/delivery-policy.mjs";
@@ -241,9 +241,7 @@ switch (command) {
       timeoutMs,
     });
     json(result);
-    if (result.timedOut) process.exitCode = 1;
-    else if (result.classifications.includes("missing")) process.exitCode = 2;
-    else if (result.classifications.includes("crashed")) process.exitCode = 3;
+    process.exitCode = waitExitCode(result);
     break;
   }
   case "archive": {

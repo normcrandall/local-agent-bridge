@@ -64,3 +64,10 @@ export async function waitForControlPlane(stateRoot, {
   const result = last || { requested, lanes: [], classifications: [], changed: [], cursor: afterUpdatedAt, reached: false };
   return result.classifications.includes("missing") ? { ...result, missing: true } : { ...result, timedOut: true };
 }
+
+export function waitExitCode(result) {
+  if (result?.missing) return 2;
+  if (result?.classifications?.includes("crashed")) return 3;
+  if (result?.timedOut) return 1;
+  return 0;
+}

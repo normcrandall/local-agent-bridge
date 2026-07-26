@@ -43,7 +43,9 @@ import {
   missionControlCopyText,
   missionControlPlatformCommands,
   missionControlPrUrl,
+  missionControlShouldRedraw,
   resolveMissionControlSelection,
+  runClipboardCopy,
 } from "../src/mission-control-actions.mjs";
 
 assert.equal(parseRepositoryRemote("https://token@example.com/owner/repo.git"), "owner/repo");
@@ -81,6 +83,36 @@ assert.equal(missionControlActionAvailability({ type: "collaboration", coordinat
 assert.equal(missionControlPlatformCommands("darwin").open[0].command, "open");
 assert.equal(missionControlPlatformCommands("linux").copy[0].command, "wl-copy");
 assert.equal(missionControlPlatformCommands("win32").copy[0].command, "clip.exe");
+
+const linuxClipboard = missionControlPlatformCommands("linux").copy;
+const failedInDisplay = runClipboardCopy("lane\ttext", {
+  commands: linuxClipboard,
+  run: (candidate) => candidate.command === "wl-copy"
+    ? { status: 1, stderr: "wl-copy: no wayland display" }
+    : { status: 0 },
+});
+assert.equal(failedInDisplay.copied, true, "an installed clipboard command that fails must fall through to the next candidate");
+assert.equal(failedInDisplay.command, "xclip");
+assert.deepEqual(failedInDisplay.attempts.map((attempt) => attempt.command), ["wl-copy", "xclip"]);
+const absentThenFailing = runClipboardCopy("lane\ttext", {
+  commands: linuxClipboard,
+  run: (candidate) => candidate.command === "xsel"
+    ? { status: 0 }
+    : { status: null, error: Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" }) },
+});
+assert.equal(absentThenFailing.command, "xsel", "absent commands must still be skipped");
+const allClipboardsFail = runClipboardCopy("lane\ttext", {
+  commands: linuxClipboard,
+  run: () => ({ status: 1 }),
+});
+assert.equal(allClipboardsFail.copied, false);
+assert.deepEqual(allClipboardsFail.attempts.map((attempt) => attempt.status), [1, 1, 1]);
+assert.equal(runClipboardCopy("lane", { commands: linuxClipboard, run: () => ({ status: 0, error: Object.assign(new Error("EPIPE"), { code: "EPIPE" }) }) }).copied, false, "a spawn error must never count as a successful copy");
+
+assert.equal(missionControlShouldRedraw({}), true);
+assert.equal(missionControlShouldRedraw({ promptOpen: true }), false, "resize must not redraw over an open interactive prompt");
+assert.equal(missionControlShouldRedraw({ promptOpen: true, stopped: true }), false);
+assert.equal(missionControlShouldRedraw({ stopped: true }), false);
 assert.deepEqual(newlyObservedAttentionKeys(new Set(["lane-a:1"]), ["lane-a:1"]), []);
 assert.deepEqual(newlyObservedAttentionKeys(new Set(["lane-a:1", "lane-b:1"]), ["lane-a:1"]), [], "removing a request must not ring again");
 assert.deepEqual(newlyObservedAttentionKeys(new Set(["lane-a:1"]), ["lane-a:1", "lane-b:1"]), ["lane-b:1"]);

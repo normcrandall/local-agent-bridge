@@ -23,7 +23,9 @@ import {
   missionControlCopyText,
   missionControlPlatformCommands,
   missionControlPrUrl,
+  missionControlShouldRedraw,
   resolveMissionControlSelection,
+  runClipboardCopy,
 } from "../src/mission-control-actions.mjs";
 import { callMissionControlAction } from "../src/mission-control-client.mjs";
 import { createProviderQuotaMonitor } from "../src/provider-quota.mjs";
@@ -113,6 +115,7 @@ let selectedIndex = 0;
 let selectedId = null;
 let drawing = false;
 let stopped = false;
+let promptOpen = false;
 let timer = null;
 let restorePromise = null;
 let terminalRestored = false;
@@ -134,7 +137,7 @@ function restore() {
   providerQuotaMonitor.stop();
   if (timer) clearInterval(timer);
   timer = null;
-  process.stdout.off("resize", draw);
+  process.stdout.off("resize", handleResize);
   process.stdin.setRawMode?.(false);
   process.stdin.pause();
   restorePromise = new Promise((resolveRestore) => {
@@ -166,8 +169,14 @@ function pauseRefreshTimer() {
   return shouldResume;
 }
 
+function handleResize() {
+  if (!missionControlShouldRedraw({ promptOpen, stopped })) return;
+  void draw();
+}
+
 async function promptLine(label) {
   const shouldResumeRefresh = pauseRefreshTimer();
+  promptOpen = true;
   process.stdin.off("data", handleKey);
   process.stdin.setRawMode(false);
   process.stdout.write(`\x1b[?25h\x1b[H\x1b[2J${label}\n`);
@@ -176,6 +185,7 @@ async function promptLine(label) {
     return (await readline.question("> ")).trim();
   } finally {
     readline.close();
+    promptOpen = false;
     process.stdin.setRawMode(true);
     process.stdin.on("data", handleKey);
     process.stdout.write("\x1b[?25l");
@@ -204,13 +214,10 @@ function openExternalUrl(url, laneId) {
 }
 
 function copySelection(lane) {
-  const input = missionControlCopyText(lane);
-  for (const candidate of missionControlPlatformCommands().copy) {
-    const copied = spawnSync(candidate.command, candidate.args, { input, encoding: "utf8" });
-    if (copied.status === 0) return true;
-    if (copied.error?.code !== "ENOENT") return false;
-  }
-  return false;
+  return runClipboardCopy(missionControlCopyText(lane), {
+    commands: missionControlPlatformCommands().copy,
+    run: (candidate, input) => spawnSync(candidate.command, candidate.args, { input, encoding: "utf8" }),
+  }).copied;
 }
 
 async function shutdown(code) {
@@ -346,7 +353,7 @@ async function handleKey(key) {
       const url = missionControlPrUrl(lane);
       openExternalUrl(url, lane.id);
     } else if (key === "y") {
-      actionMessage = copySelection(lane) ? `Copied ${lane.alias || lane.id}.` : "Clipboard copy failed: no supported clipboard command is available.";
+      actionMessage = copySelection(lane) ? `Copied ${lane.alias || lane.id}.` : "Clipboard copy failed: no supported clipboard command succeeded in this environment.";
     } else if (key === "c") {
       const message = await promptLine(`Continue ${lane.alias || lane.id}. Enter the next instruction; blank cancels.`);
       if (!message) actionMessage = "Continue cancelled.";
@@ -398,7 +405,7 @@ process.stdin.on("data", handleKey);
 process.on("SIGINT", () => { void shutdown(130); });
 process.on("SIGTERM", () => { void shutdown(143); });
 process.on("exit", restoreSynchronously);
-process.stdout.on("resize", draw);
+process.stdout.on("resize", handleResize);
 
 startRefreshTimer();
 await draw();
