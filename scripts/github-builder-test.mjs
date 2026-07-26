@@ -94,8 +94,9 @@ git(["add", "inherited-feature.txt"], { cwd: localRepoPath });
 git(["commit", "-m", "Add feature above binary base"], { cwd: localRepoPath });
 const inheritedBinaryHeadSha = gitOut(["rev-parse", "HEAD"], { cwd: localRepoPath });
 
-// Binary changes above the bound base exercise push_branch's scoped payload
-// validation when the provider omits oldSha and the client inherits baseSha.
+// Together with the unchanged-binary positive case below, binary changes above
+// the bound base pin push_branch's scoped payload validation and prove that
+// rejection finishes before any credential or remote mutation.
 git(["checkout", "-b", "added-binary", inheritedBinaryBaseSha], { cwd: localRepoPath });
 fs.writeFileSync(path.join(localRepoPath, "added-binary.dat"), Buffer.from([0, 4, 5, 6]));
 git(["add", "added-binary.dat"], { cwd: localRepoPath });
@@ -107,6 +108,11 @@ fs.writeFileSync(path.join(localRepoPath, "inherited-binary.dat"), Buffer.from([
 git(["add", "inherited-binary.dat"], { cwd: localRepoPath });
 git(["commit", "-m", "Modify binary above base"], { cwd: localRepoPath });
 const modifiedBinaryHeadSha = gitOut(["rev-parse", "HEAD"], { cwd: localRepoPath });
+
+git(["checkout", "-b", "deleted-binary", inheritedBinaryBaseSha], { cwd: localRepoPath });
+git(["rm", "inherited-binary.dat"], { cwd: localRepoPath });
+git(["commit", "-m", "Delete binary above base"], { cwd: localRepoPath });
+const deletedBinaryHeadSha = gitOut(["rev-parse", "HEAD"], { cwd: localRepoPath });
 git(["checkout", "main"], { cwd: localRepoPath });
 
 // Seed remote state through direct file-path pushes: no network, no auth, no
@@ -118,6 +124,7 @@ git(["push", bareRepoPath, `${baseCommitSha}:refs/heads/ff2-branch`], { cwd: loc
 git(["push", bareRepoPath, `${inheritedBinaryBaseSha}:refs/heads/inherited-binary-push`], { cwd: localRepoPath });
 git(["push", bareRepoPath, `${inheritedBinaryBaseSha}:refs/heads/added-binary-push`], { cwd: localRepoPath });
 git(["push", bareRepoPath, `${inheritedBinaryBaseSha}:refs/heads/modified-binary-push`], { cwd: localRepoPath });
+git(["push", bareRepoPath, `${inheritedBinaryBaseSha}:refs/heads/deleted-binary-push`], { cwd: localRepoPath });
 git(["push", bareRepoPath, `${divergedSha}:refs/heads/cas-branch`], { cwd: localRepoPath });
 git(["push", bareRepoPath, `${divergedSha}:refs/heads/diverged-branch`], { cwd: localRepoPath });
 git(["push", bareRepoPath, `${divergedSha}:refs/heads/replacement-branch`], { cwd: localRepoPath });
@@ -1509,6 +1516,20 @@ for (const binaryChange of [
     inheritedBinaryBaseSha,
   );
 }
+
+// Deletions are excluded from blob inspection. Otherwise cat-file would try to
+// read a path that no longer exists at the candidate head and reject a valid
+// fast-forward before delivery.
+const deletedBinaryPush = await createBoundBuilderClient({
+  ...base,
+  baseSha: inheritedBinaryBaseSha,
+  headSha: deletedBinaryHeadSha,
+  headRef: "deleted-binary-push",
+  fetchImpl: fakeGitHub({ branchShas: { "deleted-binary-push": [inheritedBinaryBaseSha, deletedBinaryHeadSha] } }).fetchImpl,
+}).pushBranch({ ref: "refs/heads/deleted-binary-push", sha: deletedBinaryHeadSha });
+assert.equal(deletedBinaryPush.expectedOldSha, inheritedBinaryBaseSha);
+assert.equal(deletedBinaryPush.outcome, "fast_forwarded");
+assert.equal(gitOut(["rev-parse", "refs/heads/deleted-binary-push"], { cwd: bareRepoPath }), deletedBinaryHeadSha);
 
 // F. Missing remote branch and stale oldSha are rejected before any push.
 await assert.rejects(
