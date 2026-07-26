@@ -534,6 +534,69 @@ try {
   assert.equal(widenedBuilderOperations.isError, true,
     "wider builder operations must reach fresh verification preflight rather than reuse the narrower lane");
   assert.match(widenedBuilderOperations.content?.[0]?.text || "", /Writer hydration|self-contained writer checkout|verifiedHeadSha|verification/i);
+
+  // issueClaim is the primary collaboration target, but it must not mask a
+  // changed exact-head PR review binding. Seed a live compatible lane, prove an
+  // exact retry reaches lookup and reuses it, then prove a changed review head
+  // misses lookup and reaches the later claim-identity preflight instead.
+  const claimedReviewReuseBase = {
+    task: "Exercise claimed exact-head review reuse compatibility.",
+    workspace: cleanWorkspace,
+    agents: ["claude"],
+    startAgent: "claude",
+    mode: "review",
+    maxTurns: 1,
+    handoffPath: ".bridge/test-handoffs/claimed-review-reuse.md",
+    issueClaim: {
+      repository: "veliqon/collaboration-fixture",
+      issueNumber: 98,
+      expectedLogin: "other-builder[bot]",
+      headSha: claimedHead,
+    },
+    githubReview: {
+      repository: "veliqon/collaboration-fixture",
+      prNumber: 251,
+      headSha: claimedHead,
+      expectedLogins: { claude: "test-builder[bot]" },
+    },
+  };
+  const claimedReviewIdentity = collaborationIdentity({
+    ...claimedReviewReuseBase,
+    requestedAgents: claimedReviewReuseBase.agents,
+  });
+  const claimedReviewId = "bridge-24800000-0000-4000-8000-000000000002";
+  await createCollaboration(root, {
+    id: claimedReviewId,
+    identityKey: claimedReviewIdentity,
+    task: claimedReviewReuseBase.task,
+    workspace: cleanWorkspace,
+    status: "running",
+    mode: "review",
+    agents: ["claude"],
+    requestedAgents: ["claude"],
+    startAgent: "claude",
+    handoffPath: claimedReviewReuseBase.handoffPath,
+    issueClaim: claimedReviewReuseBase.issueClaim,
+    githubReview: claimedReviewReuseBase.githubReview,
+    runtime: { activeCall: { agent: "claude", status: "running" } },
+  });
+  const claimedReviewRetry = await reviewRaceClaudeClient.callTool({
+    name: "start_collaboration",
+    arguments: claimedReviewReuseBase,
+  });
+  assert.equal(claimedReviewRetry.structuredContent.id, claimedReviewId,
+    "an identical claimed exact-head review must reuse its compatible live lane");
+  assert.equal(claimedReviewRetry.structuredContent.resume?.reused, true);
+  const changedClaimedReviewHead = await reviewRaceAntigravityClient.callTool({
+    name: "start_collaboration",
+    arguments: {
+      ...claimedReviewReuseBase,
+      githubReview: { ...claimedReviewReuseBase.githubReview, headSha: "f".repeat(40) },
+    },
+  });
+  assert.equal(changedClaimedReviewHead.isError, true,
+    "a changed exact review head must miss lookup and run fresh preflight");
+  assert.match(changedClaimedReviewHead.content?.[0]?.text || "", /Issue claim builder identity mismatch/i);
   const targetSha = "a".repeat(40);
   const firstHead = "b".repeat(40);
   const plannedPortfolio = await firstClient.callTool({

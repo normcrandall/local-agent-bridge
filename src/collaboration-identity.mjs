@@ -36,8 +36,17 @@ function canonicalReviewerLogin(value) {
 }
 
 function reviewerIdentityConstraints(githubReview = null) {
-  if (!githubReview) return { expectedLogin: null, expectedLogins: {} };
+  if (!githubReview) return {
+    repository: null,
+    prNumber: null,
+    headSha: null,
+    expectedLogin: null,
+    expectedLogins: {},
+  };
   return {
+    repository: clean(githubReview.repository) || null,
+    prNumber: githubReview.prNumber || null,
+    headSha: clean(githubReview.headSha).toLowerCase() || null,
     expectedLogin: canonicalReviewerLogin(githubReview.expectedLogin),
     expectedLogins: Object.fromEntries(Object.keys(githubReview.expectedLogins || {}).sort().flatMap((provider) => {
       const login = canonicalReviewerLogin(githubReview.expectedLogins[provider]);

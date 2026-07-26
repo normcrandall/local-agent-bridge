@@ -53,6 +53,27 @@ try {
     ...reviewRequest,
     githubReview: { ...reviewRequest.githubReview, expectedLogins: { claude: "VELIQON-CLAUDE-REVIEWER[bot]" } },
   }), "equivalent reviewer App login spellings must remain compatible");
+  const claimedReviewRequest = {
+    ...reviewRequest,
+    issueClaim: {
+      repository: "veliqon/nolvaren-next",
+      issueNumber: 248,
+      headSha: "c".repeat(40),
+    },
+  };
+  const claimedReviewIdentity = collaborationIdentity(claimedReviewRequest);
+  assert.notEqual(claimedReviewIdentity, collaborationIdentity({
+    ...claimedReviewRequest,
+    githubReview: { ...claimedReviewRequest.githubReview, headSha: "d".repeat(40) },
+  }), "the exact review head must constrain reuse even when issueClaim owns the primary target identity");
+  assert.notEqual(claimedReviewIdentity, collaborationIdentity({
+    ...claimedReviewRequest,
+    githubReview: { ...claimedReviewRequest.githubReview, prNumber: 184 },
+  }), "the review PR number must constrain reuse independently of the issue claim");
+  assert.notEqual(claimedReviewIdentity, collaborationIdentity({
+    ...claimedReviewRequest,
+    githubReview: { ...claimedReviewRequest.githubReview, repository: "veliqon/other" },
+  }), "the review repository must constrain reuse independently of the issue claim");
   assert.notEqual(identity, collaborationIdentity({
     ...reviewRequest,
     agents: ["claude"],
