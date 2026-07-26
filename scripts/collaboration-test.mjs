@@ -227,6 +227,8 @@ let receiptClient;
 let capacityClient;
 let recoveryClient;
 let mixedFailureClient;
+let reviewRaceClaudeClient;
+let reviewRaceAntigravityClient;
 try {
   firstClient = await connect("collaboration-test-app-one", { CLAUDE_BIN: hydrationProvider });
   const tools = await firstClient.listTools();
@@ -340,6 +342,67 @@ try {
   assert.equal(namedVerification.structuredContent.verificationRole, "quick");
   assert.deepEqual(namedVerification.structuredContent.requestedVerificationCommands, ["git diff --check"]);
   await waitForStop(firstClient, namedVerification.structuredContent.id);
+
+  // Two callers may race to start independent exact-head reviews. Provider
+  // selection is part of compatibility, so the identity lock must serialize
+  // only matching retries and must never collapse Claude into Antigravity.
+  reviewRaceClaudeClient = await connect("collaboration-review-race-claude", { FAKE_CLAUDE_DELAY_MS: "3000" });
+  reviewRaceAntigravityClient = await connect("collaboration-review-race-antigravity");
+  const reviewRaceBase = {
+    task: "Independently review the same exact PR head.",
+    workspace: cleanWorkspace,
+    mode: "review",
+    maxTurns: 1,
+    handoffPath: ".bridge/test-handoffs/reuse-race.md",
+    githubReview: {
+      repository: "veliqon/collaboration-fixture",
+      prNumber: 248,
+      headSha: claimedHead,
+      expectedLogins: {
+        claude: "test-builder[bot]",
+        antigravity: "test-antigravity-reviewer[bot]",
+      },
+    },
+  };
+  const [claudeRaceStart, antigravityRaceStart] = await Promise.all([
+    reviewRaceClaudeClient.callTool({
+      name: "start_collaboration",
+      arguments: { ...reviewRaceBase, agents: ["claude"], startAgent: "claude" },
+    }),
+    reviewRaceAntigravityClient.callTool({
+      name: "start_collaboration",
+      arguments: { ...reviewRaceBase, agents: ["antigravity"], startAgent: "antigravity" },
+    }),
+  ]);
+  assert.notEqual(claudeRaceStart.isError, true, claudeRaceStart.content?.[0]?.text || "Claude race start failed");
+  assert.notEqual(antigravityRaceStart.isError, true, antigravityRaceStart.content?.[0]?.text || "Antigravity race start failed");
+  assert.notEqual(
+    claudeRaceStart.structuredContent.id,
+    antigravityRaceStart.structuredContent.id,
+    "concurrent provider-specific exact-head reviews must create independent collaborations",
+  );
+  const claudeCompatibleRetry = await reviewRaceClaudeClient.callTool({
+    name: "start_collaboration",
+    arguments: { ...reviewRaceBase, agents: ["claude"], startAgent: "claude" },
+  });
+  assert.equal(claudeCompatibleRetry.structuredContent.id, claudeRaceStart.structuredContent.id,
+    "a compatible same-provider retry must reuse its live collaboration");
+  assert.equal(claudeCompatibleRetry.structuredContent.resume?.reused, true);
+  assert.deepEqual(claudeCompatibleRetry.structuredContent.resume?.compatibility?.matchedDimensions, [
+    "requestedProviderRoster",
+    "startAgent",
+    "explicitModels",
+    "modelFallbacks",
+    "allowClaudeFable",
+    "handoffPath",
+    "githubReviewerIdentityConstraints",
+  ]);
+  assert.deepEqual(claudeCompatibleRetry.structuredContent.resume?.compatibility?.requestedProviderRoster, ["claude"]);
+  assert.equal(claudeCompatibleRetry.structuredContent.resume?.compatibility?.startAgent, "claude");
+  await Promise.all([
+    waitForStop(reviewRaceClaudeClient, claudeRaceStart.structuredContent.id),
+    waitForStop(reviewRaceAntigravityClient, antigravityRaceStart.structuredContent.id),
+  ]);
   const targetSha = "a".repeat(40);
   const firstHead = "b".repeat(40);
   const plannedPortfolio = await firstClient.callTool({
@@ -1211,6 +1274,8 @@ try {
   await capacityClient?.close().catch(() => {});
   await recoveryClient?.close().catch(() => {});
   await mixedFailureClient?.close().catch(() => {});
+  await reviewRaceClaudeClient?.close().catch(() => {});
+  await reviewRaceAntigravityClient?.close().catch(() => {});
   await new Promise((resolvePromise) => githubServer.close(resolvePromise));
   try {
     const supervisor = JSON.parse(await readFile(join(stateDirectory, "supervisor.json"), "utf8"));
