@@ -451,6 +451,7 @@ export async function queryControlPlane(stateRoot, options = {}) {
     const participants = cState.participants || cState.agents || [];
     const writer = cState.writer || cState.runtime?.writer || null;
     const activeCall = cState.runtime?.activeCall || null;
+    const observedCall = activeCall || cState.runtime?.lastCall || null;
 
     const usage = {};
     for (const agent of participants) {
@@ -470,12 +471,12 @@ export async function queryControlPlane(stateRoot, options = {}) {
       }
     }
 
-    const narrative = activeCall ? {
-      summary: activeCall.summary || null,
-      updatedAt: activeCall.summaryAt || null,
-      ageSeconds: parseAge(activeCall.summaryAt),
-      source: activeCall.summarySource || null,
-      isPlaceholder: activeCall.summarySource === "broker"
+    const narrative = observedCall ? {
+      summary: observedCall.summary || null,
+      updatedAt: observedCall.summaryAt || null,
+      ageSeconds: parseAge(observedCall.summaryAt),
+      source: observedCall.summarySource || null,
+      isPlaceholder: observedCall.summarySource === "broker"
     } : {
       summary: null,
       updatedAt: null,
@@ -555,8 +556,9 @@ export async function queryControlPlane(stateRoot, options = {}) {
       task: String(cState.taskBase || cState.task || "").split(CLAIMED_ISSUE_CONTEXT_MARKER)[0].trim().slice(0, 500),
       participants,
       writer,
-      activeAgent: activeCall?.agent || cState.runtime?.previousAgent || null,
-      providerPhase: activeCall?.phase || activeCall?.status || null,
+      activeAgent: observedCall?.agent || cState.runtime?.previousAgent || null,
+      providerPhase: observedCall?.phase || observedCall?.status || null,
+      providerRole: observedCall?.role || (writer ? "writer" : "reviewer"),
       lifecyclePhase: cState.status || "unknown",
       createdAt: cState.createdAt || null,
       updatedAt: cState.updatedAt || null,
@@ -566,6 +568,7 @@ export async function queryControlPlane(stateRoot, options = {}) {
       issueNumber: cState.issueClaim?.issueNumber || null,
       prNumber: cState.ci?.pr || cState.ciTracking?.prNumber || cState.githubReview?.prNumber || cState.githubBuilder?.prNumber || null,
       branch: cState.githubBuilder?.headRef || cState.branch || null,
+      checkout: cState.writerCheckout?.path || cState.worktree?.path || cState.issueClaim?.worktree || null,
       headSha: cState.githubReview?.headSha || cState.githubBuilder?.headSha || cState.issueClaim?.headSha || null,
       ci: cState.ci || cState.ciTracking || null,
       coordinatorWake: cState.coordinatorWake || null,
@@ -574,10 +577,11 @@ export async function queryControlPlane(stateRoot, options = {}) {
       writerAuthority: cState.writerAuthority || null,
       performanceSummary: cState.performanceSummary || null,
       turnCount: cState.runtime?.turnCount || 0,
-      model: activeCall?.model || activeCall?.selectedModel || null,
+      model: observedCall?.model || observedCall?.selectedModel || null,
+      providerConcurrency: cState.providerConcurrency || null,
       narrative,
       heartbeat,
-      activity: activeCall?.activity || null,
+      activity: observedCall?.activity || null,
       handoff,
       blocker,
       recovery,
@@ -672,6 +676,7 @@ export async function queryControlPlane(stateRoot, options = {}) {
           participants,
           writer,
           activeAgent: null,
+          providerRole: writer ? "writer" : null,
           lifecyclePhase: item.status || "unknown",
           createdAt: p.createdAt || null,
           updatedAt: item.updatedAt || p.updatedAt || null,
@@ -682,6 +687,7 @@ export async function queryControlPlane(stateRoot, options = {}) {
           issueNumber: item.issueNumber || null,
           prNumber: item.prNumber || mtEntry?.prNumber || null,
           branch: item.branch || null,
+          checkout: item.worktree || null,
           headSha: item.headSha || mtEntry?.headSha || null,
           ci: item.ci || null,
           coordinatorWake: null,
@@ -689,6 +695,7 @@ export async function queryControlPlane(stateRoot, options = {}) {
           performanceSummary: null,
           turnCount: 0,
           model: null,
+          providerConcurrency: null,
           narrative: {
             summary: item.summary || null,
             updatedAt: item.updatedAt || p.updatedAt || null,

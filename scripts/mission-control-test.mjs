@@ -8,6 +8,7 @@ import { join, resolve } from "node:path";
 import {
   coalesceTimeline,
   blockedReason,
+  canonicalLifecycleCategory,
   deduplicateOperatorLanes,
   displayWidth,
   isAttentionLane,
@@ -70,6 +71,13 @@ assert.equal(blockedReason({ lifecyclePhase: "working", portfolio: { status: "me
 assert.equal(blockedReason({ lifecyclePhase: "blocked", portfolio: { status: "blocked", blockedBy: ["issue-672"], blockingDependencies: [{ id: "issue-672", title: "Publish the contract", status: "repairing" }] }, blocker: { error: "Writer provider is unavailable." } }), "Writer provider is unavailable. Waiting for issue #672 (Publish the contract) to complete.");
 assert.equal(blockedReason({ lifecyclePhase: "working" }), "");
 assert.equal(blockedReason({ lifecyclePhase: "agreed", handoff: { summary: "Review completed." } }), "");
+const lifecycleNow = Date.parse("2026-07-23T12:00:00.000Z");
+assert.equal(canonicalLifecycleCategory({ type: "portfolio_lane", lifecyclePhase: "ready", updatedAt: new Date(lifecycleNow).toISOString() }, lifecycleNow), "queued");
+assert.equal(canonicalLifecycleCategory({ type: "portfolio_lane", lifecyclePhase: "blocked", updatedAt: new Date(lifecycleNow).toISOString() }, lifecycleNow), "blocked");
+assert.equal(canonicalLifecycleCategory({ type: "collaboration", lifecyclePhase: "recovering", heartbeat: { heartbeatAt: new Date(lifecycleNow).toISOString() }, updatedAt: new Date(lifecycleNow).toISOString() }, lifecycleNow), "recovering");
+assert.equal(canonicalLifecycleCategory({ type: "collaboration", lifecyclePhase: "failed", updatedAt: new Date(lifecycleNow).toISOString() }, lifecycleNow), "terminal");
+assert.equal(canonicalLifecycleCategory({ type: "collaboration", lifecyclePhase: "failed", updatedAt: "2026-07-20T00:00:00.000Z" }, lifecycleNow), "stale");
+assert.equal(canonicalLifecycleCategory({ type: "collaboration", lifecyclePhase: "agreed", archived: true, updatedAt: new Date(lifecycleNow).toISOString() }, lifecycleNow), "historical");
 const selectionFixture = [{ id: "first", updatedAt: "one" }, { id: "last", updatedAt: "two" }];
 assert.equal(resolveMissionControlSelection(selectionFixture, null, Number.MAX_SAFE_INTEGER).id, "last");
 assert.equal(resolveMissionControlSelection(selectionFixture, "first", 1).id, "first");
@@ -80,6 +88,9 @@ assert.equal(confirmed.confirmed, true);
 assert.equal(confirmed.lane.updatedAt, "one", "confirmation must retain the rendered revision fence");
 assert.equal(missionControlActionAvailability({ type: "collaboration", coordinatorWake: { sequence: 1, status: "pending", actionable: true } }).acknowledgeWake, false);
 assert.equal(missionControlActionAvailability({ type: "collaboration", coordinatorWake: { sequence: 1, status: "pending", actionable: false } }).acknowledgeWake, true);
+assert.equal(missionControlActionAvailability({ type: "collaboration", lifecyclePhase: "needs_user" }).archive, false);
+assert.equal(missionControlActionAvailability({ type: "collaboration", lifecyclePhase: "agreed", coordinatorWake: { status: "pending" } }).archive, false);
+assert.equal(missionControlActionAvailability({ type: "collaboration", lifecyclePhase: "agreed", handoff: { acknowledged: false, nextAction: "review" } }).archive, false);
 assert.equal(missionControlPlatformCommands("darwin").open[0].command, "open");
 assert.equal(missionControlPlatformCommands("linux").copy[0].command, "wl-copy");
 assert.equal(missionControlPlatformCommands("win32").copy[0].command, "clip.exe");
@@ -200,6 +211,9 @@ try {
     status: "running",
     updatedAt: "2026-07-23T11:59:59.000Z",
     task: "Implement repository-aware mission control",
+    writer: "codex",
+    writerCheckout: { path: workspace },
+    providerConcurrency: { codex: { work: 5, review: 10 } },
     githubBuilder: { repository: "veliqon/control-plane", headRef: "codex/mission-control", headSha: "a".repeat(40) },
     writerAuthority: {
       login: "veliqon-codex-writer[bot]",
@@ -215,6 +229,7 @@ try {
       turnCount: 2,
       activeCall: {
         agent: "codex",
+        model: "gpt-5.6",
         phase: "working",
         summary: "Rendering the repository and lane detail views.",
         summaryAt: "2026-07-23T11:58:00.000Z",
@@ -229,6 +244,14 @@ try {
     JSON.stringify({ type: "collaboration_started", at: "2026-07-23T11:00:00.000Z" }),
     JSON.stringify({ type: "progress", at: "2026-07-23T11:59:00.000Z", agent: "codex", summary: "Rendering repository views" }),
   ].join("\n") + "\n");
+  await mkdir(join(root, "capacity", "codex", "work"), { recursive: true });
+  await writeFile(join(root, "capacity", "codex", "work", "1.slot"), JSON.stringify({
+    collaborationId: runningId,
+    pid: process.pid,
+    provider: "codex",
+    role: "work",
+    slot: 1,
+  }));
   await writeFile(join(root, `${completedId}.json`), JSON.stringify({
     ...base,
     id: completedId,
@@ -270,6 +293,14 @@ try {
   assert.equal(live.visibleLanes, 1);
   assert.equal(live.lanes[0].id, runningId);
   assert.equal(live.providerActivity.codex, 1);
+  assert.deepEqual(live.providerCapacity.codex, {
+    work: { limit: 5, inUse: 1, queued: 0 },
+    review: { limit: 10, inUse: 0, queued: 0 },
+  });
+  const runningOperatorLane = live.operatorLanes.find((lane) => lane.relatedLaneIds.includes(runningId));
+  assert.equal(runningOperatorLane.model, "gpt-5.6");
+  assert.equal(runningOperatorLane.checkout, workspace);
+  assert.equal(runningOperatorLane.lifecycleCategory, "active");
   assert.equal(live.collapsedStale.total, 0);
   assert.equal(live.needsUserCount, 1);
   assert.match(live.needsUserSignature, new RegExp(needsUserId));

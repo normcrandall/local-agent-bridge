@@ -10,13 +10,30 @@ export const LIVE_COLLABORATION_STATUSES = new Set([
 
 export function clearTerminalRuntime(state, { status = state.status, error = state.error || null, at = new Date().toISOString() } = {}) {
   const terminal = TERMINAL_COLLABORATION_STATUSES.has(status);
+  const activeCall = state.runtime?.activeCall || null;
   return {
     ...state,
     status,
     error,
     workerPid: terminal ? null : state.workerPid,
     workerOwner: terminal ? null : state.workerOwner,
-    runtime: terminal ? { ...(state.runtime || {}), activeCall: null } : state.runtime,
+    runtime: terminal ? {
+      ...(state.runtime || {}),
+      // Mission Control must retain the provider/model and last meaningful
+      // activity after the live call is cleared. This is operational metadata,
+      // not provider memory or hidden reasoning.
+      lastCall: activeCall ? {
+        agent: activeCall.agent || null,
+        model: activeCall.model || activeCall.selectedModel || null,
+        role: activeCall.role || (state.writer ? "writer" : "reviewer"),
+        phase: activeCall.phase || activeCall.status || null,
+        summary: activeCall.summary || null,
+        summaryAt: activeCall.summaryAt || activeCall.heartbeatAt || at,
+        summarySource: activeCall.summarySource || null,
+        activity: activeCall.activity || null,
+      } : state.runtime?.lastCall || null,
+      activeCall: null,
+    } : state.runtime,
     cleanup: terminal ? {
       ...(state.cleanup || {}), terminalAt: at, activeCallCleared: true,
       workspaceLeaseReleased: Boolean(state.cleanup?.workspaceLeaseReleased),

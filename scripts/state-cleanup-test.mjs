@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { archiveCollaboration } from "../src/collaboration-store.mjs";
 import { archivePortfolio } from "../src/portfolio-store.mjs";
-import { applyBridgeCleanup, auditBridgeCleanup, formatCleanupReport } from "../src/state-cleanup.mjs";
+import { applyBridgeCleanup, archiveVerifiedCollaboration, auditBridgeCleanup, formatCleanupReport } from "../src/state-cleanup.mjs";
 import {
   inspectCollaborationWorkspace,
   verifyCollaborationGitHubOutcome,
@@ -111,9 +111,10 @@ try {
     id: completePortfolio,
     status: "complete",
     revision: 1,
+    repository: "norm/example",
     createdAt: old,
     updatedAt: old,
-    items: [{ id: "1", status: "merged" }],
+    items: [{ id: "1", status: "merged", prNumber: 20, headSha: "2".repeat(40) }],
   })}\n`);
   await writeFile(join(process.env.BRIDGE_PORTFOLIO_DIR, `${blockedPortfolio}.json`), `${JSON.stringify({
     id: blockedPortfolio,
@@ -153,6 +154,15 @@ try {
   assert.match(formatCleanupReport(audit), /never auto-cancelled/);
   assert.match(formatCleanupReport(audit), /pull_request_open/);
   assert.doesNotThrow(() => formatCleanupReport({ ...audit, protectedCollaborations: undefined }));
+  await assert.rejects(
+    () => archiveVerifiedCollaboration(stateRoot, ids.needsUser, { expectedUpdatedAt: old }),
+    /status needs_user is not archive-ready/,
+  );
+  const localTerminal = "bridge-13131313-1313-4313-8313-131313131313";
+  await writeCollaboration(localTerminal, { status: "agreed" });
+  const localArchived = await archiveVerifiedCollaboration(stateRoot, localTerminal, { expectedUpdatedAt: old });
+  assert.equal(localArchived.retirement.reason, "local_terminal_record");
+  assert.equal(JSON.parse(await readFile(join(stateRoot, "archive", `${localTerminal}.json`), "utf8")).status, "agreed");
 
   const applied = await applyBridgeCleanup(options);
   assert.equal(applied.archivedCollaborations.length, 2);

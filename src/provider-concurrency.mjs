@@ -254,9 +254,9 @@ async function registerWaiter(directory, entry) {
   }
 }
 
-async function collaborationStillOwnsCapacity(root, collaborationId) {
+async function collaborationStillOwnsCapacity(root, collaborationId, stateDirectory = collaborationDirectory(root)) {
   try {
-    const statePath = resolve(collaborationDirectory(root), `${collaborationId}.json`);
+    const statePath = resolve(stateDirectory, `${collaborationId}.json`);
     const state = JSON.parse(await readFile(statePath, "utf8"));
     return ["queued", "running", "recovering", "cancelling", "indeterminate"].includes(state.status);
   } catch {
@@ -274,10 +274,10 @@ async function ownerAlive(pid) {
   }
 }
 
-async function removeStaleEntry(root, path) {
+async function removeStaleEntry(root, path, stateDirectory = collaborationDirectory(root)) {
   try {
     const entry = JSON.parse(await readFile(path, "utf8"));
-    if (await collaborationStillOwnsCapacity(root, entry.collaborationId)) return false;
+    if (await collaborationStillOwnsCapacity(root, entry.collaborationId, stateDirectory)) return false;
     if (await ownerAlive(entry.pid)) return false;
     await unlink(path);
     return true;
@@ -294,15 +294,34 @@ async function removeStaleEntry(root, path) {
   }
 }
 
-async function liveEntries(root, directory, suffix) {
+async function liveEntries(root, directory, suffix, { stateDirectory = collaborationDirectory(root) } = {}) {
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const names = (await readdir(directory)).filter((name) => name.endsWith(suffix)).sort();
   const live = [];
   for (const name of names) {
     const path = resolve(directory, name);
-    if (!(await removeStaleEntry(root, path))) live.push({ name, path });
+    if (!(await removeStaleEntry(root, path, stateDirectory))) live.push({ name, path });
   }
   return live;
+}
+
+export async function providerCapacitySnapshot(root, { limits = null, stateDirectory = collaborationDirectory(root) } = {}) {
+  const configured = limits || await loadProviderConcurrency();
+  return Object.fromEntries(await Promise.all(PROVIDER_NAMES.map(async (provider) => {
+    const roles = await Promise.all(["work", "review"].map(async (role) => {
+      const directory = resolve(stateDirectory, "capacity", provider, role);
+      const [slots, waiters] = await Promise.all([
+        liveEntries(root, directory, ".slot", { stateDirectory }),
+        liveEntries(root, directory, ".wait", { stateDirectory }),
+      ]);
+      return [role, {
+        limit: configured[provider][role],
+        inUse: slots.length,
+        queued: waiters.length,
+      }];
+    }));
+    return [provider, Object.fromEntries(roles)];
+  })));
 }
 
 async function countOwnedSlots(root, directory, collaborationId) {

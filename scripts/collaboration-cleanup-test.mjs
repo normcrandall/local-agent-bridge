@@ -5,8 +5,11 @@ import "./issue-55-reaping-test.mjs";
 import "./issue-55-locks-test.mjs";
 
 for (const status of ["agreed", "cancelled", "failed", "turn_limit", "budget", "needs_user"]) {
-  const state = clearTerminalRuntime({ status: "running", workerPid: 99, workerOwner: { id: "bridge-x", pid: 99 }, runtime: { activeCall: { agent: "codex" } } }, { status });
+  const state = clearTerminalRuntime({ status: "running", writer: "codex", workerPid: 99, workerOwner: { id: "bridge-x", pid: 99 }, runtime: { activeCall: { agent: "codex", model: "gpt-5.6", summary: "Publishing the reviewed branch.", summaryAt: "2026-07-23T12:00:00.000Z" } } }, { status });
   assert.equal(state.runtime.activeCall, null, status);
+  assert.equal(state.runtime.lastCall.agent, "codex", status);
+  assert.equal(state.runtime.lastCall.model, "gpt-5.6", status);
+  assert.equal(state.runtime.lastCall.summary, "Publishing the reviewed branch.", status);
   assert.equal(state.workerPid, null, status);
 }
 const indeterminate = clearTerminalRuntime({ status: "indeterminate", workerPid: 99, runtime: { activeCall: { status: "indeterminate" } } });
