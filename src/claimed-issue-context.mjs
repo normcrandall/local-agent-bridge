@@ -334,6 +334,7 @@ export function buildClaimedIssueContext({
 export const REQUIRED_ISSUE_SOURCES = ["issue", "comments", "labels", "dependencies", "linkedPullRequests"];
 export const OPTIONAL_ISSUE_SOURCES = ["projectFields"];
 export const DEFAULT_ISSUE_HYDRATION_ATTEMPTS = 3;
+export const MAX_ISSUE_HYDRATION_ATTEMPTS = 5;
 
 // A deterministic HTTP answer is authoritative and must not be retried. Only a
 // rate limit, a server fault, or a transport failure without a status can be
@@ -342,6 +343,14 @@ export function isRetryableHydrationFailure(error) {
   const status = Number(error?.status);
   if (!Number.isFinite(status)) return true;
   return status === 429 || (status >= 500 && status <= 599);
+}
+
+export function classifyHydrationFailure(error) {
+  const status = Number(error?.status);
+  if (!Number.isFinite(status)) return "transient_network";
+  if (status === 429) return "transient_rate_limit";
+  if (status >= 500 && status <= 599) return "transient_server";
+  return "deterministic_http";
 }
 
 // Retry exhaustion, a server fault, and a transport failure are never an empty
@@ -356,7 +365,7 @@ function degradationReason(error) {
 }
 
 async function readSource({ name, endpoint, required, unsupportedIsDegraded = false, read, attempts, degradations }) {
-  const record = { name, endpoint, status: "ok", attempts: 0, itemCount: 0, sha256: null };
+  const record = { name, endpoint, status: "ok", attempts: 0, retryClassifications: [], itemCount: 0, sha256: null };
   let lastError = null;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     record.attempts = attempt;
@@ -367,6 +376,7 @@ async function readSource({ name, endpoint, required, unsupportedIsDegraded = fa
       return { value, record };
     } catch (error) {
       lastError = error;
+      record.retryClassifications.push(classifyHydrationFailure(error));
       if (!isRetryableHydrationFailure(error)) break;
     }
   }
@@ -374,7 +384,8 @@ async function readSource({ name, endpoint, required, unsupportedIsDegraded = fa
   const mayDegrade = reason
     && (!required || (unsupportedIsDegraded && /HTTP (404|410)\)$/.test(reason)));
   if (!mayDegrade) {
-    throw new Error(`required issue fact "${name}" could not be read from ${endpoint} after ${record.attempts} attempt(s): ${lastError?.message || "unknown failure"}`, { cause: lastError });
+    const classification = record.retryClassifications.at(-1) || "unknown";
+    throw new Error(`required issue fact "${name}" could not be read from ${endpoint} after ${record.attempts} attempt(s) [${classification}]: ${lastError?.message || "unknown failure"}`, { cause: lastError });
   }
   record.status = "degraded";
   record.reason = reason;
@@ -397,11 +408,15 @@ export async function hydrateClaimedIssueTask({
 }) {
   try {
     if (!client) throw new Error("no bound builder App client is available for this repository");
+    const boundedAttempts = Math.min(
+      MAX_ISSUE_HYDRATION_ATTEMPTS,
+      Math.max(1, Number.isSafeInteger(attempts) ? attempts : DEFAULT_ISSUE_HYDRATION_ATTEMPTS),
+    );
     const loaded = async () => {
       const degradations = [];
       const records = [];
       const collect = async (options) => {
-        const { value, record } = await readSource({ ...options, attempts, degradations });
+        const { value, record } = await readSource({ ...options, attempts: boundedAttempts, degradations });
         records.push(record);
         return value;
       };
@@ -484,6 +499,7 @@ export async function hydrateClaimedIssueTask({
             endpoint: String(record.endpoint).slice(0, 200),
             status: record.status,
             attempts: record.attempts,
+            retryClassifications: (record.retryClassifications || []).slice(0, MAX_ISSUE_HYDRATION_ATTEMPTS),
             itemCount: record.itemCount,
             sha256: record.sha256,
             ...(record.reason ? { reason: String(record.reason).slice(0, 200) } : {}),
@@ -495,4 +511,13 @@ export async function hydrateClaimedIssueTask({
   } catch (error) {
     throw new Error(`Unable to hydrate claimed issue ${repository}#${issueNumber} before provider launch: ${error.message}`, { cause: error });
   }
+}
+
+// This is the sequencing boundary used by claimed starts: the lease callback
+// is unreachable until every required issue fact has been fetched and
+// validated successfully.
+export async function hydrateBeforeClaimLease({ hydrate, acquireClaimLease }) {
+  const hydrated = await hydrate();
+  await acquireClaimLease();
+  return hydrated;
 }

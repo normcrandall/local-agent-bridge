@@ -11,6 +11,7 @@ import {
   assertClaimedIssueContextIntegrity,
   buildClaimedIssueContext,
   claimedIssueContextWorstCaseFooterLength,
+  classifyHydrationFailure,
   extractLinkedPullRequests,
   hydrateClaimedIssueTask,
   isAgentBridgeClaimComment,
@@ -207,6 +208,10 @@ assert.equal(isRetryableHydrationFailure(httpError("server fault", 503)), true);
 assert.equal(isRetryableHydrationFailure(new Error("socket hang up")), true);
 assert.equal(isRetryableHydrationFailure(httpError("forbidden", 403)), false);
 assert.equal(isRetryableHydrationFailure(httpError("missing", 404)), false);
+assert.equal(classifyHydrationFailure(httpError("rate limited", 429)), "transient_rate_limit");
+assert.equal(classifyHydrationFailure(httpError("server fault", 503)), "transient_server");
+assert.equal(classifyHydrationFailure(new Error("socket hang up")), "transient_network");
+assert.equal(classifyHydrationFailure(httpError("forbidden", 403)), "deterministic_http");
 
 const dependencies = {
   blockedBy: [{ number: 145, state: "open", title: "Parent lane" }],
@@ -411,7 +416,58 @@ const retried = await hydrateClaimedIssueTask({
 });
 assert.equal(timelineAttempts, 3);
 assert.equal(retried.metadata.provenance.sources.find((source) => source.name === "linkedPullRequests").attempts, 3);
+assert.deepEqual(
+  retried.metadata.provenance.sources.find((source) => source.name === "linkedPullRequests").retryClassifications,
+  ["transient_server", "transient_server"],
+);
 assert.deepEqual(retried.metadata.degradedFields, []);
+
+// The two idempotent required reads used to establish the issue identity and
+// trusted discussion both retry bounded transient failures and expose why.
+for (const [method, source] of [["getIssue", "issue"], ["getIssueComments", "comments"]]) {
+  for (const [failure, classification] of [
+    [httpError("rate limited", 429), "transient_rate_limit"],
+    [httpError("server unavailable", 503), "transient_server"],
+    [new Error("socket reset"), "transient_network"],
+  ]) {
+    let attempts = 0;
+    const transient = await hydrateClaimedIssueTask({
+      client: stubClient({
+        async [method]() {
+          attempts += 1;
+          if (attempts === 1) throw failure;
+          return method === "getIssue" ? issue : [triage, lease];
+        },
+      }),
+      repository: "owner/public",
+      issueNumber: 42,
+      task: "Implement issue #42.",
+    });
+    assert.equal(attempts, 2);
+    assert.deepEqual(
+      transient.metadata.provenance.sources.find((entry) => entry.name === source).retryClassifications,
+      [classification],
+    );
+  }
+}
+
+for (const [method, source] of [["getIssue", "issue"], ["getIssueComments", "comments"]]) {
+  for (const status of [401, 403, 404]) {
+    let attempts = 0;
+    await assert.rejects(
+      hydrateClaimedIssueTask({
+        client: stubClient({
+          [method]() { attempts += 1; throw httpError(`HTTP ${status}`, status); },
+        }),
+        repository: "owner/private",
+        issueNumber: 42,
+        task: "Implement issue #42.",
+      }),
+      new RegExp(`required issue fact "${source}".*after 1 attempt\\(s\\) \\[deterministic_http\\]`, "s"),
+    );
+    assert.equal(attempts, 1);
+  }
+}
 
 let deniedAttempts = 0;
 await assert.rejects(
@@ -436,6 +492,20 @@ await assert.rejects(
   /required issue fact "projectFields" could not be read.*after 3 attempt\(s\)/s,
 );
 assert.equal(exhaustedAttempts, 3);
+
+// The retry budget is capped even if an internal caller supplies a larger one.
+let boundedAttempts = 0;
+await assert.rejects(
+  hydrateClaimedIssueTask({
+    client: stubClient({ getIssueComments() { boundedAttempts += 1; throw new Error("connection reset"); } }),
+    repository: "owner/public",
+    issueNumber: 42,
+    task: "Implement issue #42.",
+    attempts: 99,
+  }),
+  /after 5 attempt\(s\) \[transient_network\]/,
+);
+assert.equal(boundedAttempts, 5);
 
 // Truncation still bounds the snapshot once structured facts are rendered.
 const boundedHydration = await hydrateClaimedIssueTask({

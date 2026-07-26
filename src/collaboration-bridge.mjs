@@ -78,7 +78,7 @@ import {
   resolveIssueClaimRevisions,
   workspaceHeadBuilderBinding,
 } from "./collaboration-start-preflight.mjs";
-import { CLAIMED_ISSUE_CONTEXT_MARKER, assertClaimedIssueContextIntegrity, hydrateClaimedIssueTask } from "./claimed-issue-context.mjs";
+import { CLAIMED_ISSUE_CONTEXT_MARKER, assertClaimedIssueContextIntegrity, hydrateBeforeClaimLease, hydrateClaimedIssueTask } from "./claimed-issue-context.mjs";
 import { createIssueClaimClient, createIssueClaimHydrationClient } from "./github-issue-claims.mjs";
 import { startSupervisedWorker } from "./worker-supervisor-client.mjs";
 import { collaborationAlias, collaborationIdentity } from "./collaboration-identity.mjs";
@@ -974,18 +974,6 @@ server.registerTool(
         fetchImpl: fetch,
       });
 
-      const hydrated = await hydrateClaimedIssueTask({
-        client: claimClient,
-        repository,
-        issueNumber: input.issueClaim.issueNumber,
-        task: input.task,
-        evidenceStore,
-        evidenceScope: { repository, headSha },
-        authority: resolvedIssueClaim.authority,
-      });
-      resolvedTask = hydrated.task;
-      issueContext = hydrated.metadata;
-
       let portfolioId = input.issueClaim.portfolioId || null;
       let itemId = input.issueClaim.itemId || null;
       if (!portfolioId || !itemId) {
@@ -1009,20 +997,33 @@ server.registerTool(
       });
 
       claimLifecyclePolicy = loadRepositoryLifecyclePolicy(requestedWorkspace);
-      await acquireClaimLease({
-        client: claimClient,
-        issueNumber: input.issueClaim.issueNumber,
-        portfolioId,
-        itemId,
-        writer: writer || input.writer || startAgent,
-        collaborationId,
-        branch: input.worktree?.branch || input.issueClaim.branch || null,
-        worktree: plannedWorktreePath || input.issueClaim.worktree || null,
-        baseSha: claimBaseSha,
-        headSha: claimHeadSha,
-        workspaceRoot: WORKSPACE_ROOT,
-        lifecyclePolicy: claimLifecyclePolicy,
+      const hydrated = await hydrateBeforeClaimLease({
+        hydrate: () => hydrateClaimedIssueTask({
+          client: claimClient,
+          repository,
+          issueNumber: input.issueClaim.issueNumber,
+          task: input.task,
+          evidenceStore,
+          evidenceScope: { repository, headSha },
+          authority: resolvedIssueClaim.authority,
+        }),
+        acquireClaimLease: () => acquireClaimLease({
+          client: claimClient,
+          issueNumber: input.issueClaim.issueNumber,
+          portfolioId,
+          itemId,
+          writer: writer || input.writer || startAgent,
+          collaborationId,
+          branch: input.worktree?.branch || input.issueClaim.branch || null,
+          worktree: plannedWorktreePath || input.issueClaim.worktree || null,
+          baseSha: claimBaseSha,
+          headSha: claimHeadSha,
+          workspaceRoot: WORKSPACE_ROOT,
+          lifecyclePolicy: claimLifecyclePolicy,
+        }),
       });
+      resolvedTask = hydrated.task;
+      issueContext = hydrated.metadata;
       leaseAcquired = true;
     } else if (resolvedIssueTarget) {
       // Target without a claim: hydrate read-only through the same builder App.

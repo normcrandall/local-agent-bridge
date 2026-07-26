@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { createCollaboration, readCollaboration } from "../src/collaboration-store.mjs";
-import { buildClaimedIssueContext } from "../src/claimed-issue-context.mjs";
+import { buildClaimedIssueContext, hydrateBeforeClaimLease } from "../src/claimed-issue-context.mjs";
 import { recordMergeDeliveryReceipt } from "../src/merge-delivery-receipts.mjs";
 // Issue #55 dispatch/narrative fixtures: command allowlist admission and command-aware narrative.
 import "./issue-40-autonomy-test.mjs";
@@ -59,6 +59,28 @@ const env = {
   CLAUDE_BIN: resolve(root, "scripts/fake-claude.mjs"),
   AGY_BIN: "/bin/echo",
 };
+
+// Claimed starts have one integration boundary: all required hydration must
+// finish before GitHub claim mutation, and provider launch remains downstream.
+const claimedStartOrdering = [];
+const orderedHydration = await hydrateBeforeClaimLease({
+  hydrate: async () => { claimedStartOrdering.push("hydrate:start", "hydrate:complete"); return { task: "hydrated" }; },
+  acquireClaimLease: async () => { claimedStartOrdering.push("claim"); },
+});
+claimedStartOrdering.push("provider:launch");
+assert.equal(orderedHydration.task, "hydrated");
+assert.deepEqual(claimedStartOrdering, ["hydrate:start", "hydrate:complete", "claim", "provider:launch"]);
+
+const failedClaimedStartOrdering = [];
+await assert.rejects(
+  hydrateBeforeClaimLease({
+    hydrate: async () => { failedClaimedStartOrdering.push("hydrate:start"); throw new Error("required read failed"); },
+    acquireClaimLease: async () => { failedClaimedStartOrdering.push("claim"); },
+  }).then(() => { failedClaimedStartOrdering.push("provider:launch"); }),
+  /required read failed/,
+);
+assert.deepEqual(failedClaimedStartOrdering, ["hydrate:start"]);
+
 const terminalReconcileId = "bridge-00000000-0000-4000-8000-000000000001";
 await writeFile(join(stateDirectory, `${terminalReconcileId}.json`), `${JSON.stringify({
   id: terminalReconcileId, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:01.000Z",
