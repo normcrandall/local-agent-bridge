@@ -74,6 +74,34 @@ export async function probeDockerModelRunner({ model, baseUrl, fetchImpl = fetch
   return { available: true, model: selectedModel, baseUrl: selectedBaseUrl, installedModels: models };
 }
 
+export async function probeDockerModelRunnerContract({
+  model,
+  baseUrl,
+  fetchImpl = fetch,
+  timeoutMs = 30_000,
+} = {}) {
+  const health = await probeDockerModelRunner({ model, baseUrl, fetchImpl, timeoutMs });
+  const response = await fetchImpl(`${health.baseUrl}/api/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: health.model,
+      messages: [{ role: "user", content: "Reply with OK." }],
+      stream: false,
+      think: false,
+    }),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!response.ok) {
+    throw new Error(`Docker Model Runner chat contract probe returned HTTP ${response.status}.`);
+  }
+  const payload = await response.json();
+  if (!payload?.message || typeof payload.message.content !== "string") {
+    throw new Error("Docker Model Runner chat contract probe returned no assistant message.");
+  }
+  return { ...health, chatCompatible: true };
+}
+
 export async function runDockerModelReview(options = {}) {
   const configuration = await loadDockerModelRunnerConfig();
   return runLocalReview({

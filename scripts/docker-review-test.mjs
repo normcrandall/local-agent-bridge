@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,11 +10,13 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { dockerSessionDirectory, loadDockerSession, saveDockerSession } from "../src/docker-session-store.mjs";
 import {
   DEFAULT_DOCKER_MODEL_RUNNER_MODEL,
+  DEFAULT_DOCKER_MODEL_RUNNER_CONFIG,
   loadDockerModelRunnerConfig,
   probeDockerModelRunner,
+  probeDockerModelRunnerContract,
   runDockerModelReview,
 } from "../src/docker-review.mjs";
-import { executeLocalReviewTool } from "../src/ollama-review.mjs";
+import { executeLocalReviewTool, runLocalReview } from "../src/ollama-review.mjs";
 import { dockerToolRequest } from "../src/tool-requests.mjs";
 import { runConversation } from "../src/talk-protocol.mjs";
 import { selectRoles } from "../src/operations.mjs";
@@ -46,6 +48,31 @@ try {
     }),
   });
   assert.equal(health.available, true);
+  const contractRequests = [];
+  const contract = await probeDockerModelRunnerContract({
+    model: "ai/qwen2.5-coder",
+    fetchImpl: async (url, request = {}) => {
+      contractRequests.push({ url, request });
+      if (url.endsWith("/api/tags")) {
+        return { ok: true, json: async () => ({ models: [{ name: "ai/qwen2.5-coder" }] }) };
+      }
+      return { ok: true, json: async () => ({ message: { role: "assistant", content: "OK" } }) };
+    },
+  });
+  assert.equal(contract.chatCompatible, true);
+  assert.deepEqual(contractRequests.map(({ url }) => new URL(url).pathname), ["/api/tags", "/api/chat"]);
+  assert.equal(JSON.parse(contractRequests[1].request.body).stream, false);
+
+  await assert.rejects(
+    runLocalReview({
+      prompt: "Review this.",
+      workspaceRoot: repository,
+      provider: "docker",
+      providerLabel: "Docker Model Runner",
+      fetchImpl: async () => { throw new Error("must not reach inference"); },
+    }),
+    /provider-specific local model configuration/,
+  );
 
   const stateRoot = join(repository, "session-state");
   const conversationId = "123e4567-e89b-42d3-a456-426614174000";
@@ -74,7 +101,7 @@ try {
       message: {
         role: "assistant",
         content: "",
-        tool_calls: [{ id: "call-1", function: { name: "read_file", arguments: { path: "app.mjs" } } }],
+        tool_calls: [{ id: "call-1", function: { name: "read_file", arguments: JSON.stringify({ path: "app.mjs" }) } }],
       },
     },
     {
@@ -103,6 +130,30 @@ try {
   assert.equal(result.timing.apiCalls, 2);
   assert.equal(result.timing.toolCalls, 1);
 
+  for (const malformedArguments of ["{not-json", "[]", "true", "null", null]) {
+    await assert.rejects(
+      runDockerModelReview({
+        prompt: "Review malformed tool arguments.",
+        cwd: ".",
+        workspaceRoot: repository,
+        model: "ai/qwen2.5-coder",
+        fallbackModels: [],
+        fetchImpl: async () => ({
+          ok: true,
+          json: async () => ({
+            model: "ai/qwen2.5-coder",
+            message: {
+              role: "assistant",
+              content: "",
+              tool_calls: [{ function: { name: "read_file", arguments: malformedArguments } }],
+            },
+          }),
+        }),
+      }),
+      /(?:malformed JSON arguments|arguments must be a JSON object)/,
+    );
+  }
+
   process.env.AGENT_BRIDGE_DOCKER_MODEL_RUNNER_CONFIG = join(repository, "missing-docker-config.json");
   const defaultModelResponse = await runDockerModelReview({
     prompt: "Return a concise review.",
@@ -116,6 +167,26 @@ try {
   });
   assert.equal(defaultModelResponse.result, "No findings.");
   process.env.AGENT_BRIDGE_DOCKER_MODEL_RUNNER_CONFIG = configPath;
+
+  const dockerStatus = spawnSync("docker", ["model", "status"], {
+    encoding: "utf8",
+    timeout: 10_000,
+    stdio: "ignore",
+  });
+  if (dockerStatus.status === 0) {
+    const liveConfiguration = await loadDockerModelRunnerConfig({
+      configPath: DEFAULT_DOCKER_MODEL_RUNNER_CONFIG,
+      environment: {},
+    });
+    await probeDockerModelRunnerContract({
+      model: liveConfiguration.model,
+      baseUrl: liveConfiguration.baseUrl,
+      timeoutMs: 60_000,
+    });
+    console.log(`Live Docker Model Runner contract passed for ${liveConfiguration.model}.`);
+  } else {
+    console.log("Live Docker Model Runner contract skipped: docker model status is unavailable.");
+  }
 
   assert.throws(
     () => dockerToolRequest({ prompt: "implement", cwd: repository, mode: "work" }),

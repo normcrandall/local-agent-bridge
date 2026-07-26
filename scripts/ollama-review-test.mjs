@@ -16,7 +16,7 @@ import {
   OLLAMA_FALLBACK_PREFLIGHT_MAX_MS,
   OLLAMA_DOCKER_PRIORITY_MESSAGE,
 } from "../src/local-review-priority.mjs";
-import { DEFAULT_OLLAMA_MODEL, executeOllamaReviewTool, OLLAMA_PROBE_TIMEOUT_MS, runOllamaReview } from "../src/ollama-review.mjs";
+import { DEFAULT_OLLAMA_MODEL, executeOllamaReviewTool, OLLAMA_PROBE_TIMEOUT_MS, probeOllama, runOllamaReview } from "../src/ollama-review.mjs";
 import { ollamaToolRequest } from "../src/tool-requests.mjs";
 import { runConversation } from "../src/talk-protocol.mjs";
 import { selectRoles } from "../src/operations.mjs";
@@ -56,6 +56,27 @@ try {
   assert.ok(
     OLLAMA_FALLBACK_PREFLIGHT_MAX_MS < LOCAL_REVIEW_PREFLIGHT_BUDGET_MS,
     "the serial Docker-priority and Ollama probes must fit within the agent-pool preflight budget",
+  );
+  await assert.rejects(
+    probeOllama({
+      baseUrl: "http://127.0.0.1:11434",
+      timeoutMs: 25,
+      fetchImpl: async (_url, { signal }) => new Promise((resolve, reject) => {
+        const keepAlive = setTimeout(() => resolve({ ok: true, json: async () => ({ models: [] }) }), 1_000);
+        signal.addEventListener("abort", () => {
+          clearTimeout(keepAlive);
+          reject(signal.reason);
+        }, { once: true });
+      }),
+    }),
+    /health check timed out after 25ms/,
+  );
+  await assert.rejects(
+    probeOllama({
+      baseUrl: "http://127.0.0.1:11434",
+      fetchImpl: async () => { throw Object.assign(new Error("fetch failed"), { code: "ECONNREFUSED" }); },
+    }),
+    /health check could not connect: fetch failed/,
   );
   execFileSync("git", ["init", "-b", "main"], { cwd: repository, stdio: "ignore" });
   execFileSync("git", ["config", "user.name", "Test"], { cwd: repository });
