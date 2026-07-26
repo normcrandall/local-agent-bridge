@@ -89,7 +89,21 @@ export function assertGithubGovernedWorkStart({
   };
 }
 
-export function governedContinuationBuilder({ deliveryPolicy, currentBuilder, replacementBuilder, issueTarget } = {}) {
+export function governedContinuationBuilder({ deliveryPolicy, mode = "work", currentBuilder, replacementBuilder, issueTarget } = {}) {
+  if (mode !== "work") {
+    if (replacementBuilder && !currentBuilder) {
+      throw new Error("A non-work continuation cannot add a GitHub builder.");
+    }
+    return replacementBuilder || currentBuilder || null;
+  }
+  // Records created before delivery profiles were persisted remain resumable,
+  // but a continuation may not use that compatibility path to add authority.
+  if (!deliveryPolicy) {
+    if (replacementBuilder && !currentBuilder) {
+      throw new Error("A legacy continuation cannot add a GitHub builder.");
+    }
+    return replacementBuilder || currentBuilder || null;
+  }
   if (deliveryPolicy?.profile !== "github-governed") {
     if (replacementBuilder || currentBuilder) throw new Error("Local-only continuation cannot carry or add a GitHub builder.");
     return null;

@@ -1127,6 +1127,7 @@ server.registerTool(
         mode: effectiveMode,
         worktree,
       });
+      if (effectiveGithubBuilder) effectiveGithubBuilder.deliveryProfile = deliveryPolicy.deliveryProfile;
       if (effectiveGithubBuilder && resolvedIssueTarget) {
         if (effectiveGithubBuilder.issueNumber && effectiveGithubBuilder.issueNumber !== resolvedIssueTarget.issueNumber) {
           throw new Error(`githubBuilder issue #${effectiveGithubBuilder.issueNumber} does not match hydrated issue ${resolvedIssueTarget.repository}#${resolvedIssueTarget.issueNumber}.`);
@@ -2634,10 +2635,12 @@ server.registerTool(
       || (current.issueClaim ? { repository: current.issueClaim.repository, issueNumber: current.issueClaim.issueNumber } : null);
     activeGithubBuilder = governedContinuationBuilder({
       deliveryPolicy: current.deliveryPolicy,
+      mode: current.mode,
       currentBuilder: current.githubBuilder,
       replacementBuilder: activeGithubBuilder,
       issueTarget: immutableIssueTarget,
     });
+    if (activeGithubBuilder) activeGithubBuilder.deliveryProfile = current.deliveryPolicy?.profile || null;
     if (current.deliveryPolicy?.profile === "github-governed") {
       assertGithubGovernedWorkStart({
         policy: {

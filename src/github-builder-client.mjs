@@ -315,6 +315,7 @@ export function createBoundBuilderClient({
   headSha,
   prNumber = null,
   issueNumber = null,
+  deliveryProfile = null,
   verifiedHeadSha = null,
   headRef = null,
   baseRef = null,
@@ -463,6 +464,9 @@ export function createBoundBuilderClient({
   async function ensurePullRequest({ title, body, draft = false }) {
     authorize("ensure_pull_request");
     if (!headRef || !baseRef) throw new Error("Creating or updating a pull request requires bound headRef and baseRef.");
+    if (deliveryProfile === "github-governed" && (!issueNumber || !verifiedHeadSha)) {
+      throw new Error("GitHub-governed publication requires an immutable issue number and broker-verified exact head.");
+    }
     await identity();
     const deliveryReceipt = issueNumber
       ? validateGithubGovernedPullRequest({ repository, issueNumber, body, headSha: activeHeadSha })

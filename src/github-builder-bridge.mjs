@@ -20,6 +20,7 @@ const issueNumber = process.env.GITHUB_BUILDER_ISSUE_NUMBER
   ? Number.parseInt(process.env.GITHUB_BUILDER_ISSUE_NUMBER, 10)
   : null;
 const verifiedHeadSha = process.env.GITHUB_BUILDER_VERIFIED_HEAD_SHA || null;
+const deliveryProfile = process.env.GITHUB_BUILDER_DELIVERY_PROFILE || null;
 const allowWorkspaceHead = process.env.GITHUB_BUILDER_ALLOW_WORKSPACE_HEAD === "1";
 const apiUrl = process.env.GITHUB_BUILDER_API_URL || "https://api.github.com";
 const operationsAreBound = process.env.GITHUB_BUILDER_OPERATIONS_BOUND === "1";
@@ -89,6 +90,7 @@ const client = createBoundBuilderClient({
   baseRef,
   baseSha,
   issueNumber,
+  deliveryProfile,
   verifiedHeadSha,
   allowWorkspaceHead,
   allowedOperations,

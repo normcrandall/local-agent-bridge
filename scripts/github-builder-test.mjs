@@ -332,6 +332,16 @@ assert.equal((await createAndContinue.reviewThreads())[0].id, "thread-1");
 assert.equal(createAndContinue.binding().prNumber, 42);
 const governedBody = `Closes #147\n\n## Outcome\nVerified delivery.\n\n## Scope\nBound publication.\n\n## Verification\nRisk-based test passed.\n\n## Follow-ups\nNone`;
 await assert.rejects(
+  createBoundBuilderClient({
+    ...base,
+    prNumber: null,
+    deliveryProfile: "github-governed",
+    verifiedHeadSha: headSha,
+    fetchImpl: fakeGitHub().fetchImpl,
+  }).ensurePullRequest({ title: "Missing issue", body: governedBody }),
+  /immutable issue number and broker-verified exact head/,
+);
+await assert.rejects(
   createBoundBuilderClient({ ...base, prNumber: null, issueNumber: 147, fetchImpl: fakeGitHub().fetchImpl })
     .ensurePullRequest({ title: "Unverified", body: governedBody }),
   /broker-verified exact head/,

@@ -57,6 +57,20 @@ const continuedBuilder = governedContinuationBuilder({
 });
 assert.equal(continuedBuilder.issueNumber, 152);
 assert.equal(continuedBuilder.headSha, mergedSha);
+assert.equal(governedContinuationBuilder({
+  deliveryPolicy: { profile: "github-governed" },
+  mode: "review",
+}), null);
+assert.throws(() => governedContinuationBuilder({
+  deliveryPolicy: { profile: "github-governed" },
+  mode: "review",
+  replacementBuilder: { repository: "owner/repo", issueNumber: 152 },
+}), /non-work continuation cannot add/);
+const legacyBuilder = { repository: "owner/repo", issueNumber: 152, headSha: sha };
+assert.equal(governedContinuationBuilder({ currentBuilder: legacyBuilder }), legacyBuilder);
+assert.throws(() => governedContinuationBuilder({
+  replacementBuilder: legacyBuilder,
+}), /legacy continuation cannot add/);
 assert.throws(() => governedContinuationBuilder({
   deliveryPolicy: { profile: "github-governed" },
   currentBuilder: { repository: "owner/repo", headRef: "codex/152", baseRef: "main" },
