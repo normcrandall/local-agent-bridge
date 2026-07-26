@@ -523,6 +523,8 @@ try {
       title: "Blocked without a recorded reason",
       status: "blocked",
       writer: null,
+      phase: "delivery",
+      phaseOrder: 2,
       blockedBy: [],
       updatedAt: new Date(now - 29_000).toISOString(),
     }],
@@ -537,6 +539,12 @@ try {
   assert.match(flattenedPortfolioOutput, /BLOCKED BECAUSE Waiting for issue #401 \(An unresolved dependency\) to complete\./);
   const missingPortfolioReason = freshPortfolioRequest.operatorLanes.find((lane) => lane.portfolio?.itemId === "issue-14");
   assert.equal(blockedReason(missingPortfolioReason), "No blocking reason was recorded by the coordinator.");
+  const lookaheadLane = {
+    ...missingPortfolioReason,
+    portfolio: { ...missingPortfolioReason.portfolio, lookahead: true, lookaheadFromPhase: "foundation" },
+  };
+  const lookaheadOutput = renderSnapshot({ ...freshPortfolioRequest, operatorLanes: [lookaheadLane] }, { width: 100, now });
+  assert.match(lookaheadOutput.replace(/[│\n]/g, " ").replace(/\s+/g, " "), /PHASE delivery · LOOKAHEAD from foun/);
   const terminalDependencyLane = {
     ...freshPortfolioRequest.operatorLanes.find((lane) => lane.portfolio?.itemId === "issue-13"),
     lifecyclePhase: "agreed",

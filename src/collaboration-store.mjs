@@ -600,6 +600,7 @@ export async function queryControlPlane(stateRoot, options = {}) {
     if (!p.items) continue;
     const portfolioItemsById = new Map(p.items.map((item) => [item.id, item]));
     for (const item of p.items) {
+      const scheduledItem = p.schedule?.selected?.find((candidate) => candidate.id === item.id) || null;
       const colId = item.collaborationId;
       const matched = colId ? collaborations.find(c => c.state.id === colId) : null;
 
@@ -623,6 +624,10 @@ export async function queryControlPlane(stateRoot, options = {}) {
         summary: item.summary || null,
         updatedAt: item.updatedAt || p.updatedAt || null,
         priority: item.priority !== undefined ? item.priority : null,
+        phase: item.phase || null,
+        phaseOrder: item.phaseOrder ?? null,
+        lookahead: scheduledItem?.lookahead === true,
+        lookaheadFromPhase: scheduledItem?.lookaheadFromPhase || null,
         blockedBy: item.blockedBy || [],
         blockingDependencies: (item.blockedBy || []).map((dependencyId) => {
           const dependency = portfolioItemsById.get(dependencyId);
