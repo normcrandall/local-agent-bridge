@@ -1,3 +1,5 @@
+import { missionControlLaneKey, requiredIdentifier } from "./mission-control-event-protocol.mjs";
+
 export const MISSION_CONTROL_NAVIGATION_VERSION = 1;
 export const MISSION_CONTROL_NAVIGATION_VIEWS = Object.freeze([
   "active",
@@ -16,34 +18,63 @@ const DEFAULT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
 const MAX_SERIALIZED_BYTES = 64 * 1_024;
 const MAX_ORDER_ENTRIES = 256;
 const MAX_RECEIPTS = 512;
-const MAX_ID_LENGTH = 256;
+const MAX_LANE_KEY_LENGTH = (512 * 2) + 1;
+const MAX_TOKEN_LENGTH = 2_048;
+// JSON escaping can expand each protocol-valid identifier character to six
+// bytes, so two 512-character components need more than their raw size.
+const MAX_SCOPE_LENGTH = 8_192;
 
-function cleanId(value) {
-  if (typeof value !== "string") return null;
-  const valueClean = value.trim();
-  return valueClean && valueClean.length <= MAX_ID_LENGTH && !/[\u0000-\u001f\u007f]/u.test(valueClean)
-    ? valueClean
-    : null;
+function cleanIdentifier(value) {
+  try {
+    return requiredIdentifier(value, "navigation identifier");
+  } catch {
+    return null;
+  }
+}
+
+function cleanLaneKey(value) {
+  if (typeof value !== "string" || value.length > MAX_LANE_KEY_LENGTH) return null;
+  const separator = value.indexOf("\0");
+  if (separator < 1 || separator !== value.lastIndexOf("\0")) return null;
+  try {
+    return missionControlLaneKey(value.slice(0, separator), value.slice(separator + 1));
+  } catch {
+    return null;
+  }
+}
+
+function cleanToken(value) {
+  if (typeof value !== "string" || !value.trim() || value.length > MAX_TOKEN_LENGTH || /[\0\r\n]/u.test(value)) return null;
+  return value;
+}
+
+function cleanScope(value) {
+  if (typeof value !== "string" || !value || value.length > MAX_SCOPE_LENGTH || /[\0\r\n]/u.test(value)) return null;
+  return value;
 }
 
 function laneKey(lane) {
-  const explicit = cleanId(lane?.key);
-  if (explicit) return explicit;
-  const repository = cleanId(lane?.repository);
-  const id = cleanId(lane?.id);
-  return repository && id ? `${repository}:${id}` : id;
+  try {
+    return missionControlLaneKey(lane?.repository, lane?.id);
+  } catch {
+    return null;
+  }
 }
 
-function portfolioId(value) {
-  return cleanId(value?.portfolio?.portfolioId ?? value?.portfolio?.id ?? value?.portfolioId ?? value?.id);
+function declaredPortfolioId(value) {
+  return cleanIdentifier(value?.portfolioId ?? value?.id);
+}
+
+function lanePortfolioId(value) {
+  return cleanIdentifier(value?.portfolio?.portfolioId ?? value?.portfolio?.id ?? value?.portfolioId);
 }
 
 function unique(values) {
   return [...new Set(values.filter(Boolean))];
 }
 
-function boundedIds(values, limit = MAX_ORDER_ENTRIES) {
-  return unique((Array.isArray(values) ? values : []).map(cleanId)).slice(0, limit);
+function bounded(values, normalize, limit = MAX_ORDER_ENTRIES) {
+  return unique((Array.isArray(values) ? values : []).map(normalize)).slice(0, limit);
 }
 
 function nearest(previousOrder, previousSelection, currentOrder) {
@@ -54,9 +85,9 @@ function nearest(previousOrder, previousSelection, currentOrder) {
   return currentOrder[Math.min(previousIndex, currentOrder.length - 1)];
 }
 
-function stableOrder(previousOrder, currentIds) {
+function stableOrder(previousOrder, currentIds, normalize) {
   const current = new Set(currentIds);
-  const retained = boundedIds(previousOrder).filter((id) => current.has(id));
+  const retained = bounded(previousOrder, normalize).filter((id) => current.has(id));
   const retainedSet = new Set(retained);
   return [...retained, ...currentIds.filter((id) => !retainedSet.has(id))].slice(0, MAX_ORDER_ENTRIES);
 }
@@ -69,7 +100,7 @@ function collection(model, view) {
   const seen = new Set();
   return combined.filter((lane) => {
     const key = laneKey(lane);
-    if (!key || seen.has(key) || !portfolioId(lane)) return false;
+    if (!key || seen.has(key) || !lanePortfolioId(lane)) return false;
     seen.add(key);
     return true;
   });
@@ -77,9 +108,9 @@ function collection(model, view) {
 
 function repositoriesFor(model) {
   const declared = (Array.isArray(model?.repositories) ? model.repositories : [])
-    .map((entry) => cleanId(typeof entry === "string" ? entry : entry?.id));
+    .map((entry) => cleanIdentifier(typeof entry === "string" ? entry : entry?.id));
   const lanes = Object.values(model?.collections || {}).flatMap((entries) => Array.isArray(entries) ? entries : []);
-  return unique([...declared, ...lanes.map((lane) => cleanId(lane?.repository))]);
+  return unique([...declared, ...lanes.map((lane) => cleanIdentifier(lane?.repository))]);
 }
 
 function portfoliosFor(model, repository) {
@@ -88,19 +119,23 @@ function portfoliosFor(model, repository) {
     : Object.values(model?.portfolios || {});
   const fromCollections = Object.values(model?.collections || {})
     .flatMap((entries) => Array.isArray(entries) ? entries : []);
-  return unique([...declared, ...fromCollections]
-    .filter((entry) => !repository || cleanId(entry?.repository) === repository)
-    .map(portfolioId));
+  const declaredIds = declared
+    .filter((entry) => !repository || cleanIdentifier(entry?.repository) === repository)
+    .map(declaredPortfolioId);
+  const laneIds = fromCollections
+    .filter((entry) => !repository || cleanIdentifier(entry?.repository) === repository)
+    .map(lanePortfolioId);
+  return unique([...declaredIds, ...laneIds]);
 }
 
 function scopeKey(state) {
-  return [state.view, state.repository || "*", state.portfolio || "*"].join("|");
+  return JSON.stringify([state.view, state.repository, state.portfolio]);
 }
 
 function safeReceipts(receipts) {
   if (!receipts || typeof receipts !== "object" || Array.isArray(receipts)) return {};
   return Object.fromEntries(Object.entries(receipts)
-    .map(([key, token]) => [cleanId(key), cleanId(token)])
+    .map(([key, token]) => [cleanLaneKey(key), cleanToken(token)])
     .filter(([key, token]) => key && token)
     .slice(-MAX_RECEIPTS));
 }
@@ -108,7 +143,7 @@ function safeReceipts(receipts) {
 function safeOrders(orders) {
   if (!orders || typeof orders !== "object" || Array.isArray(orders)) return {};
   return Object.fromEntries(Object.entries(orders)
-    .map(([key, values]) => [cleanId(key), boundedIds(values)])
+    .map(([key, values]) => [cleanScope(key), bounded(values, cleanLaneKey)])
     .filter(([key, values]) => key && values.length)
     .slice(-MAX_ORDER_ENTRIES));
 }
@@ -120,11 +155,11 @@ export function createMissionControlNavigationState(overrides = {}) {
     version: MISSION_CONTROL_NAVIGATION_VERSION,
     view,
     pane,
-    repository: cleanId(overrides.repository),
-    portfolio: cleanId(overrides.portfolio),
-    lane: cleanId(overrides.lane),
-    repositoryOrder: boundedIds(overrides.repositoryOrder),
-    portfolioOrder: boundedIds(overrides.portfolioOrder),
+    repository: cleanIdentifier(overrides.repository),
+    portfolio: cleanIdentifier(overrides.portfolio),
+    lane: cleanLaneKey(overrides.lane),
+    repositoryOrder: bounded(overrides.repositoryOrder, cleanIdentifier),
+    portfolioOrder: bounded(overrides.portfolioOrder, cleanIdentifier),
     laneOrderByScope: safeOrders(overrides.laneOrderByScope),
     seenCompletions: safeReceipts(overrides.seenCompletions),
   };
@@ -138,26 +173,26 @@ export function createMissionControlNavigationState(overrides = {}) {
  */
 export function reconcileMissionControlNavigation(previous, model) {
   const state = createMissionControlNavigationState(previous);
-  const repositories = stableOrder(state.repositoryOrder, repositoriesFor(model));
+  const repositories = stableOrder(state.repositoryOrder, repositoriesFor(model), cleanIdentifier);
   const repository = state.repository == null
     ? null
     : nearest(state.repositoryOrder, state.repository, repositories);
 
-  const portfolioIds = stableOrder(state.portfolioOrder, portfoliosFor(model, repository));
+  const portfolioIds = stableOrder(state.portfolioOrder, portfoliosFor(model, repository), cleanIdentifier);
   const portfolio = state.portfolio == null
     ? null
     : nearest(state.portfolioOrder, state.portfolio, portfolioIds);
   const scoped = { ...state, repository, portfolio };
   const scope = scopeKey(scoped);
   const candidates = collection(model, state.view).filter((lane) => {
-    if (repository && cleanId(lane.repository) !== repository) return false;
-    if (portfolio && portfolioId(lane) !== portfolio) return false;
+    if (repository && cleanIdentifier(lane.repository) !== repository) return false;
+    if (portfolio && lanePortfolioId(lane) !== portfolio) return false;
     return Boolean(laneKey(lane));
   });
   const candidateByKey = new Map(candidates.map((lane) => [laneKey(lane), lane]));
   const candidateIds = unique(candidates.map(laneKey));
   const previousLaneOrder = state.laneOrderByScope[scope] || [];
-  const laneOrder = stableOrder(previousLaneOrder, candidateIds);
+  const laneOrder = stableOrder(previousLaneOrder, candidateIds, cleanLaneKey);
   const lane = nearest(previousLaneOrder, state.lane, laneOrder);
 
   return {
@@ -166,7 +201,10 @@ export function reconcileMissionControlNavigation(previous, model) {
       lane,
       repositoryOrder: repositories,
       portfolioOrder: portfolioIds,
-      laneOrderByScope: { ...state.laneOrderByScope, [scope]: laneOrder },
+      laneOrderByScope: Object.fromEntries([
+        ...Object.entries(state.laneOrderByScope).filter(([key]) => key !== scope),
+        [scope, laneOrder],
+      ]),
     },
     repositories,
     portfolios: portfolioIds,
@@ -178,12 +216,12 @@ export function reconcileMissionControlNavigation(previous, model) {
 export function updateMissionControlNavigation(state, patch = {}) {
   const next = createMissionControlNavigationState({ ...state, ...patch });
   if (Object.hasOwn(patch, "repository")) {
-    next.repository = cleanId(patch.repository);
+    next.repository = cleanIdentifier(patch.repository);
     next.portfolio = null;
     next.lane = null;
   }
   if (Object.hasOwn(patch, "portfolio")) {
-    next.portfolio = cleanId(patch.portfolio);
+    next.portfolio = cleanIdentifier(patch.portfolio);
     next.lane = null;
   }
   if (Object.hasOwn(patch, "view")) next.lane = null;
@@ -201,26 +239,41 @@ export function moveMissionControlLane(state, model, delta) {
 
 export function missionControlCompletionIsUnseen(state, lane) {
   const key = laneKey(lane);
-  const token = cleanId(lane?.completionToken);
-  return Boolean(key && token && state?.seenCompletions?.[key] !== token);
+  const token = cleanToken(lane?.completionToken);
+  return lane?.terminal === true && Boolean(key && token && state?.seenCompletions?.[key] !== token);
 }
 
 export function markMissionControlCompletionSeen(state, lane) {
   const key = laneKey(lane);
-  const token = cleanId(lane?.completionToken);
-  if (!key || !token) throw new Error("A lane key and completion token are required.");
+  const token = cleanToken(lane?.completionToken);
+  if (lane?.terminal !== true || !key || !token) throw new Error("A terminal lane key and completion token are required.");
+  const previousReceipts = Object.entries(state?.seenCompletions || {}).filter(([receiptKey]) => receiptKey !== key);
   return createMissionControlNavigationState({
     ...state,
-    seenCompletions: { ...state?.seenCompletions, [key]: token },
+    seenCompletions: Object.fromEntries([...previousReceipts, [key, token]]),
   });
 }
 
 /** Serialize only bounded navigation identities; model/provider content is never accepted. */
 export function serializeMissionControlNavigation(state, { now = Date.now() } = {}) {
-  const safe = createMissionControlNavigationState(state);
-  const serialized = JSON.stringify({ ...safe, savedAt: new Date(now).toISOString() });
-  if (Buffer.byteLength(serialized, "utf8") > MAX_SERIALIZED_BYTES) {
-    throw new Error("Mission Control navigation state exceeds the persistence limit.");
+  const safe = structuredClone(createMissionControlNavigationState(state));
+  const savedAt = new Date(now).toISOString();
+  const render = () => JSON.stringify({ ...safe, savedAt });
+  let serialized = render();
+  const shedOldest = (record) => {
+    const oldest = Object.keys(record)[0];
+    if (!oldest) return false;
+    delete record[oldest];
+    return true;
+  };
+  while (Buffer.byteLength(serialized, "utf8") > MAX_SERIALIZED_BYTES) {
+    if (!shedOldest(safe.laneOrderByScope)
+      && !shedOldest(safe.seenCompletions)
+      && !safe.repositoryOrder.shift()
+      && !safe.portfolioOrder.shift()) {
+      throw new Error("Mission Control navigation state exceeds the persistence limit.");
+    }
+    serialized = render();
   }
   return serialized;
 }

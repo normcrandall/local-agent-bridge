@@ -246,6 +246,7 @@ export function projectMissionControlViewModel(eventState, clientState = {}) {
     updatedAt: eventState.updatedAt ?? null,
     sync: structuredClone(eventState.sync || null),
     repositories,
+    portfolios: Object.values(eventState.portfolios || {}).map((portfolio) => structuredClone(portfolio)),
     tabs: MISSION_CONTROL_VIEW_TABS,
     collections,
     selection: {
