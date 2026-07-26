@@ -41,6 +41,7 @@ import {
 } from "../src/performance-timeline.mjs";
 import { createVerificationTimingTracker } from "../src/verification-timing.mjs";
 import { assertRepositoryEvidenceHead, captureRepositoryEvidence } from "../src/repository-evidence.mjs";
+import { createRepositoryRuntimeJournal } from "../src/repository-runtime-journal.mjs";
 import { createEvidenceStore } from "../src/evidence-store.mjs";
 import { createRepositoryJournal } from "../src/repository-journal.mjs";
 import { createRepositorySnapshotCache, repositorySnapshotCacheDirectory } from "../src/repository-snapshot-cache.mjs";
@@ -69,7 +70,78 @@ let releaseWorkspace = null;
 let pool = null;
 let state = null;
 let claimClient = null;
+let claimJournal = null;
 let workerHeadSha = null;
+
+async function checkpointClaim({ phase, summary, writer, previousWriter = null, kind = "refresh", terminal = false } = {}) {
+  if (!claimClient || !claimJournal || !state?.issueClaim) return { queued: false, publication: [] };
+  const metadata = claimWorkspaceMetadata(state);
+  workerHeadSha = metadata.headSha;
+  const queued = await claimJournal.enqueue({
+    kind,
+    collaborationId: id,
+    phase,
+    summary,
+    writer: writer || state.writer || null,
+    previousWriter,
+    headSha: metadata.headSha,
+    branch: metadata.branch,
+    terminal,
+  });
+  const publication = await claimJournal.publishPending({
+    workerId: `${id}:${process.pid}`,
+    async publish(checkpoint, entry) {
+      const currentMetadata = claimWorkspaceMetadata(state);
+      if (checkpoint.kind !== "release" && checkpoint.headSha && checkpoint.headSha !== currentMetadata.headSha) {
+        return { skipped: "superseded_head", currentHeadSha: currentMetadata.headSha };
+      }
+      if (checkpoint.kind === "release") {
+        const { releaseClaimLease } = await import("../src/github-issue-claims.mjs");
+        return releaseClaimLease({
+          client: claimClient,
+          issueNumber: entry.binding.issueNumber,
+          collaborationId: checkpoint.collaborationId,
+          outcome: checkpoint.phase,
+          workspaceRoot,
+        });
+      }
+      const { refreshClaimLease } = await import("../src/github-issue-claims.mjs");
+      return refreshClaimLease({
+        client: claimClient,
+        issueNumber: entry.binding.issueNumber,
+        collaborationId: checkpoint.collaborationId,
+        workspaceRoot,
+        phase: checkpoint.phase,
+        summary: checkpoint.summary,
+        writer: checkpoint.writer,
+        writerFailover: checkpoint.previousWriter
+          ? { from: checkpoint.previousWriter, to: checkpoint.writer, reason: "provider failover" }
+          : null,
+        ...currentMetadata,
+      });
+    },
+  });
+  const inspection = await claimJournal.inspect();
+  await updateCollaboration(workspaceRoot, id, (current) => ({
+    ...current,
+    repositoryJournal: {
+      version: 1,
+      lastCheckpointAt: new Date().toISOString(),
+      lastCheckpointPhase: phase,
+      pendingPublications: inspection.pending.length,
+      deadLetterPublications: inspection.deadLetter.length,
+      acknowledgedPublications: inspection.acknowledged.length,
+      offline: publication.some((result) => result.status === "retry_scheduled"),
+    },
+  }));
+  const terminalFailure = publication.find((result) => result.status === "dead_letter");
+  if (terminalFailure) {
+    const error = new Error(`Repository lifecycle publication was rejected: ${terminalFailure.error}`);
+    error.code = "REPOSITORY_LIFECYCLE_PUBLICATION_REJECTED";
+    throw error;
+  }
+  return { queued: !queued.idempotent, publication };
+}
 
 async function recordTiming(event) {
   const at = event.at || new Date().toISOString();
@@ -227,6 +299,12 @@ try {
       workspace: state.workspace,
       fetchImpl: fetch,
     });
+    claimJournal = createRepositoryRuntimeJournal({
+      workspace: state.workspace,
+      repository,
+      issueNumber: state.issueClaim.issueNumber,
+      pullRequestNumber: state.githubBuilder?.prNumber || state.githubReview?.prNumber || null,
+    });
   }
 
   state = await updateCollaboration(workspaceRoot, id, (current) => ({
@@ -246,18 +324,12 @@ try {
   await appendEvent(workspaceRoot, id, { type: "run_started", at: new Date().toISOString(), pid: process.pid });
 
   if (claimClient) {
-    const { refreshClaimLease } = await import("../src/github-issue-claims.mjs");
     const metadata = claimWorkspaceMetadata(state);
     workerHeadSha = metadata.headSha;
-    await refreshClaimLease({
-      client: claimClient,
-      issueNumber: state.issueClaim.issueNumber,
-      collaborationId: id,
-      workspaceRoot,
+    await checkpointClaim({
       phase: "running",
       summary: "Starting provider work.",
       writer: state.writer,
-      ...metadata,
     });
   }
 
@@ -398,17 +470,11 @@ try {
   if (preflightFailover) {
     await appendEvent(workspaceRoot, id, { type: "provider_failover", ...preflightFailover });
     if (claimClient) {
-      const { refreshClaimLease } = await import("../src/github-issue-claims.mjs");
-      await refreshClaimLease({
-        client: claimClient,
-        issueNumber: state.issueClaim.issueNumber,
-        collaborationId: id,
-        workspaceRoot,
+      await checkpointClaim({
         phase: "running",
         writer,
-        writerFailover: preflightFailover,
+        previousWriter,
         summary: `${previousWriter} failed preflight; writer transferred to ${writer}.`,
-        ...claimWorkspaceMetadata(state),
       });
     }
   }
@@ -1015,19 +1081,13 @@ try {
         },
       }));
       if (claimClient && writerTransferred) {
-        const { refreshClaimLease } = await import("../src/github-issue-claims.mjs");
         const metadata = claimWorkspaceMetadata(state);
         workerHeadSha = metadata.headSha;
-        await refreshClaimLease({
-          client: claimClient,
-          issueNumber: state.issueClaim.issueNumber,
-          collaborationId: id,
-          workspaceRoot,
+        await checkpointClaim({
           phase: "running",
           writer: failure.writer,
-          writerFailover: failover,
+          previousWriter: failover.from,
           summary: `${failure.agent} failed (${failure.failureClass}); writer transferred to ${failure.writer}.`,
-          ...metadata,
         });
       }
     },
@@ -1046,16 +1106,10 @@ try {
         },
       }));
       if (claimClient) {
-        const { refreshClaimLease } = await import("../src/github-issue-claims.mjs");
-        await refreshClaimLease({
-          client: claimClient,
-          issueNumber: state.issueClaim.issueNumber,
-          collaborationId: id,
-          workspaceRoot,
+        await checkpointClaim({
           phase: runtime.activeCall?.phase || "running",
           summary: runtime.activeCall?.summary || "Provider work is active.",
           writer: runtime.writer,
-          ...metadata,
         });
       }
     },
@@ -1086,37 +1140,26 @@ try {
     });
     if (claimClient) {
       if (outcome.reason === "completed") {
-        const { refreshClaimLease } = await import("../src/github-issue-claims.mjs");
-        await refreshClaimLease({
-          client: claimClient,
-          issueNumber: state.issueClaim.issueNumber,
-          collaborationId: id,
-          workspaceRoot,
+        await checkpointClaim({
           phase: "completed",
           summary: "Provider work completed; the claim remains held through review and merge.",
           writer: outcome.state.writer,
-          ...finalClaimMetadata,
+          terminal: true,
         });
       } else if (["cancelled", "obsolete"].includes(outcome.reason)) {
-        const { releaseClaimLease } = await import("../src/github-issue-claims.mjs");
-        await releaseClaimLease({
-          client: claimClient,
-          issueNumber: state.issueClaim.issueNumber,
-          collaborationId: id,
-          outcome: outcome.reason,
-          workspaceRoot,
+        await checkpointClaim({
+          kind: "release",
+          phase: outcome.reason,
+          summary: `Claim released after ${outcome.reason}.`,
+          writer: outcome.state.writer,
+          terminal: true,
         });
       } else if (["failed", "indeterminate"].includes(outcome.reason)) {
-        const { refreshClaimLease } = await import("../src/github-issue-claims.mjs");
-        await refreshClaimLease({
-          client: claimClient,
-          issueNumber: state.issueClaim.issueNumber,
-          collaborationId: id,
-          workspaceRoot,
+        await checkpointClaim({
           phase: outcome.reason,
           summary: outcome.error || `Provider work stopped with ${outcome.reason}; the claim remains held.`,
           writer: outcome.state.writer,
-          ...finalClaimMetadata,
+          terminal: true,
         });
       }
     }
@@ -1127,18 +1170,13 @@ try {
     let failure = error;
     if (claimClient) {
       try {
-        const { refreshClaimLease } = await import("../src/github-issue-claims.mjs");
         const metadata = claimWorkspaceMetadata(state);
         workerHeadSha = metadata.headSha;
-        await refreshClaimLease({
-          client: claimClient,
-          issueNumber: state.issueClaim.issueNumber,
-          collaborationId: id,
-          workspaceRoot,
+        await checkpointClaim({
           phase: error?.indeterminate ? "indeterminate" : "failed",
           summary: error.message,
           writer: state.writer,
-          ...metadata,
+          terminal: true,
         });
       } catch (claimErr) {
         failure = new AggregateError(
