@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { missionControlLaneKey } from "./mission-control-event-protocol.mjs";
 
 export const MISSION_CONTROL_VIEW_TABS = Object.freeze([
@@ -76,14 +77,33 @@ function isTerminal(lane, status) {
 }
 
 function completionToken(lane) {
-  return clean(
-    lane.completion?.sequence
-    ?? lane.completion?.completedAt
-    ?? lane.github?.headSha
-    ?? lane.headSha
-    ?? lane.updatedAt
-    ?? lane.status,
-  );
+  const identities = [
+    ["completion-sequence", lane.completion?.sequence],
+    ["completion-id", lane.completion?.id],
+    ["completion-at", lane.completion?.completedAt],
+    ["terminal-id", lane.terminalId],
+    ["terminal-at", lane.terminalAt ?? lane.completedAt ?? lane.finishedAt ?? lane.stoppedAt],
+    ["merge-commit", lane.github?.mergeCommitSha],
+    ["github-head", lane.github?.headSha],
+    ["head", lane.headSha],
+  ];
+  for (const [kind, value] of identities) {
+    const identity = clean(value);
+    if (identity) return `${kind}:${identity}`;
+  }
+
+  // updatedAt and narrative/heartbeat data are deliberately excluded: they can
+  // change after completion without representing a new terminal outcome.
+  const stableFacts = JSON.stringify({
+    lane: laneKey(lane),
+    status: laneStatus(lane),
+    createdAt: clean(lane.createdAt) || null,
+    startedAt: clean(lane.startedAt) || null,
+    runId: clean(lane.runId ?? lane.runtime?.runId) || null,
+    attempt: Number.isSafeInteger(lane.attempt) ? lane.attempt : null,
+    outcome: clean(lane.completion?.lastHandoff?.outcome ?? lane.outcome).toLowerCase() || null,
+  });
+  return `terminal-facts:${createHash("sha256").update(stableFacts).digest("hex")}`;
 }
 
 function compareCreated(left, right) {
@@ -99,9 +119,8 @@ function compareCreated(left, right) {
   return left.key.localeCompare(right.key);
 }
 
-function orderActive(active, previousOrder) {
-  const liveKeys = new Set(active.map((lane) => lane.key));
-  const retained = (Array.isArray(previousOrder) ? previousOrder : []).filter((key) => liveKeys.has(key));
+function orderActive(active, previousOrder, presentKeys) {
+  const retained = (Array.isArray(previousOrder) ? previousOrder : []).filter((key) => presentKeys.has(key));
   const retainedSet = new Set(retained);
   const appended = active.filter((lane) => !retainedSet.has(lane.key)).sort(compareCreated).map((lane) => lane.key);
   const order = [...retained, ...appended];
@@ -183,15 +202,19 @@ export function projectMissionControlViewModel(eventState, clientState = {}) {
     else lane.category = "queue";
   }
 
-  const activeOrder = orderActive(lanes.filter((lane) => lane.category === "active"), clientState.activeOrder);
+  const activeOrder = orderActive(
+    lanes.filter((lane) => lane.category === "active"),
+    clientState.activeOrder,
+    new Set(lanes.map((lane) => lane.key)),
+  );
   const stable = (values) => [...values].sort(compareCreated);
   const collections = {
     active: activeOrder.lanes,
     needsYou: stable(lanes.filter((lane) => lane.category === "needsYou")),
     queue: stable(lanes.filter((lane) => lane.category === "queue")),
-    reviews: stable(lanes.filter((lane) => isReview(lane, lane.status))),
-    mergeTrain: stable(lanes.filter((lane) => isMergeTrain(lane, lane.status))),
-    history: stable(lanes.filter((lane) => lane.category === "history")),
+    reviews: stable(lanes.filter((lane) => !lane.terminal && isReview(lane, lane.status))),
+    mergeTrain: stable(lanes.filter((lane) => !lane.terminal && isMergeTrain(lane, lane.status))),
+    history: stable(lanes.filter((lane) => lane.terminal)),
   };
 
   const repositories = repositoryRollups(Object.values(eventState.repositories || {}), lanes);
