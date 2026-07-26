@@ -93,6 +93,20 @@ fs.writeFileSync(path.join(localRepoPath, "inherited-feature.txt"), "feature pay
 git(["add", "inherited-feature.txt"], { cwd: localRepoPath });
 git(["commit", "-m", "Add feature above binary base"], { cwd: localRepoPath });
 const inheritedBinaryHeadSha = gitOut(["rev-parse", "HEAD"], { cwd: localRepoPath });
+
+// Binary changes above the bound base exercise push_branch's scoped payload
+// validation when the provider omits oldSha and the client inherits baseSha.
+git(["checkout", "-b", "added-binary", inheritedBinaryBaseSha], { cwd: localRepoPath });
+fs.writeFileSync(path.join(localRepoPath, "added-binary.dat"), Buffer.from([0, 4, 5, 6]));
+git(["add", "added-binary.dat"], { cwd: localRepoPath });
+git(["commit", "-m", "Add binary above base"], { cwd: localRepoPath });
+const addedBinaryHeadSha = gitOut(["rev-parse", "HEAD"], { cwd: localRepoPath });
+
+git(["checkout", "-b", "modified-binary", inheritedBinaryBaseSha], { cwd: localRepoPath });
+fs.writeFileSync(path.join(localRepoPath, "inherited-binary.dat"), Buffer.from([0, 7, 8, 9]));
+git(["add", "inherited-binary.dat"], { cwd: localRepoPath });
+git(["commit", "-m", "Modify binary above base"], { cwd: localRepoPath });
+const modifiedBinaryHeadSha = gitOut(["rev-parse", "HEAD"], { cwd: localRepoPath });
 git(["checkout", "main"], { cwd: localRepoPath });
 
 // Seed remote state through direct file-path pushes: no network, no auth, no
@@ -102,6 +116,8 @@ git(["push", bareRepoPath, `${baseCommitSha}:refs/heads/exists-elsewhere`], { cw
 git(["push", bareRepoPath, `${baseCommitSha}:refs/heads/ff-branch`], { cwd: localRepoPath });
 git(["push", bareRepoPath, `${baseCommitSha}:refs/heads/ff2-branch`], { cwd: localRepoPath });
 git(["push", bareRepoPath, `${inheritedBinaryBaseSha}:refs/heads/inherited-binary-push`], { cwd: localRepoPath });
+git(["push", bareRepoPath, `${inheritedBinaryBaseSha}:refs/heads/added-binary-push`], { cwd: localRepoPath });
+git(["push", bareRepoPath, `${inheritedBinaryBaseSha}:refs/heads/modified-binary-push`], { cwd: localRepoPath });
 git(["push", bareRepoPath, `${divergedSha}:refs/heads/cas-branch`], { cwd: localRepoPath });
 git(["push", bareRepoPath, `${divergedSha}:refs/heads/diverged-branch`], { cwd: localRepoPath });
 git(["push", bareRepoPath, `${divergedSha}:refs/heads/replacement-branch`], { cwd: localRepoPath });
@@ -1456,6 +1472,43 @@ const inheritedBinaryPush = await createBoundBuilderClient({
 assert.equal(inheritedBinaryPush.expectedOldSha, inheritedBinaryBaseSha);
 assert.equal(inheritedBinaryPush.outcome, "fast_forwarded");
 assert.equal(gitOut(["rev-parse", "refs/heads/inherited-binary-push"], { cwd: bareRepoPath }), inheritedBinaryHeadSha);
+
+// The same inherited base must reject binaries that are added or modified in
+// baseSha..headSha when push_branch inherits its old SHA from the client
+// binding. Validation must finish before credential issuance, API access, or a
+// transport mutation.
+for (const binaryChange of [
+  { branch: "added-binary-push", headSha: addedBinaryHeadSha },
+  { branch: "modified-binary-push", headSha: modifiedBinaryHeadSha },
+]) {
+  const binaryChangeFactory = tokenFactory();
+  const binaryChangeApi = fakeGitHub({
+    branchShas: { [binaryChange.branch]: inheritedBinaryBaseSha },
+  });
+  const pushAttemptsBeforeBinaryRejection = mockServer.pushAttempts;
+  await assert.rejects(
+    createBoundBuilderClient({
+      ...base,
+      token: null,
+      getToken: binaryChangeFactory.getToken,
+      baseSha: inheritedBinaryBaseSha,
+      headSha: binaryChange.headSha,
+      headRef: binaryChange.branch,
+      fetchImpl: binaryChangeApi.fetchImpl,
+    }).pushBranch({
+      ref: `refs/heads/${binaryChange.branch}`,
+      sha: binaryChange.headSha,
+    }),
+    /is binary and must be tracked via LFS/,
+  );
+  assert.equal(binaryChangeFactory.state.issued, false);
+  assert.equal(binaryChangeApi.calls.length, 0);
+  assert.equal(mockServer.pushAttempts, pushAttemptsBeforeBinaryRejection);
+  assert.equal(
+    gitOut(["rev-parse", `refs/heads/${binaryChange.branch}`], { cwd: bareRepoPath }),
+    inheritedBinaryBaseSha,
+  );
+}
 
 // F. Missing remote branch and stale oldSha are rejected before any push.
 await assert.rejects(
