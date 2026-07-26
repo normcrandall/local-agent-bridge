@@ -132,6 +132,7 @@ export function createRepositoryRuntimeJournal({
   repository,
   issueNumber,
   pullRequestNumber = null,
+  collaborationId = null,
   directory = null,
   now = () => new Date().toISOString(),
   leaseMs,
@@ -145,6 +146,12 @@ export function createRepositoryRuntimeJournal({
     issueNumber: positiveInteger(issueNumber, "issueNumber"),
     pullRequestNumber: pullRequestNumber === null ? null : positiveInteger(pullRequestNumber, "pullRequestNumber"),
   };
+  const collaborationScope = collaborationId === null
+    ? null
+    : required(collaborationId, "collaborationId", 128);
+  const idempotencyKeyPrefix = collaborationScope === null
+    ? null
+    : `collaboration-checkpoint:${collaborationScope}:`;
   const journalRoot = directory || resolve(repositoryRuntimeJournalDirectory(workspace), `issue-${binding.issueNumber}`);
   const journal = createRepositoryJournal({ directory: journalRoot, now });
   const outbox = createRepositoryJournalOutbox({
@@ -159,6 +166,9 @@ export function createRepositoryRuntimeJournal({
 
   async function enqueue(checkpointInput) {
     const checkpoint = normalizedCheckpoint(checkpointInput);
+    if (collaborationScope !== null && checkpoint.collaborationId !== collaborationScope) {
+      throw new Error(`Checkpoint collaborationId must match the runtime journal scope ${collaborationScope}.`);
+    }
     const idempotencyKey = checkpointKey(checkpoint);
     const payload = { repositoryRuntime: checkpoint };
     const result = await outbox.enqueue({
@@ -173,7 +183,11 @@ export function createRepositoryRuntimeJournal({
 
   async function publishPending({ workerId, publish, limit = 25 } = {}) {
     if (typeof publish !== "function") throw new Error("publish must be a function.");
-    const claimed = await outbox.claim({ workerId: required(workerId, "workerId", 256), limit });
+    const claimed = await outbox.claim({
+      workerId: required(workerId, "workerId", 256),
+      limit,
+      ...(idempotencyKeyPrefix === null ? {} : { idempotencyKeyPrefix }),
+    });
     const results = [];
     for (const entry of claimed) {
       try {
@@ -198,7 +212,7 @@ export function createRepositoryRuntimeJournal({
     if (!Number.isInteger(maxRedrives) || maxRedrives < 0) {
       throw new Error("maxRedrives must be a non-negative integer.");
     }
-    const inspection = await outbox.inspect();
+    const inspection = await inspect();
     const eligible = inspection.deadLetter.filter((entry) => {
       const classification = entry.failure?.classification;
       const statusCode = entry.failure?.statusCode;
@@ -227,6 +241,18 @@ export function createRepositoryRuntimeJournal({
     };
   }
 
+  async function inspect() {
+    const inspection = await outbox.inspect();
+    if (collaborationScope === null) return inspection;
+    const belongsToScope = (entry) => entry.payload?.repositoryRuntime?.collaborationId === collaborationScope;
+    return {
+      ...inspection,
+      pending: inspection.pending.filter(belongsToScope),
+      deadLetter: inspection.deadLetter.filter(belongsToScope),
+      acknowledged: inspection.acknowledged.filter(belongsToScope),
+    };
+  }
+
   return Object.freeze({
     binding,
     journal,
@@ -234,7 +260,7 @@ export function createRepositoryRuntimeJournal({
     enqueue,
     publishPending,
     redriveAuthorityFailures,
-    inspect: outbox.inspect,
+    inspect,
     retain: outbox.retain,
   });
 }

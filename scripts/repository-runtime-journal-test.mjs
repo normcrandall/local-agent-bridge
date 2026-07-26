@@ -277,6 +277,59 @@ try {
     "ordinary lease reclamation must not consume the one authority-redrive allowance");
   assert.equal((await reclaimed.inspect()).pending[0].redriveCount, 1);
 
+  const sharedDirectory = join(root, "shared-issue-across-collaborations");
+  const collaborationA = createRepositoryRuntimeJournal({
+    workspace: root,
+    directory: sharedDirectory,
+    repository: "veliqon/example",
+    issueNumber: 231,
+    collaborationId: "bridge-collaboration-a",
+    now,
+  });
+  await collaborationA.enqueue({
+    collaborationId: "bridge-collaboration-a",
+    phase: "completed",
+    writer: "codex",
+    headSha: advancedHead,
+    terminal: true,
+  });
+  await collaborationA.publishPending({ workerId: "collaboration-a-publisher", async publish() {
+    const error = new Error("foreign collaboration can no longer refresh this claim");
+    error.status = 403;
+    throw error;
+  } });
+  assert.equal((await collaborationA.inspect()).deadLetter.length, 1);
+
+  const collaborationB = createRepositoryRuntimeJournal({
+    workspace: root,
+    directory: sharedDirectory,
+    repository: "veliqon/example",
+    issueNumber: 231,
+    collaborationId: "bridge-collaboration-b",
+    now,
+  });
+  await collaborationB.enqueue({
+    collaborationId: "bridge-collaboration-b",
+    phase: "running",
+    writer: "claude",
+    headSha: advancedHead,
+  });
+  const publishedByB = [];
+  const collaborationBResults = await collaborationB.publishPending({
+    workerId: "collaboration-b-publisher",
+    async publish(checkpoint) {
+      publishedByB.push(checkpoint.collaborationId);
+      return { refreshed: true };
+    },
+  });
+  assert.deepEqual(publishedByB, ["bridge-collaboration-b"],
+    "a new collaboration must not claim or publish an older collaboration's journal entries");
+  assert.equal(collaborationBResults[0].status, "published");
+  assert.equal((await collaborationB.inspect()).deadLetter.length, 0,
+    "foreign dead letters must not contaminate the scoped collaboration state");
+  assert.equal((await collaborationA.inspect()).deadLetter.length, 1,
+    "the original collaboration keeps its durable recovery evidence");
+
   const hiddenDirectory = join(root, "hidden-resource");
   const hidden = createRepositoryRuntimeJournal({
     workspace: root,

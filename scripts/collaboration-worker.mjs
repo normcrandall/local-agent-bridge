@@ -293,6 +293,7 @@ try {
       repository,
       issueNumber: state.issueClaim.issueNumber,
       pullRequestNumber: state.githubBuilder?.prNumber || state.githubReview?.prNumber || null,
+      collaborationId: id,
     });
     // A newly minted, repository-bound credential is the only automatic
     // authority-restoration signal. Redrive is persistently bounded by the

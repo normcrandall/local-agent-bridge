@@ -369,8 +369,11 @@ export function createRepositoryJournalOutbox({
     }
   }
 
-  async function claim({ workerId, limit = 1, leaseDurationMs = leaseMs } = {}) {
+  async function claim({ workerId, limit = 1, leaseDurationMs = leaseMs, idempotencyKeyPrefix = null } = {}) {
     const normalizedWorker = requiredString(workerId, "workerId", 256);
+    const normalizedPrefix = idempotencyKeyPrefix === null
+      ? null
+      : requiredString(idempotencyKeyPrefix, "idempotencyKeyPrefix", 256);
     if (!Number.isInteger(limit) || limit <= 0 || limit > MAX_CLAIM_LIMIT) fail(`limit must be from 1 through ${MAX_CLAIM_LIMIT}.`, "INVALID_LIMIT");
     millis(leaseDurationMs, "leaseDurationMs");
     const claimed = [];
@@ -379,6 +382,7 @@ export function createRepositoryJournalOutbox({
       const snapshot = await state();
       const candidates = [...snapshot.items.values()]
         .filter((item) => publicItem(item, snapshot.nowMs, maxAttempts).status === "pending")
+        .filter((item) => normalizedPrefix === null || item.idempotencyKey.startsWith(normalizedPrefix))
         .sort((left, right) => (left.retryAt || left.enqueuedAt).localeCompare(right.retryAt || right.enqueuedAt)
           || left.enqueueSequence - right.enqueueSequence
           || left.idempotencyKey.localeCompare(right.idempotencyKey));
