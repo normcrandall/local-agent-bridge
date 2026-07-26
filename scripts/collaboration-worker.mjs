@@ -909,7 +909,11 @@ try {
           }
         }
         const reviewPublication = turn.metadata?.reviewPublication?.published
-          ? recordReviewPublicationResult(current.reviewPublication, { agent: turn.agent, published: true })
+          ? recordReviewPublicationResult(current.reviewPublication, {
+            agent: turn.agent,
+            published: true,
+            trustRoster: turn.metadata.reviewPublication.trustRoster || null,
+          })
           : current.reviewPublication;
         return {
           ...current, usage, budgetExceeded: decision.exceeded, ci, decisions, decisionEscalation,

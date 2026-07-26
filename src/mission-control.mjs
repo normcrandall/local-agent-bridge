@@ -938,6 +938,12 @@ export function blockedReason(lane) {
     ? `Waiting for ${dependencies.join(", ")} to complete.`
     : "";
   const candidates = [
+    blocked && (lane.reviewPublication?.trustRoster?.unknown || lane.reviewPublication?.trustRoster?.degraded)
+      ? lane.reviewPublication.trustRoster.degradationReason || "Writer trust-roster inspection degraded."
+      : null,
+    blocked && lane.reviewPublication?.trustRoster?.signerNotTrusted?.length
+      ? `${lane.reviewPublication.trustRoster.signerNotTrusted.length} exact-head disposition signer(s) are not in the active trusted writer roster.`
+      : null,
     lane.blocker?.error,
     lane.blocker?.pendingDecision?.question,
     lane.blocker?.pendingDecision?.reason,
@@ -1133,6 +1139,24 @@ function detailPane(lane, timeline, width, now, snapshot, expanded = false) {
       .join(" · ");
     if (permissions) rows.push(paneLine(`PERMS (bound)  ${permissions}`, "36"));
   }
+  const trustRoster = lane.reviewPublication?.trustRoster;
+  if (trustRoster) {
+    const configuredWriters = trustRoster.configuredWriterLogins?.length
+      ? trustRoster.configuredWriterLogins.join(", ")
+      : "none verified";
+    rows.push(paneLine(
+      `TRUST  ${trustRoster.unknown ? "UNKNOWN" : trustRoster.degraded ? "DEGRADED" : "verified"} · ${trustRoster.rosterSource || "unknown source"} · writers ${configuredWriters}`,
+      trustRoster.unknown || trustRoster.degraded || trustRoster.signerNotTrusted?.length ? "31;1" : "36",
+    ));
+    const trustReason = trustRoster.unknown
+      ? trustRoster.degradationReason || "Durable review trust evidence is unreadable."
+      : trustRoster.degraded
+        ? trustRoster.degradationReason
+      : trustRoster.signerNotTrusted?.length
+        ? `${trustRoster.signerNotTrusted.length} disposition signer(s) not trusted at this head`
+        : null;
+    if (trustReason) rows.push(...wrap(`REASON  ${trustReason}`, width).slice(0, expanded ? 3 : 2).map((line) => paneLine(line, "31")));
+  }
   if (!deliveryStatus && lane.nextAction && lane.nextAction !== "none") rows.push(paneLine(`NEXT  ${friendlyPhase(lane)}`, "33"));
   const blockingReason = deliveryStatus ? "" : blockedReason(lane);
   if (blockingReason) {
@@ -1148,6 +1172,7 @@ function detailPane(lane, timeline, width, now, snapshot, expanded = false) {
     rows.push(paneLine(`ID  ${lane.id}`, "90"));
     if (lane.workspace) rows.push(paneLine(`WORKSPACE  ${lane.workspace}`, "90"));
     if (lane.checkout && lane.checkout !== lane.workspace) rows.push(paneLine(`CHECKOUT  ${lane.checkout}`, "90"));
+    if (lane.headSha) rows.push(paneLine(`HEAD  ${lane.headSha}`, "90"));
     if (lane.model) rows.push(paneLine(`MODEL  ${lane.model}`, "90"));
     const capacity = lane.activeAgent && snapshot.providerCapacity?.[lane.activeAgent];
     if (capacity) {

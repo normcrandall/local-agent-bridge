@@ -89,6 +89,7 @@ export function recordReviewPublicationResult(publication, {
   agent,
   published = false,
   unavailableReason = null,
+  trustRoster = null,
 } = {}) {
   if (!publication || !agent) return publication;
   const publishableAgents = (publication.publishableAgents || []).filter((candidate) => (
@@ -124,6 +125,29 @@ export function recordReviewPublicationResult(publication, {
     localOnlyAgents,
     unavailableAgents,
     humanApprovalRequired: !hasAuthorizationPath,
+    trustRoster: trustRoster || publication.trustRoster || null,
+  };
+}
+
+export function reviewTrustRosterForPublication({ latestEvidence, githubReview, publicationSucceeded = false }) {
+  if (latestEvidence?.status === "found") return latestEvidence.evidence;
+  const evidenceUnavailable = latestEvidence?.status === "unreadable"
+    || (latestEvidence?.status === "absent" && publicationSucceeded);
+  if (!evidenceUnavailable) return null;
+  const absentReason = "GitHub review publication succeeded, but no durable review trust evidence was recorded for this publication attempt.";
+  return {
+    repository: githubReview.repository,
+    prNumber: githubReview.prNumber,
+    headSha: githubReview.headSha,
+    reviewerLogin: githubReview.expectedLogin,
+    rosterSource: "durable-review-evidence",
+    configuredWriterLogins: [],
+    degraded: false,
+    unknown: true,
+    degradationReason: latestEvidence?.status === "unreadable"
+      ? latestEvidence.reason || "Durable review trust evidence is unreadable."
+      : absentReason,
+    signerNotTrusted: [],
   };
 }
 

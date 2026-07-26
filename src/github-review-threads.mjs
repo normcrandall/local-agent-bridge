@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
+import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 
 const FINDING_PREFIX = "<!-- agent-bridge-finding:v1:";
 const DISPOSITION_PREFIX = "<!-- agent-bridge-disposition:v1:";
@@ -180,17 +181,23 @@ function actionableFinding(thread, trustedReviewerLogins) {
   return { original, finding };
 }
 
-function currentDisposition(thread, headSha, trustedWriterLogins, repository = null) {
+function currentDispositionState(thread, headSha, trustedWriterLogins, repository = null) {
   const comments = thread.comments?.nodes || [];
+  let signerNotTrusted = null;
   for (let index = comments.length - 1; index >= 1; index -= 1) {
     const comment = comments[index];
     const disposition = parseWriterDisposition(comment.body, { repository });
-    if (
-      disposition?.headSha?.toLowerCase() === headSha.toLowerCase()
-      && trustedBotComment(comment, disposition.writerLogin, trustedWriterLogins)
-    ) return { comment, disposition };
+    if (disposition?.headSha?.toLowerCase() !== headSha.toLowerCase()) continue;
+    // A marker can describe only the bot account that actually authored it.
+    // Preserve an otherwise-valid exact-head disposition as diagnostic evidence
+    // when that signer is absent from the active roster, but never authorize it.
+    if (!trustedBotComment(comment, disposition.writerLogin, [disposition.writerLogin])) continue;
+    if (trustedBotComment(comment, disposition.writerLogin, trustedWriterLogins)) {
+      return { response: { comment, disposition }, signerNotTrusted: null };
+    }
+    signerNotTrusted ||= { comment, disposition };
   }
-  return null;
+  return { response: null, signerNotTrusted };
 }
 
 export function evaluateReviewThreadState({
@@ -199,13 +206,16 @@ export function evaluateReviewThreadState({
   repository = null,
   trustedReviewerLogins = [],
   trustedWriterLogins = [],
+  trustRoster = null,
+  prNumber = null,
 }) {
   if (!validSha(headSha)) throw new Error("Review-thread evaluation requires a full head SHA.");
   const actionable = [];
   for (const thread of threads) {
     const owned = actionableFinding(thread, trustedReviewerLogins);
     if (!owned) continue;
-    const response = currentDisposition(thread, headSha, trustedWriterLogins, repository);
+    const dispositionState = currentDispositionState(thread, headSha, trustedWriterLogins, repository);
+    const response = dispositionState.response;
     actionable.push({
       threadId: thread.id,
       reviewerLogin: owned.finding.reviewerLogin,
@@ -214,9 +224,15 @@ export function evaluateReviewThreadState({
       answered: Boolean(response),
       resolved: thread.isResolved === true,
       responseUrl: response?.comment?.url || null,
+      signerNotTrusted: dispositionState.signerNotTrusted ? {
+        writerLogin: dispositionState.signerNotTrusted.disposition.writerLogin,
+        disposition: dispositionState.signerNotTrusted.disposition.disposition,
+        responseUrl: dispositionState.signerNotTrusted.comment?.url || null,
+      } : null,
     });
   }
-  const unanswered = actionable.filter((entry) => !entry.answered);
+  const signerNotTrusted = actionable.filter((entry) => entry.signerNotTrusted);
+  const unanswered = actionable.filter((entry) => !entry.answered && !entry.signerNotTrusted);
   const unresolved = actionable.filter((entry) => entry.answered && !entry.resolved);
   const normalizedReviewerLogins = [...new Set(trustedReviewerLogins.map(normalizeBotLogin).filter(Boolean))].sort();
   const normalizedWriterLogins = [...new Set(trustedWriterLogins.map(normalizeBotLogin).filter(Boolean))].sort();
@@ -225,15 +241,25 @@ export function evaluateReviewThreadState({
     headSha: headSha.toLowerCase(),
     trustedReviewerLogins: normalizedReviewerLogins,
     trustedWriterLogins: normalizedWriterLogins,
+    trustRoster,
     actionable,
   })).digest("hex");
   return {
-    version: 1,
+    version: 2,
+    repository: repository || null,
+    prNumber: Number.isInteger(prNumber) ? prNumber : null,
     headSha: headSha.toLowerCase(),
     actionable,
     unanswered,
+    signerNotTrusted,
     unresolved,
-    ready: unanswered.length === 0 && unresolved.length === 0,
+    trustRoster: trustRoster || {
+      source: "caller-supplied",
+      configuredWriterLogins: normalizedWriterLogins,
+      degraded: false,
+      reason: null,
+    },
+    ready: unanswered.length === 0 && signerNotTrusted.length === 0 && unresolved.length === 0,
     digest,
   };
 }
@@ -251,16 +277,27 @@ export function constrainApprovalToReviewThreadState({
   // An answered thread may still need the owning reviewer App to resolve it.
   // Allow the formal APPROVE so that exact-head approval can authorize that
   // resolution; the merge gate continues to require every thread resolved.
-  if (readiness.unanswered.length === 0) {
+  const signerNotTrusted = readiness.signerNotTrusted || [];
+  if (readiness.unanswered.length === 0 && signerNotTrusted.length === 0) {
     return {
       event,
       body,
       gateReviewState: statusGateEnabled ? (readiness.ready ? "APPROVE" : "COMMENT") : null,
     };
   }
+  const scope = [
+    readiness.repository,
+    readiness.prNumber ? `PR #${readiness.prNumber}` : null,
+    readiness.headSha ? `at ${readiness.headSha.slice(0, 12)}` : null,
+  ].filter(Boolean).join(" ");
+  const roster = readiness.trustRoster || {};
+  const configuredWriters = roster.configuredWriterLogins?.length
+    ? roster.configuredWriterLogins.join(", ")
+    : "none verified";
+  const rosterDetail = ` Writer trust roster: source=${roster.source || "unknown"}; degraded=${roster.degraded ? "yes" : "no"}; configured writers=${configuredWriters}.${roster.degraded ? ` Reason: ${roster.reason || "writer identities could not be verified"}.` : ""}`;
   return {
     event: "COMMENT",
-    body: `${String(body || "").trim()}\n\nApproval withheld: ${readiness.unanswered.length} actionable thread(s) are unanswered and ${readiness.unresolved.length} answered thread(s) remain unresolved at this exact head.`,
+    body: `${String(body || "").trim()}\n\nApproval withheld${scope ? ` for ${scope}` : ""}: ${readiness.unanswered.length} actionable thread(s) are unanswered, ${signerNotTrusted.length} exact-head disposition signer(s) are not in the active trusted writer roster, and ${readiness.unresolved.length} answered thread(s) remain unresolved.${rosterDetail}`,
     gateReviewState: statusGateEnabled ? "COMMENT" : null,
   };
 }
@@ -270,6 +307,7 @@ export function assertReviewThreadReadiness(input) {
   if (!receipt.ready) {
     const parts = [];
     if (receipt.unanswered.length) parts.push(`${receipt.unanswered.length} unanswered`);
+    if (receipt.signerNotTrusted?.length) parts.push(`${receipt.signerNotTrusted.length} signed by a writer outside the active trusted roster`);
     if (receipt.unresolved.length) parts.push(`${receipt.unresolved.length} unresolved`);
     throw new Error(`Merge readiness refused on exact head ${receipt.headSha}: actionable review threads are ${parts.join(" and ")}.`);
   }
@@ -348,7 +386,7 @@ export function createReviewerThreadController({
       if (finding && (
         !headSha
         || !sameBotLogin(finding.reviewerLogin, expectedLogin)
-        || !currentDisposition(thread, headSha, trustedWriterLogins, repository)
+        || !currentDispositionState(thread, headSha, trustedWriterLogins, repository).response
       )) {
         throw new Error("The reviewer may resolve an actionable thread only after a validated writer disposition on the refreshed exact head.");
       }
@@ -361,4 +399,80 @@ export function createReviewerThreadController({
       };
     },
   };
+}
+
+export function reviewTrustEvidencePath({ repository, prNumber, headSha, stateRoot }) {
+  const root = stateRoot || resolve(homedir(), ".local/share/agent-bridge/review-receipts");
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository || "")) {
+    throw new Error("reviewTrustEvidencePath requires an owner/name repository.");
+  }
+  if (!Number.isInteger(prNumber) || prNumber < 1 || !validSha(headSha)) {
+    throw new Error("reviewTrustEvidencePath requires a positive PR number and full head SHA.");
+  }
+  return resolve(root, `${repository.replaceAll("/", "__")}--${prNumber}--${headSha.toLowerCase()}--trust.jsonl`);
+}
+
+export async function appendReviewTrustEvidence({ repository, prNumber, headSha, evidence, stateRoot }) {
+  const path = reviewTrustEvidencePath({ repository, prNumber, headSha, stateRoot });
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const record = {
+    version: 1,
+    type: "review_trust_roster",
+    at: new Date().toISOString(),
+    repository,
+    prNumber,
+    headSha: headSha.toLowerCase(),
+    reviewerLogin: evidence.reviewerLogin || null,
+    readinessDigest: evidence.readinessDigest || null,
+    configuredWriterLogins: [...new Set(evidence.configuredWriterLogins || [])].sort(),
+    rosterSource: evidence.rosterSource || "unknown",
+    degraded: evidence.degraded === true,
+    unknown: evidence.unknown === true,
+    degradationReason: evidence.degradationReason || null,
+    unansweredCount: evidence.unansweredCount || 0,
+    signerNotTrusted: (evidence.signerNotTrusted || []).map((entry) => ({
+      threadId: entry.threadId,
+      writerLogin: entry.signerNotTrusted?.writerLogin || entry.writerLogin || null,
+      disposition: entry.signerNotTrusted?.disposition || entry.disposition || null,
+    })),
+    unresolvedCount: evidence.unresolvedCount || 0,
+  };
+  await appendFile(path, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+  return record;
+}
+
+export async function readLatestReviewTrustEvidence({
+  repository,
+  prNumber,
+  headSha,
+  reviewerLogin,
+  notBefore = null,
+  stateRoot,
+}) {
+  if (!/^[A-Za-z0-9-]+(?:\[bot\])?$/.test(reviewerLogin || "")) {
+    throw new Error("readLatestReviewTrustEvidence requires a reviewer login.");
+  }
+  const path = reviewTrustEvidencePath({ repository, prNumber, headSha, stateRoot });
+  try {
+    const lines = (await readFile(path, "utf8")).trim().split("\n").filter(Boolean);
+    const records = [];
+    for (const line of lines) {
+      let record;
+      try { record = JSON.parse(line); } catch {
+        return { status: "unreadable", evidence: null, reason: "Durable review trust evidence is unreadable." };
+      }
+      if (record?.type !== "review_trust_roster") continue;
+      if (!sameBotLogin(record.reviewerLogin, reviewerLogin)) continue;
+      if (notBefore && Date.parse(record.at) < Date.parse(notBefore)) continue;
+      records.push(record);
+    }
+    if (!records.length) return { status: "absent", evidence: null, reason: null };
+    // Within one bounded publication attempt, a degraded observation must not
+    // be hidden by a concurrently appended healthy record for the same signer.
+    const conservative = records.filter((record) => record.degraded === true || record.unknown === true);
+    return { status: "found", evidence: (conservative.length ? conservative : records).at(-1), reason: null };
+  } catch (error) {
+    if (error.code === "ENOENT") return { status: "absent", evidence: null, reason: null };
+    return { status: "unreadable", evidence: null, reason: "Durable review trust evidence is unreadable." };
+  }
 }

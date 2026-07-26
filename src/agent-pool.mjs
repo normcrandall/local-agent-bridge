@@ -7,10 +7,12 @@ import { builderEnvelopeInstructions } from "./builder-envelope.mjs";
 import { deliverBuilderEnvelope } from "./builder-delivery-repair.mjs";
 import { configuredReviewerLogin, createInstallationToken, inspectGitHubAppRoles, sameGitHubAppLogin } from "./github-app-auth.mjs";
 import { createBoundBuilderClient } from "./github-builder-client.mjs";
+import { readLatestReviewTrustEvidence } from "./github-review-threads.mjs";
 import {
   localReviewPrompt,
   republishValidatedReview,
   resolveReviewPublication,
+  reviewTrustRosterForPublication,
   submitReviewWithSummaryCompatibility,
 } from "./review-publication.mjs";
 import { resolveContainedHandoffPath } from "./handoff-path.mjs";
@@ -608,6 +610,7 @@ export function createAgentPool({
       request._meta = { progressToken: `${agent}-${Date.now()}` };
       const fallbackSlots = providerFallbackSlots(agent, modelFallbacks);
       const maxTotalTimeoutMs = requestTimeoutMs * (1 + fallbackSlots);
+      const reviewEvidenceNotBefore = new Date().toISOString();
       let result;
       try {
         result = await client.callTool(request, undefined, {
@@ -671,6 +674,23 @@ export function createAgentPool({
         message = `${message}\n\nBound builder operations published: ${JSON.stringify(delivery.receipts)}`;
       }
       const structured = result.structuredContent || {};
+      const latestReviewTrustRoster = mode === "review" && effectiveGithubReview
+        ? await readLatestReviewTrustEvidence({
+          repository: effectiveGithubReview.repository,
+          prNumber: effectiveGithubReview.prNumber,
+          headSha: effectiveGithubReview.headSha,
+          reviewerLogin: effectiveGithubReview.expectedLogin,
+          notBefore: reviewEvidenceNotBefore,
+        })
+        : null;
+      const publicationSucceeded = Boolean(publishedReviewReceipt) || structured.reviewPublished === true;
+      const reviewTrustRoster = effectiveGithubReview
+        ? reviewTrustRosterForPublication({
+          latestEvidence: latestReviewTrustRoster,
+          githubReview: effectiveGithubReview,
+          publicationSucceeded,
+        })
+        : null;
       const routing = structured.modelRouting || structured;
       return {
         message,
@@ -704,13 +724,14 @@ export function createAgentPool({
             : null,
           reviewPublication: mode === "review" && githubReview ? {
             available: publication.available,
-            published: Boolean(publishedReviewReceipt) || structured.reviewPublished === true,
+            published: publicationSucceeded,
             receipt: publishedReviewReceipt,
             authorizing: publication.authorizing !== false,
             login: effectiveGithubReview?.expectedLogin || null,
             reason: publication.reason,
             statusGateAvailable: publication.statusGateAvailable ?? false,
             humanApprovalRequired: !publication.available || publication.authorizing === false,
+            trustRoster: reviewTrustRoster,
           } : null,
         },
       };

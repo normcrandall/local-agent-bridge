@@ -198,7 +198,7 @@ function summary(view) {
   }
   if (view.githubReview) {
     lines.push(
-      `PR review: ${view.githubReview.repository}#${view.githubReview.prNumber}@${view.githubReview.headSha.slice(0, 12)} as ${view.githubReview.expectedLogin || "the active provider reviewer App"}`,
+      `PR review: ${view.githubReview.repository}#${view.githubReview.prNumber}@${view.githubReview.headSha} as ${view.githubReview.expectedLogin || "the active provider reviewer App"}`,
     );
   }
   if (view.reviewPublication?.status && view.reviewPublication.status !== "available") {
@@ -218,6 +218,15 @@ function summary(view) {
     if (view.reviewPublication.humanApprovalRequired) {
       lines.push("Merge gate: exact-head approval from a configured trusted human is required.");
     }
+  }
+  const trustRoster = view.reviewPublication?.trustRoster;
+  if (trustRoster?.unknown || trustRoster?.degraded || trustRoster?.signerNotTrusted?.length) {
+    const reason = trustRoster.unknown
+      ? trustRoster.degradationReason || "writer trust evidence is unknown"
+      : trustRoster.degraded
+        ? trustRoster.degradationReason || "writer trust-roster inspection degraded"
+        : `${trustRoster.signerNotTrusted.length} disposition signer(s) are not in the active trusted writer roster`;
+    lines.push(`Review trust: ${view.githubReview?.repository || "unknown repository"} PR #${view.githubReview?.prNumber || "?"}@${view.githubReview?.headSha || "unknown head"} — ${reason}`);
   }
   if (view.rotation) lines.push(`Rotation: task ${view.rotation.taskNumber}; writer ${view.rotation.writer}; reviewers ${view.rotation.reviewers.join(", ")}`);
   if (view.chair) lines.push(`Chair: ${view.chair.provider} (${view.chair.source || "native-chair"}); same-provider delegation ${view.chair.allowSameProviderDelegation ? "allowed" : "suppressed"}.`);

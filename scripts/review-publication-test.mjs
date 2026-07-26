@@ -7,6 +7,7 @@ import {
   recordReviewPublicationResult,
   republishValidatedReview,
   resolveReviewPublication,
+  reviewTrustRosterForPublication,
   submitReviewWithSummaryCompatibility,
 } from "../src/review-publication.mjs";
 import { localReviewEnvelopePolicy, localReviewPublicationPolicy } from "../src/agent-pool.mjs";
@@ -92,13 +93,40 @@ assert.equal(failedPublishable.status, "degraded");
 assert.equal(failedPublishable.humanApprovalRequired, true);
 assert.deepEqual(failedPublishable.publishableAgents, []);
 assert.match(failedPublishable.unavailableAgents.claude, /transport closed/);
-const alreadyPublished = recordReviewPublicationResult(preflightPartial, { agent: "claude", published: true });
+const alreadyPublished = recordReviewPublicationResult(preflightPartial, {
+  agent: "claude",
+  published: true,
+  trustRoster: {
+    repository: "owner/repo",
+    prNumber: 1,
+    headSha: "a".repeat(40),
+    rosterSource: "github-app-roles",
+    configuredWriterLogins: ["claude-writer[bot]"],
+    degraded: false,
+    signerNotTrusted: [],
+  },
+});
+assert.equal(alreadyPublished.trustRoster.configuredWriterLogins[0], "claude-writer[bot]");
 const laterFailure = recordReviewPublicationResult(alreadyPublished, {
   agent: "claude",
   unavailableReason: "transport closed after publication",
 });
 assert.equal(laterFailure.humanApprovalRequired, false);
 assert.deepEqual(laterFailure.publishedAgents, ["claude"]);
+
+const absentTrustAfterPublication = reviewTrustRosterForPublication({
+  latestEvidence: { status: "absent", evidence: null, reason: null },
+  githubReview: { ...githubReview, expectedLogin: "claude-reviewer[bot]" },
+  publicationSucceeded: true,
+});
+assert.equal(absentTrustAfterPublication.unknown, true);
+assert.equal(absentTrustAfterPublication.degraded, false);
+assert.match(absentTrustAfterPublication.degradationReason, /publication succeeded.*no durable review trust evidence/i);
+assert.equal(reviewTrustRosterForPublication({
+  latestEvidence: { status: "absent", evidence: null, reason: null },
+  githubReview,
+  publicationSucceeded: false,
+}), null, "an unpublished review does not manufacture a trust receipt");
 
 const ordinary = orderReviewProbes({
   requestedStartAgent: "codex",
