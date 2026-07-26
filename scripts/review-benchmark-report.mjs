@@ -3,6 +3,7 @@
 import process from "node:process";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { access } from "node:fs/promises";
 import { readReviewBenchmarkLedger } from "../src/review-benchmark-ledger.mjs";
 import { adjudicateReviewRuns } from "../src/review-benchmark-model.mjs";
 import { aggregateReviewBenchmarks } from "../src/review-benchmark-report.mjs";
@@ -199,9 +200,15 @@ export async function runReviewBenchmarkReport(argv, io = {}) {
 
   let records;
   try {
+    await access(options.ledger);
     records = await readReviewBenchmarkLedger(options.ledger);
+    // The ledger reader intentionally treats ENOENT as an empty store for
+    // programmatic callers. A CLI user supplied this path explicitly, so also
+    // catch the narrow race where it disappears between access and reading.
+    await access(options.ledger);
   } catch (error) {
-    stderr.write(`Ledger error (${options.ledger}): ${error.message}\n`);
+    const reason = error?.code === "ENOENT" ? "the explicitly supplied ledger does not exist" : error.message;
+    stderr.write(`Ledger error (${options.ledger}): ${reason}\n`);
     return 1;
   }
   const report = createReviewBenchmarkReport(records, options);

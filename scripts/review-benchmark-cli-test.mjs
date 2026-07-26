@@ -93,8 +93,14 @@ try {
   assert.deepEqual(empty.targets, []);
 
   const missingLedgerRun = run(["--ledger", join(scratch, "not-created.jsonl"), "--json"]);
-  assert.equal(missingLedgerRun.status, 0, "a not-yet-created ledger is an explicit empty sample");
-  assert.equal(JSON.parse(missingLedgerRun.stdout).sample.state, "empty");
+  assert.equal(missingLedgerRun.status, 1, "an explicitly requested absent ledger is an operational failure");
+  assert.equal(missingLedgerRun.stdout, "");
+  assert.match(missingLedgerRun.stderr, /explicitly supplied ledger does not exist/);
+
+  const filteredEmptyRun = run(["--ledger", ledger, "--repository", "veliqon/missing", "--json"]);
+  assert.equal(filteredEmptyRun.status, 0, "an existing ledger with no matching records is a valid empty sample");
+  assert.equal(JSON.parse(filteredEmptyRun.stdout).sample.state, "empty");
+  assert.match(JSON.parse(filteredEmptyRun.stdout).sample.message, /No benchmark runs matched/);
 
   const noLedgerRun = run([]);
   assert.equal(noLedgerRun.status, 2);
