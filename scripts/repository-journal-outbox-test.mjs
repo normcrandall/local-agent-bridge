@@ -123,6 +123,12 @@ try {
   const [authLease] = await outbox.claim({ workerId: "publisher-a" });
   const auth = await outbox.fail({ leaseId: authLease.lease.leaseId, failure: { statusCode: 401, message: "bad credentials" } });
   assert.equal(auth.terminal, true);
+  assert.equal(auth.entry.redriveCount, 0);
+  const authRequeued = await outbox.requeue({ idempotencyKey: "auth" });
+  assert.equal(authRequeued.entry.redriveCount, 1, "operator redrives must have their own durable counter");
+  const [authRedriveLease] = await outbox.claim({ workerId: "publisher-after-authority-restore" });
+  assert.equal(authRedriveLease.idempotencyKey, "auth");
+  await outbox.fail({ leaseId: authRedriveLease.lease.leaseId, failure: { statusCode: 401, message: "still unauthorized" } });
 
   await outbox.enqueue({ repository: "veliqon/example", operation: "status", idempotencyKey: "policy", payload: {} });
   const [policyLease] = await outbox.claim({ workerId: "publisher-a" });
@@ -149,6 +155,7 @@ try {
 
   const inspection = await restarted.inspect();
   assert.deepEqual(inspection.deadLetter.map((entry) => entry.idempotencyKey), ["retry", "auth", "policy"]);
+  assert.equal(inspection.deadLetter.find((entry) => entry.idempotencyKey === "auth").redriveCount, 1);
   assert.deepEqual(inspection.acknowledged.map((entry) => entry.idempotencyKey), ["issue-207:complete", "expired"]);
   assert.equal(inspection.pending.length, 0);
 

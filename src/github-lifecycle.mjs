@@ -79,6 +79,14 @@ export function semanticStateForPhase(phase) {
   return PHASE_TO_SEMANTIC[String(phase || "").toLowerCase()] || null;
 }
 
+export function compactGitHubLifecycleSummary({ phase, writer = null, summary = null, terminal = false } = {}) {
+  const state = String(phase || "unknown").trim().toLowerCase().slice(0, 64);
+  if (terminal && summary) return String(summary).trim().replaceAll(/\s+/g, " ").slice(0, 500);
+  return writer
+    ? `${writer} collaboration checkpoint: ${state}.`
+    : `Collaboration checkpoint: ${state}.`;
+}
+
 export function portfolioStatusForSemanticState(state) {
   assertSemanticState(state);
   return SEMANTIC_TO_PORTFOLIO_STATUS[state];

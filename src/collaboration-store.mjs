@@ -133,6 +133,7 @@ export async function createCollaboration(root, input) {
     cancelRequested: false,
     workerPid: null,
     error: null,
+    repositoryJournal: null,
     ...input,
   };
   await atomicWriteJson(target.state, state);
@@ -221,6 +222,7 @@ export async function listCollaborations(root, { status, limit = 20 } = {}) {
       createdAt: state.createdAt,
       updatedAt: state.updatedAt,
       error: state.error,
+      repositoryJournal: state.repositoryJournal || null,
       coordinatorWake: state.coordinatorWake ? {
         sequence: state.coordinatorWake.sequence,
         kind: state.coordinatorWake.kind,
