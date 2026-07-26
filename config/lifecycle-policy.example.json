@@ -1,0 +1,30 @@
+{
+  "labels": {
+    "triaging": "workflow:triage",
+    "queued": "workflow:queued",
+    "implementing": "workflow:implementing",
+    "reviewing": "workflow:reviewing",
+    "blocked": "workflow:blocked",
+    "needs_user": "workflow:needs-user",
+    "merged": "workflow:merged",
+    "cancelled": "workflow:cancelled",
+    "obsolete": "workflow:obsolete",
+    "stale": "workflow:stale"
+  },
+  "project": {
+    "number": 1,
+    "field": "Status",
+    "options": {
+      "triaging": "Triage",
+      "queued": "Todo",
+      "implementing": "In Progress",
+      "reviewing": "In Review",
+      "blocked": "Blocked",
+      "needs_user": "Needs user",
+      "merged": "Done",
+      "cancelled": "Cancelled",
+      "obsolete": "Obsolete",
+      "stale": "Stale"
+    }
+  }
+}

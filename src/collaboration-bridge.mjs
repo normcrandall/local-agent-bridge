@@ -45,6 +45,7 @@ import { replayIncident, formatReplayHuman } from "./incident-replay.mjs";
 import { analyzePortfolio, buildExecutionWaves, normalizePortfolioItems } from "./portfolio-scheduler.mjs";
 import { PORTFOLIO_STATUSES, PORTFOLIO_STATUS_GROUPS } from "./portfolio-status.mjs";
 import { createPortfolio, listPortfolios, readPortfolio, updatePortfolio } from "./portfolio-store.mjs";
+import { createSemanticLifecycleRecord, loadRepositoryLifecyclePolicy } from "./github-lifecycle.mjs";
 import {
   loadProviderConcurrency,
   normalizeProviderConcurrency,
@@ -820,6 +821,7 @@ server.registerTool(
     let claimClient = null;
     let claimHeadSha = null;
     let claimBaseSha = null;
+    let claimLifecyclePolicy = null;
     let resolvedIssueClaim = canonicalIssueClaim;
     let resolvedTask = input.task;
     let issueContext = null;
@@ -876,7 +878,7 @@ server.registerTool(
         authority: resolvedIssueClaim.authority,
         headSha,
         issueNumber: input.issueClaim.issueNumber,
-        allowedOperations: ["get_issue", "add_issue_label", "remove_issue_label", "get_issue_comments", "get_issue_timeline", "get_issue_dependencies", "get_issue_project_items", "post_issue_comment", "update_issue_comment", "delete_issue_comment", "list_tag_locks", "acquire_tag_lock", "release_tag_lock"],
+        allowedOperations: ["get_issue", "add_issue_label", "remove_issue_label", "get_issue_comments", "get_issue_timeline", "get_issue_dependencies", "get_issue_project_items", "update_issue_project_single_select", "post_issue_comment", "update_issue_comment", "delete_issue_comment", "list_tag_locks", "acquire_tag_lock", "release_tag_lock"],
         workspace: requestedWorkspace,
         fetchImpl: fetch,
       });
@@ -915,6 +917,7 @@ server.registerTool(
         mode: effectiveMode,
       });
 
+      claimLifecyclePolicy = loadRepositoryLifecyclePolicy(requestedWorkspace);
       await acquireClaimLease({
         client: claimClient,
         issueNumber: input.issueClaim.issueNumber,
@@ -927,6 +930,7 @@ server.registerTool(
         baseSha: claimBaseSha,
         headSha: claimHeadSha,
         workspaceRoot: WORKSPACE_ROOT,
+        lifecyclePolicy: claimLifecyclePolicy,
       });
       leaseAcquired = true;
     } else if (resolvedIssueTarget) {
@@ -1054,6 +1058,7 @@ server.registerTool(
           client: claimClient,
           issueNumber: input.issueClaim.issueNumber,
           collaborationId,
+          workspaceRoot: WORKSPACE_ROOT,
           phase: "preflight",
           summary: "Worktree created and collaboration preflight passed.",
           writer: resolvedIssueClaim.writer,
@@ -1112,6 +1117,14 @@ server.registerTool(
         githubReview: input.githubReview || null,
         githubBuilder: effectiveGithubBuilder,
         issueClaim: resolvedIssueClaim,
+        semanticLifecycle: resolvedIssueClaim
+          ? createSemanticLifecycleRecord({
+            state: "queued",
+            collaborationId,
+            writer: resolvedIssueClaim.writer || writer,
+            policy: claimLifecyclePolicy,
+          })
+          : null,
         issueTarget: resolvedIssueTarget,
         issueContext,
         evidence: {
@@ -1344,6 +1357,7 @@ server.registerTool(
           client,
           issueNumber: state.issueClaim.issueNumber,
           collaborationId: id,
+          workspaceRoot: WORKSPACE_ROOT,
           phase: "recovered",
           summary: "Coordinator inspected and migrated the stranded writer into private Git custody.",
           headSha: recovered.base,
@@ -2330,6 +2344,7 @@ server.registerTool(
         client: claimClient,
         issueNumber: current.issueClaim.issueNumber,
         collaborationId: id,
+        workspaceRoot: WORKSPACE_ROOT,
         phase: "working",
         summary: "Collaboration continuation queued.",
         writer: resolvedContinuationIssueClaim.writer || current.writer,
