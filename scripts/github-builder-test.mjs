@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createBoundBuilderClient } from "../src/github-builder-client.mjs";
-import { assertBranchRef, resolveTransportUrl } from "../src/github-builder-transport.mjs";
+import { assertBranchRef, resolveTransportUrl, runGit } from "../src/github-builder-transport.mjs";
 import {
   BuilderEnvelopeError,
   builderEnvelopeInstructions,
@@ -137,6 +137,7 @@ git(["push", bareRepoPath, `${baseCommitSha}:refs/heads/readback-missing`], { cw
 git(["push", bareRepoPath, `${baseCommitSha}:refs/heads/readback-auth`], { cwd: localRepoPath });
 git(["push", bareRepoPath, `${baseCommitSha}:refs/heads/readback-transport`], { cwd: localRepoPath });
 git(["push", bareRepoPath, `${baseCommitSha}:refs/heads/readback-exhausted`], { cwd: localRepoPath });
+git(["push", bareRepoPath, `${divergedSha}:refs/heads/readback-replace-exhausted`], { cwd: localRepoPath });
 
 // Git smart-HTTP servers that enforce exact Basic credentials from the askpass
 // channel. Every child process gets an error handler; timeouts are bounded.
@@ -145,6 +146,16 @@ git(["push", bareRepoPath, `${baseCommitSha}:refs/heads/readback-exhausted`], { 
 // mode "deny-push": ref advertisement works, the push RPC is denied with 403.
 const BUILDER_TOKEN = "ghs_builder-token";
 const expectedAuth = "Basic " + Buffer.from(`x-access-token:${BUILDER_TOKEN}`).toString("base64");
+const redactedStdout = await runGit(
+  ["-e", "process.stdout.write(process.env.TEST_BUILDER_SECRET)"],
+  {
+    gitPath: process.execPath,
+    cwd: tmpDir,
+    env: { ...process.env, TEST_BUILDER_SECRET: BUILDER_TOKEN },
+    secrets: [BUILDER_TOKEN],
+  },
+);
+assert.equal(redactedStdout.stdout.toString("utf8"), "[REDACTED]");
 const authAttempts = [];
 function createGitServer(mode) {
   const server = http.createServer((req, res) => {
@@ -1362,20 +1373,35 @@ assert.equal(gitOut(["rev-parse", "refs/heads/readback-replace"], { cwd: bareRep
 // Non-stale read-back failures never consume the retry budget. The thrown
 // error and durable terminal receipt retain both transport and observation
 // evidence so a coordinator can reconcile without guessing or re-pushing.
-async function captureReadBackFailure({ branch, branchShas, receiptName, maxAttempts = 4 }) {
+async function captureReadBackFailure({
+  branch,
+  branchShas,
+  receiptName,
+  maxAttempts = 4,
+  operation = "push_branch",
+  oldSha = baseCommitSha,
+}) {
   const failureReceiptPath = path.join(tmpDir, receiptName);
   const delays = [];
   let error = null;
   try {
-    await createBoundBuilderClient({
+    const client = createBoundBuilderClient({
       ...base,
       headRef: branch,
+      allowedOperations: [operation],
       fetchImpl: fakeGitHub({ branchShas: { [branch]: branchShas } }).fetchImpl,
       receiptPath: failureReceiptPath,
       sleep: async (delayMs) => { delays.push(delayMs); },
       random: () => 0.5,
       refReadBackMaxAttempts: maxAttempts,
-    }).pushBranch({ ref: `refs/heads/${branch}`, sha: headSha, oldSha: baseCommitSha });
+    });
+    if (operation === "create_branch") {
+      await client.createBranch({ ref: `refs/heads/${branch}`, sha: headSha });
+    } else if (operation === "replace_branch") {
+      await client.replaceBranch({ ref: `refs/heads/${branch}`, sha: headSha, oldSha });
+    } else {
+      await client.pushBranch({ ref: `refs/heads/${branch}`, sha: headSha, oldSha });
+    }
   } catch (caught) {
     error = caught;
   }
@@ -1435,6 +1461,45 @@ assert.equal(exhaustedReadBack.receipt.outcome, "indeterminate");
 assert.equal(exhaustedReadBack.receipt.readBackRetryCount, 1);
 assert.deepEqual(exhaustedReadBack.receipt.observedIntermediateShas, [baseCommitSha, baseCommitSha]);
 assert.deepEqual(exhaustedReadBack.delays, [100]);
+
+const createUnexpectedReadBack = await captureReadBackFailure({
+  branch: "readback-create-unexpected",
+  branchShas: [null, divergedSha],
+  receiptName: "readback-create-unexpected.jsonl",
+  operation: "create_branch",
+});
+assert.equal(createUnexpectedReadBack.error.readBackEvidence.readBackObservations[0].classification, "unexpected_sha");
+assert.equal(createUnexpectedReadBack.receipt.outcome, "failed");
+assert.deepEqual(createUnexpectedReadBack.delays, []);
+
+const createExhaustedReadBack = await captureReadBackFailure({
+  branch: "readback-create-exhausted",
+  branchShas: [null, null, null],
+  receiptName: "readback-create-exhausted.jsonl",
+  operation: "create_branch",
+  maxAttempts: 2,
+});
+assert.deepEqual(createExhaustedReadBack.error.readBackEvidence.readBackObservations.map(({ classification }) => classification), [
+  "missing_ref", "missing_ref",
+]);
+assert.equal(createExhaustedReadBack.receipt.outcome, "indeterminate");
+assert.equal(createExhaustedReadBack.receipt.readBackRetryCount, 1);
+assert.deepEqual(createExhaustedReadBack.delays, [100]);
+
+const replaceExhaustedReadBack = await captureReadBackFailure({
+  branch: "readback-replace-exhausted",
+  branchShas: [divergedSha, divergedSha, divergedSha],
+  receiptName: "readback-replace-exhausted.jsonl",
+  operation: "replace_branch",
+  oldSha: divergedSha,
+  maxAttempts: 2,
+});
+assert.deepEqual(replaceExhaustedReadBack.error.readBackEvidence.readBackObservations.map(({ classification }) => classification), [
+  "stale_previous_sha", "stale_previous_sha",
+]);
+assert.equal(replaceExhaustedReadBack.receipt.outcome, "indeterminate");
+assert.equal(replaceExhaustedReadBack.receipt.readBackRetryCount, 1);
+assert.deepEqual(replaceExhaustedReadBack.delays, [100]);
 
 // C. createBranch refuses a ref that exists at a different SHA.
 await assert.rejects(
