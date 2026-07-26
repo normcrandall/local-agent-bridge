@@ -149,9 +149,60 @@ export function createSemanticLifecycleRecord({
   }, { writer, at, reason: "claimed" });
 }
 
-export function createProductionGitHubLifecycleAdapter(client) {
+export function createProductionGitHubLifecycleAdapter(client, {
+  snapshotCache = null,
+  repository = null,
+  headSha = null,
+} = {}) {
+  async function cachedRead({ kind, subject, exactHead = null, load }) {
+    if (!snapshotCache || !repository) {
+      return { value: await load(), cache: "disabled", authoritative: false, usableForAuthorization: false };
+    }
+    return snapshotCache.getOrLoad({
+      repository,
+      kind,
+      subject,
+      headSha: exactHead,
+      trustClass: "github-live",
+      load: async () => {
+        const data = await load();
+        return {
+          data,
+          sourceUpdatedAt: data?.updated_at || data?.updatedAt || null,
+        };
+      },
+    });
+  }
+
   return {
+    // Snapshot methods are intentionally separate from the live lifecycle
+    // authority method below. A caller can use them for context or display,
+    // but state transitions must continue through getIssue().
+    getIssueSnapshot: (issueNumber) => cachedRead({
+      kind: "issue",
+      subject: `issue:${issueNumber}`,
+      exactHead: headSha,
+      load: () => client.getIssue(issueNumber),
+    }),
+    getPullRequestSnapshot: typeof client.getPullRequest === "function"
+      ? (pullRequestNumber, exactHead = headSha) => cachedRead({
+        kind: "pull_request",
+        subject: `pr:${pullRequestNumber}`,
+        exactHead,
+        load: () => client.getPullRequest(pullRequestNumber),
+      })
+      : undefined,
+    getReviewThreadsSnapshot: typeof client.reviewThreads === "function"
+      ? (pullRequestNumber, exactHead = headSha) => cachedRead({
+        kind: "review_threads",
+        subject: `pr:${pullRequestNumber}`,
+        exactHead,
+        load: () => client.reviewThreads(pullRequestNumber),
+      })
+      : undefined,
     async getIssue(issueNumber) {
+      // Lifecycle reconciliation may close work or release capacity. It is an
+      // authority decision and therefore always re-reads GitHub live.
       const issue = await client.getIssue(issueNumber);
       if (String(issue?.state || "").toLowerCase() !== "closed"
         || issue.merged_at

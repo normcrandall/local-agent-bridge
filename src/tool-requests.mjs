@@ -112,6 +112,7 @@ export function codexToolRequest({
     arguments_.config["mcp_servers.github_review.env.GITHUB_REVIEW_EXPECTED_LOGIN"] = githubReview.expectedLogin;
     arguments_.config["mcp_servers.github_review.env.GITHUB_REVIEW_PUBLISH_STATUS_GATE"] = githubReview.publishStatusGate ? "1" : "0";
     arguments_.config["mcp_servers.github_review.env.GITHUB_REVIEW_HANDOFF_PATH"] = absoluteHandoffPath;
+    arguments_.config["mcp_servers.github_review.env.GITHUB_REVIEW_WORKSPACE"] = cwd;
     arguments_.config["mcp_servers.github_review.env.GITHUB_REVIEW_TOKEN_FILE"] = resolve(homedir(), ".config/ghtoken");
     arguments_.config["mcp_servers.github_review.default_tools_approval_mode"] = "approve";
   }

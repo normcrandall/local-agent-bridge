@@ -113,6 +113,7 @@ async function environmentFingerprint(workspace, headSha, files, status, maxBuff
 export async function captureRepositoryEvidence({
   workspace,
   store,
+  snapshotCache = null,
   repository,
   headSha,
   baseSha = null,
@@ -134,28 +135,56 @@ export async function captureRepositoryEvidence({
   const headScope = { repository: resolvedRepository, headSha: exactHead };
   const diffScope = { ...headScope, ...(baseSha ? { baseSha } : {}) };
 
-  const map = await store.getOrLoad({
-      kind: "repository_map",
-      key: "tracked_files",
-      scope: headScope,
-    source: "git",
-    load: async () => {
+  const mapLoader = async () => {
       const tracked = await gitPayload(workspace, ["ls-tree", "-r", "--name-only", exactHead], { maxBuffer: evidenceMaxBuffer });
       return {
         files: tracked.complete ? tracked.value.split("\n").filter(Boolean) : [],
         complete: tracked.complete,
         error: tracked.error,
       };
-    },
-  });
+    };
+  const map = snapshotCache
+    ? await snapshotCache.getOrLoad({
+      repository: resolvedRepository,
+      kind: "repository_map",
+      subject: "tracked_files",
+      headSha: exactHead,
+      freshnessMs: 24 * 60 * 60_000,
+      trustClass: "local-derived",
+      load: async () => ({ data: await mapLoader(), sourceRevision: 1 }),
+    })
+    : await store.getOrLoad({
+      kind: "repository_map",
+      key: "tracked_files",
+      scope: headScope,
+      source: "git",
+      load: mapLoader,
+    });
 
   const diff = baseSha
-    ? await store.getOrLoad({
-      kind: "repository_diff",
-      key: `${baseSha}..${exactHead}`,
-      scope: diffScope,
-      source: "git",
-      load: async () => {
+    ? snapshotCache
+      ? await snapshotCache.getOrLoad({
+        repository: resolvedRepository,
+        kind: "diff",
+        subject: `base:${baseSha}`,
+        headSha: exactHead,
+        freshnessMs: 24 * 60 * 60_000,
+        trustClass: "local-derived",
+        load: async () => ({
+          data: await loadDiff(),
+          sourceRevision: 1,
+        }),
+      })
+      : await store.getOrLoad({
+        kind: "repository_diff",
+        key: `${baseSha}..${exactHead}`,
+        scope: diffScope,
+        source: "git",
+        load: loadDiff,
+      })
+    : null;
+
+  async function loadDiff() {
         const files = await gitPayload(workspace, ["diff", "--name-only", baseSha, exactHead], { maxBuffer: evidenceMaxBuffer });
         const nameStatus = await gitPayload(workspace, ["diff", "--name-status", baseSha, exactHead], { maxBuffer: evidenceMaxBuffer });
         const stat = await gitPayload(workspace, ["diff", "--stat", baseSha, exactHead], { maxBuffer: evidenceMaxBuffer });
@@ -166,9 +195,7 @@ export async function captureRepositoryEvidence({
           complete: files.complete && nameStatus.complete && stat.complete,
           errors: [files.error, nameStatus.error, stat.error].filter(Boolean),
         };
-      },
-    })
-    : null;
+  }
   const status = await gitPayload(workspace, ["status", "--porcelain=v1"], { maxBuffer: evidenceMaxBuffer });
   const environment = await environmentFingerprint(workspace, exactHead, map.value.files, status, evidenceMaxBuffer);
   assertRepositoryEvidenceHead({ expectedHeadSha: exactHead, observedHeadSha: await readRepositoryHead(workspace) });
@@ -189,7 +216,7 @@ export async function captureRepositoryEvidence({
     environmentFingerprintComplete: environment.complete,
     digests: { repositoryMap: map.digest, diff: diff?.digest || null },
     cache: { repositoryMap: map.cache, diff: diff?.cache || null },
-    cacheMetrics: store.metrics(),
+    cacheMetrics: snapshotCache?.metrics?.() || store.metrics(),
   };
 }
 

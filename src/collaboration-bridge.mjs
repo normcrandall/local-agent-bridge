@@ -31,6 +31,8 @@ import { clearTerminalRuntime, legacyWorkerCommandMatches, reconciliationAction,
 import { acknowledgeCompletion } from "./handoff-protocol.mjs";
 import { readContextCapsule } from "./context-capsule.mjs";
 import { createEvidenceStore } from "./evidence-store.mjs";
+import { createRepositoryJournal } from "./repository-journal.mjs";
+import { createRepositorySnapshotCache, repositorySnapshotCacheDirectory } from "./repository-snapshot-cache.mjs";
 import { assertRepositoryEvidenceHead, captureActualRepositoryFootprint, captureRepositoryEvidence, formatRepositoryEvidence, readRepositoryHead, readRepositoryIdentity } from "./repository-evidence.mjs";
 import { formatReusableVerification, resolveVerificationPlan } from "./verification-receipts.mjs";
 import {
@@ -109,6 +111,12 @@ const EVIDENCE_ROOT = resolve(collaborationDirectory(WORKSPACE_ROOT), "evidence"
 const MERGE_RECEIPT_ROOT = resolve(collaborationDirectory(WORKSPACE_ROOT), "merge-receipts");
 const TERMINAL_STATUSES = new Set(["agreed", "needs_user", "turn_limit", "failed", "cancelled", "budget"]);
 const STATUS_VALUES = ["queued", "running", "recovering", "cancelling", "indeterminate", ...TERMINAL_STATUSES];
+
+function repositorySnapshotCache(workspace) {
+  return createRepositorySnapshotCache({
+    journal: createRepositoryJournal({ directory: repositorySnapshotCacheDirectory(workspace) }),
+  });
+}
 
 function blockNestedCollaboration() {
   if (process.env.BRIDGE_DELEGATED_SESSION === "1") {
@@ -925,6 +933,7 @@ server.registerTool(
     let repositoryEvidence = null;
     let verificationPlan = { reusable: [], pendingCommands: requestedVerificationCommands, avoidedCommands: 0, estimatedAvoidedMs: 0 };
     const evidenceStore = createEvidenceStore({ directory: EVIDENCE_ROOT });
+    const snapshotCache = repositorySnapshotCache(requestedWorkspace);
 
     try {
     // The explicit issue target is authoritative for what this lane implements.
@@ -1012,6 +1021,7 @@ server.registerTool(
           issueNumber: input.issueClaim.issueNumber,
           task: input.task,
           evidenceStore,
+          snapshotCache,
           evidenceScope: { repository, headSha },
           authority: resolvedIssueClaim.authority,
         }),
@@ -1068,6 +1078,7 @@ server.registerTool(
         issueNumber: resolvedIssueTarget.issueNumber,
         task: input.task,
         evidenceStore,
+        snapshotCache,
         evidenceScope: { repository, headSha: revisions.headSha },
         authority: {
           login: credential.expectedLogin,
@@ -1210,6 +1221,7 @@ server.registerTool(
       repositoryEvidence = await captureRepositoryEvidence({
         workspace,
         store: evidenceStore,
+        snapshotCache,
         repository: input.issueClaim?.repository || input.githubReview?.repository || effectiveGithubBuilder?.repository,
         headSha: input.githubReview?.headSha || effectiveGithubBuilder?.headSha || undefined,
         baseSha: effectiveGithubBuilder?.baseSha || resolvedIssueClaim?.baseSha || null,
@@ -1282,7 +1294,10 @@ server.registerTool(
         issueContext,
         evidence: {
           repository: repositoryEvidence,
-          cacheMetrics: evidenceStore.metrics(),
+          cacheMetrics: {
+            ...evidenceStore.metrics(),
+            snapshots: snapshotCache.metrics(),
+          },
           avoidedCommands: verificationPlan.avoidedCommands,
           estimatedAvoidedMs: verificationPlan.estimatedAvoidedMs,
         },
@@ -2295,9 +2310,11 @@ server.registerTool(
       throw new Error(`Verification command was not declared for collaboration ${id}: ${command}`);
     }
     const store = createEvidenceStore({ directory: EVIDENCE_ROOT });
+    const snapshotCache = repositorySnapshotCache(current.workspace);
     const currentEvidence = await captureRepositoryEvidence({
       workspace: current.workspace,
       store,
+      snapshotCache,
       repository: repositoryEvidence.repository,
       headSha: repositoryEvidence.headSha,
       baseSha: repositoryEvidence.baseSha || null,
@@ -2331,7 +2348,10 @@ server.registerTool(
       ],
       evidence: {
         ...(previous.evidence || {}),
-        cacheMetrics: store.metrics(),
+        cacheMetrics: {
+          ...store.metrics(),
+          snapshots: snapshotCache.metrics(),
+        },
       },
     }));
     await appendEvent(WORKSPACE_ROOT, id, { type: "verification_receipt_recorded", at: new Date().toISOString(), receipt });
@@ -2656,6 +2676,7 @@ server.registerTool(
       throw new Error("Resolved verification role and explicit commands exceed the 20-command phase limit.");
     }
     const continuationStore = createEvidenceStore({ directory: EVIDENCE_ROOT });
+    const continuationSnapshotCache = repositorySnapshotCache(current.workspace);
     const activeGithubReview = githubReview || current.githubReview || null;
     let activeGithubBuilder = githubBuilder
       ? workspaceHeadBuilderBinding({ githubBuilder, mode: current.mode, worktree: current.worktree })
@@ -2687,6 +2708,7 @@ server.registerTool(
     const continuationEvidence = await captureRepositoryEvidence({
       workspace: current.workspace,
       store: continuationStore,
+      snapshotCache: continuationSnapshotCache,
       repository: resolvedContinuationIssueClaim?.repository || activeGithubReview?.repository || activeGithubBuilder?.repository,
       headSha: activeGithubReview?.headSha || activeGithubBuilder?.headSha || undefined,
       baseSha: activeGithubBuilder?.baseSha || resolvedContinuationIssueClaim?.baseSha || null,
@@ -2771,7 +2793,10 @@ server.registerTool(
         ciTracking: ciTracking || previous.ciTracking || null,
         evidence: {
           repository: continuationEvidence,
-          cacheMetrics: continuationStore.metrics(),
+          cacheMetrics: {
+            ...continuationStore.metrics(),
+            snapshots: continuationSnapshotCache.metrics(),
+          },
           avoidedCommands: continuationVerificationPlan.avoidedCommands,
           estimatedAvoidedMs: continuationVerificationPlan.estimatedAvoidedMs,
         },
