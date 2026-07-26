@@ -96,6 +96,7 @@ export function createMissionControlSubscriptionClient({
   let redrawCount = 0;
   let reconnectCount = 0;
   let resyncCount = 0;
+  let consecutiveResyncs = 0;
 
   const publish = async (reason, eventCount = 0) => {
     viewModel = projectMissionControlViewModel(eventState, viewModel?.clientState || {});
@@ -154,6 +155,13 @@ export function createMissionControlSubscriptionClient({
         try {
           const result = await pollOnce();
           if (result.status === "more") continue;
+          if (result.status.startsWith("resync:")) {
+            consecutiveResyncs += 1;
+            const backoffMs = Math.min(5_000, Math.max(25, reconnectDelayMs) * (2 ** Math.min(4, consecutiveResyncs - 1)));
+            await delay(backoffMs, signal);
+            continue;
+          }
+          consecutiveResyncs = 0;
         } catch (error) {
           if (stopped || signal?.aborted) break;
           reconnectCount += 1;
@@ -179,6 +187,7 @@ export function createMissionControlSubscriptionClient({
         redrawCount,
         reconnectCount,
         resyncCount,
+        consecutiveResyncs,
       };
     },
     setNavigation(next) { navigation = createMissionControlNavigationState(next); },

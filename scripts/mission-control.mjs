@@ -7,6 +7,7 @@ import { execFile, spawnSync } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import {
   clearRepositoryCache,
+  deduplicateOperatorLanes,
   loadMissionControlSnapshot,
   loadTimeline,
   missionControlRepositories,
@@ -117,6 +118,8 @@ if (oneShot) {
 let selectedIndex = 0;
 let selectedId = null;
 let drawing = false;
+let redrawPending = false;
+let pendingDrawOverride = null;
 let stopped = false;
 let promptOpen = false;
 let timer = null;
@@ -244,16 +247,27 @@ function subscriptionSnapshot(viewModel) {
   for (const [collection, operatorCategory] of categorized) {
     for (const lane of viewModel.collections?.[collection] || []) {
       const key = lane.key || `${lane.repository}\0${lane.id}`;
-      if (!all.has(key)) all.set(key, { ...lane, operatorCategory, providers: [lane.activeAgent || lane.writer].filter(Boolean), relatedLaneCount: 1 });
+      if (!all.has(key)) all.set(key, { ...lane, operatorCategory });
     }
   }
-  const include = view === "live"
-    ? new Set(["active"])
-    : view === "attention" ? new Set(["needs_user", "waiting"]) : null;
-  const operatorLanes = [...all.values()].filter((lane) => (
-    (!include || include.has(lane.operatorCategory))
-    && (!repositoryFilter || lane.repository === repositoryFilter)
-  ));
+  const matching = [...all.values()].filter((lane) => !repositoryFilter || lane.repository === repositoryFilter);
+  const liveRepositories = new Set(matching
+    .filter((lane) => lane.operatorCategory === "active")
+    .map((lane) => lane.repository));
+  const liveSource = matching.filter((lane) => {
+    if (["active", "needs_user"].includes(lane.operatorCategory)) return true;
+    return lane.operatorCategory === "waiting"
+      && (liveRepositories.size === 0 || liveRepositories.has(lane.repository));
+  });
+  const modeSource = view === "all"
+    ? matching
+    : view === "attention"
+      ? matching.filter((lane) => ["needs_user", "waiting"].includes(lane.operatorCategory))
+      : liveSource;
+  const operatorLanes = deduplicateOperatorLanes(modeSource, {
+    includeHistory: view === "all",
+    staleAfterMs: staleAfterHours * 60 * 60 * 1000,
+  });
   const counts = {
     active: viewModel.collections?.active?.length || 0,
     needs_user: viewModel.collections?.needsYou?.length || 0,
@@ -285,7 +299,12 @@ function subscriptionSnapshot(viewModel) {
 }
 
 async function draw(currentOverride = null) {
-  if (drawing || stopped) return;
+  if (stopped) return;
+  if (drawing) {
+    redrawPending = true;
+    if (currentOverride) pendingDrawOverride = currentOverride;
+    return;
+  }
   drawing = true;
   try {
     const current = currentOverride || (lastViewModel ? subscriptionSnapshot(lastViewModel) : null) || lastSnapshot || await snapshot();
@@ -332,6 +351,12 @@ async function draw(currentOverride = null) {
     process.stdout.write(`\x1b[H\x1b[2JMission Control refresh failed: ${error.message}\nPress r to retry or q to quit.`);
   } finally {
     drawing = false;
+    if (redrawPending && !stopped) {
+      const nextOverride = pendingDrawOverride;
+      redrawPending = false;
+      pendingDrawOverride = null;
+      queueMicrotask(() => { void draw(nextOverride); });
+    }
   }
 }
 

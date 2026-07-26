@@ -105,4 +105,24 @@ assert.equal(client.snapshot.redrawCount, redraws.length);
 client.stop();
 assert.equal((await client.pollOnce()).status, "stopped");
 
-console.log("Mission Control live-client tests passed: ordered batching, reconnect cursor reuse, bounded gap resync, and redraw coalescing are verified.");
+let consecutiveResyncReads = 0;
+const resyncAbort = new AbortController();
+const resyncClient = createMissionControlSubscriptionClient({
+  runtimeRoot: "/runtime",
+  workspaceRoot: "/workspace",
+  stateRoot: "/state",
+  waitMs: 0,
+  reconnectDelayMs: 1,
+  snapshotReader: async () => snapshot(7, "running"),
+  eventReader: async () => {
+    consecutiveResyncReads += 1;
+    if (consecutiveResyncReads === 3) resyncAbort.abort();
+    return { streamId, cursor: 7, events: [], resyncRequired: true, reason: "retention_window_exceeded" };
+  },
+});
+await resyncClient.run({ signal: resyncAbort.signal });
+assert.equal(consecutiveResyncReads, 3, "repeated resync requests remain recoverable");
+assert.ok(resyncClient.snapshot.resyncCount >= 2);
+assert.ok(resyncClient.snapshot.consecutiveResyncs >= 2, "consecutive resyncs are tracked and back off instead of busy-looping");
+
+console.log("Mission Control live-client tests passed: ordered batching, reconnect cursor reuse, bounded gap resync/backoff, and redraw coalescing are verified.");
