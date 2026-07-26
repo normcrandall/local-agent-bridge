@@ -7,7 +7,12 @@ import { builderEnvelopeInstructions } from "./builder-envelope.mjs";
 import { deliverBuilderEnvelope } from "./builder-delivery-repair.mjs";
 import { configuredReviewerLogin, createInstallationToken, inspectGitHubAppRoles, sameGitHubAppLogin } from "./github-app-auth.mjs";
 import { createBoundBuilderClient } from "./github-builder-client.mjs";
-import { localReviewPrompt, republishValidatedReview, resolveReviewPublication } from "./review-publication.mjs";
+import {
+  localReviewPrompt,
+  republishValidatedReview,
+  resolveReviewPublication,
+  submitReviewWithSummaryCompatibility,
+} from "./review-publication.mjs";
 import { resolveContainedHandoffPath } from "./handoff-path.mjs";
 import {
   admitProviderCommands,
@@ -193,14 +198,18 @@ export function createAgentPool({
         arguments: { content: envelope.handoff },
       });
       if (handoff.isError) throw new Error(`${agent} handoff publication failed: ${textFrom(handoff)}`);
-      const review = await publisher.callTool({
-        name: "submit_pr_review",
-        arguments: {
-          event: envelope.event,
-          body: envelope.body,
-          comments: envelope.comments,
-          summary: envelope.summary,
-        },
+      const review = await submitReviewWithSummaryCompatibility({
+        envelope,
+        submit: (arguments_) => publisher.callTool({
+          name: "submit_pr_review",
+          arguments: arguments_,
+        }),
+        onDowngrade: () => emitTiming({
+          action: "milestone",
+          name: "review_summary_compatibility_downgrade",
+          at: new Date().toISOString(),
+          metadata: { agent, channel: "github_review" },
+        }),
       });
       if (review.isError) throw new Error(`${agent} PR review publication failed: ${textFrom(review)}`);
       return review.structuredContent;

@@ -583,7 +583,7 @@ export function createBoundBuilderClient({
     const finding = parseReviewFinding(original.body);
     if (finding) {
       const validDisposition = (thread.comments?.nodes || []).slice(1).some((comment) => {
-        const parsed = parseWriterDisposition(comment.body);
+        const parsed = parseWriterDisposition(comment.body, { repository });
         return parsed?.headSha === activeHeadSha
           && comment.author?.__typename === "Bot"
           && normalizeBotLogin(parsed.writerLogin) === normalizeBotLogin(comment.author?.login)
@@ -733,6 +733,7 @@ export function createBoundBuilderClient({
     const reviewReadiness = assertReviewThreadReadiness({
       threads: await loadReviewThreads(),
       headSha: activeHeadSha,
+      repository,
       trustedReviewerLogins: trustedReviewLogins,
       trustedWriterLogins: [expectedLogin],
     });

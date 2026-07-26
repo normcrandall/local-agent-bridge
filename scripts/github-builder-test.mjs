@@ -383,7 +383,12 @@ const actionableFindingBody = `Guard this input.\n\n${reviewFindingMarker({
   classification: "blocker",
   fixRecommendation: "Validate the input before changing state.",
 })}`;
-const dispositionComment = ({ dispositionHead = headSha, disposition = "fixed", isResolved = false } = {}) => ({
+const dispositionComment = ({
+  dispositionHead = headSha,
+  disposition = "fixed",
+  dispositionRepository = "owner/repo",
+  isResolved = false,
+} = {}) => ({
   id: "thread-actionable",
   isResolved,
   comments: { nodes: [
@@ -397,8 +402,8 @@ const dispositionComment = ({ dispositionHead = headSha, disposition = "fixed", 
         writerLogin: "builder[bot]",
         disposition,
         rationale: disposition === "declined" ? "The proposed behavior conflicts with the public contract." : "",
-        followUpUrl: disposition === "follow_up" ? "https://github.com/owner/repo/issues/149" : null,
-        repository: "owner/repo",
+        followUpUrl: disposition === "follow_up" ? `https://github.com/${dispositionRepository}/issues/149` : null,
+        repository: dispositionRepository,
       })}`,
       url: "https://github.test/reply/actionable",
       author: { login: "builder", __typename: "Bot" },
@@ -435,6 +440,31 @@ const reopenedApi = fakeGitHub({
 await assert.rejects(
   createBoundBuilderClient({ ...base, fetchImpl: reopenedApi.fetchImpl }).merge({ method: "squash" }),
   /1 unresolved/i,
+);
+
+const wrongRepositoryFollowUpApi = fakeGitHub({
+  reviewThreads: [dispositionComment({
+    disposition: "follow_up",
+    dispositionRepository: "other/repo",
+  })],
+});
+await assert.rejects(
+  createBoundBuilderClient({ ...base, fetchImpl: wrongRepositoryFollowUpApi.fetchImpl })
+    .merge({ method: "squash" }),
+  /1 unanswered/i,
+);
+const wrongRepositoryResolver = createBoundBuilderClient({
+  ...base,
+  fetchImpl: wrongRepositoryFollowUpApi.fetchImpl,
+  reviewResolutionAuthority: {
+    reviewerLogin: "reviewer[bot]",
+    headSha,
+    trustedWriterLogins: ["builder[bot]"],
+  },
+});
+await assert.rejects(
+  wrongRepositoryResolver.resolveReviewThread({ threadId: "thread-actionable" }),
+  /validated writer disposition/i,
 );
 
 const followUpResolvedApi = fakeGitHub({

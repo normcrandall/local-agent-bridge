@@ -13,6 +13,14 @@ function normalizeBotLogin(login) {
   return String(login || "").toLowerCase().replace(/\[bot\]$/, "");
 }
 
+export function assertTrustedReviewerLogins(logins = []) {
+  const normalized = [...new Set(logins.map(normalizeBotLogin).filter(Boolean))];
+  if (normalized.length === 0) {
+    throw new Error("Review-thread evaluation requires at least one trusted reviewer App login.");
+  }
+  return normalized;
+}
+
 function sameBotLogin(left, right) {
   return normalizeBotLogin(left) === normalizeBotLogin(right);
 }
@@ -49,6 +57,16 @@ function requireReviewerApp(client) {
     throw new Error("Review-thread access requires the configured reviewer GitHub App; PAT fallback is not authorized.");
   }
   return client;
+}
+
+function escapeRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function followUpIssuePattern(repository = null) {
+  return repository
+    ? new RegExp(`^https://github\\.com/${escapeRegExp(repository)}/issues/[1-9][0-9]*$`, "i")
+    : /^https:\/\/github\.com\/[^/]+\/[^/]+\/issues\/[1-9][0-9]*$/i;
 }
 
 export function reviewFindingMarker({
@@ -114,8 +132,7 @@ export function writerDispositionMarker({
     throw new Error("A declined review finding requires a rationale.");
   }
   if (disposition === "follow_up") {
-    const escapedRepository = String(repository || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const issuePattern = new RegExp(`^https://github\\.com/${escapedRepository}/issues/[1-9][0-9]*$`, "i");
+    const issuePattern = followUpIssuePattern(repository);
     if (!repository || !issuePattern.test(String(followUpUrl || ""))) {
       throw new Error(`A follow-up disposition requires a linked ${repository || "repository"} GitHub issue URL.`);
     }
@@ -131,15 +148,16 @@ export function writerDispositionMarker({
   });
 }
 
-export function parseWriterDisposition(body) {
+export function parseWriterDisposition(body, { repository = null } = {}) {
   const value = decodeMarker(body, DISPOSITION_PREFIX);
+  const followUpPattern = followUpIssuePattern(repository);
   if (
     !value
     || !validSha(value.headSha)
     || !value.writerLogin
     || !DISPOSITIONS.has(value.disposition)
     || (value.disposition === "declined" && !String(value.rationale || "").trim())
-    || (value.disposition === "follow_up" && !/^https:\/\/github\.com\/[^/]+\/[^/]+\/issues\/[1-9][0-9]*$/i.test(value.followUpUrl || ""))
+    || (value.disposition === "follow_up" && !followUpPattern.test(value.followUpUrl || ""))
   ) return null;
   return value;
 }
@@ -152,11 +170,11 @@ function actionableFinding(thread, trustedReviewerLogins) {
   return { original, finding };
 }
 
-function currentDisposition(thread, headSha, trustedWriterLogins) {
+function currentDisposition(thread, headSha, trustedWriterLogins, repository = null) {
   const comments = thread.comments?.nodes || [];
   for (let index = comments.length - 1; index >= 1; index -= 1) {
     const comment = comments[index];
-    const disposition = parseWriterDisposition(comment.body);
+    const disposition = parseWriterDisposition(comment.body, { repository });
     if (
       disposition?.headSha?.toLowerCase() === headSha.toLowerCase()
       && trustedBotComment(comment, disposition.writerLogin, trustedWriterLogins)
@@ -168,6 +186,7 @@ function currentDisposition(thread, headSha, trustedWriterLogins) {
 export function evaluateReviewThreadState({
   threads = [],
   headSha,
+  repository = null,
   trustedReviewerLogins = [],
   trustedWriterLogins = [],
 }) {
@@ -176,7 +195,7 @@ export function evaluateReviewThreadState({
   for (const thread of threads) {
     const owned = actionableFinding(thread, trustedReviewerLogins);
     if (!owned) continue;
-    const response = currentDisposition(thread, headSha, trustedWriterLogins);
+    const response = currentDisposition(thread, headSha, trustedWriterLogins, repository);
     actionable.push({
       threadId: thread.id,
       reviewerLogin: owned.finding.reviewerLogin,
@@ -189,7 +208,15 @@ export function evaluateReviewThreadState({
   }
   const unanswered = actionable.filter((entry) => !entry.answered);
   const unresolved = actionable.filter((entry) => entry.answered && !entry.resolved);
-  const digest = createHash("sha256").update(JSON.stringify(actionable)).digest("hex");
+  const normalizedReviewerLogins = [...new Set(trustedReviewerLogins.map(normalizeBotLogin).filter(Boolean))].sort();
+  const normalizedWriterLogins = [...new Set(trustedWriterLogins.map(normalizeBotLogin).filter(Boolean))].sort();
+  const digest = createHash("sha256").update(JSON.stringify({
+    repository: String(repository || "").toLowerCase() || null,
+    headSha: headSha.toLowerCase(),
+    trustedReviewerLogins: normalizedReviewerLogins,
+    trustedWriterLogins: normalizedWriterLogins,
+    actionable,
+  })).digest("hex");
   return {
     version: 1,
     headSha: headSha.toLowerCase(),
@@ -198,6 +225,33 @@ export function evaluateReviewThreadState({
     unresolved,
     ready: unanswered.length === 0 && unresolved.length === 0,
     digest,
+  };
+}
+
+export function constrainApprovalToReviewThreadState({
+  event,
+  body,
+  readiness,
+  statusGateEnabled = false,
+}) {
+  if (event !== "APPROVE") {
+    return { event, body, gateReviewState: null };
+  }
+  if (!readiness) throw new Error("APPROVE requires an exact-head review-thread readiness receipt.");
+  // An answered thread may still need the owning reviewer App to resolve it.
+  // Allow the formal APPROVE so that exact-head approval can authorize that
+  // resolution; the merge gate continues to require every thread resolved.
+  if (readiness.unanswered.length === 0) {
+    return {
+      event,
+      body,
+      gateReviewState: statusGateEnabled ? (readiness.ready ? "APPROVE" : "COMMENT") : null,
+    };
+  }
+  return {
+    event: "COMMENT",
+    body: `${String(body || "").trim()}\n\nApproval withheld: ${readiness.unanswered.length} actionable thread(s) are unanswered and ${readiness.unresolved.length} answered thread(s) remain unresolved at this exact head.`,
+    gateReviewState: statusGateEnabled ? "COMMENT" : null,
   };
 }
 
@@ -250,6 +304,7 @@ export function createReviewerThreadController({
   resolverClient = client,
   expectedLogin,
   headSha = null,
+  repository = null,
   trustedWriterLogins = [],
   getSubmittedEvent,
 }) {
@@ -283,7 +338,7 @@ export function createReviewerThreadController({
       if (finding && (
         !headSha
         || !sameBotLogin(finding.reviewerLogin, expectedLogin)
-        || !currentDisposition(thread, headSha, trustedWriterLogins)
+        || !currentDisposition(thread, headSha, trustedWriterLogins, repository)
       )) {
         throw new Error("The reviewer may resolve an actionable thread only after a validated writer disposition on the refreshed exact head.");
       }

@@ -20,6 +20,8 @@ import {
 import { createBoundBuilderClient } from "./github-builder-client.mjs";
 import {
   approvedSubmissionEvent,
+  assertTrustedReviewerLogins,
+  constrainApprovalToReviewThreadState,
   createReviewerThreadController,
   evaluateReviewThreadState,
   reviewThreadReceiptPath,
@@ -63,10 +65,11 @@ let trustedReviewerLogins = [expectedLogin];
 if (appCredential) {
   try {
     const roles = await inspectGitHubAppRoles({ configPath: appConfigPath });
-    trustedReviewerLogins = [
+    trustedReviewerLogins = [...new Set([
+      expectedLogin,
       roles.roles?.reviewer?.expectedLogin,
       ...Object.values(roles.roles?.reviewers || {}).map((reviewer) => reviewer.expectedLogin),
-    ].filter(Boolean);
+    ].filter(Boolean))];
     builderRole = await loadGitHubAppRole({
       role: "builder",
       repository,
@@ -78,6 +81,7 @@ if (appCredential) {
     builderRole = null;
   }
 }
+if (appCredential) assertTrustedReviewerLogins(trustedReviewerLogins);
 
 const inlineComment = z.object({
   path: z.string().min(1),
@@ -149,8 +153,16 @@ const threadController = createReviewerThreadController({
   resolverClient: threadResolverClient,
   expectedLogin,
   headSha,
+  repository,
   trustedWriterLogins: builderRole ? [builderRole.expectedLogin] : [],
   getSubmittedEvent: () => submittedEvent,
+});
+const currentReadiness = async () => evaluateReviewThreadState({
+  threads: await threadController.read(),
+  headSha,
+  repository,
+  trustedReviewerLogins,
+  trustedWriterLogins: builderRole ? [builderRole.expectedLogin] : [],
 });
 
 server.registerTool(
@@ -203,16 +215,19 @@ server.registerTool(
     if (!appCredential && event !== "COMMENT") {
       throw new Error("A PAT fallback may post an attributed comment but cannot APPROVE or REQUEST_CHANGES; configure the reviewer GitHub App.");
     }
-    let gateReviewState = null;
-    if (statusGateEnabled && event === "APPROVE" && threadReaderClient) {
-      const readiness = evaluateReviewThreadState({
-        threads: await threadController.read(),
-        headSha,
-        trustedReviewerLogins,
-        trustedWriterLogins: builderRole ? [builderRole.expectedLogin] : [],
-      });
-      gateReviewState = readiness.ready ? "APPROVE" : "COMMENT";
+    let readiness = null;
+    if (event === "APPROVE" && threadReaderClient) {
+      readiness = await currentReadiness();
     }
+    const constrained = constrainApprovalToReviewThreadState({
+      event,
+      body,
+      readiness: event === "APPROVE" && threadReaderClient ? readiness : { ready: true, unanswered: [], unresolved: [] },
+      statusGateEnabled,
+    });
+    const effectiveEvent = constrained.event;
+    const effectiveBody = constrained.body;
+    const gateReviewState = constrained.gateReviewState;
     const result = await submitBoundReview({
       apiUrl: reviewApiUrl,
       token,
@@ -221,8 +236,8 @@ server.registerTool(
       headSha,
       expectedLogin,
       verifiedLogin,
-      event,
-      body,
+      event: effectiveEvent,
+      body: effectiveBody,
       comments,
       summary,
       statusContext,
@@ -241,7 +256,7 @@ server.registerTool(
     return {
       content: [{
         type: "text",
-        text: `${result.idempotent ? "Existing" : "Posted"} ${event} review as ${result.login}: ${result.url}`,
+        text: `${result.idempotent ? "Existing" : "Posted"} ${result.state || effectiveEvent} review as ${result.login}: ${result.url}`,
       }],
       structuredContent: result,
     };
@@ -278,12 +293,7 @@ if (appCredential) {
         const result = await threadController.resolve({ threadId });
         let gate = null;
         if (statusGateEnabled && submittedReview && submittedEvent === "APPROVE") {
-          const readiness = evaluateReviewThreadState({
-            threads: await threadController.read(),
-            headSha,
-            trustedReviewerLogins,
-            trustedWriterLogins: [builderRole.expectedLogin],
-          });
+          const readiness = await currentReadiness();
           if (readiness.ready) {
             gate = await publishBoundReviewGate({
               apiUrl: reviewApiUrl,

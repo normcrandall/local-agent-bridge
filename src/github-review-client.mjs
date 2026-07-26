@@ -178,10 +178,10 @@ export async function submitBoundReview({
   const decoratedComments = comments.map((comment) => {
     const classification = comment.classification
       || (event === "REQUEST_CHANGES" ? "blocker" : "suggestion");
-    const fixRecommendation = String(
-      comment.fixRecommendation
-      || (comment.classification === undefined ? comment.body : ""),
-    ).trim();
+    const fixRecommendation = String(comment.fixRecommendation || "").trim();
+    if (classification === "blocker" && !fixRecommendation) {
+      throw new Error(`Blocker at ${comment.path}:${comment.line} requires an explicit concrete fix recommendation.`);
+    }
     if (event === "APPROVE" && classification === "blocker") {
       throw new Error("An APPROVE review cannot introduce an actionable blocker.");
     }
@@ -191,8 +191,8 @@ export async function submitBoundReview({
       classification,
       fixRecommendation,
     });
-    const visibleRecommendation = classification === "blocker" && comment.fixRecommendation
-      ? `\n\nRecommended fix: ${comment.fixRecommendation.trim()}`
+    const visibleRecommendation = classification === "blocker"
+      ? `\n\nRecommended fix: ${fixRecommendation}`
       : "";
     const {
       classification: _classification,
