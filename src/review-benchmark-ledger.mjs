@@ -1,6 +1,6 @@
 import { mkdir, open, readFile, rm } from "node:fs/promises";
 import { dirname } from "node:path";
-import { normalizeReviewEnvelope } from "./review-benchmark-model.mjs";
+import { normalizeBenchmarkAdjudication, normalizeBenchmarkOutcome, normalizeReviewEnvelope } from "./review-benchmark-model.mjs";
 
 const LOCK_RETRY_MS = 10;
 const LOCK_TIMEOUT_MS = 5_000;
@@ -18,8 +18,16 @@ function serialized(record) {
 }
 
 export function benchmarkRecordIdentity(record) {
-  const normalized = normalizeReviewEnvelope(record);
+  const normalized = normalizeBenchmarkLedgerRecord(record);
+  if (normalized.recordType === "finding_adjudication") return `${normalized.recordType}\u0000${normalized.repository}\u0000${normalized.headSha}\u0000${normalized.adjudicationId}`;
+  if (normalized.recordType === "review_outcome") return `${normalized.recordType}\u0000${normalized.repository}\u0000${normalized.headSha}\u0000${normalized.provider}\u0000${normalized.runId}\u0000${normalized.outcomeId}`;
   return `${normalized.repository}\u0000${normalized.headSha}\u0000${normalized.provider}\u0000${normalized.runId}`;
+}
+
+export function normalizeBenchmarkLedgerRecord(record) {
+  if (record?.recordType === "finding_adjudication") return normalizeBenchmarkAdjudication(record);
+  if (record?.recordType === "review_outcome") return normalizeBenchmarkOutcome(record);
+  return normalizeReviewEnvelope(record);
 }
 
 async function acquireLock(path) {
@@ -57,7 +65,7 @@ export async function readReviewBenchmarkLedger(path) {
         error.code = "UNSUPPORTED_REVIEW_BENCHMARK_SCHEMA";
         throw error;
       }
-      return normalizeReviewEnvelope(parsed);
+      return normalizeBenchmarkLedgerRecord(parsed);
     } catch (error) {
       error.message = `invalid benchmark ledger record at line ${index + 1}: ${error.message}`;
       throw error;
@@ -66,11 +74,21 @@ export async function readReviewBenchmarkLedger(path) {
 }
 
 export async function appendReviewBenchmarkRecord(path, input) {
-  const record = normalizeReviewEnvelope(input);
+  const record = normalizeBenchmarkLedgerRecord(input);
   await mkdir(dirname(path), { recursive: true });
   const release = await acquireLock(path);
   try {
     const records = await readReviewBenchmarkLedger(path);
+    if (record.recordType === "finding_adjudication") {
+      const priorDecisions = records.filter((entry) => entry.recordType === "finding_adjudication"
+        && entry.repository === record.repository && entry.headSha === record.headSha && entry.findingKey === record.findingKey);
+      const currentStatus = priorDecisions.at(-1)?.status ?? "unresolved";
+      if (record.previousStatus !== currentStatus) {
+        const stale = new Error(`stale adjudication transition for ${record.findingKey}: expected previousStatus ${currentStatus}`);
+        stale.code = "BENCHMARK_ADJUDICATION_STALE";
+        throw stale;
+      }
+    }
     const identity = benchmarkRecordIdentity(record);
     const prior = records.find((entry) => benchmarkRecordIdentity(entry) === identity);
     if (prior) {

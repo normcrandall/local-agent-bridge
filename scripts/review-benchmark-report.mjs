@@ -3,7 +3,7 @@
 import process from "node:process";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { access } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { readReviewBenchmarkLedger } from "../src/review-benchmark-ledger.mjs";
 import { adjudicateReviewRuns } from "../src/review-benchmark-model.mjs";
 import { aggregateReviewBenchmarks } from "../src/review-benchmark-report.mjs";
@@ -19,7 +19,11 @@ authorizes a review, pull request, or merge.
 
 Options:
   --ledger PATH       Versioned JSONL benchmark ledger to read (required)
+  --adjudications PATH
+                      Optional independent finding-adjudication JSON
   --provider NAME     Include only this provider/model cohort
+  --model NAME        Include only this model
+  --cohort NAME       Include only this repository cohort
   --repository OWNER/NAME
                       Include only this repository (case-insensitive)
   --head SHA          Include only this exact 40-character commit SHA
@@ -40,16 +44,16 @@ function requiredValue(argv, index, flag) {
 }
 
 export function parseReviewBenchmarkReportArguments(argv) {
-  const options = { ledger: null, provider: null, repository: null, headSha: null, json: false, help: false };
+  const options = { ledger: null, adjudications: null, provider: null, model: null, cohort: null, repository: null, headSha: null, json: false, help: false };
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
     if (flag === "--help" || flag === "-h") {
       options.help = true;
     } else if (flag === "--json") {
       options.json = true;
-    } else if (["--ledger", "--provider", "--repository", "--head"].includes(flag)) {
+    } else if (["--ledger", "--adjudications", "--provider", "--model", "--cohort", "--repository", "--head"].includes(flag)) {
       const value = requiredValue(argv, index, flag);
-      const key = { "--ledger": "ledger", "--provider": "provider", "--repository": "repository", "--head": "headSha" }[flag];
+      const key = { "--ledger": "ledger", "--adjudications": "adjudications", "--provider": "provider", "--model": "model", "--cohort": "cohort", "--repository": "repository", "--head": "headSha" }[flag];
       if (options[key] !== null) throw new TypeError(`${flag} may be supplied only once`);
       options[key] = value;
       index += 1;
@@ -71,7 +75,10 @@ export function parseReviewBenchmarkReportArguments(argv) {
   return {
     ...options,
     ledger: resolve(options.ledger),
+    adjudications: options.adjudications ? resolve(options.adjudications) : null,
     provider: options.provider?.trim().toLowerCase() ?? null,
+    model: options.model?.trim().toLowerCase() ?? null,
+    cohort: options.cohort?.trim().toLowerCase() ?? null,
     repository: options.repository?.toLowerCase() ?? null,
     headSha: options.headSha?.toLowerCase() ?? null,
   };
@@ -94,8 +101,13 @@ function targetKey(record) {
 }
 
 export function createReviewBenchmarkReport(records, filters = {}) {
-  const selected = records.filter((record) => (
+  const reviewRuns = records.filter((record) => !record.recordType || record.recordType === "review_run");
+  const outcomeRecords = records.filter((record) => record.recordType === "review_outcome");
+  const ledgerAdjudications = records.filter((record) => record.recordType === "finding_adjudication");
+  const selected = reviewRuns.filter((record) => (
     (!filters.provider || record.provider === filters.provider)
+    && (!filters.model || record.model === filters.model)
+    && (!filters.cohort || record.repositoryCohort === filters.cohort)
     && (!filters.repository || record.repository === filters.repository)
     && (!filters.headSha || record.headSha === filters.headSha)
   )).sort(compareRecords);
@@ -106,24 +118,59 @@ export function createReviewBenchmarkReport(records, filters = {}) {
     groups.set(targetKey(record), group);
   }
 
+  const findingCatalog = new Map(reviewRuns.flatMap((run) => run.findings.map((finding) => [`${targetKey(run)}\u0000${finding.key}`, finding])));
+  const adjudicationInputs = new Map((filters.adjudications ?? []).map((entry) => {
+    const key = `${String(entry.repository).toLowerCase()}\u0000${String(entry.headSha).toLowerCase()}`;
+    return [key, (entry.findingAdjudications ?? []).map((decision) => ({ ...decision, finding: decision.finding ?? findingCatalog.get(`${key}\u0000${decision.findingKey}`) }))];
+  }));
+  for (const record of ledgerAdjudications) {
+    const key = targetKey(record);
+    const decisions = new Map((adjudicationInputs.get(key) ?? []).map((entry) => [entry.findingKey, entry]));
+    decisions.set(record.findingKey, { ...record, finding: record.finding ?? findingCatalog.get(`${key}\u0000${record.findingKey}`) });
+    adjudicationInputs.set(key, [...decisions.values()]);
+  }
   const targets = [...groups.values()].map((runs) => {
+    runs = runs.map((run) => {
+      const later = outcomeRecords.filter((record) => record.repository === run.repository && record.headSha === run.headSha
+        && record.provider === run.provider && record.model === run.model && record.runId === run.runId);
+      if (later.length === 0) return run;
+      const outcomes = Object.fromEntries(Object.keys(run.outcomes).map((key) => [key, run.outcomes[key] + later.reduce((sum, record) => sum + record.outcomes[key], 0)]));
+      return { ...run, outcomes };
+    });
     // The v1 ledger contains observations, not accepted/rejected ground truth.
     // Reuse the canonical adjudication and aggregation paths for latency and
     // counts, but never expose their zero-denominator ratio as provider quality.
-    const aggregate = aggregateReviewBenchmarks([adjudicateReviewRuns(runs)]);
+    const targetAdjudications = adjudicationInputs.get(targetKey(runs[0]));
+    const hasAdjudication = Array.isArray(targetAdjudications) && targetAdjudications.length > 0;
+    const aggregate = aggregateReviewBenchmarks([adjudicateReviewRuns(runs, { findingAdjudications: targetAdjudications ?? [] })]);
     const providers = aggregate.providers.map((row) => {
-      const providerRuns = runs.filter((run) => run.provider === row.provider);
+      const providerRuns = runs.filter((run) => run.provider === row.provider && run.model === row.model && run.repositoryCohort === row.repositoryCohort);
       return {
         provider: row.provider,
-        model: null,
+        model: row.model,
+        repositoryCohort: row.repositoryCohort,
         executionClass: executionClass(providerRuns),
         sampleCount: row.runs,
-        findingCount: row.unadjudicated,
-        precision: null,
-        recall: null,
+        findingCount: row.truePositives + row.falsePositives + row.unadjudicated + row.duplicateFindings + row.advisoryFindings,
+        precision: hasAdjudication ? row.precision : null,
+        recall: hasAdjudication ? row.recall : null,
+        blockingRecall: hasAdjudication ? row.blockingRecall : null,
+        citationValidity: row.citationValidity,
+        evidenceSupport: row.evidenceSupport,
+        actionability: row.actionability,
+        duplicateRate: hasAdjudication ? row.duplicateRate : null,
+        uniqueValidFindings: hasAdjudication ? row.uniqueValidFindings : null,
+        exactHeadCompletionRate: row.exactHeadCompletionRate,
+        reliability: row.reliability,
+        outcomes: row.outcomes,
         latencyMs: row.latencyMs,
-        confidence: "incomplete",
-        incompleteReason: "the ledger has no independent accepted/rejected finding adjudication",
+        localWallTimeMs: row.localWallTimeMs,
+        inputTokens: row.inputTokens,
+        outputTokens: row.outputTokens,
+        estimatedCostUsd: row.estimatedCostUsd,
+        peakMemoryMb: row.peakMemoryMb,
+        confidence: hasAdjudication ? row.confidence : "incomplete",
+        incompleteReason: hasAdjudication ? null : "the ledger has no independent finding adjudication",
       };
     });
     return {
@@ -131,8 +178,11 @@ export function createReviewBenchmarkReport(records, filters = {}) {
       headSha: runs[0].headSha,
       sampleCount: aggregate.runCount,
       providerCount: aggregate.providerCount,
-      confidence: "incomplete",
-      incompleteReason: "precision and recall require independent finding adjudication",
+      confidence: hasAdjudication ? aggregate.providers.reduce((lowest, row) => {
+        const order = ["insufficient", "directional", "moderate", "strong"];
+        return order.indexOf(row.confidence) < order.indexOf(lowest) ? row.confidence : lowest;
+      }, "strong") : "incomplete",
+      incompleteReason: hasAdjudication ? null : "precision and recall require independent finding adjudication",
       providers,
     };
   });
@@ -143,16 +193,20 @@ export function createReviewBenchmarkReport(records, filters = {}) {
     purpose: "observational",
     filters: {
       provider: filters.provider ?? null,
+      model: filters.model ?? null,
+      cohort: filters.cohort ?? null,
       repository: filters.repository ?? null,
       headSha: filters.headSha ?? null,
     },
     sample: {
-      state: selected.length === 0 ? "empty" : "incomplete",
+      state: selected.length === 0 ? "empty" : targets.every((target) => target.confidence === "incomplete") ? "incomplete" : "adjudicated",
       runCount: selected.length,
       targetCount: targets.length,
       message: selected.length === 0
         ? "No benchmark runs matched the selected filters."
-        : "Samples are observational; precision and recall are unavailable without independent adjudication.",
+        : targets.every((target) => target.confidence === "incomplete")
+          ? "Samples are observational; precision and recall are unavailable without independent adjudication."
+          : "Findings are independently adjudicated; confidence remains sample-size bounded and is not a global ranking.",
     },
     targets,
   };
@@ -175,9 +229,11 @@ export function formatReviewBenchmarkReport(report) {
     for (const row of target.providers) {
       const cohort = row.model ? `${row.provider}/${row.model}` : `${row.provider} (model n/r)`;
       const latency = `${milliseconds(row.latencyMs.median)}/${milliseconds(row.latencyMs.p95)}/${milliseconds(row.latencyMs.mean)}`;
-      lines.push(`${cohort.padEnd(22)} ${row.executionClass.padEnd(7)} ${String(row.sampleCount).padStart(2)} ${"n/a".padStart(10)} ${"n/a".padStart(7)}  ${latency}`);
+      const precision = row.precision == null ? "n/a" : `${(row.precision * 100).toFixed(1)}%`;
+      const recall = row.recall == null ? "n/a" : `${(row.recall * 100).toFixed(1)}%`;
+      lines.push(`${cohort.padEnd(22)} ${row.executionClass.padEnd(7)} ${String(row.sampleCount).padStart(2)} ${precision.padStart(10)} ${recall.padStart(7)}  ${latency}  ${row.confidence}`);
     }
-    lines.push(`INCOMPLETE: ${target.incompleteReason}.`);
+    if (target.incompleteReason) lines.push(`INCOMPLETE: ${target.incompleteReason}.`);
   }
   lines.push("", "This report cannot satisfy or bypass any review or merge gate.");
   return `${lines.join("\n")}\n`;
@@ -211,7 +267,18 @@ export async function runReviewBenchmarkReport(argv, io = {}) {
     stderr.write(`Ledger error (${options.ledger}): ${reason}\n`);
     return 1;
   }
-  const report = createReviewBenchmarkReport(records, options);
+  let adjudications = [];
+  if (options.adjudications) {
+    try {
+      const parsed = JSON.parse(await readFile(options.adjudications, "utf8"));
+      if (!Array.isArray(parsed)) throw new TypeError("adjudication file must contain a JSON array");
+      adjudications = parsed;
+    } catch (error) {
+      stderr.write(`Adjudication error (${options.adjudications}): ${error.message}\n`);
+      return 1;
+    }
+  }
+  const report = createReviewBenchmarkReport(records, { ...options, adjudications });
   stdout.write(options.json ? `${JSON.stringify(report, null, 2)}\n` : formatReviewBenchmarkReport(report));
   return 0;
 }
