@@ -1096,6 +1096,98 @@ async function runTests() {
   assert.equal(reconciledCollaboration.semanticLifecycle.state, "obsolete");
   assert.equal((await parseClaims(client, 42))[0].data.phase, "obsolete");
 
+  console.log("13d. Testing one unrebindable claim does not stop later healthy portfolio reconciliation...");
+  const isolatedWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-claim-reconciliation-test-"));
+  const isolatedPortfolios = path.join(isolatedWorkspace, ".bridge", "portfolios");
+  fs.mkdirSync(isolatedPortfolios, { recursive: true });
+  const badPortfolioId = "helm-00000000-0000-4000-8000-000000000001";
+  const goodPortfolioId = "helm-00000000-0000-4000-8000-000000000002";
+  const badCollaborationId = "bridge-00000000-0000-4000-8000-000000000001";
+  const goodCollaborationId = "bridge-00000000-0000-4000-8000-000000000002";
+  const claimFor = ({ portfolio, item, collaboration, authority }) => ({
+    portfolio,
+    item,
+    writer: "codex",
+    collaboration,
+    phase: "working",
+    authority,
+    head: "1111111111111111111111111111111111111111",
+    timestamps: {
+      created: new Date().toISOString(),
+      updated: new Date(0).toISOString(),
+    },
+  });
+  const writeReconciliationPortfolio = ({ id, issueNumber, collaborationId, updatedAt }) => {
+    fs.writeFileSync(path.join(isolatedPortfolios, `${id}.json`), JSON.stringify({
+      id,
+      revision: 1,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt,
+      workspace: isolatedWorkspace,
+      items: [{
+        id: `issue-${issueNumber}`,
+        issueNumber,
+        status: "claimed",
+        collaborationId,
+      }],
+    }, null, 2));
+  };
+  writeReconciliationPortfolio({ id: badPortfolioId, issueNumber: 42, collaborationId: badCollaborationId, updatedAt: "2026-01-01T00:00:02.000Z" });
+  writeReconciliationPortfolio({ id: goodPortfolioId, issueNumber: 43, collaborationId: goodCollaborationId, updatedAt: "2026-01-01T00:00:01.000Z" });
+  for (const [id, issueNumber] of [[badCollaborationId, 42], [goodCollaborationId, 43]]) {
+    await createCollaboration(isolatedWorkspace, {
+      id,
+      task: `issue-${issueNumber}`,
+      workspace: isolatedWorkspace,
+      status: "working",
+      writer: "codex",
+      issueClaim: {
+        repository: "owner/repo",
+        issueNumber,
+        expectedLogin: "builder-app[bot]",
+        headSha: "1111111111111111111111111111111111111111",
+      },
+    });
+  }
+  const badMock = createPausableMockGitHub();
+  const goodMock = createPausableMockGitHub();
+  badMock.setComments([{
+    id: 5003486600,
+    body: `### Agent Bridge Issue Claim Lease\n<!-- agent-bridge-issue-claim\n${JSON.stringify(claimFor({
+      portfolio: badPortfolioId,
+      item: "issue-42",
+      collaboration: badCollaborationId,
+      authority: { ...baseClientConfig.authority, appId: "legacy-app" },
+    }), null, 2)}\n-->`,
+    user: { login: "builder-app[bot]" },
+  }]);
+  goodMock.setComments([{
+    id: 5003486601,
+    body: `### Agent Bridge Issue Claim Lease\n<!-- agent-bridge-issue-claim\n${JSON.stringify(claimFor({
+      portfolio: goodPortfolioId,
+      item: "issue-43",
+      collaboration: goodCollaborationId,
+      authority: baseClientConfig.authority,
+    }), null, 2)}\n-->`,
+    user: { login: "builder-app[bot]" },
+  }]);
+  const badClaimClient = createIssueClaimClient({ ...claimClientArgs, issueNumber: 42, workspace: isolatedWorkspace, fetchImpl: badMock.fetchImpl });
+  const goodClaimClient = createIssueClaimClient({ ...claimClientArgs, issueNumber: 43, workspace: isolatedWorkspace, fetchImpl: goodMock.fetchImpl });
+  await reconcileClaimsAndPortfolios(
+    isolatedWorkspace,
+    fetch,
+    ({ issueNumber }) => issueNumber === 42 ? badClaimClient : goodClaimClient,
+  );
+  const isolatedBadPortfolio = JSON.parse(fs.readFileSync(path.join(isolatedPortfolios, `${badPortfolioId}.json`), "utf8"));
+  const isolatedGoodPortfolio = JSON.parse(fs.readFileSync(path.join(isolatedPortfolios, `${goodPortfolioId}.json`), "utf8"));
+  assert.equal(isolatedBadPortfolio.items[0].status, "indeterminate");
+  assert.match(isolatedBadPortfolio.items[0].summary, /GitHub App ID changed/);
+  assert.match(isolatedBadPortfolio.items[0].summary, /Release the inspected claim.*reacquire/i);
+  assert.equal(isolatedGoodPortfolio.items[0].status, "claimed");
+  assert.match(goodMock.getComments()[0].body, /Reconciled local collaboration status working after broker restart/);
+  assert.doesNotMatch(badMock.getComments()[0].body, /Reconciled local collaboration status/);
+  fs.rmSync(isolatedWorkspace, { recursive: true, force: true });
+
   console.log("14. Testing fail-closed behavior for ref without comment...");
   mock.clear();
   mock.getRefs().set("refs/tags/claims/issue-42-generation-1", "1111111111111111111111111111111111111111");

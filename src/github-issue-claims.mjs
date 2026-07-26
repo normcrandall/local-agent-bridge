@@ -924,7 +924,9 @@ export async function reconcileClaimsAndPortfolios(workspaceRoot, fetchImpl = fe
 
       const issueNum = item.issueNumber || collab?.issueClaim?.issueNumber;
       if (!issueNum) continue;
-      const client = clientOverride || await getBuilderClientForWorkspace(portfolioState.workspace || workspaceRoot, issueNum, fetchImpl);
+      const client = typeof clientOverride === "function"
+        ? await clientOverride({ issueNumber: issueNum, portfolio: portfolioState, item })
+        : clientOverride || await getBuilderClientForWorkspace(portfolioState.workspace || workspaceRoot, issueNum, fetchImpl);
       if (!client) throw new Error(`No builder App client is configured for claimed issue #${issueNum}.`);
       const claim = canonicalClaim(await parseClaims(client, issueNum));
       const claimIsHeld = claim && !RELEASED_PHASES.has(normalizePhase(claim.data.phase));
@@ -1050,16 +1052,32 @@ export async function reconcileClaimsAndPortfolios(workspaceRoot, fetchImpl = fe
         continue;
       }
 
-      await refreshClaimLease({
-        client,
-        issueNumber: issueNum,
-        collaborationId: item.collaborationId,
-        phase: collab.status,
-        headSha: collab.issueClaim?.headSha,
-        branch: collab.issueClaim?.branch,
-        worktree: collab.issueClaim?.worktree || collab.workspace,
-        summary: `Reconciled local collaboration status ${collab.status} after broker restart.`,
-      });
+      try {
+        await refreshClaimLease({
+          client,
+          issueNumber: issueNum,
+          collaborationId: item.collaborationId,
+          phase: collab.status,
+          headSha: collab.issueClaim?.headSha,
+          branch: collab.issueClaim?.branch,
+          worktree: collab.issueClaim?.worktree || collab.workspace,
+          summary: `Reconciled local collaboration status ${collab.status} after broker restart.`,
+        });
+      } catch (error) {
+        const detail = error?.message || String(error);
+        const recovery = /release the inspected claim.*reacquire/i.test(detail)
+          ? ""
+          : " The retained claim was not released automatically; inspect and release it, then reacquire it with the verified builder App.";
+        await updatePortfolioWithRetry(portfoliosPath, p.id, async (current) => {
+          const targetItem = current.items.find((candidate) => candidate.id === item.id);
+          if (targetItem) {
+            targetItem.status = "indeterminate";
+            targetItem.summary = `Claim authority could not be refreshed after broker restart: ${detail}${recovery}`;
+          }
+          return current;
+        });
+        continue;
+      }
     }
   }
 }
