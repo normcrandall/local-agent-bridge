@@ -7,10 +7,10 @@ import { execFile, spawnSync } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 import {
   clearRepositoryCache,
-  deduplicateOperatorLanes,
   loadMissionControlSnapshot,
   loadTimeline,
   missionControlRepositories,
+  missionControlTabOperatorLanes,
   missionControlVisibleLanes,
   navigationIntent,
   newlyObservedAttentionKeys,
@@ -253,11 +253,10 @@ function subscriptionSnapshot(viewModel) {
     }
   }
   const matching = [...all.values()].filter((lane) => !repositoryFilter || lane.repository === repositoryFilter);
-  const selectedCollection = viewModel.collections?.[selectedTab] || [];
-  const selectedKeys = new Set(selectedCollection.map((lane) => lane.key || `${lane.repository}\0${lane.id}`));
-  const modeSource = matching.filter((lane) => selectedKeys.has(lane.key || `${lane.repository}\0${lane.id}`));
-  const operatorLanes = deduplicateOperatorLanes(modeSource, {
-    includeHistory: view === "all" || (view === "attention" && includeStale),
+  const operatorLanes = missionControlTabOperatorLanes(viewModel, matching, {
+    selectedTab,
+    repositoryFilter,
+    includeStale,
     staleAfterMs: staleAfterHours * 60 * 60 * 1000,
   });
   const counts = {
@@ -382,12 +381,18 @@ async function handleKey(key) {
     pendingConfirmation = null;
   }
   else if (key === "\t" || key === "\x1b[C") {
+    const previousPane = activePane;
     ({ layout: paneLayout, activePane } = missionControlPaneControlIntent(paneLayout, key, activePane));
-    actionMessage = `Focused ${["repositories", "work", "details"][activePane]} pane.`;
+    actionMessage = previousPane === activePane
+      ? `Focus remains on ${["repositories", "work", "details"][activePane]} pane.`
+      : `Focused ${["repositories", "work", "details"][activePane]} pane.`;
   }
   else if (key === "\x1b[Z" || key === "\x1b[D") {
+    const previousPane = activePane;
     ({ layout: paneLayout, activePane } = missionControlPaneControlIntent(paneLayout, key, activePane));
-    actionMessage = `Focused ${["repositories", "work", "details"][activePane]} pane.`;
+    actionMessage = previousPane === activePane
+      ? `Focus remains on ${["repositories", "work", "details"][activePane]} pane.`
+      : `Focused ${["repositories", "work", "details"][activePane]} pane.`;
   }
   else if (key === "\r" || key === "\n") {
     if (activePane === 0 || activePane === 1) {
@@ -422,6 +427,7 @@ async function handleKey(key) {
   }
   else if (key === "s") {
     if (view !== "attention") view = "attention";
+    selectedTab = "needsYou";
     includeStale = !includeStale;
     selectedIndex = 0;
     selectedId = null;

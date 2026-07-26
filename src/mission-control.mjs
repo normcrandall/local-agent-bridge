@@ -425,6 +425,27 @@ export function deduplicateOperatorLanes(lanes, { now = Date.now(), includeHisto
   }).sort(compareOperatorLanes);
 }
 
+export function missionControlTabOperatorLanes(viewModel, lanes, {
+  selectedTab = "active",
+  repositoryFilter = null,
+  includeStale = false,
+  staleAfterMs = DEFAULT_STALE_AFTER_MS,
+  now = Date.now(),
+} = {}) {
+  const selected = new Set((viewModel?.collections?.[selectedTab] || [])
+    .map((lane) => lane.key || `${lane.repository}\0${lane.id}`));
+  const source = (lanes || []).filter((lane) => {
+    const key = lane.key || `${lane.repository}\0${lane.id}`;
+    return selected.has(key) && (!repositoryFilter || lane.repository === repositoryFilter);
+  });
+  const preserveTabHistory = ["reviews", "mergeTrain", "history"].includes(selectedTab);
+  return deduplicateOperatorLanes(source, {
+    now,
+    includeHistory: preserveTabHistory || (selectedTab === "needsYou" && includeStale),
+    staleAfterMs,
+  });
+}
+
 export async function loadMissionControlSnapshot({
   stateRoot,
   includeArchived = false,
@@ -1343,7 +1364,7 @@ export function renderMissionControl(snapshot, {
   lines.push(truncateAnsi(tabs, usableWidth));
   lines.push(truncate(`${formatLocalDateTime(snapshot.generatedAt)} · ${repositoryCount} repo${repositoryCount === 1 ? "" : "s"}${snapshot.filter ? ` · ${snapshot.filter}` : ""}`, usableWidth));
   const quotaFooter = renderProviderQuotaFooter(snapshot.providerQuota, { width: usableWidth, color });
-  const footerRows = quotaFooter.length + (interactive ? (actionMessage ? 2 : 1) : snapshot.mode === "all" ? 1 : 0);
+  const footerRows = quotaFooter.length + (interactive ? (actionMessage ? 3 : 2) : snapshot.mode === "all" ? 1 : 0);
   const contentRows = Math.max(4, height - lines.length - footerRows - 4);
   const titles = ["REPOSITORIES", "WORK", "DETAILS"];
   const measurements = gridMeasurements(usableWidth, activePane, paneLayout);
@@ -1369,7 +1390,8 @@ export function renderMissionControl(snapshot, {
         ? "WORK · j/k choose lane · Enter details"
         : `DETAILS · j/k scroll · g/G ends · Enter ${detailExpanded ? "collapse" : "expand"}`;
     const detached = paneLayout?.detached?.length ? ` · detached ${paneLayout.detached.map((pane) => titles[pane].toLowerCase()).join(",")}` : "";
-    lines.push(sliceDisplay(` ${paneHelp}${detached}  1-6 tabs  Tab/←/→ pane  \\ split  +/- resize  z zoom  d detach  D reattach  o PR  c continue  x cancel  q quit`, usableWidth, { cleanValue: false }));
+    lines.push(sliceDisplay(` ${paneHelp}${detached}  q quit  1-6 tabs  Tab/←/→ pane`, usableWidth, { cleanValue: false }));
+    lines.push(sliceDisplay(" \\ split  +/- resize  z zoom  d detach  D reattach  o PR  c continue  x cancel", usableWidth, { cleanValue: false }));
   } else if (snapshot.mode === "all") {
     lines.push(truncate("Archive preview: bridge cleanup --older-than-days 7", usableWidth));
   }

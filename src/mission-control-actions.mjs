@@ -2,14 +2,28 @@ const TERMINAL = new Set(["agreed", "completed", "merged", "failed", "cancelled"
 
 export const MISSION_CONTROL_PANE_IDS = Object.freeze(["repositories", "work", "details"]);
 
+function normalizePaneWeights(values) {
+  const total = values.reduce((sum, value) => sum + value, 0);
+  const bounded = values.map((value) => Math.min(0.7, Math.max(0.15, value / total)));
+  const boundedTotal = bounded.reduce((sum, value) => sum + value, 0);
+  if (Math.abs(boundedTotal - 1) <= Number.EPSILON) return bounded;
+  if (boundedTotal > 1) {
+    const excess = boundedTotal - 1;
+    const capacity = bounded.map((value) => value - 0.15);
+    const available = capacity.reduce((sum, value) => sum + value, 0);
+    return bounded.map((value, index) => value - excess * (capacity[index] / available));
+  }
+  const deficit = 1 - boundedTotal;
+  const capacity = bounded.map((value) => 0.7 - value);
+  const available = capacity.reduce((sum, value) => sum + value, 0);
+  return bounded.map((value, index) => value + deficit * (capacity[index] / available));
+}
+
 export function createMissionControlPaneLayout(value = {}) {
   const rawWeights = Array.isArray(value.weights) && value.weights.length === 3
     ? value.weights.map((weight) => Number.isFinite(weight) && weight > 0 ? weight : 1)
     : [18, 28, 54];
-  const rawTotal = rawWeights.reduce((sum, weight) => sum + weight, 0);
-  const boundedWeights = rawWeights.map((weight) => Math.min(0.7, Math.max(0.15, weight / rawTotal)));
-  const boundedTotal = boundedWeights.reduce((sum, weight) => sum + weight, 0);
-  const normalized = boundedWeights.map((weight) => weight / boundedTotal);
+  const normalized = normalizePaneWeights(rawWeights);
   const zoomedPane = Number.isInteger(value.zoomedPane) && value.zoomedPane >= 0 && value.zoomedPane < 3
     ? value.zoomedPane
     : null;
@@ -26,7 +40,6 @@ export function missionControlVisiblePanes(layout, activePane = 1) {
   const pane = Math.min(2, Math.max(0, Number.isInteger(activePane) ? activePane : 1));
   const attached = [0, 1, 2].filter((candidate) => !current.detached.includes(candidate));
   if (current.zoomedPane != null && attached.includes(current.zoomedPane)) return [current.zoomedPane];
-  if (current.split === false) return [attached.includes(pane) ? pane : attached[0]];
   return attached.length ? attached : [pane];
 }
 
@@ -46,10 +59,11 @@ export function missionControlPaneLayoutIntent(layout, key, activePane) {
   if (key === "z") return { ...current, zoomedPane: current.zoomedPane === pane ? null : pane };
   if (key === "d" || key === "D") {
     const attached = [0, 1, 2].filter((candidate) => !current.detached.includes(candidate));
-    const shouldReattach = key === "D" || attached.length <= 1 || current.detached.includes(pane);
-    const detached = shouldReattach
-      ? current.detached.slice(0, -1)
-      : [...current.detached, pane];
+    const detached = current.detached.includes(pane)
+      ? current.detached.filter((candidate) => candidate !== pane)
+      : key === "D" || attached.length <= 1
+        ? current.detached.slice(0, -1)
+        : [...current.detached, pane];
     return { ...current, detached, zoomedPane: current.zoomedPane === pane ? null : current.zoomedPane };
   }
   if (!["+", "=", "-", "_"].includes(key)) return current;
