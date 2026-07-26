@@ -331,13 +331,13 @@ assert.equal(createAndContinue.binding().prNumber, 42);
 const threads = await builder.reviewThreads();
 assert.equal(threads[0].id, "thread-1");
 
-// A bound client backed by a token factory refreshes once for each authorized
-// operation, and its authority receipt learns the permissions observed on the
-// minted installation token. This pins the token lifecycle at the client seam,
-// so hoisting a client cannot silently turn a per-operation credential into a
-// pool-lifetime credential.
+// A bound client backed by a token factory reuses only a safely unexpired
+// credential, refreshes before expiry, and teaches its authority receipt the
+// permissions observed on the minted installation token. This pins the token
+// lifecycle at the client seam so hoisting a client cannot retain a stale token.
 {
   let tokenMints = 0;
+  let nowMs = Date.parse("2026-07-26T00:00:00.000Z");
   const refreshApi = fakeGitHub();
   const refreshReceiptPath = path.join(tmpDir, "refresh-token-receipts.jsonl");
   const refreshClient = createBoundBuilderClient({
@@ -348,6 +348,7 @@ assert.equal(threads[0].id, "thread-1");
     getToken: async () => ({
       token: `ghs_refresh_${++tokenMints}`,
       verifiedLogin: "builder[bot]",
+      expiresAt: new Date(nowMs + 120_000).toISOString(),
       permissions: { contents: "write", issues: "write", metadata: "read", pull_requests: "write" },
     }),
     authority: {
@@ -358,15 +359,19 @@ assert.equal(threads[0].id, "thread-1");
       permissions: {},
     },
     receiptPath: refreshReceiptPath,
+    now: () => nowMs,
   });
   await refreshClient.reviewThreads();
   await refreshClient.reviewThreads();
-  assert.equal(tokenMints, 2, "two client operations must mint two short-lived credentials");
+  assert.equal(tokenMints, 1, "operations may reuse a credential while it remains safely before expiry");
+  nowMs += 61_000;
+  await refreshClient.reviewThreads();
+  assert.equal(tokenMints, 2, "the client must refresh before the cached credential reaches expiry");
   assert.deepEqual(refreshClient.binding().writerAuthority.permissions, {
     contents: "write", issues: "write", metadata: "read", pull_requests: "write",
   });
   await refreshClient.ensurePullRequest({ title: "Refresh receipt", body: "Observed permissions" });
-  assert.equal(tokenMints, 3, "a third client operation must mint a third credential");
+  assert.equal(tokenMints, 2, "the safely unexpired replacement credential should be reused");
   const refreshReceipts = fs.readFileSync(refreshReceiptPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
   assert.deepEqual(refreshReceipts.at(-1).appIdentity.permissions, {
     contents: "write", issues: "write", metadata: "read", pull_requests: "write",

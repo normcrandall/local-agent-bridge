@@ -66,6 +66,7 @@ const getToken = async () => {
   return {
     token: credential.token,
     verifiedLogin: credential.verifiedLogin,
+    expiresAt: credential.expiresAt,
     permissions: credential.permissions,
   };
 };

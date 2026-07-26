@@ -331,7 +331,12 @@ export function createAgentPool({
         || Number(fresh.installationId) !== Number(credential.installationId)) {
         throw new Error(`Configured ${agent} writer authority changed while the collaboration was running.`);
       }
-      return { token: fresh.token, verifiedLogin: fresh.verifiedLogin };
+      return {
+        token: fresh.token,
+        verifiedLogin: fresh.verifiedLogin,
+        expiresAt: fresh.expiresAt,
+        permissions: fresh.permissions,
+      };
     };
     return builderClientFactory({
       ...activeGithubBuilder,

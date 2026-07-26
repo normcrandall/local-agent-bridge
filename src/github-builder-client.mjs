@@ -321,6 +321,7 @@ export function createBoundBuilderClient({
   receiptPath = null,
   allowWorkspaceHead = false,
   reviewResolutionAuthority = null,
+  now = Date.now,
 }) {
   assertRepository(repository);
   assertSha(headSha);
@@ -385,6 +386,7 @@ export function createBoundBuilderClient({
 
   let cachedToken = token || null;
   let cachedVerifiedLogin = verifiedLogin || null;
+  let cachedExpiresAt = null;
 
   const context = { fetchImpl, apiUrl, token: cachedToken, repository, expectedLogin, verifiedLogin: cachedVerifiedLogin, headSha: activeHeadSha, prNumber, issueNumber };
   const allowed = new Set(allowedOperations);
@@ -405,12 +407,17 @@ export function createBoundBuilderClient({
     if (!getToken) {
       throw new Error("Token factory 'getToken' is required.");
     }
+    const expiresAtMs = Date.parse(cachedExpiresAt || "");
+    if (cachedToken && Number.isFinite(expiresAtMs) && expiresAtMs - now() > 60_000) {
+      return { token: cachedToken, verifiedLogin: cachedVerifiedLogin, expiresAt: cachedExpiresAt };
+    }
     const credential = await getToken();
     if (!credential.token || typeof credential.token !== "string" || !credential.token.startsWith("ghs_")) {
       throw new Error("Only short-lived GitHub App installation tokens (ghs_...) are permitted for builder operations.");
     }
     cachedToken = credential.token;
     cachedVerifiedLogin = credential.verifiedLogin;
+    cachedExpiresAt = credential.expiresAt || null;
     if (credential.permissions && typeof credential.permissions === "object") {
       observedPermissions = Object.fromEntries(
         Object.entries(credential.permissions).sort(([left], [right]) => left.localeCompare(right)),
