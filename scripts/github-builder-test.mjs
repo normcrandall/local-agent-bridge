@@ -348,7 +348,7 @@ assert.equal(threads[0].id, "thread-1");
     getToken: async () => ({
       token: `ghs_refresh_${++tokenMints}`,
       verifiedLogin: "builder[bot]",
-      expiresAt: new Date(nowMs + 120_000).toISOString(),
+      expiresAt: new Date(nowMs + 600_000).toISOString(),
       permissions: { contents: "write", issues: "write", metadata: "read", pull_requests: "write" },
     }),
     authority: {
@@ -364,7 +364,7 @@ assert.equal(threads[0].id, "thread-1");
   await refreshClient.reviewThreads();
   await refreshClient.reviewThreads();
   assert.equal(tokenMints, 1, "operations may reuse a credential while it remains safely before expiry");
-  nowMs += 61_000;
+  nowMs += 301_000;
   await refreshClient.reviewThreads();
   assert.equal(tokenMints, 2, "the client must refresh before the cached credential reaches expiry");
   assert.deepEqual(refreshClient.binding().writerAuthority.permissions, {
@@ -376,6 +376,25 @@ assert.equal(threads[0].id, "thread-1");
   assert.deepEqual(refreshReceipts.at(-1).appIdentity.permissions, {
     contents: "write", issues: "write", metadata: "read", pull_requests: "write",
   }, "durable mutation receipts must carry the permissions observed on the operation token");
+
+  const downgradedClient = createBoundBuilderClient({
+    ...base,
+    token: null,
+    verifiedLogin: null,
+    fetchImpl: fakeGitHub().fetchImpl,
+    getToken: async () => ({
+      token: "ghs_downgraded",
+      verifiedLogin: "builder[bot]",
+      expiresAt: new Date(nowMs + 600_000).toISOString(),
+      permissions: { contents: "read", issues: "write", metadata: "read", pull_requests: "write" },
+    }),
+    authority: {
+      login: "builder[bot]", appId: "1", installationId: 101, repository: "owner/repo", permissions: {},
+    },
+    now: () => nowMs,
+  });
+  await assert.rejects(downgradedClient.reviewThreads(), /lacks required permissions: contents:write/,
+    "observed authority evidence must fail closed below the builder permission floor");
 }
 const replied = await builder.replyReviewThread({ threadId: "thread-1", body: "Fixed." });
 assert.equal(replied.url, "https://github.test/comment/1");

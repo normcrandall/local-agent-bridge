@@ -1087,7 +1087,7 @@ function detailPane(lane, timeline, width, now, snapshot, expanded = false) {
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([name, level]) => `${name}:${level}`)
       .join(" · ");
-    if (permissions) rows.push(paneLine(`PERMS  ${permissions}`, "36"));
+    if (permissions) rows.push(paneLine(`PERMS (bound)  ${permissions}`, "36"));
   }
   if (!deliveryStatus && lane.nextAction && lane.nextAction !== "none") rows.push(paneLine(`NEXT  ${friendlyPhase(lane)}`, "33"));
   const blockingReason = deliveryStatus ? "" : blockedReason(lane);

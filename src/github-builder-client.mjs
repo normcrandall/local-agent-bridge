@@ -15,6 +15,7 @@ import {
 } from "./github-merge-enforcement.mjs";
 import { loadBranchReconciliationState, loadNonBranchIntents } from "./builder-operation-store.mjs";
 import { classifyDeliveryOutcome } from "./builder-contract.mjs";
+import { assertGitHubAppPermissions } from "./github-app-auth.mjs";
 import {
   assertReviewThreadReadiness,
   parseReviewFinding,
@@ -25,6 +26,7 @@ import {
 const LFS_POINTER_REGEX = /^version https:\/\/git-lfs\.github\.com\/spec\/v1\r?\noid sha256:[0-9a-f]{64}\r?\nsize [0-9]+\r?\n$/;
 const MAX_PUSH_FILES = 2000;
 const PROTECTED_BRANCH_NAMES = ["main", "master", "production", "release", "develop"];
+const TOKEN_REFRESH_SKEW_MS = 300_000;
 
 async function assertLocalAncestry({ gitPath, workspace, ancestor, descendant }) {
   try {
@@ -387,6 +389,7 @@ export function createBoundBuilderClient({
   let cachedToken = token || null;
   let cachedVerifiedLogin = verifiedLogin || null;
   let cachedExpiresAt = null;
+  let tokenRefreshPromise = null;
 
   const context = { fetchImpl, apiUrl, token: cachedToken, repository, expectedLogin, verifiedLogin: cachedVerifiedLogin, headSha: activeHeadSha, prNumber, issueNumber };
   const allowed = new Set(allowedOperations);
@@ -408,24 +411,39 @@ export function createBoundBuilderClient({
       throw new Error("Token factory 'getToken' is required.");
     }
     const expiresAtMs = Date.parse(cachedExpiresAt || "");
-    if (cachedToken && Number.isFinite(expiresAtMs) && expiresAtMs - now() > 60_000) {
+    if (cachedToken && Number.isFinite(expiresAtMs) && expiresAtMs - now() > TOKEN_REFRESH_SKEW_MS) {
       return { token: cachedToken, verifiedLogin: cachedVerifiedLogin, expiresAt: cachedExpiresAt };
     }
-    const credential = await getToken();
-    if (!credential.token || typeof credential.token !== "string" || !credential.token.startsWith("ghs_")) {
-      throw new Error("Only short-lived GitHub App installation tokens (ghs_...) are permitted for builder operations.");
+    if (!tokenRefreshPromise) {
+      tokenRefreshPromise = (async () => {
+        const credential = await getToken();
+        if (!credential.token || typeof credential.token !== "string" || !credential.token.startsWith("ghs_")) {
+          throw new Error("Only short-lived GitHub App installation tokens (ghs_...) are permitted for builder operations.");
+        }
+        if (authorityMetadata) {
+          if (!credential.permissions || typeof credential.permissions !== "object") {
+            throw new Error("A bound GitHub builder credential must report its observed installation permissions.");
+          }
+          assertGitHubAppPermissions("builder", credential.permissions);
+        }
+        cachedToken = credential.token;
+        cachedVerifiedLogin = credential.verifiedLogin;
+        cachedExpiresAt = credential.expiresAt || null;
+        if (credential.permissions && typeof credential.permissions === "object") {
+          observedPermissions = Object.fromEntries(
+            Object.entries(credential.permissions).sort(([left], [right]) => left.localeCompare(right)),
+          );
+        }
+        context.token = cachedToken;
+        context.verifiedLogin = cachedVerifiedLogin;
+        return credential;
+      })();
     }
-    cachedToken = credential.token;
-    cachedVerifiedLogin = credential.verifiedLogin;
-    cachedExpiresAt = credential.expiresAt || null;
-    if (credential.permissions && typeof credential.permissions === "object") {
-      observedPermissions = Object.fromEntries(
-        Object.entries(credential.permissions).sort(([left], [right]) => left.localeCompare(right)),
-      );
+    try {
+      return await tokenRefreshPromise;
+    } finally {
+      tokenRefreshPromise = null;
     }
-    context.token = cachedToken;
-    context.verifiedLogin = cachedVerifiedLogin;
-    return credential;
   }
 
   async function identity() {

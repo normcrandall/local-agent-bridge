@@ -746,7 +746,7 @@ try {
   const authorityRendered = renderSnapshot(attention, { selectedIndex, timeline, width: 200, height: 40, now, detailExpanded: true });
   assert.match(authorityRendered, /REBIND.*veliqon-builder\[bot\].*veliqon-codex-writer\[bot\].*provider_writer_selection/);
   assert.match(authorityRendered, /AUTH.*stripped merge/);
-  assert.match(authorityRendered, /PERMS.*contents:write.*pull_requests:write/);
+  assert.match(authorityRendered, /PERMS \(bound\).*contents:write.*pull_requests:write/);
   const selectedLane = attention.lanes[selectedIndex];
   assert.deepEqual(missionControlActionAvailability(selectedLane), { openPr: false, copy: true, continue: false, cancel: true, archive: false, acknowledgeWake: false });
   const needsUserLane = attention.lanes.find((lane) => lane.id === needsUserId);

@@ -178,6 +178,9 @@ export function createAgentPool({
       if (explicitlyPinnedLogin && !sameGitHubAppLogin(explicitlyPinnedLogin, credential.expectedLogin)) {
         throw new Error(`Configured ${agent} writer identity ${credential.expectedLogin} does not match the bound authorization ${explicitlyPinnedLogin}.`);
       }
+      // A per-provider expectedLogins pin is the explicit authorization for
+      // that provider and deliberately supersedes the compatibility/top-level
+      // login. Both values originate in the same trusted builder binding.
       if (explicitlyPinnedLogin) {
         authorizedBy = "explicit_provider_pin";
       } else if (sameGitHubAppLogin(githubBuilder.expectedLogin, credential.expectedLogin)) {
