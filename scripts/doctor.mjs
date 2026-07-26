@@ -1,6 +1,6 @@
-import { accessSync, constants, existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, readFileSync, realpathSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { GITHUB_LOGIN_PATTERN } from "../src/github-app-auth.mjs";
 import {
@@ -16,7 +16,26 @@ const selectedChecks = new Set(String(process.env.AGENT_BRIDGE_DOCTOR_CHECKS || 
   .map((label) => label.trim())
   .filter(Boolean));
 const explicitProjectRoot = String(process.env.AGENT_BRIDGE_WORKSPACE || "").trim();
-const requestedProjectRoot = resolve(explicitProjectRoot || process.cwd());
+function sameRealPath(left, right) {
+  try {
+    return realpathSync(left) === realpathSync(right);
+  } catch {
+    return false;
+  }
+}
+
+function implicitWorkingDirectory() {
+  const cwd = resolve(process.cwd());
+  const logical = String(process.env.PWD || "").trim();
+  return isAbsolute(logical) && sameRealPath(logical, cwd) ? resolve(logical) : cwd;
+}
+
+function isWithin(parent, child) {
+  const offset = relative(parent, child);
+  return offset === "" || (!offset.startsWith("..") && !isAbsolute(offset));
+}
+
+const requestedProjectRoot = resolve(explicitProjectRoot || implicitWorkingDirectory());
 const resolvedProjectRoot = explicitProjectRoot
   ? null
   : spawnSync("git", ["-c", "core.fsmonitor=false", "rev-parse", "--show-toplevel"], {
@@ -24,9 +43,35 @@ const resolvedProjectRoot = explicitProjectRoot
       encoding: "utf8",
       env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0" },
     });
-const projectRoot = resolvedProjectRoot?.status === 0
+const discoveredProjectRoot = resolvedProjectRoot?.status === 0
   ? resolve(resolvedProjectRoot.stdout.trim())
-  : requestedProjectRoot;
+  : null;
+let projectRoot = requestedProjectRoot;
+let workspaceSelection = explicitProjectRoot
+  ? `explicit AGENT_BRIDGE_WORKSPACE ${projectRoot}`
+  : `implicit cwd ${projectRoot}`;
+
+if (!explicitProjectRoot && discoveredProjectRoot) {
+  const requestedRealRoot = realpathSync(requestedProjectRoot);
+  const discoveredRealRoot = realpathSync(discoveredProjectRoot);
+  const homeRealRoot = realpathSync(homedir());
+  if (discoveredRealRoot === homeRealRoot && requestedRealRoot !== homeRealRoot) {
+    workspaceSelection += ` retained; Git top-level ${discoveredProjectRoot} is the home-directory repository boundary`;
+  } else if (requestedProjectRoot !== requestedRealRoot) {
+    workspaceSelection += ` retained; Git top-level ${discoveredProjectRoot} crosses a symlink boundary`;
+  } else if (!isWithin(discoveredRealRoot, requestedRealRoot)) {
+    workspaceSelection += ` retained; Git top-level ${discoveredProjectRoot} is not an ancestor of cwd`;
+  } else {
+    projectRoot = discoveredProjectRoot;
+    if (projectRoot !== requestedProjectRoot) {
+      workspaceSelection += ` normalized to Git top-level ${projectRoot}`;
+    }
+  }
+} else if (!explicitProjectRoot) {
+  workspaceSelection += "; no enclosing Git worktree found";
+}
+
+console.log(`Workspace: ${workspaceSelection}`);
 let failed = false;
 
 function configuredOllamaModel() {

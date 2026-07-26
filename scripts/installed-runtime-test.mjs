@@ -2,7 +2,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import process from "node:process";
@@ -164,7 +164,66 @@ try {
     `an explicit nested workspace must fail closed instead of silently adopting its parent repository: ${explicitWorkspace.stdout}`);
   assert.match(explicitWorkspace.stderr, /\.codex\/config\.toml|\.mcp\.json/,
     "the failure should identify a missing project-scoped configuration");
-  console.log("Installed runtime smoke test passed with a fetch-less checkout and retained drift rejection.");
+  const outsideRepository = resolve(temporary, "outside-repository");
+  await mkdir(resolve(outsideRepository, ".codex"), { recursive: true });
+  await writeFile(resolve(outsideRepository, ".codex/config.toml"), "# test\n");
+  await writeFile(resolve(outsideRepository, ".mcp.json"), "{}\n");
+  const outsideRun = spawnSync(process.execPath, [resolve(runtimeRoot, "scripts/doctor.mjs")], {
+    cwd: outsideRepository,
+    env: {
+      ...doctorEnvironment,
+      PWD: outsideRepository,
+      AGENT_BRIDGE_DOCTOR_CHECKS: "Codex project config,Claude project config",
+    },
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  assert.equal(outsideRun.status, 0, outsideRun.stderr);
+  assert.match(outsideRun.stdout, new RegExp(`Workspace: implicit cwd ${outsideRepository.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}; no enclosing Git worktree found`),
+    "doctor should disclose that an outside-repository cwd remains the effective workspace");
+
+  const fakeHome = resolve(temporary, "home-repository");
+  const nestedHomeCaller = resolve(fakeHome, "projects/application");
+  await mkdir(resolve(fakeHome, ".codex"), { recursive: true });
+  await mkdir(nestedHomeCaller, { recursive: true });
+  await writeFile(resolve(fakeHome, ".codex/config.toml"), "# dotfiles\n");
+  await writeFile(resolve(fakeHome, ".mcp.json"), "{}\n");
+  execFileSync("git", ["init", "-q"], { cwd: fakeHome });
+  const homeBoundaryRun = spawnSync(process.execPath, [resolve(runtimeRoot, "scripts/doctor.mjs")], {
+    cwd: nestedHomeCaller,
+    env: {
+      ...doctorEnvironment,
+      HOME: fakeHome,
+      PWD: nestedHomeCaller,
+      AGENT_BRIDGE_DOCTOR_CHECKS: "Codex project config,Claude project config",
+    },
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  assert.equal(homeBoundaryRun.status, 1,
+    "a dotfiles repository rooted at HOME must not silently become a nested caller's workspace");
+  assert.match(homeBoundaryRun.stdout, /home-directory repository boundary/,
+    "doctor should disclose why it refused the home-root rewrite");
+  assert.match(homeBoundaryRun.stderr, /projects\/application\/\.codex\/config\.toml|projects\/application\/\.mcp\.json/,
+    "project checks should remain bound to the nested caller");
+
+  const symlinkCaller = resolve(temporary, "logical-workspace");
+  await symlink(nestedCaller, symlinkCaller);
+  const symlinkBoundaryRun = spawnSync(process.execPath, [resolve(runtimeRoot, "scripts/doctor.mjs")], {
+    cwd: nestedCaller,
+    env: {
+      ...doctorEnvironment,
+      PWD: symlinkCaller,
+      AGENT_BRIDGE_DOCTOR_CHECKS: "Codex project config,Claude project config",
+    },
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  assert.equal(symlinkBoundaryRun.status, 1,
+    "a logical symlink cwd must not silently normalize to the physical repository root");
+  assert.match(symlinkBoundaryRun.stdout, /crosses a symlink boundary/,
+    "doctor should disclose why it retained the logical symlink workspace");
+  console.log("Installed runtime smoke test passed with a fetch-less checkout, retained drift rejection, and bounded implicit workspace discovery.");
 } finally {
   await rm(temporary, { recursive: true, force: true });
 }
