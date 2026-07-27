@@ -199,10 +199,10 @@ export async function reconcileMissionControlRemote({
   const hasRemoteFacts = lanes.some((lane) => lane.issue || lane.pullRequest);
   const status = failures.length === 0
     ? "current"
-    : hasRemoteFacts
-      ? "partial"
-      : failures.some((failure) => failure.reason === "offline")
-        ? "offline"
+    : failures.some((failure) => failure.reason === "offline")
+      ? "offline"
+      : hasRemoteFacts
+        ? "partial"
         : "degraded";
   return {
     version: 1, status, observedAt, lanes, providerCapacity,

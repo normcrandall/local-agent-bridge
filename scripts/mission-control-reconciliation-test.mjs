@@ -302,6 +302,7 @@ const failedPull = await reconcileMissionControlRemote({
 assert.equal(failedPull.lanes[0].observedHeadSha, null);
 assert.equal(failedPull.lanes[0].exactHead, false, "a failed pull-request read cannot claim exact-head freshness from the requested ticket");
 assert.equal(failedPull.lanes[0].ci, null, "head-bound CI is withheld when the pull-request head was not observed");
+assert.equal(failedPull.status, "partial", "issue-only remote facts remain partial when the pull-request read fails");
 
 const offlineTicket = { repository: "owner/offline", laneId: "offline-lane", issueNumber: 1, headSha: null, journalSequence: 1, journalDigest: "2".repeat(64) };
 const offline = await reconcileMissionControlRemote({

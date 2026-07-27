@@ -1547,21 +1547,24 @@ export function renderMissionControl(snapshot, {
   lines.push(truncate(`${formatLocalDateTime(snapshot.generatedAt)} · ${repositoryCount} repo${repositoryCount === 1 ? "" : "s"}${snapshot.filter ? ` · ${snapshot.filter}` : ""}`, usableWidth));
   if (snapshot.reconciliation) {
     const reconciliation = snapshot.reconciliation;
-    const failureSummary = (reconciliation.failures || []).slice(0, 3).map((failure) => {
+    const failureLabels = [...new Set((reconciliation.failures || []).map((failure) => {
       const source = String(failure.source || failure.reason || "remote").replaceAll("_", " ");
       return `${source}${failure.statusCode ? ` ${failure.statusCode}` : ""}`;
-    }).filter((value, index, values) => values.indexOf(value) === index).join(", ");
+    }))];
+    const failureSummary = failureLabels.slice(0, 3).join(", ")
+      + (failureLabels.length > 3 ? `, +${failureLabels.length - 3} more` : "");
+    const unavailable = failureSummary ? ` · unavailable: ${failureSummary}` : "";
     const label = reconciliation.status === "current"
       ? `REMOTE CURRENT${reconciliation.observedAt ? ` · ${formatLocalDateTime(reconciliation.observedAt)}` : ""}`
       : reconciliation.status === "partial"
-        ? `REMOTE PARTIAL${failureSummary ? ` · unavailable: ${failureSummary}` : ""}`
-      : reconciliation.status === "refreshing"
-        ? "REMOTE REFRESHING · local journal remains current"
-        : reconciliation.status === "offline"
-          ? `REMOTE OFFLINE · showing local journal state${failureSummary ? ` · ${failureSummary}` : ""}`
-          : reconciliation.status === "local"
-            ? "LOCAL JOURNAL · remote facts pending"
-            : `REMOTE DEGRADED · showing local journal state${failureSummary ? ` · ${failureSummary}` : ""}`;
+        ? `REMOTE PARTIAL${unavailable}`
+        : reconciliation.status === "refreshing"
+          ? "REMOTE REFRESHING · local journal remains current"
+          : reconciliation.status === "offline"
+            ? `REMOTE OFFLINE · showing local journal state${unavailable}`
+            : reconciliation.status === "local"
+              ? "LOCAL JOURNAL · remote facts pending"
+              : `REMOTE DEGRADED · showing local journal state${unavailable}`;
     const style = reconciliation.status === "current"
       ? "36"
       : reconciliation.status === "partial" || reconciliation.status === "refreshing" || reconciliation.status === "local"
