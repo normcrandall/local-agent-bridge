@@ -157,6 +157,21 @@ reconciler.observeLocal(structuredClone(snapshot));
 assert.equal(reconciler.snapshot.value.lanes[0].github.ci.combinedState, "success", "valid remote facts remain visible across local redraws");
 reconciler.stop();
 
+let scopedTickets = null;
+const scopedReconciler = createMissionControlJournalFirstReconciler({
+  reconcile: async ({ tickets }) => {
+    scopedTickets = tickets;
+    return { status: "current", observedAt: "2026-07-26T12:03:00.000Z", lanes: [], providerCapacity: {}, failures: [] };
+  },
+});
+scopedReconciler.observeLocal({
+  ...structuredClone(snapshot),
+  operatorLanes: [],
+});
+await scopedReconciler.refresh().promise;
+assert.deepEqual(scopedTickets, [], "hidden lanes retained outside the operator scope must not trigger remote reconciliation");
+scopedReconciler.stop();
+
 let resolveStaleStream;
 const staleStream = createMissionControlJournalFirstReconciler({
   reconcile: () => new Promise((resolve) => { resolveStaleStream = resolve; }),
@@ -267,7 +282,7 @@ const rateLimited = await reconcileMissionControlRemote({
     return { ok: false, status: 403, headers: { get: (name) => name === "retry-after" ? "60" : null }, json: async () => ({}) };
   },
 });
-assert.equal(rateLimited.status, "degraded");
+assert.equal(rateLimited.status, "partial");
 assert.ok(rateLimited.failures.some((failure) => failure.reason === "rate_limited"));
 assert.equal(rateLimited.failures.find((failure) => failure.reason === "rate_limited").retryAfterSeconds, 60);
 assert.equal(rateLimited.lanes[0].pullRequest.state, "open", "partial remote facts survive a rate-limited source");

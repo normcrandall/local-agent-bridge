@@ -98,7 +98,13 @@ export function createMissionControlJournalFirstReconciler({ reconcile, onUpdate
     lastStartedAt = now();
     const requestGeneration = ++generation;
     const requestLocal = structuredClone(local);
-    const remotelyBound = (requestLocal.lanes || []).filter((lane) => (
+    // Reconcile only the operator-visible scope. The full lane collection may
+    // retain hidden historical records for navigation and deduplication; those
+    // records must not make the current view depend on stale GitHub facts.
+    const scopedLanes = Array.isArray(requestLocal.operatorLanes)
+      ? requestLocal.operatorLanes
+      : (requestLocal.lanes || []);
+    const remotelyBound = scopedLanes.filter((lane) => (
       (lane.issueNumber || lane.prNumber) && !String(lane.repository || "").startsWith("local/")
     ));
     const revisions = new Map(remotelyBound.map((lane) => [laneKey(lane), revision(lane)]));
