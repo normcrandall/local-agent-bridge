@@ -38,12 +38,13 @@ async function latestCheckpoint(lane) {
     throw error;
   }
   const cached = recordCache.get(path);
-  if (cached?.mtimeMs === info.mtimeMs && cached?.size === info.size) return cached.record;
-  const records = await createRepositoryJournal({ directory }).read();
+  const records = cached?.mtimeMs === info.mtimeMs && cached?.size === info.size
+    ? cached.records
+    : await createRepositoryJournal({ directory }).read();
+  if (records !== cached?.records) recordCache.set(path, { mtimeMs: info.mtimeMs, size: info.size, records });
   const record = [...records].reverse().find((entry) => (
     entry.payload?.repositoryRuntime?.collaborationId === lane.id
   )) || null;
-  recordCache.set(path, { mtimeMs: info.mtimeMs, size: info.size, record });
   return record;
 }
 

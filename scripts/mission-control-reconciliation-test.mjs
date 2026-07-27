@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
-import { applyRepositoryJournalCheckpoint } from "../src/mission-control-journal-state.mjs";
+import { execFileSync } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { applyRepositoryJournalCheckpoint, clearMissionControlJournalCache, projectRepositoryJournalState } from "../src/mission-control-journal-state.mjs";
 import { createMissionControlJournalFirstReconciler, mergeMissionControlRemote } from "../src/mission-control-reconciliation.mjs";
 import { reconcileMissionControlRemote } from "../src/mission-control-remote.mjs";
+import { createRepositoryJournal } from "../src/repository-journal.mjs";
 
 const head = "a".repeat(40);
 const digest = "b".repeat(64);
@@ -60,6 +65,36 @@ const newerLocalLane = applyRepositoryJournalCheckpoint({
   } },
 });
 assert.equal(newerLocalLane.lifecyclePhase, "running", "an older terminal checkpoint cannot replace newer local lifecycle state");
+
+const sharedJournalRepository = await mkdtemp(join(tmpdir(), "mission-control-shared-journal-"));
+try {
+  execFileSync("git", ["init", "-q", sharedJournalRepository]);
+  const sharedJournal = createRepositoryJournal({
+    directory: join(sharedJournalRepository, ".git", "agent-bridge", "repository-runtime", "issue-234"),
+  });
+  for (const [index, collaborationId] of [lane.id, "bridge-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"].entries()) {
+    await sharedJournal.append({
+      identity: `checkpoint-${index}`,
+      repository: "owner/repo",
+      issueNumber: 234,
+      headSha: head,
+      payload: { repositoryRuntime: {
+        collaborationId, phase: index === 0 ? "working" : "reviewing", writer: "codex", previousWriter: null,
+        headSha: head, branch: `codex/shared-${index}`, summary: `Shared journal lane ${index}.`, terminal: false,
+      } },
+    });
+  }
+  clearMissionControlJournalCache();
+  const sharedProjected = await projectRepositoryJournalState([
+    { ...lane, workspace: sharedJournalRepository },
+    { ...lane, id: "bridge-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", workspace: sharedJournalRepository },
+  ], { concurrency: 2 });
+  assert.deepEqual(sharedProjected.map((value) => value.repositoryJournal.sequence), [1, 2], "lanes sharing one issue journal each receive their own collaboration checkpoint");
+  assert.deepEqual(sharedProjected.map((value) => value.lifecyclePhase), ["working", "reviewing"]);
+} finally {
+  clearMissionControlJournalCache();
+  await rm(sharedJournalRepository, { recursive: true, force: true });
+}
 
 const snapshot = {
   streamId: "mission-control-one",
