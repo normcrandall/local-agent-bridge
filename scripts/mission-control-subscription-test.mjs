@@ -171,6 +171,17 @@ async function waitForExit(pid) {
   }
 }
 
+async function waitForSupervisorCondition(options, predicate, description, timeoutMs = 3_000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastStatus = null;
+  while (Date.now() < deadline) {
+    lastStatus = await getSupervisorStatus(options);
+    if (predicate(lastStatus)) return lastStatus;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+  }
+  throw new Error(`Timed out waiting for ${description}; last status: ${JSON.stringify(lastStatus?.missionControl || null)}`);
+}
+
 function rawRequest(payload, { destroyAfterMs = null } = {}) {
   return new Promise((resolvePromise, rejectPromise) => {
     const socket = createConnection(supervisorEndpoint(stateDirectory));
@@ -231,9 +242,12 @@ try {
   assert.equal(alive(workerPid), true, "disconnecting a reader must not affect a collaboration worker");
   assert.equal((await getSupervisorStatus(options)).supervisorPid, supervisorPid);
 
-  const firstReader = readMissionControlEvents({ ...options, streamId: snapshot.streamId, cursor: snapshot.cursor, maxEvents: 10, waitMs: 2_000 });
-  const secondReader = readMissionControlEvents({ ...options, streamId: snapshot.streamId, cursor: snapshot.cursor, maxEvents: 10, waitMs: 2_000 });
-  await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+  const firstReader = readMissionControlEvents({ ...options, streamId: snapshot.streamId, cursor: snapshot.cursor, maxEvents: 10, waitMs: 5_000 });
+  const secondReader = readMissionControlEvents({ ...options, streamId: snapshot.streamId, cursor: snapshot.cursor, maxEvents: 10, waitMs: 5_000 });
+  await waitForSupervisorCondition(options, (status) => (
+    status.missionControl.waitingSubscribers >= 2
+    && status.missionControl.activeSubscribers >= 2
+  ), "both simultaneous Mission Control subscribers to enter the long-poll wait set");
   await writeState({ status: "running", updatedAt: "2026-07-26T12:00:03.000Z" });
   const [first, second] = await Promise.all([firstReader, secondReader]);
   assert.ok(first.events.length > 0, "subscriber must receive deltas after its cursor");
@@ -250,7 +264,10 @@ try {
     waitMs: 5_000,
     signal: abortController.signal,
   });
-  await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+  await waitForSupervisorCondition(options, (status) => (
+    status.missionControl.waitingSubscribers >= 1
+    && status.missionControl.activeSubscribers >= 1
+  ), "the abort test subscriber to enter the long-poll wait set");
   abortController.abort();
   await assert.rejects(abortedReader, (error) => error?.name === "AbortError" && error?.code === "ABORT_ERR");
   assert.ok(Date.now() - abortStartedAt < 500, "aborting a supervisor long poll must release the client socket promptly");
