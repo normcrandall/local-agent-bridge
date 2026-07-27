@@ -63,21 +63,24 @@ try {
 
   process.env.BRIDGE_SUPERVISOR_PS_BIN = join(root, "scripts/fixtures/fake-transient-ps.mjs");
   process.env.BRIDGE_SUPERVISOR_TEST_PS_LOG = psLog;
-  const { getSupervisorStatus, refreshSupervisor } = await import("../src/worker-supervisor-client.mjs");
+  const { getMissionControlEventSnapshot, getSupervisorStatus } = await import("../src/worker-supervisor-client.mjs");
+  const { MISSION_CONTROL_EVENT_PROTOCOL_VERSION } = await import("../src/mission-control-event-protocol.mjs");
   const options = { runtimeRoot: root, workspaceRoot, stateDirectory };
   const status = await getSupervisorStatus(options);
   assert.equal(status.supervisorPid, legacy.pid);
   assert.equal(status.legacy, true, "status must fall back to ping for a live legacy supervisor");
 
-  const refreshed = await refreshSupervisor(options);
-  currentPid = refreshed.current.supervisorPid;
-  assert.equal(refreshed.accepted.legacySignal, true);
-  assert.equal(alive(legacy.pid), false, "legacy supervisor must be stopped only after identity verification");
+  const snapshot = await getMissionControlEventSnapshot(options);
+  const current = await getSupervisorStatus(options);
+  currentPid = current.supervisorPid;
+  assert.equal(snapshot.version, MISSION_CONTROL_EVENT_PROTOCOL_VERSION);
+  assert.equal(current.missionControl.protocolVersion, MISSION_CONTROL_EVENT_PROTOCOL_VERSION);
+  assert.equal(alive(legacy.pid), false, "Mission Control bootstrap must stop an incompatible supervisor only after identity verification");
   assert.notEqual(currentPid, legacy.pid);
   const probes = await readFile(psLog, "utf8");
   assert.match(probes, /command=/, "legacy fencing must use the configured process probe for command identity");
   assert.match(probes, /lstart=/, "legacy fencing must verify process start freshness before signalling");
-  console.log("Legacy supervisor test passed: status falls back to ping and refresh fences command plus start identity through the configured probe.");
+  console.log("Legacy supervisor test passed: Mission Control protocol negotiation replaces version-skewed supervisors after identity-safe fencing.");
 } finally {
   if (currentPid && alive(currentPid)) process.kill(currentPid, "SIGTERM");
   await waitFor(() => !currentPid || !alive(currentPid), "replacement supervisor did not stop during cleanup").catch(() => {});

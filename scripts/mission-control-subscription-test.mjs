@@ -12,7 +12,10 @@ import {
   refreshMissionControlRepositories,
   startSupervisedWorker,
 } from "../src/worker-supervisor-client.mjs";
-import { validateMissionControlEventEnvelope } from "../src/mission-control-event-protocol.mjs";
+import {
+  MISSION_CONTROL_EVENT_PROTOCOL_VERSION,
+  validateMissionControlEventEnvelope,
+} from "../src/mission-control-event-protocol.mjs";
 import { MissionControlEventStream } from "../src/mission-control-event-stream.mjs";
 import { supervisorEndpoint } from "../src/worker-supervisor-protocol.mjs";
 
@@ -230,6 +233,8 @@ try {
   assert.ok(snapshot.payload.capacities.length > 0);
   assert.ok(snapshot.payload.capacities.every((capacity) => capacity.work && capacity.review),
     "subscription capacity must retain separate work and review roles");
+  assert.equal((await getSupervisorStatus(options)).missionControl.protocolVersion, MISSION_CONTROL_EVENT_PROTOCOL_VERSION,
+    "the supervisor must advertise the exact Mission Control event protocol it emits");
   assert.equal((await stat(supervisorEndpoint(stateDirectory))).mode & 0o777, 0o600, "subscription transport must retain owner-only Unix permissions");
   const repositoryRefresh = await refreshMissionControlRepositories(options);
   assert.deepEqual(repositoryRefresh, {

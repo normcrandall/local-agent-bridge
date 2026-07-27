@@ -163,6 +163,7 @@ export class MissionControlEventStream {
 
   get status() {
     return {
+      protocolVersion: MISSION_CONTROL_EVENT_PROTOCOL_VERSION,
       streamId: this.#streamId,
       cursor: this.#sequence,
       degraded: Boolean(this.#degraded),

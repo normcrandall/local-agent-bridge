@@ -581,8 +581,8 @@ try {
     now,
   });
   for (const field of [
-    "stateRoot", "visibleRepositories", "scopedOut", "needsUserRequests",
-    "historicalNeedsUserCount", "recentActivity", "providerCapacity",
+    "mode", "stateRoot", "repositories", "visibleRepositories", "scopedOut", "needsUserRequests",
+    "historicalNeedsUserCount", "recentActivity", "providerActivity", "providerCapacity",
   ]) {
     assert.deepEqual(differentialSubscribed[field], live[field], `subscribed ${field} must match the authoritative snapshot projection`);
   }

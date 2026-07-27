@@ -537,8 +537,23 @@ export function projectMissionControlSubscribedSnapshot(eventState, viewModel, {
       nextAction: lane.nextAction || null,
       blockedBy: lane.portfolio?.blockedBy || [],
     }));
+  const repositories = new Map();
+  for (const lane of matching) {
+    const summary = repositories.get(lane.repository) || {
+      repository: lane.repository,
+      total: 0,
+      attention: 0,
+      live: 0,
+      visible: 0,
+    };
+    summary.total += 1;
+    if (isAttentionLane(lane, now)) summary.attention += 1;
+    if (isLiveLane(lane, now)) summary.live += 1;
+    repositories.set(lane.repository, summary);
+  }
+  for (const lane of selected) repositories.get(lane.repository).visible += 1;
   const providerActivity = {};
-  for (const lane of matching.filter((lane) => isLiveLane(lane, now))) {
+  for (const lane of selected) {
     const provider = lane.activeAgent || lane.writer;
     if (provider) providerActivity[provider] = (providerActivity[provider] || 0) + 1;
   }
@@ -550,7 +565,7 @@ export function projectMissionControlSubscribedSnapshot(eventState, viewModel, {
     selectedTab,
     filter: repositoryFilter,
     stateRoot: eventState?.metadata?.stateRoot || null,
-    repositories: viewModel?.repositories || [],
+    repositories: [...repositories.values()].sort((left, right) => left.repository.localeCompare(right.repository)),
     visibleRepositories: new Set(selected.map((lane) => lane.repository)).size,
     collapsedStale: !includeStale ? summarizeCollapsedStale(stale) : summarizeCollapsedStale([]),
     staleAfterMs,
