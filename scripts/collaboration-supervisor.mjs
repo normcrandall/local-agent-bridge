@@ -21,6 +21,7 @@ import { createLocalModelWarmer } from "../src/local-model-warmth.mjs";
 import { scanPendingUserAttention } from "../src/user-attention.mjs";
 import { clearRepositoryCache, loadMissionControlSnapshot } from "../src/mission-control.mjs";
 import { MissionControlEventStream } from "../src/mission-control-event-stream.mjs";
+import { reconcileMissionControlRemote } from "../src/mission-control-remote.mjs";
 
 import { killProcessSafely, processProbe } from "../src/process-identity-probe.mjs";
 
@@ -477,6 +478,13 @@ const server = createServer((socket) => {
             streamId: missionControlStream.streamId,
             cursor: missionControlStream.cursor,
           };
+        } else if (request.type === "mission_control_reconcile") {
+          touchMissionControlStream();
+          result = await reconcileMissionControlRemote({
+            tickets: request.tickets,
+            stateRoot: stateDirectory,
+            signal: socketAbort.signal,
+          });
         } else if (request.type === "refresh") {
           refreshing = true;
           ready = false;

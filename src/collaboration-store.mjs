@@ -579,6 +579,7 @@ export async function queryControlPlane(stateRoot, options = {}) {
       coordinatorWake: cState.coordinatorWake || null,
       attentionRequestedAt: attentionRequestAt(cState),
       reviewPublication: cState.reviewPublication || null,
+      repositoryJournal: cState.repositoryJournal || null,
       writerAuthority: cState.writerAuthority || null,
       performanceSummary: cState.performanceSummary || null,
       turnCount: cState.runtime?.turnCount || 0,

@@ -10,6 +10,7 @@ import { PORTFOLIO_STATUSES, PORTFOLIO_STATUS_GROUPS } from "./portfolio-status.
 import { deliveryPolicyForSurface } from "./delivery-policy.mjs";
 import { providerCapacitySnapshot } from "./provider-concurrency.mjs";
 import { requiresCoordinatorAction, requiresHumanAttention } from "./human-attention-policy.mjs";
+import { projectRepositoryJournalState, clearMissionControlJournalCache } from "./mission-control-journal-state.mjs";
 
 const ACTIVE_STATUSES = new Set([
   "queued", "waiting_capacity", "running", "working", "recovering", "cancelling",
@@ -50,6 +51,7 @@ export function paneFocusIntent(key, activePane) {
 export function clearRepositoryCache() {
   repositoryCacheGeneration += 1;
   repositoryCache.clear();
+  clearMissionControlJournalCache();
 }
 
 export async function readFileRange(handle, start, length) {
@@ -617,7 +619,8 @@ export async function loadMissionControlSnapshot({
     providerCapacitySnapshot(stateRoot, { stateDirectory: stateRoot, reap: false }),
   ]);
   const rawLanes = [...controlPlane.lanes, ...hostActivities.map((state) => hostActivityLane(state, now))];
-  const allLanes = await mapLimit(rawLanes, 12, async (lane) => ({ ...lane, repository: await repositoryForLane(lane) }));
+  const repositoryLanes = await mapLimit(rawLanes, 12, async (lane) => ({ ...lane, repository: await repositoryForLane(lane) }));
+  const allLanes = await projectRepositoryJournalState(repositoryLanes);
   const normalizedFilter = clean(repositoryFilter).toLowerCase();
   const matching = allLanes.filter((lane) => !normalizedFilter
     || lane.repository.toLowerCase() === normalizedFilter);
@@ -1286,6 +1289,19 @@ function detailPane(lane, timeline, width, now, snapshot, expanded = false) {
   if (summaryIsStale) rows.push(paneLine("SUMMARY STALE · process heartbeat remains live", "33;1"));
   const github = [lane.issueNumber && `issue #${lane.issueNumber}`, lane.prNumber && `PR #${lane.prNumber}`, lane.branch, lane.headSha && lane.headSha.slice(0, 10)].filter(Boolean).join(" · ");
   if (github) rows.push(paneLine(""), paneLine(`GITHUB  ${github}`, "35"));
+  if (lane.github) {
+    const remote = lane.github;
+    const prState = remote.pullRequest
+      ? remote.pullRequest.merged ? "merged" : `${remote.pullRequest.state}${remote.pullRequest.draft ? " draft" : ""}`
+      : null;
+    const approvals = (remote.reviews || []).filter((review) => String(review.state).toUpperCase() === "APPROVED").length;
+    const ciState = remote.ci?.combinedState
+      || (remote.ci?.checks?.length ? remote.ci.checks.every((check) => check.conclusion === "success") ? "success" : "pending/failing" : null);
+    const facts = [prState && `PR ${prState}`, ciState && `CI ${ciState}`, remote.reviews?.length && `${approvals}/${remote.reviews.length} approvals`].filter(Boolean);
+    if (facts.length) rows.push(paneLine(`REMOTE  ${facts.join(" · ")}`, remote.exactHead === false ? "33;1" : "36"));
+    if (remote.exactHead === false) rows.push(paneLine(`REMOTE HEAD STALE  ${String(remote.observedHeadSha || "unknown").slice(0, 10)} · exact-head review/CI withheld`, "33;1"));
+    if (remote.degradations?.length) rows.push(paneLine(`REMOTE DEGRADED  ${remote.degradations.map((entry) => entry.source).join(", ")}`, "31"));
+  }
   if (lane.portfolio?.phase) {
     const lookahead = lane.portfolio.lookahead
       ? ` · LOOKAHEAD ahead of ${lane.portfolio.lookaheadFromPhase || "the current phase"}`
@@ -1529,6 +1545,20 @@ export function renderMissionControl(snapshot, {
   }).join("  ");
   lines.push(truncateAnsi(tabs, usableWidth));
   lines.push(truncate(`${formatLocalDateTime(snapshot.generatedAt)} · ${repositoryCount} repo${repositoryCount === 1 ? "" : "s"}${snapshot.filter ? ` · ${snapshot.filter}` : ""}`, usableWidth));
+  if (snapshot.reconciliation) {
+    const reconciliation = snapshot.reconciliation;
+    const label = reconciliation.status === "current"
+      ? `REMOTE CURRENT${reconciliation.observedAt ? ` · ${formatLocalDateTime(reconciliation.observedAt)}` : ""}`
+      : reconciliation.status === "refreshing"
+        ? "REMOTE REFRESHING · local journal remains current"
+        : reconciliation.status === "offline"
+          ? "REMOTE OFFLINE · showing local journal state"
+          : reconciliation.status === "local"
+            ? "LOCAL JOURNAL · remote facts pending"
+            : "REMOTE DEGRADED · showing local journal state";
+    const style = reconciliation.status === "current" ? "36" : reconciliation.status === "refreshing" || reconciliation.status === "local" ? "33" : "31;1";
+    lines.push(truncateAnsi(paint(label, style, color), usableWidth));
+  }
   const quotaFooter = renderProviderQuotaFooter(snapshot.providerQuota, { width: usableWidth, color });
   const footerRows = quotaFooter.length + (interactive ? (actionMessage ? 3 : 2) : snapshot.mode === "all" ? 1 : 0);
   const contentRows = Math.max(4, height - lines.length - footerRows - 4);

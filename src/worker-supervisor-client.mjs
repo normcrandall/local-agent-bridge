@@ -328,6 +328,18 @@ export async function refreshMissionControlRepositories({
   return request(endpoint, { type: "mission_control_refresh_repositories" }, 0, { signal });
 }
 
+export async function getMissionControlReconciliation({
+  tickets = [],
+  runtimeRoot = resolve(fileURLToPath(new URL("..", import.meta.url))),
+  workspaceRoot = resolve(process.env.BRIDGE_WORKSPACE_ROOT || runtimeRoot),
+  stateDirectory = resolve(process.env.BRIDGE_COLLABORATION_DIR || collaborationDirectory(workspaceRoot)),
+  signal,
+} = {}) {
+  const endpoint = supervisorEndpoint(stateDirectory);
+  await ensureSupervisor({ runtimeRoot, workspaceRoot, stateDirectory, endpoint, signal });
+  return request(endpoint, { type: "mission_control_reconcile", tickets }, 30_000, { signal });
+}
+
 export async function refreshSupervisor({
   runtimeRoot = resolve(fileURLToPath(new URL("..", import.meta.url))),
   workspaceRoot = resolve(process.env.BRIDGE_WORKSPACE_ROOT || runtimeRoot),

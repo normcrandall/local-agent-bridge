@@ -35,7 +35,8 @@ import {
   createMissionControlSubscriptionClient,
 } from "../src/mission-control-client.mjs";
 import { createProviderQuotaMonitor } from "../src/provider-quota.mjs";
-import { refreshMissionControlRepositories } from "../src/worker-supervisor-client.mjs";
+import { getMissionControlReconciliation, refreshMissionControlRepositories } from "../src/worker-supervisor-client.mjs";
+import { createMissionControlJournalFirstReconciler } from "../src/mission-control-reconciliation.mjs";
 
 process.stdout.on("error", (error) => {
   if (error.code === "EPIPE") process.exit(0);
@@ -153,6 +154,7 @@ let lastSnapshot = null;
 let lastViewModel = null;
 let subscriptionClient = null;
 const subscriptionAbort = new AbortController();
+let lastReconciledSnapshot = null;
 let actionMessage = null;
 let pendingConfirmation = null;
 let activePane = 1;
@@ -175,11 +177,27 @@ const repositoryRefresh = createMissionControlRepositoryRefreshController({
     void draw();
   },
 });
+const journalFirstReconciler = createMissionControlJournalFirstReconciler({
+  refreshMs: 60_000,
+  reconcile: ({ tickets, signal }) => getMissionControlReconciliation({
+    tickets,
+    runtimeRoot: resolve(import.meta.dirname, ".."),
+    workspaceRoot: resolve(import.meta.dirname, ".."),
+    stateDirectory: stateRoot,
+    signal,
+  }),
+  onUpdate: (current) => {
+    if (stopped) return;
+    lastReconciledSnapshot = current;
+    void draw(current);
+  },
+});
 
 function restore() {
   if (restorePromise) return restorePromise;
   stopped = true;
   subscriptionAbort.abort();
+  journalFirstReconciler.stop();
   subscriptionClient?.stop();
   providerQuotaMonitor.stop();
   if (timer) clearInterval(timer);
@@ -205,7 +223,10 @@ function restoreSynchronously() {
 
 function startRefreshTimer() {
   if (stopped || timer) return;
-  timer = setInterval(draw, refreshMs);
+  timer = setInterval(() => {
+    journalFirstReconciler.refresh();
+    void draw();
+  }, refreshMs);
   timer.unref();
 }
 
@@ -291,7 +312,7 @@ async function draw(currentOverride = null) {
   }
   drawing = true;
   try {
-    const current = currentOverride || (lastViewModel ? subscriptionSnapshot(lastViewModel) : null) || lastSnapshot || await snapshot();
+    const current = currentOverride || lastReconciledSnapshot || (lastViewModel ? subscriptionSnapshot(lastViewModel) : null) || lastSnapshot || await snapshot();
     if (quotaEnabled) current.providerQuota = await providerQuotaMonitor.snapshot({ waitForRefresh: false });
     lastSnapshot = current;
     if (stopped) return;
@@ -490,6 +511,7 @@ async function handleKey(key) {
   }
   else if (key === "r") {
     clearRepositoryCache();
+    journalFirstReconciler.cancel();
     const refresh = repositoryRefresh.start({
       runtimeRoot: resolve(import.meta.dirname, ".."),
       workspaceRoot: resolve(import.meta.dirname, ".."),
@@ -499,6 +521,7 @@ async function handleKey(key) {
     actionMessage = refresh.started
       ? "Repository cache refresh started."
       : "Repository cache refresh already in progress.";
+    journalFirstReconciler.refresh({ force: true });
   }
   else if (activePane === 1) {
     const intent = navigationIntent(key, selectedIndex);
@@ -528,7 +551,9 @@ subscriptionClient = createMissionControlSubscriptionClient({
   onUpdate: async ({ eventState, viewModel }) => {
     lastViewModel = viewModel;
     if (actionMessage?.startsWith("Subscription reconnecting:")) actionMessage = null;
-    await draw(subscriptionSnapshot(viewModel, eventState));
+    const local = subscriptionSnapshot(viewModel, eventState);
+    journalFirstReconciler.observeLocal(local);
+    journalFirstReconciler.refresh();
   },
   onError: async (error) => {
     actionMessage = `Subscription reconnecting: ${error.message}`;
