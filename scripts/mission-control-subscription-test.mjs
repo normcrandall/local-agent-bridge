@@ -41,6 +41,56 @@ await kernel.refresh();
 assert.equal((await kernel.read({ streamId: kernelSnapshot.streamId, cursor: 0, maxEvents: 10 })).resyncRequired, true, "slow readers must resynchronize after bounded retention advances");
 assert.equal((await kernel.read({ streamId: "mission-control-old", cursor: kernel.cursor, maxEvents: 10 })).reason, "stream_changed");
 
+let coalescedLoads = 0;
+let coalescedStatus = "queued";
+const coalescedReleases = [];
+const coalescedKernel = new MissionControlEventStream({
+  loadSnapshot: async () => {
+    coalescedLoads += 1;
+    const sampled = eventSource(coalescedStatus, `2026-07-26T12:00:0${coalescedLoads}.000Z`);
+    if (coalescedLoads <= 2) {
+      await new Promise((resolvePromise) => { coalescedReleases.push(resolvePromise); });
+    }
+    return sampled;
+  },
+  streamId: "mission-control-coalesced-refresh",
+});
+const firstRefresh = coalescedKernel.refresh();
+assert.equal(coalescedLoads, 1);
+coalescedStatus = "running";
+const refreshBurst = Array.from({ length: 39 }, () => coalescedKernel.refresh());
+assert.equal(coalescedLoads, 1, "concurrent refresh triggers must not start parallel snapshot loads");
+coalescedReleases.shift()();
+await firstRefresh;
+await Promise.resolve();
+assert.equal(coalescedLoads, 2, "mid-flight triggers must coalesce into one trailing snapshot load");
+coalescedStatus = "needs_user";
+const refreshDuringTrailingLoad = coalescedKernel.refresh();
+coalescedReleases.shift()();
+await Promise.all(refreshBurst);
+await refreshDuringTrailingLoad;
+assert.equal(coalescedLoads, 3, "a trigger during the trailing load must schedule one more bounded refresh");
+const coalescedEvents = await coalescedKernel.read({
+  streamId: "mission-control-coalesced-refresh",
+  cursor: 0,
+  maxEvents: 10,
+});
+assert.ok(coalescedEvents.events.some((event) => event.type === "lane.updated" && event.payload.lifecyclePhase === "needs_user"),
+  "each trailing refresh must observe state changed after its caller arrived");
+
+let rejectingLoads = 0;
+const rejectingKernel = new MissionControlEventStream({
+  loadSnapshot: async () => {
+    rejectingLoads += 1;
+    if (rejectingLoads === 1) throw new Error("transient snapshot failure");
+    return eventSource();
+  },
+  streamId: "mission-control-rejected-refresh",
+});
+await assert.rejects(rejectingKernel.refresh(), /transient snapshot failure/);
+await rejectingKernel.refresh();
+assert.equal(rejectingLoads, 2, "a rejected load must clear refresh state so a later call can recover");
+
 let capacitySource = {
   ...eventSource(),
   providerCapacity: {

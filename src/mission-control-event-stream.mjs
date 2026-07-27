@@ -124,7 +124,8 @@ export class MissionControlEventStream {
   #degraded = null;
   #initialized = false;
   #loadSnapshot;
-  #refresh = Promise.resolve();
+  #refresh = null;
+  #queuedRefresh = null;
   #retention;
   #maxSnapshotBytes;
   #maxWaiters;
@@ -229,54 +230,71 @@ export class MissionControlEventStream {
     this.#notify();
   }
 
-  async refresh() {
-    const operation = this.#refresh.then(async () => {
-      let next;
-      try {
-        next = projectSnapshot(await this.#loadSnapshot(), this.#maxSnapshotBytes);
-      } catch (error) {
-        if (error?.code !== "MISSION_CONTROL_SNAPSHOT_TOO_LARGE") throw error;
-        this.#enterDegraded(error);
-        return;
-      }
-      this.#degraded = null;
-      if (!this.#initialized) {
-        this.#snapshot = next;
-        this.#initialized = true;
-        return;
-      }
-      const startingSequence = this.#sequence;
-      const definitions = [
-        ["repositories", (entry) => entry.id, "repository.updated", "repository.removed", (entry) => ({ repository: entry.id })],
-        ["portfolios", (entry) => `${entry.repository}\0${entry.id}`, "portfolio.updated", "portfolio.removed", (entry) => ({ repository: entry.repository, portfolioId: entry.id })],
-        ["lanes", (entry) => `${entry.repository}\0${entry.id}`, "lane.updated", "lane.removed", (entry) => ({ repository: entry.repository, laneId: entry.id })],
-        ["providers", (entry) => `${entry.repository}\0${entry.laneId}\0${entry.id}`, "provider.updated", "provider.removed", (entry) => ({ repository: entry.repository, laneId: entry.laneId, providerId: entry.id })],
-        ["capacities", (entry) => entry.providerId, "capacity.updated", "capacity.removed", (entry) => ({ providerId: entry.providerId })],
-        ["quotas", (entry) => entry.providerId, "quota.updated", null, (entry) => ({ providerId: entry.providerId })],
-      ];
-      for (const [name, keyFor, updateType, removeType, identityFor] of definitions) {
-        const before = indexed(this.#snapshot[name], keyFor);
-        const after = indexed(next[name], keyFor);
-        for (const entry of sorted(after.values(), keyFor)) {
-          const key = keyFor(entry);
-          if (!before.has(key) || changed(before.get(key), entry)) {
-            this.#append(this.#envelope(updateType, entry, identityFor(entry)));
-          }
-        }
-      }
-      for (const [name, keyFor, _updateType, removeType, identityFor] of [...definitions].reverse()) {
-        if (!removeType) continue;
-        const before = indexed(this.#snapshot[name], keyFor);
-        const after = indexed(next[name], keyFor);
-        for (const entry of sorted(before.values(), keyFor)) {
-          if (!after.has(keyFor(entry))) this.#append(this.#envelope(removeType, {}, identityFor(entry)));
-        }
-      }
+  async #runRefresh() {
+    let next;
+    try {
+      next = projectSnapshot(await this.#loadSnapshot(), this.#maxSnapshotBytes);
+    } catch (error) {
+      if (error?.code !== "MISSION_CONTROL_SNAPSHOT_TOO_LARGE") throw error;
+      this.#enterDegraded(error);
+      return;
+    }
+    this.#degraded = null;
+    if (!this.#initialized) {
       this.#snapshot = next;
-      if (this.#sequence !== startingSequence) this.#notify();
-    });
-    this.#refresh = operation.catch(() => {});
-    await operation;
+      this.#initialized = true;
+      return;
+    }
+    const startingSequence = this.#sequence;
+    const definitions = [
+      ["repositories", (entry) => entry.id, "repository.updated", "repository.removed", (entry) => ({ repository: entry.id })],
+      ["portfolios", (entry) => `${entry.repository}\0${entry.id}`, "portfolio.updated", "portfolio.removed", (entry) => ({ repository: entry.repository, portfolioId: entry.id })],
+      ["lanes", (entry) => `${entry.repository}\0${entry.id}`, "lane.updated", "lane.removed", (entry) => ({ repository: entry.repository, laneId: entry.id })],
+      ["providers", (entry) => `${entry.repository}\0${entry.laneId}\0${entry.id}`, "provider.updated", "provider.removed", (entry) => ({ repository: entry.repository, laneId: entry.laneId, providerId: entry.id })],
+      ["capacities", (entry) => entry.providerId, "capacity.updated", "capacity.removed", (entry) => ({ providerId: entry.providerId })],
+      ["quotas", (entry) => entry.providerId, "quota.updated", null, (entry) => ({ providerId: entry.providerId })],
+    ];
+    for (const [name, keyFor, updateType, removeType, identityFor] of definitions) {
+      const before = indexed(this.#snapshot[name], keyFor);
+      const after = indexed(next[name], keyFor);
+      for (const entry of sorted(after.values(), keyFor)) {
+        const key = keyFor(entry);
+        if (!before.has(key) || changed(before.get(key), entry)) {
+          this.#append(this.#envelope(updateType, entry, identityFor(entry)));
+        }
+      }
+    }
+    for (const [name, keyFor, _updateType, removeType, identityFor] of [...definitions].reverse()) {
+      if (!removeType) continue;
+      const before = indexed(this.#snapshot[name], keyFor);
+      const after = indexed(next[name], keyFor);
+      for (const entry of sorted(before.values(), keyFor)) {
+        if (!after.has(keyFor(entry))) this.#append(this.#envelope(removeType, {}, identityFor(entry)));
+      }
+    }
+    this.#snapshot = next;
+    if (this.#sequence !== startingSequence) this.#notify();
+  }
+
+  #startRefresh() {
+    const operation = this.#runRefresh();
+    this.#refresh = operation;
+    void operation.finally(() => {
+      if (this.#refresh === operation) this.#refresh = null;
+    }).catch(() => {});
+    return operation;
+  }
+
+  refresh() {
+    if (!this.#refresh) return this.#startRefresh();
+    if (!this.#queuedRefresh) {
+      const queued = this.#refresh.catch(() => {}).then(() => {
+        if (this.#queuedRefresh === queued) this.#queuedRefresh = null;
+        return this.#startRefresh();
+      });
+      this.#queuedRefresh = queued;
+    }
+    return this.#queuedRefresh;
   }
 
   async snapshot() {
