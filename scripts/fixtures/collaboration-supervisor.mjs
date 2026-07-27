@@ -12,6 +12,9 @@ const stateDirectory = resolve(process.env.BRIDGE_COLLABORATION_DIR);
 const endpoint = supervisorEndpoint(stateDirectory);
 const supervisorId = randomUUID();
 const startedAt = new Date().toISOString();
+const pidMode = process.env.BRIDGE_FIXTURE_SUPERVISOR_PID_MODE || "actual";
+const advertisedPid = pidMode === "absent" ? undefined : pidMode === "invalid" ? "not-a-pid" : process.pid;
+const supportsRefresh = process.env.BRIDGE_FIXTURE_SUPPORT_REFRESH === "1";
 
 await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
 await chmod(stateDirectory, 0o700);
@@ -27,13 +30,19 @@ const server = createServer((socket) => {
     if (request.type === "ping") {
       socket.end(`${JSON.stringify({ ok: true, result: {
         supervisorId,
-        supervisorPid: process.pid,
+        ...(advertisedPid === undefined ? {} : { supervisorPid: advertisedPid }),
         protocol: 0,
         startedAt,
         runtimeRoot,
         stateDirectory,
         ready: true,
       } })}\n`);
+    } else if (request.type === "refresh" && supportsRefresh) {
+      socket.end(`${JSON.stringify({ ok: true, result: {
+        supervisorId,
+        ...(advertisedPid === undefined ? {} : { supervisorPid: advertisedPid }),
+        accepted: true,
+      } })}\n`, () => void shutdown());
     } else {
       socket.end(`${JSON.stringify({ ok: false, error: `Unknown supervisor request: ${request.type}` })}\n`);
     }

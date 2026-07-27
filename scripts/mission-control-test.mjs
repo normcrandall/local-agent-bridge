@@ -429,7 +429,8 @@ const subscribedHiddenQueueStale = projectMissionControlSubscribedSnapshot(subsc
   staleAfterMs: 60 * 60 * 1_000,
   now,
 });
-assert.equal(subscribedHiddenQueueStale.collapsedStale.total, 1);
+assert.equal(subscribedHiddenQueueStale.collapsedStale.total, 0,
+  "collapsed stale disclosure is exclusive to the canonical attention view");
 assert.equal(subscribedHiddenQueueStale.operatorLanes.length, 0, "stale filtering applies outside Needs You");
 const subscribedRevealedQueueStale = projectMissionControlSubscribedSnapshot(subscribedEventState, subscribedViewModel, {
   selectedTab: "queue",
@@ -545,7 +546,7 @@ try {
     items: [{ id: "issue-12", title: "Queued portfolio work", issueNumber: 12, status: "ready", writer: "claude", blockedBy: [] }],
   }));
 
-  const live = await loadMissionControlSnapshot({ stateRoot: root, now });
+  const live = await loadMissionControlSnapshot({ stateRoot: root, policyWorkspace: workspace, now });
   assert.equal(live.mode, "live");
   assert.equal(live.totalLanes, 4);
   assert.equal(live.visibleLanes, 1);
@@ -564,7 +565,13 @@ try {
   assert.match(live.needsUserSignature, new RegExp(needsUserId));
   assert.deepEqual(live.needsUserRequests.map(({ repository, summary }) => ({ repository, summary })), [{ repository: "norm/example", summary: "Authorization required" }]);
 
-  const subscriptionSource = await loadMissionControlSnapshot({ stateRoot: root, view: "all", includeStale: true, now });
+  const subscriptionSource = await loadMissionControlSnapshot({
+    stateRoot: root,
+    policyWorkspace: workspace,
+    view: "all",
+    includeStale: true,
+    now,
+  });
   const subscriptionEnvelope = {
     version: MISSION_CONTROL_EVENT_PROTOCOL_VERSION,
     streamId: "mission-control-differential-parity",
@@ -580,8 +587,10 @@ try {
     selectedTab: "active",
     now,
   });
+  assert.ok(live.deliveryPolicy, "canonical Mission Control must expose its resolved delivery policy");
+  assert.ok(differentialSubscribed.deliveryPolicy, "subscription metadata must retain the resolved delivery policy");
   for (const field of [
-    "mode", "stateRoot", "repositories", "visibleRepositories", "scopedOut", "needsUserRequests",
+    "deliveryPolicy", "mode", "stateRoot", "repositories", "visibleRepositories", "scopedOut", "needsUserRequests",
     "historicalNeedsUserCount", "recentActivity", "providerActivity", "providerCapacity",
   ]) {
     assert.deepEqual(differentialSubscribed[field], live[field], `subscribed ${field} must match the authoritative snapshot projection`);

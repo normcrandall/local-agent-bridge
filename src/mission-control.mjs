@@ -559,6 +559,7 @@ export function projectMissionControlSubscribedSnapshot(eventState, viewModel, {
   }
   const needsUserKeys = needsUser.map((lane) => `${lane.id}:${lane.coordinatorWake?.sequence || 0}`).sort();
   return {
+    ...(eventState?.metadata?.deliveryPolicy ? { deliveryPolicy: structuredClone(eventState.metadata.deliveryPolicy) } : {}),
     version: 2,
     generatedAt: new Date(now).toISOString(),
     mode: selectedTab === "active" ? "live" : selectedTab === "history" ? "all" : "attention",
@@ -567,7 +568,7 @@ export function projectMissionControlSubscribedSnapshot(eventState, viewModel, {
     stateRoot: eventState?.metadata?.stateRoot || null,
     repositories: [...repositories.values()].sort((left, right) => left.repository.localeCompare(right.repository)),
     visibleRepositories: new Set(selected.map((lane) => lane.repository)).size,
-    collapsedStale: !includeStale ? summarizeCollapsedStale(stale) : summarizeCollapsedStale([]),
+    collapsedStale: !includeStale && selectedTab === "needsYou" ? summarizeCollapsedStale(stale) : summarizeCollapsedStale([]),
     staleAfterMs,
     includeStale,
     providerActivity,
