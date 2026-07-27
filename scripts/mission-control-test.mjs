@@ -950,6 +950,7 @@ try {
   assert.match(outputRendered, /tail text/);
   assert.match(outputRendered, /tail summary/);
   assert.doesNotMatch(outputRendered, /hidden output 6/);
+  assert.ok(outputRendered.indexOf("METADATA") < outputRendered.indexOf("OUTPUT  10 records"), "output must not displace expanded metadata");
   const objectOutputLane = { ...outputLane, output: [{ code: 7 }] };
   assert.match(renderMissionControl({ ...outputSnapshot, lanes: [objectOutputLane], operatorLanes: [objectOutputLane] }, {
     selectedRepository: objectOutputLane.repository,
@@ -960,6 +961,30 @@ try {
     interactive: false,
     detailExpanded: true,
   }), /\{"code":7\}/);
+  const emptyTextLane = { ...outputLane, output: [{ text: "" }] };
+  const emptyTextRendered = renderMissionControl({ ...outputSnapshot, lanes: [emptyTextLane], operatorLanes: [emptyTextLane] }, {
+    selectedRepository: emptyTextLane.repository,
+    width: 160,
+    height: 80,
+    now,
+    color: false,
+    interactive: false,
+    detailExpanded: true,
+  });
+  assert.match(emptyTextRendered, /OUTPUT\s+1 records/);
+  assert.doesNotMatch(emptyTextRendered, /\{"text":""\}/, "empty text must remain empty instead of falling back to JSON");
+  const longOutputLane = { ...outputLane, output: [`start ${"middle ".repeat(100)}HIDDEN-TAIL`] };
+  const longOutputRendered = renderMissionControl({ ...outputSnapshot, lanes: [longOutputLane], operatorLanes: [longOutputLane] }, {
+    selectedRepository: longOutputLane.repository,
+    width: 100,
+    height: 80,
+    now,
+    color: false,
+    interactive: false,
+    detailExpanded: true,
+  });
+  assert.match(longOutputRendered, /… \d+ more lines/, "bounded output records must disclose omitted wrapped lines");
+  assert.doesNotMatch(longOutputRendered, /HIDDEN-TAIL/, "output rendering remains bounded to two content lines");
   const noOutputLane = { ...outputLane, output: undefined };
   assert.match(renderMissionControl({ ...outputSnapshot, lanes: [noOutputLane], operatorLanes: [noOutputLane] }, {
     selectedRepository: noOutputLane.repository,

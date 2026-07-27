@@ -1193,12 +1193,6 @@ function detailPane(lane, timeline, width, now, snapshot, expanded = false) {
     rows.push(...visibleReasonLines.map((line) => paneLine(line, "31")));
   }
   if (expanded) {
-    const outputRecords = Array.isArray(lane.output) ? lane.output : [];
-    rows.push(paneLine(""), paneLine(`OUTPUT  ${outputRecords.length} records`, "1"));
-    for (const record of outputRecords.slice(-3)) {
-      const text = typeof record === "string" ? record : record?.text || record?.summary || JSON.stringify(record);
-      rows.push(...wrap(text, width).slice(0, 2).map((line) => paneLine(line, "90")));
-    }
     rows.push(paneLine(""), paneLine("METADATA", "1"));
     rows.push(paneLine(`ID  ${lane.id}`, "90"));
     if (lane.workspace) rows.push(paneLine(`WORKSPACE  ${lane.workspace}`, "90"));
@@ -1223,6 +1217,20 @@ function detailPane(lane, timeline, width, now, snapshot, expanded = false) {
       const count = activity.progressEventCount ?? activity.toolEventCount ?? 0;
       const lastActivityAt = activity.lastOutputAt || activity.lastToolAt || activity.lastProgressAt;
       rows.push(paneLine(`ACTIVITY  ${count} events · ${Number(activity.outputBytes || 0)} bytes${lastActivityAt ? ` · ${age(lastActivityAt, now)} ago` : ""}`, "90"));
+    }
+    const outputRecords = Array.isArray(lane.output) ? lane.output : [];
+    rows.push(paneLine(""), paneLine(`OUTPUT  ${outputRecords.length} records`, "1"));
+    for (const record of outputRecords.slice(-3)) {
+      const text = typeof record === "string"
+        ? record
+        : typeof record?.text === "string"
+          ? record.text
+          : typeof record?.summary === "string"
+            ? record.summary
+            : JSON.stringify(record);
+      const lines = wrap(text, width);
+      rows.push(...lines.slice(0, 2).map((line) => paneLine(line, "90")));
+      if (lines.length > 2) rows.push(paneLine(`… ${lines.length - 2} more lines`, "90"));
     }
   }
   const events = coalesceTimeline(timeline, 4);

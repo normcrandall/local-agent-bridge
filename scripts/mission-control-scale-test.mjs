@@ -2,6 +2,7 @@
 
 import {
   MISSION_CONTROL_SCALE_BUDGETS,
+  growthGateEvidence,
   leastSquaresGrowthFit,
   linearPercentile,
   requireFiniteBudget,
@@ -19,6 +20,15 @@ assert.equal(linearFit.exponent, 1);
 assert.equal(linearFit.rmseLog, 0);
 assert.throws(() => requireFiniteBudget("growthFit.snapshot.exponent", undefined), /Missing or non-numeric budget/);
 assert.throws(() => requireFiniteBudget("growthFit.snapshot.exponent", Number.POSITIVE_INFINITY), /Missing or non-numeric budget/);
+assert.equal(growthGateEvidence("burst", {
+  exponent: 2.1,
+  confidence95Approx: { low: 1.7, high: 2.5 },
+}, 1.8).outcome, "regression-not-established");
+assert.equal(growthGateEvidence("burst", {
+  exponent: 2.1,
+  confidence95Approx: { low: 1.9, high: 2.3 },
+}, 1.8).outcome, "regression-supported");
+assert.throws(() => growthGateEvidence("burst", { exponent: 2.1, confidence95Approx: null }, 1.8), /growth-fit uncertainty/);
 
 let report;
 try {

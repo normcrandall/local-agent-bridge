@@ -293,7 +293,8 @@ function outputDepthScenarios() {
     };
     const rendered = renderMissionControl(snapshot, renderOptions);
     const expectedOutputCount = `OUTPUT  ${outputDepth} records`;
-    if (!rendered.includes(expectedOutputCount)) {
+    const observed = rendered.includes(expectedOutputCount);
+    if (!observed) {
       throw new Error(`Output-depth render guard failed: expected selected lane marker ${JSON.stringify(expectedOutputCount)}.`);
     }
     return {
@@ -303,7 +304,7 @@ function outputDepthScenarios() {
         selectedTab: "history",
       })),
       render: timedSamples(() => renderMissionControl(snapshot, renderOptions)),
-      renderGuard: { selectedLaneId: snapshot.lanes[0].id, expectedOutputCount, observed: true },
+      renderGuard: { selectedLaneId: snapshot.lanes[0].id, expectedOutputCount, observed },
       fixtureBytes: Buffer.byteLength(JSON.stringify(snapshot)),
     };
   });
@@ -378,6 +379,24 @@ export function requireFiniteBudget(path, limit) {
   return limit;
 }
 
+export function growthGateEvidence(metric, fit, limit) {
+  requireFiniteBudget(`growthFit.${metric}.limit`, limit);
+  const pointEstimate = fit?.exponent;
+  const low = fit?.confidence95Approx?.low;
+  const high = fit?.confidence95Approx?.high;
+  if (![pointEstimate, low, high].every(Number.isFinite) || low > high) {
+    throw new Error(`Missing or invalid growth-fit uncertainty for ${metric}.`);
+  }
+  return {
+    statistic: "confidence95Approx.low",
+    observed: low,
+    limit,
+    pointEstimate,
+    confidence95Approx: { low, high },
+    outcome: low > limit ? "regression-supported" : "regression-not-established",
+  };
+}
+
 function evaluateBudgets(results, budgets) {
   const failures = [];
   const check = (path, observed, limit, unit) => {
@@ -400,8 +419,8 @@ function evaluateBudgets(results, budgets) {
     check(`outputDepth.${result.outputDepth}.render.medianMs`, result.render.medianMs, budget.renderMedianMs, "ms");
   }
   check("process.rssMiB", results.processMemory.rss / 2 ** 20, budgets.memory.maxProcessRssMiB, "MiB");
-  for (const [name, fit] of Object.entries(results.growthFit)) {
-    check(`growthFit.${name}.exponent`, fit.exponent, budgets.growthExponent[name], "exponent");
+  for (const [name, evidence] of Object.entries(results.growthGate)) {
+    check(`growthGate.${name}.${evidence.statistic}`, evidence.observed, evidence.limit, "exponent");
   }
   return failures;
 }
@@ -476,6 +495,10 @@ export async function runMissionControlScaleBenchmark({ budgets = MISSION_CONTRO
     burst: leastSquaresGrowthFit(sensitivity.map((point) => ({ size: point.historicalLanes, medianMs: point.burst.medianMs }))),
     cleanup: leastSquaresGrowthFit(sensitivity.map((point) => ({ size: point.historicalLanes, medianMs: point.cleanup.medianMs }))),
   };
+  const growthGate = Object.fromEntries(Object.entries(growthFit).map(([metric, fit]) => [
+    metric,
+    growthGateEvidence(metric, fit, budgets.growthExponent[metric]),
+  ]));
   const results = {
     scale,
     historySensitivity: sensitivity,
@@ -484,6 +507,7 @@ export async function runMissionControlScaleBenchmark({ budgets = MISSION_CONTRO
     reconnect,
     outputDepth,
     growthFit,
+    growthGate,
     processMemory: process.memoryUsage(),
   };
   const failures = evaluateBudgets(results, budgets);
