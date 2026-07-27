@@ -18,6 +18,20 @@ const lane = {
   repositoryJournal: { sequence: 7, digest },
 };
 
+function allowedLaneFor(ticket) {
+  return {
+    id: ticket.laneId,
+    repository: ticket.repository,
+    issueNumber: ticket.issueNumber || null,
+    prNumber: ticket.prNumber || null,
+    headSha: ticket.headSha || null,
+    repositoryJournal: {
+      sequence: ticket.journalSequence || 0,
+      digest: ticket.journalDigest || null,
+    },
+  };
+}
+
 const journalLane = applyRepositoryJournalCheckpoint(lane, {
   sequence: 8,
   digest: "c".repeat(64),
@@ -31,6 +45,21 @@ const journalLane = applyRepositoryJournalCheckpoint(lane, {
 assert.equal(journalLane.lifecyclePhase, "reviewing");
 assert.equal(journalLane.repositoryJournal.sequence, 8);
 assert.equal(journalLane.narrative.source, "repository_journal");
+
+const newerLocalLane = applyRepositoryJournalCheckpoint({
+  ...lane,
+  updatedAt: "2026-07-26T12:02:00.000Z",
+}, {
+  sequence: 9,
+  digest: "d".repeat(64),
+  recordedAt: "2026-07-26T12:01:30.000Z",
+  binding: { repository: "owner/repo", issueNumber: 234, pullRequestNumber: 254, headSha: head },
+  payload: { repositoryRuntime: {
+    collaborationId: lane.id, phase: "failed", writer: "codex", previousWriter: null,
+    headSha: head, branch: "codex/issue-234", summary: "Older terminal checkpoint.", terminal: true,
+  } },
+});
+assert.equal(newerLocalLane.lifecyclePhase, "running", "an older terminal checkpoint cannot replace newer local lifecycle state");
 
 const snapshot = {
   streamId: "mission-control-one",
@@ -54,6 +83,11 @@ const remote = {
 const merged = mergeMissionControlRemote(snapshot, remote, ticket);
 assert.equal(merged.lanes[0].github.ci.combinedState, "success");
 assert.equal(merged.lanes[0].lifecyclePhase, "running", "remote facts cannot replace local lifecycle");
+
+const mixedCaseSnapshot = structuredClone(snapshot);
+mixedCaseSnapshot.lanes[0].repository = "Owner/Repo";
+mixedCaseSnapshot.operatorLanes[0].repository = "Owner/Repo";
+assert.equal(mergeMissionControlRemote(mixedCaseSnapshot, remote, ticket).lanes[0].github.ci.combinedState, "success", "repository matching is case-insensitive");
 
 const advanced = structuredClone(snapshot);
 advanced.lanes[0].repositoryJournal.sequence = 8;
@@ -84,6 +118,8 @@ resolveRemote(remote);
 await first.promise;
 assert.equal(reconciler.snapshot.value.reconciliation.status, "current");
 assert.ok(updates.includes("refreshing"));
+reconciler.observeLocal(structuredClone(snapshot));
+assert.equal(reconciler.snapshot.value.lanes[0].github.ci.combinedState, "success", "valid remote facts remain visible across local redraws");
 reconciler.stop();
 
 let abortObserved = false;
@@ -97,6 +133,16 @@ const cancellation = cancellable.refresh();
 cancellable.cancel();
 assert.equal((await cancellation.promise).status, "cancelled");
 assert.equal(abortObserved, true, "generation cancellation aborts the broker request");
+
+const rejectingCancellation = createMissionControlJournalFirstReconciler({
+  reconcile: ({ signal }) => new Promise((_resolve, reject) => {
+    signal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })), { once: true });
+  }),
+});
+rejectingCancellation.observeLocal(snapshot);
+const rejectedCancellation = rejectingCancellation.refresh();
+rejectingCancellation.cancel();
+assert.equal((await rejectedCancellation.promise).status, "cancelled", "an AbortError after cancellation is handled without dereferencing cleared controller state");
 
 let clock = 1_000;
 let recoveryAttempt = 0;
@@ -124,10 +170,12 @@ const responses = new Map([
   [`/repos/owner/repo/commits/${head}/status`, { state: "success", statuses: [{ context: "agent-review", state: "success" }] }],
   [`/repos/owner/repo/commits/${head}/check-runs?per_page=100`, { check_runs: [{ name: "gates", status: "completed", conclusion: "success" }] }],
 ]);
+const primaryTicket = { repository: "owner/repo", laneId: lane.id, issueNumber: 234, prNumber: 254, headSha: head, journalSequence: 7, journalDigest: digest };
 const result = await reconcileMissionControlRemote({
-  tickets: [{ repository: "owner/repo", laneId: lane.id, issueNumber: 234, prNumber: 254, headSha: head, journalSequence: 7, journalDigest: digest }],
+  tickets: [primaryTicket],
+  allowedLanes: [allowedLaneFor(primaryTicket)],
   stateRoot: "/tmp/mission-control-test-state",
-  createCredential: async () => ({ token: "ghs_test", verifiedLogin: "builder[bot]" }),
+  createCredential: async () => ({ token: "ghs_test", verifiedLogin: "builder[bot]", appId: "1", installationId: "2" }),
   fetchImpl: async (url) => {
     const path = new URL(url).pathname + new URL(url).search;
     const body = responses.get(path);
@@ -139,11 +187,31 @@ assert.equal(result.lanes[0].exactHead, true);
 assert.equal(result.lanes[0].ci.checks[0].conclusion, "success");
 assert.equal(result.lanes[0].provenance.source, "github_app");
 
-const rateLimitedHead = "f".repeat(40);
-const rateLimited = await reconcileMissionControlRemote({
-  tickets: [{ repository: "owner/rate-limited", laneId: "rate-limit-lane", issueNumber: 1, prNumber: 2, headSha: rateLimitedHead, journalSequence: 1, journalDigest: "1".repeat(64) }],
+const cachedWithoutAuthentication = await reconcileMissionControlRemote({
+  tickets: [primaryTicket],
+  allowedLanes: [allowedLaneFor(primaryTicket)],
   stateRoot: "/tmp/mission-control-test-state",
-  createCredential: async () => ({ token: "ghs_test", verifiedLogin: "builder[bot]" }),
+  createCredential: async () => { throw new Error("credential unavailable"); },
+  fetchImpl: async () => { throw new Error("cache hit must not fetch"); },
+});
+assert.equal(cachedWithoutAuthentication.status, "degraded");
+assert.equal(cachedWithoutAuthentication.lanes.length, 0, "cached GitHub facts are not returned before current credential authorization");
+
+await assert.rejects(reconcileMissionControlRemote({
+  tickets: [{ ...primaryTicket, laneId: "forged-lane" }],
+  allowedLanes: [allowedLaneFor(primaryTicket)],
+  stateRoot: "/tmp/mission-control-test-state",
+  createCredential: async () => ({ token: "ghs_test", verifiedLogin: "builder[bot]", appId: "1", installationId: "2" }),
+  fetchImpl: async () => { throw new Error("unauthorized tickets must not fetch"); },
+}), /not authorized by the live control plane/);
+
+const rateLimitedHead = "f".repeat(40);
+const rateLimitedTicket = { repository: "owner/rate-limited", laneId: "rate-limit-lane", issueNumber: 1, prNumber: 2, headSha: rateLimitedHead, journalSequence: 1, journalDigest: "1".repeat(64) };
+const rateLimited = await reconcileMissionControlRemote({
+  tickets: [rateLimitedTicket],
+  allowedLanes: [allowedLaneFor(rateLimitedTicket)],
+  stateRoot: "/tmp/mission-control-test-state",
+  createCredential: async () => ({ token: "ghs_test", verifiedLogin: "builder[bot]", appId: "3", installationId: "4" }),
   fetchImpl: async (url) => {
     const path = new URL(url).pathname;
     if (path.endsWith("/issues/1")) return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ number: 1, state: "open", labels: [] }) };
@@ -153,22 +221,27 @@ const rateLimited = await reconcileMissionControlRemote({
 });
 assert.equal(rateLimited.status, "degraded");
 assert.ok(rateLimited.failures.some((failure) => failure.reason === "rate_limited"));
+assert.equal(rateLimited.failures.find((failure) => failure.reason === "rate_limited").retryAfterSeconds, 60);
 assert.equal(rateLimited.lanes[0].pullRequest.state, "open", "partial remote facts survive a rate-limited source");
 
+const offlineTicket = { repository: "owner/offline", laneId: "offline-lane", issueNumber: 1, headSha: null, journalSequence: 1, journalDigest: "2".repeat(64) };
 const offline = await reconcileMissionControlRemote({
-  tickets: [{ repository: "owner/offline", laneId: "offline-lane", issueNumber: 1, headSha: null, journalSequence: 1, journalDigest: "2".repeat(64) }],
+  tickets: [offlineTicket],
+  allowedLanes: [allowedLaneFor(offlineTicket)],
   stateRoot: "/tmp/mission-control-test-state",
-  createCredential: async () => ({ token: "ghs_test", verifiedLogin: "builder[bot]" }),
+  createCredential: async () => ({ token: "ghs_test", verifiedLogin: "builder[bot]", appId: "5", installationId: "6" }),
   fetchImpl: async () => { throw new TypeError("fetch failed"); },
 });
 assert.equal(offline.status, "offline");
 
 const slowController = new AbortController();
+const slowTicket = { repository: "owner/slow", laneId: "slow-lane", issueNumber: 1, headSha: null, journalSequence: 1, journalDigest: "3".repeat(64) };
 const slow = reconcileMissionControlRemote({
-  tickets: [{ repository: "owner/slow", laneId: "slow-lane", issueNumber: 1, headSha: null, journalSequence: 1, journalDigest: "3".repeat(64) }],
+  tickets: [slowTicket],
+  allowedLanes: [allowedLaneFor(slowTicket)],
   stateRoot: "/tmp/mission-control-test-state",
   signal: slowController.signal,
-  createCredential: async () => ({ token: "ghs_test", verifiedLogin: "builder[bot]" }),
+  createCredential: async () => ({ token: "ghs_test", verifiedLogin: "builder[bot]", appId: "7", installationId: "8" }),
   fetchImpl: async (_url, { signal }) => new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })), { once: true })),
 });
 slowController.abort();

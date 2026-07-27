@@ -480,8 +480,10 @@ const server = createServer((socket) => {
           };
         } else if (request.type === "mission_control_reconcile") {
           touchMissionControlStream();
+          const localSnapshot = await missionControlStream.snapshot();
           result = await reconcileMissionControlRemote({
             tickets: request.tickets,
+            allowedLanes: localSnapshot?.payload?.lanes || [],
             stateRoot: stateDirectory,
             signal: socketAbort.signal,
           });

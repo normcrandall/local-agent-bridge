@@ -60,7 +60,9 @@ export function applyRepositoryJournalCheckpoint(lane, record) {
     terminal: checkpoint.terminal === true,
   };
   const journalIsNewer = timestamp(record.recordedAt) >= timestamp(lane.updatedAt);
-  const useCheckpoint = checkpoint.terminal || journalIsNewer;
+  // Terminal is not an authority override: a newer control-plane receipt may
+  // represent recovery or resumed work after this journal checkpoint.
+  const useCheckpoint = journalIsNewer;
   return {
     ...lane,
     repositoryJournal: { ...(lane.repositoryJournal || {}), ...journal },
