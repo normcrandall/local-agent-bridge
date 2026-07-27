@@ -1193,6 +1193,12 @@ function detailPane(lane, timeline, width, now, snapshot, expanded = false) {
     rows.push(...visibleReasonLines.map((line) => paneLine(line, "31")));
   }
   if (expanded) {
+    const outputRecords = Array.isArray(lane.output) ? lane.output : [];
+    rows.push(paneLine(""), paneLine(`OUTPUT  ${outputRecords.length} records`, "1"));
+    for (const record of outputRecords.slice(-3)) {
+      const text = typeof record === "string" ? record : record?.text || record?.summary || JSON.stringify(record);
+      rows.push(...wrap(text, width).slice(0, 2).map((line) => paneLine(line, "90")));
+    }
     rows.push(paneLine(""), paneLine("METADATA", "1"));
     rows.push(paneLine(`ID  ${lane.id}`, "90"));
     if (lane.workspace) rows.push(paneLine(`WORKSPACE  ${lane.workspace}`, "90"));

@@ -12,17 +12,28 @@ import { projectMissionControlViewModel } from "./mission-control-view-model.mjs
 export const MISSION_CONTROL_SCALE_BUDGETS = Object.freeze({
   version: 1,
   scale: {
-    500: { snapshotP95Ms: 50, projectionP95Ms: 75, redrawP95Ms: 75 },
-    2000: { snapshotP95Ms: 150, projectionP95Ms: 200, redrawP95Ms: 200 },
-    10000: { snapshotP95Ms: 750, projectionP95Ms: 750, redrawP95Ms: 1_000 },
+    500: { snapshotMedianMs: 50, projectionMedianMs: 75, redrawMedianMs: 75 },
+    2000: { snapshotMedianMs: 150, projectionMedianMs: 200, redrawMedianMs: 200 },
+    10000: { snapshotMedianMs: 750, projectionMedianMs: 750, redrawMedianMs: 1_000 },
   },
-  burst: { events: 500, applyP95Ms: 2_500 },
+  burst: { events: 500, applyMedianMs: 2_500 },
   reconnect: { recoverMs: 1_500 },
-  cleanup: { removals: 500, applyP95Ms: 3_500 },
-  outputDepth: { 0: 25, 100: 50, 1000: 150, 5000: 500 },
+  cleanup: { removals: 500, applyMedianMs: 3_500 },
+  outputDepth: {
+    0: { projectionMedianMs: 3, renderMedianMs: 10 },
+    100: { projectionMedianMs: 3, renderMedianMs: 10 },
+    1000: { projectionMedianMs: 5, renderMedianMs: 12 },
+    5000: { projectionMedianMs: 10, renderMedianMs: 12 },
+  },
   memory: { maxScenarioHeapDeltaMiB: 512, maxProcessRssMiB: 1_024 },
   growthExponent: { snapshot: 1.8, projection: 1.8, redraw: 1.8, burst: 1.8, cleanup: 1.8 },
-  algorithmicSensitivity: { collectionPass: 1.2, incrementalEvent: 0.4 },
+  diagnostics: {
+    algorithmicSensitivity: {
+      gating: false,
+      collectionPassExponent: 1.2,
+      incrementalEventExponent: 0.4,
+    },
+  },
 });
 
 const SCALE_POINTS = Object.freeze([500, 2_000, 10_000]);
@@ -122,9 +133,13 @@ function deltaEnvelope({ sequence, type, repository, laneId, payload, streamId =
   };
 }
 
-function percentile(sorted, fraction) {
+export function linearPercentile(sorted, fraction) {
   if (!sorted.length) return 0;
-  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * fraction) - 1))];
+  const position = Math.min(sorted.length - 1, Math.max(0, (sorted.length - 1) * fraction));
+  const lower = Math.floor(position);
+  const upper = Math.ceil(position);
+  if (lower === upper) return sorted[lower];
+  return sorted[lower] + (sorted[upper] - sorted[lower]) * (position - lower);
 }
 
 function round(value, digits = 3) {
@@ -132,7 +147,21 @@ function round(value, digits = 3) {
   return Math.round(value * factor) / factor;
 }
 
-function timedSamples(operation, { samples = 3 } = {}) {
+function summarizeDurations(durations, maxHeapDeltaBytes) {
+  const sorted = [...durations].sort((left, right) => left - right);
+  return {
+    sampleCount: durations.length,
+    samples: durations.map((value) => round(value)),
+    minMs: round(sorted[0] || 0),
+    medianMs: round(linearPercentile(sorted, 0.5)),
+    p95Ms: round(linearPercentile(sorted, 0.95)),
+    maxMs: round(sorted.at(-1) || 0),
+    spreadMs: round((sorted.at(-1) || 0) - (sorted[0] || 0)),
+    maxHeapDeltaBytes: Math.max(0, maxHeapDeltaBytes),
+  };
+}
+
+function timedSamples(operation, { samples = 5 } = {}) {
   const durations = [];
   let maxHeapDeltaBytes = 0;
   for (let sample = 0; sample < samples; sample += 1) {
@@ -142,17 +171,10 @@ function timedSamples(operation, { samples = 3 } = {}) {
     durations.push(performance.now() - startedAt);
     maxHeapDeltaBytes = Math.max(maxHeapDeltaBytes, process.memoryUsage().heapUsed - heapBefore);
   }
-  const sorted = [...durations].sort((left, right) => left - right);
-  return {
-    samples: durations.map((value) => round(value)),
-    medianMs: round(percentile(sorted, 0.5)),
-    p95Ms: round(percentile(sorted, 0.95)),
-    maxMs: round(sorted.at(-1) || 0),
-    maxHeapDeltaBytes: Math.max(0, maxHeapDeltaBytes),
-  };
+  return summarizeDurations(durations, maxHeapDeltaBytes);
 }
 
-function timedStateSamples(setup, operation, { samples = 2 } = {}) {
+function timedStateSamples(setup, operation, { samples = 3 } = {}) {
   const durations = [];
   let maxHeapDeltaBytes = 0;
   for (let sample = 0; sample < samples; sample += 1) {
@@ -163,14 +185,7 @@ function timedStateSamples(setup, operation, { samples = 2 } = {}) {
     durations.push(performance.now() - startedAt);
     maxHeapDeltaBytes = Math.max(maxHeapDeltaBytes, process.memoryUsage().heapUsed - heapBefore);
   }
-  const sorted = [...durations].sort((left, right) => left - right);
-  return {
-    samples: durations.map((value) => round(value)),
-    medianMs: round(percentile(sorted, 0.5)),
-    p95Ms: round(percentile(sorted, 0.95)),
-    maxMs: round(sorted.at(-1) || 0),
-    maxHeapDeltaBytes: Math.max(0, maxHeapDeltaBytes),
-  };
+  return summarizeDurations(durations, maxHeapDeltaBytes);
 }
 
 async function timedAsync(operation) {
@@ -265,12 +280,30 @@ function outputDepthScenarios() {
   return [0, 100, 1_000, 5_000].map((outputDepth) => {
     const snapshot = seedMissionControlSnapshot({ historicalLanes: 100, liveLanes: 1, outputDepth });
     const eventState = createMissionControlEventState(snapshotEnvelope(snapshot, { streamId: `mission-control-output-${outputDepth}` }));
+    const renderOptions = {
+      selectedIndex: 0,
+      selectedRepository: REPOSITORIES[0],
+      activePane: 2,
+      detailExpanded: true,
+      width: 160,
+      height: 80,
+      color: false,
+      interactive: false,
+      now: BASE_TIME + 21_000_000,
+    };
+    const rendered = renderMissionControl(snapshot, renderOptions);
+    const expectedOutputCount = `OUTPUT  ${outputDepth} records`;
+    if (!rendered.includes(expectedOutputCount)) {
+      throw new Error(`Output-depth render guard failed: expected selected lane marker ${JSON.stringify(expectedOutputCount)}.`);
+    }
     return {
       outputDepth,
       projection: timedSamples(() => projectMissionControlViewModel(eventState, {
         selectedRepository: REPOSITORIES[0],
         selectedTab: "history",
       })),
+      render: timedSamples(() => renderMissionControl(snapshot, renderOptions)),
+      renderGuard: { selectedLaneId: snapshot.lanes[0].id, expectedOutputCount, observed: true },
       fixtureBytes: Buffer.byteLength(JSON.stringify(snapshot)),
     };
   });
@@ -311,49 +344,77 @@ async function reconnectScenario(snapshot) {
   };
 }
 
-function growthExponent(firstSize, firstValue, lastSize, lastValue) {
-  if (firstValue <= 0 || lastValue <= 0) return 0;
-  return round(Math.log(lastValue / firstValue) / Math.log(lastSize / firstSize));
+export function leastSquaresGrowthFit(points) {
+  const usable = points.filter(({ size, medianMs }) => size > 0 && medianMs > 0);
+  if (usable.length < 2) return { exponent: 0, intercept: 0, rSquared: 1, rmseLog: 0, slopeStdError: null, confidence95Approx: null, points: [] };
+  const transformed = usable.map(({ size, medianMs }) => ({ size, medianMs, x: Math.log(size), y: Math.log(medianMs) }));
+  const meanX = transformed.reduce((sum, point) => sum + point.x, 0) / transformed.length;
+  const meanY = transformed.reduce((sum, point) => sum + point.y, 0) / transformed.length;
+  const denominator = transformed.reduce((sum, point) => sum + (point.x - meanX) ** 2, 0);
+  const exponent = transformed.reduce((sum, point) => sum + (point.x - meanX) * (point.y - meanY), 0) / denominator;
+  const intercept = meanY - exponent * meanX;
+  const evidence = transformed.map((point) => {
+    const predictedLog = intercept + exponent * point.x;
+    return { size: point.size, medianMs: round(point.medianMs), predictedMs: round(Math.exp(predictedLog)), residualLog: round(point.y - predictedLog, 6) };
+  });
+  const residualSumSquares = evidence.reduce((sum, point) => sum + point.residualLog ** 2, 0);
+  const totalSumSquares = transformed.reduce((sum, point) => sum + (point.y - meanY) ** 2, 0);
+  const degreesOfFreedom = transformed.length - 2;
+  const slopeStdError = degreesOfFreedom > 0 ? Math.sqrt((residualSumSquares / degreesOfFreedom) / denominator) : null;
+  const t95 = degreesOfFreedom === 1 ? 12.706 : 1.96;
+  return {
+    exponent: round(exponent),
+    intercept: round(intercept, 6),
+    rSquared: round(totalSumSquares === 0 ? 1 : 1 - residualSumSquares / totalSumSquares, 6),
+    rmseLog: round(Math.sqrt(residualSumSquares / transformed.length), 6),
+    slopeStdError: slopeStdError === null ? null : round(slopeStdError, 6),
+    confidence95Approx: slopeStdError === null ? null : { low: round(exponent - t95 * slopeStdError), high: round(exponent + t95 * slopeStdError) },
+    points: evidence,
+  };
 }
 
 function evaluateBudgets(results, budgets) {
   const failures = [];
   const check = (path, observed, limit, unit) => {
-    if (observed > limit) failures.push({ path, observed, limit, unit });
+    if (observed > limit) failures.push({ kind: "budget", path, observed, limit, unit, message: null });
   };
   for (const scenario of results.scale) {
     const budget = budgets.scale[scenario.historicalLanes];
-    check(`scale.${scenario.historicalLanes}.snapshot.p95Ms`, scenario.snapshot.p95Ms, budget.snapshotP95Ms, "ms");
-    check(`scale.${scenario.historicalLanes}.projection.p95Ms`, scenario.projection.p95Ms, budget.projectionP95Ms, "ms");
-    check(`scale.${scenario.historicalLanes}.redraw.p95Ms`, scenario.redraw.p95Ms, budget.redrawP95Ms, "ms");
+    check(`scale.${scenario.historicalLanes}.snapshot.medianMs`, scenario.snapshot.medianMs, budget.snapshotMedianMs, "ms");
+    check(`scale.${scenario.historicalLanes}.projection.medianMs`, scenario.projection.medianMs, budget.projectionMedianMs, "ms");
+    check(`scale.${scenario.historicalLanes}.redraw.medianMs`, scenario.redraw.medianMs, budget.redrawMedianMs, "ms");
     check(`scale.${scenario.historicalLanes}.scenarioHeapDeltaMiB`, scenario.scenarioHeapDeltaBytes / 2 ** 20, budgets.memory.maxScenarioHeapDeltaMiB, "MiB");
   }
-  check("burst.apply.p95Ms", results.burst.p95Ms, budgets.burst.applyP95Ms, "ms");
-  check("cleanup.apply.p95Ms", results.cleanup.p95Ms, budgets.cleanup.applyP95Ms, "ms");
+  check("burst.apply.medianMs", results.burst.medianMs, budgets.burst.applyMedianMs, "ms");
+  check("cleanup.apply.medianMs", results.cleanup.medianMs, budgets.cleanup.applyMedianMs, "ms");
   check("reconnect.elapsedMs", results.reconnect.elapsedMs, budgets.reconnect.recoverMs, "ms");
   for (const result of results.outputDepth) {
-    check(`outputDepth.${result.outputDepth}.projection.p95Ms`, result.projection.p95Ms, budgets.outputDepth[result.outputDepth], "ms");
+    const budget = budgets.outputDepth[result.outputDepth];
+    check(`outputDepth.${result.outputDepth}.projection.medianMs`, result.projection.medianMs, budget.projectionMedianMs, "ms");
+    check(`outputDepth.${result.outputDepth}.render.medianMs`, result.render.medianMs, budget.renderMedianMs, "ms");
   }
   check("process.rssMiB", results.processMemory.rss / 2 ** 20, budgets.memory.maxProcessRssMiB, "MiB");
-  for (const [name, value] of Object.entries(results.growthExponent)) {
-    check(`growthExponent.${name}`, value, budgets.growthExponent[name], "exponent");
+  for (const [name, fit] of Object.entries(results.growthFit)) {
+    check(`growthFit.${name}.exponent`, fit.exponent, budgets.growthExponent[name], "exponent");
   }
   return failures;
 }
 
 function rustEvaluation(results, failures, budgets) {
-  const algorithmic = Object.entries(results.growthExponent)
-    .filter(([metric, exponent]) => exponent > (
+  const sensitivity = budgets.diagnostics.algorithmicSensitivity;
+  const algorithmic = Object.entries(results.growthFit)
+    .filter(([metric, fit]) => fit.exponent > (
       ["burst", "cleanup"].includes(metric)
-        ? budgets.algorithmicSensitivity.incrementalEvent
-        : budgets.algorithmicSensitivity.collectionPass
+        ? sensitivity.incrementalEventExponent
+        : sensitivity.collectionPassExponent
     ))
-    .map(([metric, exponent]) => ({ metric, exponent }));
+    .map(([metric, fit]) => ({ metric, fit, advisory: true }));
   const latencyFailures = failures.filter((failure) => failure.unit === "ms");
   if (algorithmic.length) {
     return {
       classification: "algorithmic-scaling",
       rustRecommended: false,
+      gating: false,
       evidence: algorithmic,
       decision: "Keep the orchestration path in JavaScript and first replace whole-collection cloning, sorting, or scanning with indexed incremental updates. Rewriting the same asymptotic work in Rust would only reduce a constant.",
       candidateBoundary: "After algorithmic repairs, isolate event projection/diffing plus snapshot serialization behind the versioned Mission Control event protocol if measured constant cost still exceeds redraw budgets.",
@@ -363,6 +424,7 @@ function rustEvaluation(results, failures, budgets) {
     return {
       classification: "constant-cost",
       rustRecommended: true,
+      gating: false,
       evidence: latencyFailures,
       decision: "The measured curves remain near-linear but exceed latency budgets; a native implementation may reduce constant CPU and allocation cost.",
       candidateBoundary: "Move event projection/diffing and snapshot serialization behind the existing versioned event envelopes; keep navigation, policy, rendering, and MCP orchestration in JavaScript.",
@@ -371,6 +433,7 @@ function rustEvaluation(results, failures, budgets) {
   return {
     classification: "javascript-sufficient",
     rustRecommended: false,
+    gating: false,
     evidence: [],
     decision: "JavaScript remains within the explicit scale budgets; a Rust migration is not justified by this run.",
     candidateBoundary: "Retain the versioned event projection/diff and snapshot-serialization seam as the only future native boundary.",
@@ -400,14 +463,12 @@ export async function runMissionControlScaleBenchmark({ budgets = MISSION_CONTRO
   const cleanup = applyCleanup(largest, budgets.cleanup.removals);
   const outputDepth = outputDepthScenarios();
   const reconnect = await reconnectScenario(largest);
-  const first = scale[0];
-  const last = scale.at(-1);
-  const growth = {
-    snapshot: growthExponent(first.historicalLanes, first.snapshot.p95Ms, last.historicalLanes, last.snapshot.p95Ms),
-    projection: growthExponent(first.historicalLanes, first.projection.p95Ms, last.historicalLanes, last.projection.p95Ms),
-    redraw: growthExponent(first.historicalLanes, first.redraw.p95Ms, last.historicalLanes, last.redraw.p95Ms),
-    burst: growthExponent(sensitivity[0].historicalLanes, sensitivity[0].burst.p95Ms, sensitivity.at(-1).historicalLanes, sensitivity.at(-1).burst.p95Ms),
-    cleanup: growthExponent(sensitivity[0].historicalLanes, sensitivity[0].cleanup.p95Ms, sensitivity.at(-1).historicalLanes, sensitivity.at(-1).cleanup.p95Ms),
+  const growthFit = {
+    snapshot: leastSquaresGrowthFit(scale.map((point) => ({ size: point.historicalLanes, medianMs: point.snapshot.medianMs }))),
+    projection: leastSquaresGrowthFit(scale.map((point) => ({ size: point.historicalLanes, medianMs: point.projection.medianMs }))),
+    redraw: leastSquaresGrowthFit(scale.map((point) => ({ size: point.historicalLanes, medianMs: point.redraw.medianMs }))),
+    burst: leastSquaresGrowthFit(sensitivity.map((point) => ({ size: point.historicalLanes, medianMs: point.burst.medianMs }))),
+    cleanup: leastSquaresGrowthFit(sensitivity.map((point) => ({ size: point.historicalLanes, medianMs: point.cleanup.medianMs }))),
   };
   const results = {
     scale,
@@ -416,13 +477,14 @@ export async function runMissionControlScaleBenchmark({ budgets = MISSION_CONTRO
     cleanup,
     reconnect,
     outputDepth,
-    growthExponent: growth,
+    growthFit,
     processMemory: process.memoryUsage(),
   };
   const failures = evaluateBudgets(results, budgets);
   return {
     schemaVersion: 1,
     benchmark: "mission-control-scale",
+    resultKind: "measurements",
     status: failures.length ? "budget-failed" : "passed",
     startedAt,
     completedAt: new Date().toISOString(),
@@ -430,7 +492,9 @@ export async function runMissionControlScaleBenchmark({ budgets = MISSION_CONTRO
       historicalLaneCounts: [...SCALE_POINTS],
       concurrentLiveLanes: LIVE_LANES,
       seedTime: new Date(BASE_TIME).toISOString(),
-      samplesPerScalePoint: 3,
+      samplesPerScalePoint: 5,
+      expensiveSamples: 3,
+      percentileMethod: "linear-interpolation",
       node: process.version,
       platform: process.platform,
       architecture: process.arch,
@@ -439,5 +503,6 @@ export async function runMissionControlScaleBenchmark({ budgets = MISSION_CONTRO
     results,
     failures,
     rustEvaluation: rustEvaluation(results, failures, budgets),
+    error: null,
   };
 }

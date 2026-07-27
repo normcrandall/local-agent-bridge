@@ -2,8 +2,20 @@
 
 import {
   MISSION_CONTROL_SCALE_BUDGETS,
+  leastSquaresGrowthFit,
+  linearPercentile,
   runMissionControlScaleBenchmark,
 } from "../src/mission-control-benchmark.mjs";
+import assert from "node:assert/strict";
+
+assert.equal(linearPercentile([1, 2, 3, 4, 5], 0.95), 4.8);
+const linearFit = leastSquaresGrowthFit([
+  { size: 10, medianMs: 2 },
+  { size: 100, medianMs: 20 },
+  { size: 1_000, medianMs: 200 },
+]);
+assert.equal(linearFit.exponent, 1);
+assert.equal(linearFit.rmseLog, 0);
 
 let report;
 try {
@@ -12,15 +24,22 @@ try {
   report = {
     schemaVersion: 1,
     benchmark: "mission-control-scale",
+    resultKind: "execution-error",
     status: "error",
+    startedAt: null,
     completedAt: new Date().toISOString(),
+    reproducibility: null,
     budgets: MISSION_CONTROL_SCALE_BUDGETS,
+    results: null,
     failures: [{
+      kind: "execution-error",
       path: "benchmark.execution",
-      observed: error?.message || String(error),
-      limit: "successful deterministic execution",
+      observed: null,
+      limit: null,
       unit: "error",
+      message: error?.message || String(error),
     }],
+    rustEvaluation: null,
     error: {
       name: error?.name || "Error",
       message: error?.message || String(error),
