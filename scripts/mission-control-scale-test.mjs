@@ -4,6 +4,7 @@ import {
   MISSION_CONTROL_SCALE_BUDGETS,
   leastSquaresGrowthFit,
   linearPercentile,
+  requireFiniteBudget,
   runMissionControlScaleBenchmark,
 } from "../src/mission-control-benchmark.mjs";
 import assert from "node:assert/strict";
@@ -16,6 +17,8 @@ const linearFit = leastSquaresGrowthFit([
 ]);
 assert.equal(linearFit.exponent, 1);
 assert.equal(linearFit.rmseLog, 0);
+assert.throws(() => requireFiniteBudget("growthFit.snapshot.exponent", undefined), /Missing or non-numeric budget/);
+assert.throws(() => requireFiniteBudget("growthFit.snapshot.exponent", Number.POSITIVE_INFINITY), /Missing or non-numeric budget/);
 
 let report;
 try {

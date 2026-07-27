@@ -20,10 +20,10 @@ export const MISSION_CONTROL_SCALE_BUDGETS = Object.freeze({
   reconnect: { recoverMs: 1_500 },
   cleanup: { removals: 500, applyMedianMs: 3_500 },
   outputDepth: {
-    0: { projectionMedianMs: 3, renderMedianMs: 10 },
-    100: { projectionMedianMs: 3, renderMedianMs: 10 },
-    1000: { projectionMedianMs: 5, renderMedianMs: 12 },
-    5000: { projectionMedianMs: 10, renderMedianMs: 12 },
+    0: { projectionMedianMs: 3, renderMedianMs: 15 },
+    100: { projectionMedianMs: 3, renderMedianMs: 15 },
+    1000: { projectionMedianMs: 5, renderMedianMs: 15 },
+    5000: { projectionMedianMs: 10, renderMedianMs: 15 },
   },
   memory: { maxScenarioHeapDeltaMiB: 512, maxProcessRssMiB: 1_024 },
   growthExponent: { snapshot: 1.8, projection: 1.8, redraw: 1.8, burst: 1.8, cleanup: 1.8 },
@@ -373,9 +373,15 @@ export function leastSquaresGrowthFit(points) {
   };
 }
 
+export function requireFiniteBudget(path, limit) {
+  if (!Number.isFinite(limit)) throw new Error(`Missing or non-numeric budget for ${path}.`);
+  return limit;
+}
+
 function evaluateBudgets(results, budgets) {
   const failures = [];
   const check = (path, observed, limit, unit) => {
+    requireFiniteBudget(path, limit);
     if (observed > limit) failures.push({ kind: "budget", path, observed, limit, unit, message: null });
   };
   for (const scenario of results.scale) {

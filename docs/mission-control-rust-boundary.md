@@ -40,7 +40,7 @@ The table below is an indicative example from one implementation run on 2026-07-
 
 The largest retained scenario added about 30.7 MiB of heap while the completed benchmark process reported 357.5 MiB RSS. Raw values, including individual samples, remain in the generated report rather than this rounded summary.
 
-The harness now also renders the expanded details pane with the deep-output lane selected and asserts that the render consumed the lane's output record count. This prevents a cheap view-model-only measurement from masquerading as an output-depth rendering result.
+The harness now also renders the expanded details pane with the deep-output lane selected and asserts that the render consumed the lane's output record count. This prevents a cheap view-model-only measurement from masquerading as an output-depth rendering result. Mission Control intentionally renders only the last three output records, so render medians should remain flat as depth grows: the uniform render budget guards that bound, while the depth-sensitive cost appears in the projection measurements. The render result is not a throughput claim for rendering every retained record.
 
 The history-sensitivity probes are important diagnostics alongside the absolute latency. The regression uses all three history sizes and reports residuals, R-squared, standard error, and an approximate confidence interval rather than fitting only the endpoints:
 
