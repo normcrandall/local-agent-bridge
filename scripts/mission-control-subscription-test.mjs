@@ -41,6 +41,25 @@ await kernel.refresh();
 assert.equal((await kernel.read({ streamId: kernelSnapshot.streamId, cursor: 0, maxEvents: 10 })).resyncRequired, true, "slow readers must resynchronize after bounded retention advances");
 assert.equal((await kernel.read({ streamId: "mission-control-old", cursor: kernel.cursor, maxEvents: 10 })).reason, "stream_changed");
 
+let coalescedLoads = 0;
+let releaseCoalescedLoad;
+const coalescedLoad = new Promise((resolvePromise) => { releaseCoalescedLoad = resolvePromise; });
+const coalescedKernel = new MissionControlEventStream({
+  loadSnapshot: async () => {
+    coalescedLoads += 1;
+    await coalescedLoad;
+    return eventSource();
+  },
+  streamId: "mission-control-coalesced-refresh",
+});
+const refreshBurst = Array.from({ length: 40 }, () => coalescedKernel.refresh());
+await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+assert.equal(coalescedLoads, 1, "concurrent refresh triggers must share one in-flight snapshot load");
+releaseCoalescedLoad();
+await Promise.all(refreshBurst);
+await coalescedKernel.refresh();
+assert.equal(coalescedLoads, 2, "a later refresh must start after the coalesced load completes");
+
 let capacitySource = {
   ...eventSource(),
   providerCapacity: {

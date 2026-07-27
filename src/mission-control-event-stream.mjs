@@ -124,7 +124,7 @@ export class MissionControlEventStream {
   #degraded = null;
   #initialized = false;
   #loadSnapshot;
-  #refresh = Promise.resolve();
+  #refresh = null;
   #retention;
   #maxSnapshotBytes;
   #maxWaiters;
@@ -230,7 +230,8 @@ export class MissionControlEventStream {
   }
 
   async refresh() {
-    const operation = this.#refresh.then(async () => {
+    if (this.#refresh) return this.#refresh;
+    const operation = (async () => {
       let next;
       try {
         next = projectSnapshot(await this.#loadSnapshot(), this.#maxSnapshotBytes);
@@ -274,9 +275,13 @@ export class MissionControlEventStream {
       }
       this.#snapshot = next;
       if (this.#sequence !== startingSequence) this.#notify();
-    });
-    this.#refresh = operation.catch(() => {});
-    await operation;
+    })();
+    this.#refresh = operation;
+    try {
+      await operation;
+    } finally {
+      if (this.#refresh === operation) this.#refresh = null;
+    }
   }
 
   async snapshot() {
