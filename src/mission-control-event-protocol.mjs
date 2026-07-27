@@ -12,6 +12,8 @@ export const MISSION_CONTROL_EVENT_TYPES = Object.freeze([
   "lane.removed",
   "provider.updated",
   "provider.removed",
+  "capacity.updated",
+  "capacity.removed",
   "narrative.updated",
   "output.appended",
   "attention.updated",
@@ -33,6 +35,8 @@ const EVENT_IDENTITY_FIELDS = Object.freeze({
   "lane.removed": ["repository", "laneId"],
   "provider.updated": ["repository", "laneId", "providerId"],
   "provider.removed": ["repository", "laneId", "providerId"],
+  "capacity.updated": ["providerId"],
+  "capacity.removed": ["providerId"],
   "narrative.updated": ["repository", "laneId"],
   "output.appended": ["repository", "laneId"],
   "attention.updated": ["repository", "laneId"],
@@ -119,6 +123,7 @@ export function validateMissionControlSnapshotPayload(value) {
   const portfolios = validateSnapshotCollection(value.portfolios, "portfolios");
   const lanes = validateSnapshotCollection(value.lanes, "lanes");
   const providers = validateSnapshotCollection(value.providers, "providers");
+  const capacities = validateSnapshotCollection(value.capacities, "capacities");
   const quotas = validateSnapshotCollection(value.quotas, "quotas");
 
   const repositoryIds = new Set();
@@ -172,7 +177,14 @@ export function validateMissionControlSnapshotPayload(value) {
     quotaIds.add(id);
   }
 
-  return { repositories, portfolios, lanes, providers, quotas };
+  const capacityIds = new Set();
+  for (const capacity of capacities) {
+    const id = requiredIdentifier(capacity.providerId, "snapshot capacity.providerId");
+    if (capacityIds.has(id)) throw new Error(`snapshot contains duplicate capacity ${id}.`);
+    capacityIds.add(id);
+  }
+
+  return { repositories, portfolios, lanes, providers, capacities, quotas };
 }
 
 export function validateMissionControlEventEnvelope(value) {
@@ -200,8 +212,8 @@ export function validateMissionControlEventEnvelope(value) {
   const allowedIdentities = new Set(EVENT_IDENTITY_FIELDS[value.type]);
   for (const field of IDENTITY_FIELDS) {
     if (identities[field] && !allowedIdentities.has(field)) {
-      if (value.type === "quota.updated") {
-        throw new Error("quota.updated is machine-global and cannot carry repository, lane, or portfolio identity.");
+      if (["quota.updated", "capacity.updated", "capacity.removed"].includes(value.type)) {
+        throw new Error(`${value.type} is machine-global and cannot carry repository, lane, or portfolio identity.`);
       }
       throw new Error(`${value.type} cannot carry ${field} identity.`);
     }

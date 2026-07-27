@@ -42,7 +42,7 @@ function retainedEventDigests(digests, cursor) {
 }
 
 function stateFromSnapshot(event, previousState = null) {
-  const { repositories, portfolios, lanes, providers, quotas } = event.payload;
+  const { repositories, portfolios, lanes, providers, capacities, quotas } = event.payload;
   const preserveReplayEvidence = previousState?.streamId === event.streamId;
   return {
     version: MISSION_CONTROL_EVENT_PROTOCOL_VERSION,
@@ -55,6 +55,7 @@ function stateFromSnapshot(event, previousState = null) {
     portfolios: indexed(portfolios, (entry) => missionControlPortfolioKey(entry.repository, entry.id)),
     lanes: indexed(lanes, (entry) => missionControlLaneKey(entry.repository, entry.id)),
     providers: indexed(providers, (entry) => missionControlProviderKey(entry.repository, entry.laneId, entry.id)),
+    capacities: indexed(capacities, (entry) => entry.providerId),
     quotas: indexed(quotas, (entry) => entry.providerId),
     appliedEventDigests: preserveReplayEvidence
       ? retainedEventDigests(previousState.appliedEventDigests, event.cursor)
@@ -75,6 +76,7 @@ function applyDelta(state, event) {
   let portfolios = state.portfolios;
   let lanes = state.lanes;
   let providers = state.providers;
+  let capacities = state.capacities;
   let quotas = state.quotas;
   const laneKey = event.laneId ? missionControlLaneKey(event.repository, event.laneId) : null;
   const portfolioKey = event.portfolioId ? missionControlPortfolioKey(event.repository, event.portfolioId) : null;
@@ -130,6 +132,15 @@ function applyDelta(state, event) {
     case "provider.removed":
       providers = withoutKeys(providers, (key) => key === providerKey);
       break;
+    case "capacity.updated":
+      capacities = {
+        ...capacities,
+        [event.providerId]: mergeEntity(capacities[event.providerId], event.payload, { providerId: event.providerId }),
+      };
+      break;
+    case "capacity.removed":
+      capacities = withoutKeys(capacities, (key) => key === event.providerId);
+      break;
     case "narrative.updated":
     case "attention.updated":
     case "github.updated":
@@ -164,7 +175,7 @@ function applyDelta(state, event) {
       throw new Error(`Reducer cannot apply event type ${event.type}.`);
   }
 
-  return { ...state, repositories, portfolios, lanes, providers, quotas };
+  return { ...state, repositories, portfolios, lanes, providers, capacities, quotas };
 }
 
 function deltaIdentityFailure(state, event) {
@@ -203,7 +214,7 @@ export function reduceMissionControlEvent(currentState, envelope) {
       snapshotAt: null,
       updatedAt: null,
       sync: readySync(),
-      repositories: {}, portfolios: {}, lanes: {}, providers: {}, quotas: {}, appliedEventDigests: {},
+      repositories: {}, portfolios: {}, lanes: {}, providers: {}, capacities: {}, quotas: {}, appliedEventDigests: {},
     }, "snapshot_required", event, null);
   }
   const state = currentState;

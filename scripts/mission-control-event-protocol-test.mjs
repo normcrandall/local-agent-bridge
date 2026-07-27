@@ -32,6 +32,7 @@ const snapshot = envelope(10, "snapshot", {
   portfolios: [{ id: "helm-1", repository: "norm/example", status: "active" }],
   lanes: [{ id: "bridge-1", repository: "norm/example", status: "running", output: [] }],
   providers: [{ id: "claude", repository: "norm/example", laneId: "bridge-1", model: "opus" }],
+  capacities: [{ providerId: "claude", work: { limit: 5, inUse: 1, queued: 0 }, review: { limit: 10, inUse: 0, queued: 0 } }],
   quotas: [{ providerId: "claude", weeklyRemaining: 50 }],
 });
 
@@ -83,6 +84,7 @@ const initial = createMissionControlEventState(snapshot);
 const laneKey = missionControlLaneKey("norm/example", "bridge-1");
 assert.equal(initial.cursor, 10);
 assert.equal(initial.lanes[laneKey].status, "running");
+assert.equal(initial.capacities.claude.review.limit, 10);
 assert.throws(() => reduceMissionControlEvent(initial, envelope(11, "repository.updated", {}, {
   repository: "norm/example",
   laneId: "bridge-1",
@@ -112,12 +114,21 @@ assert.deepEqual(current.lanes[laneKey].output, [{ text: "Review approved.", sou
 assert.equal(current.quotas.claude.weeklyRemaining, 49);
 assert.equal("repository" in validateMissionControlEventEnvelope(quota), false);
 assert.throws(() => validateMissionControlEventEnvelope({ ...quota, repository: "norm/example" }), /machine-global/i);
+const capacityUpdate = envelope(11, "capacity.updated", {
+  work: { limit: 5, inUse: 2, queued: 1 },
+  review: { limit: 10, inUse: 3, queued: 4 },
+}, { providerId: "claude" });
+const capacityState = reduceMissionControlEvent(initial, capacityUpdate);
+assert.equal(capacityState.capacities.claude.work.inUse, 2);
+assert.equal(capacityState.capacities.claude.review.queued, 4);
+assert.throws(() => validateMissionControlEventEnvelope({ ...capacityUpdate, repository: "norm/example" }), /machine-global/i);
 
 const snapshotAfterDeltas = envelope(15, "snapshot", {
   repositories: Object.values(current.repositories),
   portfolios: Object.values(current.portfolios),
   lanes: Object.values(current.lanes),
   providers: Object.values(current.providers),
+  capacities: Object.values(current.capacities),
   quotas: Object.values(current.quotas),
 });
 const replacedAtSameStream = reduceMissionControlEvent(current, snapshotAfterDeltas);
@@ -238,6 +249,7 @@ const removalSnapshot = envelope(30, "snapshot", {
     { id: "claude", repository: "norm/example", laneId: "bridge-1" },
     { id: "codex", repository: "norm/example", laneId: "bridge-2" },
   ],
+  capacities: [{ providerId: "claude", work: { limit: 5, inUse: 0, queued: 0 }, review: { limit: 10, inUse: 1, queued: 0 } }],
   quotas: [{ providerId: "claude", weeklyRemaining: 48 }],
 });
 const afterLaneRemoval = reduceMissionControlEvent(createMissionControlEventState(removalSnapshot),
@@ -251,6 +263,8 @@ assert.deepEqual(afterRepositoryRemoval.repositories, {});
 assert.deepEqual(afterRepositoryRemoval.portfolios, {});
 assert.deepEqual(afterRepositoryRemoval.lanes, {});
 assert.deepEqual(afterRepositoryRemoval.providers, {});
+assert.equal(afterRepositoryRemoval.capacities.claude.review.inUse, 1,
+  "repository removal must not erase machine-global provider capacity");
 assert.equal(afterRepositoryRemoval.quotas.claude.weeklyRemaining, 48,
   "repository removal must not erase machine-global quota state");
 

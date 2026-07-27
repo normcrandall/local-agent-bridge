@@ -25,6 +25,7 @@ import {
   operatorLaneCategory,
   paneFocusIntent,
   parseRepositoryRemote,
+  projectMissionControlSubscribedSnapshot,
   renderSnapshot,
   renderMissionControl,
   readFileRange,
@@ -32,6 +33,9 @@ import {
   stripAnsi,
   windowPane,
 } from "../src/mission-control.mjs";
+import { createMissionControlEventState } from "../src/mission-control-event-reducer.mjs";
+import { MISSION_CONTROL_EVENT_PROTOCOL_VERSION } from "../src/mission-control-event-protocol.mjs";
+import { projectMissionControlViewModel } from "../src/mission-control-view-model.mjs";
 import {
   HOST_ACTIVITY_LIVE_MS,
   HOST_ACTIVITY_HEARTBEAT_GRACE_MS,
@@ -312,6 +316,75 @@ const runningId = "bridge-11111111-1111-4111-8111-111111111111";
 const completedId = "bridge-22222222-2222-4222-8222-222222222222";
 const needsUserId = "bridge-33333333-3333-4333-8333-333333333333";
 const now = Date.parse("2026-07-23T12:00:00.000Z");
+const subscribedEnvelope = {
+  version: MISSION_CONTROL_EVENT_PROTOCOL_VERSION,
+  streamId: "mission-control-supplementary-metadata",
+  sequence: 7,
+  cursor: 7,
+  type: "snapshot",
+  occurredAt: new Date(now).toISOString(),
+  payload: {
+    repositories: [{ id: "norm/subscribed" }],
+    portfolios: [],
+    providers: [],
+    capacities: [{
+      providerId: "codex",
+      work: { limit: 5, inUse: 2, queued: 1 },
+      review: { limit: 10, inUse: 3, queued: 4 },
+    }],
+    quotas: [],
+    lanes: [
+      {
+        id: "recent-completion", repository: "norm/subscribed", type: "collaboration",
+        lifecyclePhase: "completed", status: "completed", writer: "codex",
+        task: "Recently completed subscribed work", updatedAt: new Date(now - 60_000).toISOString(),
+      },
+      {
+        id: "historical-input", repository: "norm/subscribed", type: "collaboration",
+        lifecyclePhase: "needs_user", status: "needs_user", task: "Old protected boundary",
+        updatedAt: new Date(now - 8 * 24 * 60 * 60 * 1_000).toISOString(),
+        coordinatorWake: {
+          sequence: 3, status: "pending", kind: "needs_user", nextAction: "needs_user",
+          createdAt: new Date(now - 8 * 24 * 60 * 60 * 1_000).toISOString(),
+        },
+      },
+      {
+        id: "stale-blocked", repository: "norm/subscribed", type: "portfolio_lane",
+        lifecyclePhase: "blocked", status: "blocked", task: "Old blocked lane",
+        updatedAt: new Date(now - 2 * 60 * 60 * 1_000).toISOString(),
+        portfolio: { portfolioId: "helm-stale", itemId: "issue-239", status: "blocked" },
+      },
+    ],
+  },
+};
+const subscribedEventState = createMissionControlEventState(subscribedEnvelope);
+const subscribedViewModel = projectMissionControlViewModel(subscribedEventState);
+const subscribedHiddenStale = projectMissionControlSubscribedSnapshot(subscribedEventState, subscribedViewModel, {
+  selectedTab: "needsYou",
+  includeStale: false,
+  staleAfterMs: 60 * 60 * 1_000,
+  now,
+});
+assert.deepEqual(subscribedHiddenStale.providerCapacity.codex, {
+  work: { limit: 5, inUse: 2, queued: 1 },
+  review: { limit: 10, inUse: 3, queued: 4 },
+}, "subscribed capacity must preserve independent work and review roles");
+assert.deepEqual(subscribedHiddenStale.recentActivity.map((activity) => activity.id), ["recent-completion"]);
+assert.equal(subscribedHiddenStale.historicalNeedsUserCount, 1);
+assert.equal(subscribedHiddenStale.collapsedStale.total, 1);
+assert.equal(subscribedHiddenStale.operatorLanes.length, 0, "stale attention stays collapsed by default");
+const subscribedRevealedStale = projectMissionControlSubscribedSnapshot(subscribedEventState, subscribedViewModel, {
+  selectedTab: "needsYou",
+  includeStale: true,
+  staleAfterMs: 60 * 60 * 1_000,
+  now,
+});
+assert.deepEqual(subscribedRevealedStale.operatorLanes.map((lane) => lane.id), ["historical-input"]);
+const subscribedAfterRecentWindow = projectMissionControlSubscribedSnapshot(subscribedEventState, subscribedViewModel, {
+  selectedTab: "active",
+  now: now + 4 * 60 * 1_000 + 1,
+});
+assert.deepEqual(subscribedAfterRecentWindow.recentActivity, [], "client redraw time must expire the five-minute recent window without polling");
 
 try {
   const base = { workspace, agents: ["codex", "claude"], writer: "codex", createdAt: "2026-07-23T11:00:00.000Z" };

@@ -10,10 +10,10 @@ import {
   loadMissionControlSnapshot,
   loadTimeline,
   missionControlRepositories,
-  missionControlTabOperatorLanes,
   missionControlVisibleLanes,
   navigationIntent,
   newlyObservedAttentionKeys,
+  projectMissionControlSubscribedSnapshot,
   renderMissionControl,
   renderSnapshot,
 } from "../src/mission-control.mjs";
@@ -34,6 +34,7 @@ import {
   createMissionControlSubscriptionClient,
 } from "../src/mission-control-client.mjs";
 import { createProviderQuotaMonitor } from "../src/provider-quota.mjs";
+import { refreshMissionControlRepositories } from "../src/worker-supervisor-client.mjs";
 
 process.stdout.on("error", (error) => {
   if (error.code === "EPIPE") process.exit(0);
@@ -262,56 +263,13 @@ async function shutdown(code) {
   resolveExit();
 }
 
-function subscriptionSnapshot(viewModel) {
-  const categorized = [
-    ["active", "active"],
-    ["needsYou", "needs_user"],
-    ["queue", "waiting"],
-    ["history", "stopped"],
-  ];
-  const all = new Map();
-  for (const [collection, operatorCategory] of categorized) {
-    for (const lane of viewModel.collections?.[collection] || []) {
-      const key = lane.key || `${lane.repository}\0${lane.id}`;
-      if (!all.has(key)) all.set(key, { ...lane, operatorCategory });
-    }
-  }
-  const matching = [...all.values()].filter((lane) => !repositoryFilter || lane.repository === repositoryFilter);
-  const operatorLanes = missionControlTabOperatorLanes(viewModel, matching, {
+function subscriptionSnapshot(viewModel, eventState = subscriptionClient?.snapshot.eventState) {
+  return projectMissionControlSubscribedSnapshot(eventState, viewModel, {
     selectedTab,
     repositoryFilter,
     includeStale,
     staleAfterMs: staleAfterHours * 60 * 60 * 1000,
   });
-  const counts = {
-    active: viewModel.collections?.active?.length || 0,
-    needs_user: viewModel.collections?.needsYou?.length || 0,
-    waiting: viewModel.collections?.queue?.length || 0,
-    stopped: viewModel.collections?.history?.length || 0,
-  };
-  return {
-    generatedAt: viewModel.updatedAt || new Date().toISOString(),
-    mode: view,
-    selectedTab,
-    filter: repositoryFilter,
-    lanes: [...all.values()],
-    operatorLanes,
-    operatorCounts: counts,
-    lifecycleCounts: {
-      needs_user: counts.needs_user,
-      queued: counts.waiting,
-      blocked: (viewModel.collections?.queue || []).filter((lane) => lane.status === "blocked").length,
-      recovering: (viewModel.collections?.active || []).filter((lane) => lane.status === "recovering").length,
-      terminal: counts.stopped,
-    },
-    needsUserCount: counts.needs_user,
-    needsUserKeys: (viewModel.collections?.needsYou || []).map((lane) => lane.key),
-    providerQuota: null,
-    providerCapacity: {},
-    recentActivity: [],
-    historicalNeedsUserCount: 0,
-    staleAfterMs: staleAfterHours * 60 * 60 * 1000,
-  };
 }
 
 async function draw(currentOverride = null) {
@@ -519,7 +477,20 @@ async function handleKey(key) {
       }
     }
   }
-  else if (key === "r") clearRepositoryCache();
+  else if (key === "r") {
+    clearRepositoryCache();
+    try {
+      const refreshed = await refreshMissionControlRepositories({
+        runtimeRoot: resolve(import.meta.dirname, ".."),
+        workspaceRoot: resolve(import.meta.dirname, ".."),
+        stateDirectory: stateRoot,
+        signal: subscriptionAbort.signal,
+      });
+      actionMessage = `Repository cache refreshed at event cursor ${refreshed.cursor}.`;
+    } catch (error) {
+      actionMessage = `Repository cache refresh failed: ${error.message}`;
+    }
+  }
   else if (activePane === 1) {
     const intent = navigationIntent(key, selectedIndex);
     const changedSelection = intent.selectedIndex !== selectedIndex || !intent.preserveSelectedId;
@@ -545,10 +516,10 @@ subscriptionClient = createMissionControlSubscriptionClient({
   runtimeRoot: resolve(import.meta.dirname, ".."),
   workspaceRoot: resolve(import.meta.dirname, ".."),
   stateRoot,
-  onUpdate: async ({ viewModel }) => {
+  onUpdate: async ({ eventState, viewModel }) => {
     lastViewModel = viewModel;
     if (actionMessage?.startsWith("Subscription reconnecting:")) actionMessage = null;
-    await draw(subscriptionSnapshot(viewModel));
+    await draw(subscriptionSnapshot(viewModel, eventState));
   },
   onError: async (error) => {
     actionMessage = `Subscription reconnecting: ${error.message}`;

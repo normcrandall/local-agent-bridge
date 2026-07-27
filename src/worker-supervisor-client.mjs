@@ -242,6 +242,17 @@ export async function readMissionControlEvents({
   }, Math.min(15_000, Math.max(5_000, waitMs + 5_000)), { signal });
 }
 
+export async function refreshMissionControlRepositories({
+  runtimeRoot = resolve(fileURLToPath(new URL("..", import.meta.url))),
+  workspaceRoot = resolve(process.env.BRIDGE_WORKSPACE_ROOT || runtimeRoot),
+  stateDirectory = resolve(process.env.BRIDGE_COLLABORATION_DIR || collaborationDirectory(workspaceRoot)),
+  signal,
+} = {}) {
+  const endpoint = supervisorEndpoint(stateDirectory);
+  await ensureSupervisor({ runtimeRoot, workspaceRoot, stateDirectory, endpoint, signal });
+  return request(endpoint, { type: "mission_control_refresh_repositories" }, 10_000, { signal });
+}
+
 export async function refreshSupervisor({
   runtimeRoot = resolve(fileURLToPath(new URL("..", import.meta.url))),
   workspaceRoot = resolve(process.env.BRIDGE_WORKSPACE_ROOT || runtimeRoot),
