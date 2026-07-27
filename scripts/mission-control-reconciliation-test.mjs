@@ -287,6 +287,50 @@ assert.ok(rateLimited.failures.some((failure) => failure.reason === "rate_limite
 assert.equal(rateLimited.failures.find((failure) => failure.reason === "rate_limited").retryAfterSeconds, 60);
 assert.equal(rateLimited.lanes[0].pullRequest.state, "open", "partial remote facts survive a rate-limited source");
 
+const freshMixedTicket = { repository: "owner/fresh-mixed", laneId: "fresh-mixed-lane", issueNumber: 1, headSha: null, journalSequence: 1, journalDigest: "5".repeat(64) };
+const offlineMixedTicket = { repository: "owner/offline-mixed", laneId: "offline-mixed-lane", issueNumber: 1, headSha: null, journalSequence: 1, journalDigest: "6".repeat(64) };
+const freshMixed = await reconcileMissionControlRemote({
+  tickets: [freshMixedTicket, offlineMixedTicket],
+  allowedLanes: [allowedLaneFor(freshMixedTicket), allowedLaneFor(offlineMixedTicket)],
+  stateRoot: "/tmp/mission-control-test-state",
+  createCredential: async ({ repository }) => ({
+    token: "ghs_test", verifiedLogin: "builder[bot]",
+    appId: repository === freshMixedTicket.repository ? "11" : "12",
+    installationId: repository === freshMixedTicket.repository ? "13" : "14",
+  }),
+  fetchImpl: async (url) => {
+    if (url.includes(`/repos/${freshMixedTicket.repository}/`)) {
+      return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ number: 1, state: "open", labels: [] }) };
+    }
+    throw new TypeError("fetch failed");
+  },
+});
+assert.equal(freshMixed.status, "partial", "fresh remote facts keep a mixed connectivity failure partial");
+
+const cachedTicket = { repository: "owner/cached", laneId: "cached-lane", issueNumber: 1, headSha: null, journalSequence: 1, journalDigest: "7".repeat(64) };
+const cachedCredential = async ({ repository }) => ({
+  token: "ghs_test", verifiedLogin: "builder[bot]",
+  appId: repository === cachedTicket.repository ? "15" : "16",
+  installationId: repository === cachedTicket.repository ? "17" : "18",
+});
+await reconcileMissionControlRemote({
+  tickets: [cachedTicket],
+  allowedLanes: [allowedLaneFor(cachedTicket)],
+  stateRoot: "/tmp/mission-control-test-state",
+  createCredential: cachedCredential,
+  fetchImpl: async () => ({ ok: true, status: 200, headers: { get: () => null }, json: async () => ({ number: 1, state: "open", labels: [] }) }),
+});
+const cachedOfflineTicket = { repository: "owner/cached-offline", laneId: "cached-offline-lane", issueNumber: 1, headSha: null, journalSequence: 1, journalDigest: "8".repeat(64) };
+const cachedOffline = await reconcileMissionControlRemote({
+  tickets: [cachedTicket, cachedOfflineTicket],
+  allowedLanes: [allowedLaneFor(cachedTicket), allowedLaneFor(cachedOfflineTicket)],
+  stateRoot: "/tmp/mission-control-test-state",
+  createCredential: cachedCredential,
+  fetchImpl: async () => { throw new TypeError("fetch failed"); },
+});
+assert.equal(cachedOffline.status, "offline", "cached facts cannot conceal a current connectivity outage");
+assert.equal(cachedOffline.lanes[0].provenance.cacheHit, true);
+
 const failedPullTicket = { repository: "owner/pull-failed", laneId: "pull-failed-lane", issueNumber: 1, prNumber: 2, headSha: "9".repeat(40), journalSequence: 1, journalDigest: "4".repeat(64) };
 const failedPull = await reconcileMissionControlRemote({
   tickets: [failedPullTicket],
