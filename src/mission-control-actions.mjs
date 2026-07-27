@@ -187,6 +187,26 @@ export function missionControlShouldRedraw({ promptOpen = false, stopped = false
   return !promptOpen && !stopped;
 }
 
+export function createMissionControlRepositoryRefreshController({ refresh, onResult = () => {} } = {}) {
+  if (typeof refresh !== "function") throw new Error("Mission Control repository refresh requires a refresh function.");
+  let inFlight = null;
+  return {
+    start(input) {
+      if (inFlight) return { started: false, promise: inFlight };
+      const operation = Promise.resolve()
+        .then(() => refresh(input))
+        .then(
+          (result) => ({ status: "refreshed", result }),
+          (error) => ({ status: "failed", error }),
+        );
+      inFlight = operation.finally(() => { inFlight = null; });
+      void inFlight.then(onResult);
+      return { started: true, promise: inFlight };
+    },
+    get inFlight() { return Boolean(inFlight); },
+  };
+}
+
 export function missionControlPrUrl(lane) {
   if (!missionControlActionAvailability(lane).openPr) return null;
   return `https://github.com/${lane.repository}/pull/${lane.prNumber}`;

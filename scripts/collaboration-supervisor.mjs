@@ -19,7 +19,7 @@ import { enqueueCoordinatorWake } from "../src/coordinator-wake.mjs";
 import { sanitizeWorkerEnvironment, supervisorEndpoint } from "../src/worker-supervisor-protocol.mjs";
 import { createLocalModelWarmer } from "../src/local-model-warmth.mjs";
 import { scanPendingUserAttention } from "../src/user-attention.mjs";
-import { loadMissionControlSnapshot } from "../src/mission-control.mjs";
+import { clearRepositoryCache, loadMissionControlSnapshot } from "../src/mission-control.mjs";
 import { MissionControlEventStream } from "../src/mission-control-event-stream.mjs";
 
 import { killProcessSafely, processProbe } from "../src/process-identity-probe.mjs";
@@ -468,6 +468,15 @@ const server = createServer((socket) => {
             waitMs: request.waitMs,
             signal: socketAbort.signal,
           });
+        } else if (request.type === "mission_control_refresh_repositories") {
+          touchMissionControlStream();
+          clearRepositoryCache();
+          await missionControlStream.refresh();
+          result = {
+            refreshed: true,
+            streamId: missionControlStream.streamId,
+            cursor: missionControlStream.cursor,
+          };
         } else if (request.type === "refresh") {
           refreshing = true;
           ready = false;

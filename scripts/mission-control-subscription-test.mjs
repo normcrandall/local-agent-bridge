@@ -9,9 +9,13 @@ import {
   getMissionControlEventSnapshot,
   getSupervisorStatus,
   readMissionControlEvents,
+  refreshMissionControlRepositories,
   startSupervisedWorker,
 } from "../src/worker-supervisor-client.mjs";
-import { validateMissionControlEventEnvelope } from "../src/mission-control-event-protocol.mjs";
+import {
+  MISSION_CONTROL_EVENT_PROTOCOL_VERSION,
+  validateMissionControlEventEnvelope,
+} from "../src/mission-control-event-protocol.mjs";
 import { MissionControlEventStream } from "../src/mission-control-event-stream.mjs";
 import { supervisorEndpoint } from "../src/worker-supervisor-protocol.mjs";
 
@@ -36,6 +40,39 @@ kernelSource = eventSource("needs_user", "2026-07-26T12:00:02.000Z");
 await kernel.refresh();
 assert.equal((await kernel.read({ streamId: kernelSnapshot.streamId, cursor: 0, maxEvents: 10 })).resyncRequired, true, "slow readers must resynchronize after bounded retention advances");
 assert.equal((await kernel.read({ streamId: "mission-control-old", cursor: kernel.cursor, maxEvents: 10 })).reason, "stream_changed");
+
+let capacitySource = {
+  ...eventSource(),
+  providerCapacity: {
+    codex: {
+      work: { limit: 5, inUse: 1, queued: 0 },
+      review: { limit: 10, inUse: 0, queued: 0 },
+    },
+  },
+};
+const capacityKernel = new MissionControlEventStream({
+  loadSnapshot: async () => capacitySource,
+  streamId: "mission-control-capacity-test",
+});
+const capacitySnapshot = await capacityKernel.snapshot();
+assert.equal(capacitySnapshot.payload.capacities[0].review.limit, 10);
+capacitySource = {
+  ...capacitySource,
+  providerCapacity: {
+    codex: {
+      work: { limit: 5, inUse: 1, queued: 0 },
+      review: { limit: 10, inUse: 2, queued: 3 },
+    },
+  },
+};
+await capacityKernel.refresh();
+const capacityDeltas = await capacityKernel.read({
+  streamId: capacitySnapshot.streamId,
+  cursor: capacitySnapshot.cursor,
+  maxEvents: 10,
+});
+assert.deepEqual(capacityDeltas.events.map((event) => event.type), ["capacity.updated"]);
+assert.equal(capacityDeltas.events[0].payload.review.queued, 3);
 
 let oversizedSource = eventSource();
 const recoverableKernel = new MissionControlEventStream({
@@ -137,6 +174,17 @@ async function waitForExit(pid) {
   }
 }
 
+async function waitForSupervisorCondition(options, predicate, description, timeoutMs = 3_000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastStatus = null;
+  while (Date.now() < deadline) {
+    lastStatus = await getSupervisorStatus(options);
+    if (predicate(lastStatus)) return lastStatus;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+  }
+  throw new Error(`Timed out waiting for ${description}; last status: ${JSON.stringify(lastStatus?.missionControl || null)}`);
+}
+
 function rawRequest(payload, { destroyAfterMs = null } = {}) {
   return new Promise((resolvePromise, rejectPromise) => {
     const socket = createConnection(supervisorEndpoint(stateDirectory));
@@ -182,15 +230,29 @@ try {
   const snapshot = validateMissionControlEventEnvelope(await getMissionControlEventSnapshot(options));
   assert.equal(snapshot.type, "snapshot");
   assert.equal(snapshot.payload.lanes.length, 1);
+  assert.ok(snapshot.payload.capacities.length > 0);
+  assert.ok(snapshot.payload.capacities.every((capacity) => capacity.work && capacity.review),
+    "subscription capacity must retain separate work and review roles");
+  assert.equal((await getSupervisorStatus(options)).missionControl.protocolVersion, MISSION_CONTROL_EVENT_PROTOCOL_VERSION,
+    "the supervisor must advertise the exact Mission Control event protocol it emits");
   assert.equal((await stat(supervisorEndpoint(stateDirectory))).mode & 0o777, 0o600, "subscription transport must retain owner-only Unix permissions");
+  const repositoryRefresh = await refreshMissionControlRepositories(options);
+  assert.deepEqual(repositoryRefresh, {
+    refreshed: true,
+    streamId: snapshot.streamId,
+    cursor: snapshot.cursor,
+  }, "repository refresh must execute in the supervisor and return an observable stream checkpoint");
 
   await rawRequest({ type: "mission_control_subscribe", streamId: snapshot.streamId, cursor: snapshot.cursor, maxEvents: 10, waitMs: 5_000 }, { destroyAfterMs: 50 });
   assert.equal(alive(workerPid), true, "disconnecting a reader must not affect a collaboration worker");
   assert.equal((await getSupervisorStatus(options)).supervisorPid, supervisorPid);
 
-  const firstReader = readMissionControlEvents({ ...options, streamId: snapshot.streamId, cursor: snapshot.cursor, maxEvents: 10, waitMs: 2_000 });
-  const secondReader = readMissionControlEvents({ ...options, streamId: snapshot.streamId, cursor: snapshot.cursor, maxEvents: 10, waitMs: 2_000 });
-  await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+  const firstReader = readMissionControlEvents({ ...options, streamId: snapshot.streamId, cursor: snapshot.cursor, maxEvents: 10, waitMs: 5_000 });
+  const secondReader = readMissionControlEvents({ ...options, streamId: snapshot.streamId, cursor: snapshot.cursor, maxEvents: 10, waitMs: 5_000 });
+  await waitForSupervisorCondition(options, (status) => (
+    status.missionControl.waitingSubscribers >= 2
+    && status.missionControl.activeSubscribers >= 2
+  ), "both simultaneous Mission Control subscribers to enter the long-poll wait set");
   await writeState({ status: "running", updatedAt: "2026-07-26T12:00:03.000Z" });
   const [first, second] = await Promise.all([firstReader, secondReader]);
   assert.ok(first.events.length > 0, "subscriber must receive deltas after its cursor");
@@ -207,7 +269,10 @@ try {
     waitMs: 5_000,
     signal: abortController.signal,
   });
-  await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+  await waitForSupervisorCondition(options, (status) => (
+    status.missionControl.waitingSubscribers >= 1
+    && status.missionControl.activeSubscribers >= 1
+  ), "the abort test subscriber to enter the long-poll wait set");
   abortController.abort();
   await assert.rejects(abortedReader, (error) => error?.name === "AbortError" && error?.code === "ABORT_ERR");
   assert.ok(Date.now() - abortStartedAt < 500, "aborting a supervisor long poll must release the client socket promptly");
@@ -253,7 +318,7 @@ try {
   assert.ok(replacement.cursor >= cursor, "resync snapshot must describe the current stream head after any idle-period change");
   assert.deepEqual((await readMissionControlEvents({ ...options, streamId: replacement.streamId, cursor: replacement.cursor, maxEvents: 10 })).events, []);
 
-  console.log("Mission Control subscription tests passed: owner-only bootstrap, ordered resume, resync, multi-reader, abort cleanup, disconnect, backpressure, malformed input, and bounded lifetime are verified.");
+  console.log("Mission Control subscription tests passed: metadata deltas, repository refresh, owner-only bootstrap, ordered resume, resync, multi-reader, abort cleanup, disconnect, backpressure, malformed input, and bounded lifetime are verified.");
 } finally {
   if (supervisorPid && alive(supervisorPid)) process.kill(supervisorPid, "SIGTERM");
   if (supervisorPid) await waitForExit(supervisorPid);

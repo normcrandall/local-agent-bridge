@@ -7,8 +7,14 @@ import process from "node:process";
 import { collaborationDirectory } from "./collaboration-store.mjs";
 import { sanitizeWorkerEnvironment, supervisorEndpoint } from "./worker-supervisor-protocol.mjs";
 import { processProbe } from "./process-identity-probe.mjs";
+import { MISSION_CONTROL_EVENT_PROTOCOL_VERSION } from "./mission-control-event-protocol.mjs";
 
 const PROTOCOL_VERSION = 1;
+
+export function supervisorSupportsMissionControlProtocol(status) {
+  return status?.protocol === PROTOCOL_VERSION
+    && status?.missionControl?.protocolVersion === MISSION_CONTROL_EVENT_PROTOCOL_VERSION;
+}
 
 function pause(ms) {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
@@ -51,8 +57,14 @@ async function request(endpoint, payload, timeoutMs = 1_000, { signal } = {}) {
       else resolvePromise(value);
     };
     signal?.addEventListener("abort", abort, { once: true });
-    socket.setTimeout(timeoutMs, () => finish(new Error("Supervisor request timed out.")));
+    if (timeoutMs > 0) socket.setTimeout(timeoutMs, () => finish(new Error("Supervisor request timed out.")));
     socket.once("error", (error) => finish(error));
+    socket.once("close", () => {
+      if (settled) return;
+      const error = new Error("Supervisor connection closed before a response was received.");
+      error.code = "SUPERVISOR_CONNECTION_CLOSED";
+      finish(error);
+    });
     socket.once("connect", () => socket.write(`${JSON.stringify({ protocol: PROTOCOL_VERSION, ...payload })}\n`));
     socket.on("data", (chunk) => {
       buffer += chunk.toString("utf8");
@@ -60,13 +72,45 @@ async function request(endpoint, payload, timeoutMs = 1_000, { signal } = {}) {
       if (newline < 0) return;
       try {
         const response = JSON.parse(buffer.slice(0, newline));
-        if (!response.ok) finish(new Error(response.error || "Supervisor request failed."));
-        else finish(null, response.result);
+        if (!response.ok) {
+          const error = new Error(response.error || "Supervisor request failed.");
+          error.code = "SUPERVISOR_REQUEST_REJECTED";
+          finish(error);
+        } else finish(null, response.result);
       } catch (error) {
         finish(error);
       }
     });
   });
+}
+
+function validSupervisorPid(pid) {
+  return Number.isInteger(pid) && pid > 1;
+}
+
+function endpointUnavailable(error) {
+  return ["ENOENT", "ECONNREFUSED"].includes(error?.code);
+}
+
+async function waitForSupervisorTransition({ endpoint, previous, signal, timeoutMs = 5_000 }) {
+  const previousId = typeof previous?.supervisorId === "string" && previous.supervisorId
+    ? previous.supervisorId
+    : null;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (signal?.aborted) throw abortError();
+    try {
+      const current = await request(endpoint, { type: "ping" }, 300, { signal });
+      if (previousId && current?.supervisorId !== previousId) return current;
+      if (!previousId && supervisorSupportsMissionControlProtocol(current)) return current;
+    } catch (error) {
+      if (endpointUnavailable(error)) return null;
+      if (error?.name === "AbortError") throw error;
+    }
+    await pause(50);
+  }
+  const identity = previousId ? ` ${previousId}` : " with no usable supervisorId";
+  throw new Error(`Cannot fence incompatible supervisor${identity}: it still owns the endpoint after refresh.`);
 }
 
 async function acquireStartupLock(directory, signal) {
@@ -100,17 +144,43 @@ async function acquireStartupLock(directory, signal) {
 async function ensureSupervisor({ runtimeRoot, workspaceRoot, stateDirectory, endpoint, signal }) {
   if (signal?.aborted) throw abortError();
   try {
-    return await request(endpoint, { type: "ping" }, 300, { signal });
+    const current = await request(endpoint, { type: "ping" }, 300, { signal });
+    if (supervisorSupportsMissionControlProtocol(current)) return current;
   } catch {}
 
   if (signal?.aborted) throw abortError();
   const release = await acquireStartupLock(stateDirectory, signal);
   try {
+    let incompatible = null;
     try {
-      return await request(endpoint, { type: "ping" }, 300, { signal });
+      const current = await request(endpoint, { type: "ping" }, 300, { signal });
+      if (supervisorSupportsMissionControlProtocol(current)) return current;
+      incompatible = current;
     } catch {}
 
     if (signal?.aborted) throw abortError();
+
+    if (incompatible) {
+      let refreshAccepted = false;
+      try {
+        await request(endpoint, { type: "refresh" }, 2_000, { signal });
+        refreshAccepted = true;
+      } catch (error) {
+        if (error?.name === "AbortError") throw error;
+        if (validSupervisorPid(incompatible.supervisorPid) && processAlive(incompatible.supervisorPid)) {
+          await stopSupervisorAfterIdentityCheck({ previous: incompatible, runtimeRoot, stateDirectory });
+        } else if (error?.code === "SUPERVISOR_REQUEST_REJECTED") {
+          const observed = String(incompatible.supervisorPid ?? "missing");
+          throw new Error(`Cannot fence incompatible supervisor ${incompatible.supervisorId || "with unknown identity"}: refresh was rejected and supervisorPid is ${observed}.`);
+        }
+      }
+      const transitioned = await waitForSupervisorTransition({ endpoint, previous: incompatible, signal });
+      if (transitioned) {
+        if (supervisorSupportsMissionControlProtocol(transitioned)) return transitioned;
+        const source = refreshAccepted ? "accepted refresh" : "identity-fenced stop";
+        throw new Error(`Cannot use supervisor ${transitioned.supervisorId || "with unknown identity"}: ${source} produced another incompatible endpoint owner.`);
+      }
+    }
 
     const bootstrap = resolve(runtimeRoot, "scripts/collaboration-supervisor-bootstrap.mjs");
     const launched = spawnSync(process.execPath, [bootstrap], {
@@ -132,11 +202,13 @@ async function ensureSupervisor({ runtimeRoot, workspaceRoot, stateDirectory, en
     while (Date.now() < deadline) {
       if (signal?.aborted) throw abortError();
       try {
-        return await request(endpoint, { type: "ping" }, 300, { signal });
+        const current = await request(endpoint, { type: "ping" }, 300, { signal });
+        if (supervisorSupportsMissionControlProtocol(current)) return current;
+        lastError = new Error(`Supervisor advertises Mission Control event protocol ${String(current?.missionControl?.protocolVersion ?? "missing")}; expected ${MISSION_CONTROL_EVENT_PROTOCOL_VERSION}.`);
       } catch (error) {
         lastError = error;
-        await pause(50);
       }
+      await pause(50);
     }
     throw new Error(`Collaboration supervisor did not become ready: ${lastError?.message || "unknown error"}`);
   } finally {
@@ -144,7 +216,7 @@ async function ensureSupervisor({ runtimeRoot, workspaceRoot, stateDirectory, en
   }
 }
 
-async function stopLegacySupervisor({ previous, runtimeRoot, stateDirectory }) {
+async function stopSupervisorAfterIdentityCheck({ previous, runtimeRoot, stateDirectory }) {
   const metadata = JSON.parse(await readFile(join(stateDirectory, "supervisor.json"), "utf8"));
   const commandRes = processProbe(previous.supervisorPid, "command");
   const observedStartRes = processProbe(previous.supervisorPid, "lstart");
@@ -162,7 +234,7 @@ async function stopLegacySupervisor({ previous, runtimeRoot, stateDirectory }) {
     || resolve(metadata.stateDirectory || "") !== resolve(stateDirectory)
     || !command?.includes("collaboration-supervisor.mjs")
     || !startIdentityMatches) {
-    throw new Error("Legacy supervisor identity could not be verified; refresh was refused.");
+    throw new Error("Supervisor identity could not be verified; refresh was refused.");
   }
   process.kill(previous.supervisorPid, "SIGTERM");
   return { ...previous, accepted: true, legacySignal: true };
@@ -242,6 +314,20 @@ export async function readMissionControlEvents({
   }, Math.min(15_000, Math.max(5_000, waitMs + 5_000)), { signal });
 }
 
+export async function refreshMissionControlRepositories({
+  runtimeRoot = resolve(fileURLToPath(new URL("..", import.meta.url))),
+  workspaceRoot = resolve(process.env.BRIDGE_WORKSPACE_ROOT || runtimeRoot),
+  stateDirectory = resolve(process.env.BRIDGE_COLLABORATION_DIR || collaborationDirectory(workspaceRoot)),
+  signal,
+} = {}) {
+  const endpoint = supervisorEndpoint(stateDirectory);
+  await ensureSupervisor({ runtimeRoot, workspaceRoot, stateDirectory, endpoint, signal });
+  // Repository probes are individually bounded, but the aggregate scan scales with
+  // the number of lanes. The caller already runs this operation off the render path;
+  // keep it abortable without imposing an unrelated whole-scan deadline.
+  return request(endpoint, { type: "mission_control_refresh_repositories" }, 0, { signal });
+}
+
 export async function refreshSupervisor({
   runtimeRoot = resolve(fileURLToPath(new URL("..", import.meta.url))),
   workspaceRoot = resolve(process.env.BRIDGE_WORKSPACE_ROOT || runtimeRoot),
@@ -265,7 +351,7 @@ export async function refreshSupervisor({
   }
 
   const accepted = legacy
-    ? await stopLegacySupervisor({ previous, runtimeRoot, stateDirectory })
+    ? await stopSupervisorAfterIdentityCheck({ previous, runtimeRoot, stateDirectory })
     : await request(endpoint, { type: "refresh" }, 2_000);
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline && processAlive(previous.supervisorPid)) {

@@ -245,6 +245,12 @@ export function projectMissionControlViewModel(eventState, clientState = {}) {
     sync: structuredClone(eventState.sync || null),
     repositories,
     portfolios: Object.values(eventState.portfolios || {}).map((portfolio) => structuredClone(portfolio)),
+    providers: Object.values(eventState.providers || {}).map((provider) => structuredClone(provider)),
+    providerCapacity: Object.fromEntries(Object.values(eventState.capacities || {}).map(({ providerId, ...capacity }) => [
+      providerId,
+      structuredClone(capacity),
+    ])),
+    quotas: Object.values(eventState.quotas || {}).map((quota) => structuredClone(quota)),
     tabs: MISSION_CONTROL_VIEW_TABS,
     collections,
     selection: {

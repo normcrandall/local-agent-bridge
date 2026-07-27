@@ -2,9 +2,17 @@
 
 import assert from "node:assert/strict";
 import { createMissionControlSubscriptionClient } from "../src/mission-control-client.mjs";
+import { supervisorSupportsMissionControlProtocol } from "../src/worker-supervisor-client.mjs";
 import { MISSION_CONTROL_EVENT_PROTOCOL_VERSION } from "../src/mission-control-event-protocol.mjs";
 
 const streamId = "mission-control-client-test";
+assert.equal(supervisorSupportsMissionControlProtocol({
+  protocol: 1,
+  missionControl: { protocolVersion: MISSION_CONTROL_EVENT_PROTOCOL_VERSION },
+}), true);
+assert.equal(supervisorSupportsMissionControlProtocol({ protocol: 1, missionControl: { protocolVersion: 1 } }), false);
+assert.equal(supervisorSupportsMissionControlProtocol({ protocol: 1 }), false,
+  "a supervisor from before event-protocol negotiation must not be silently reused");
 const occurredAt = (sequence) => new Date(Date.parse("2026-07-26T19:00:00.000Z") + sequence * 1_000).toISOString();
 const repository = { id: "norm/example" };
 const lane = (status, updatedAt = occurredAt(0)) => ({

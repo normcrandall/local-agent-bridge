@@ -89,7 +89,11 @@ function projectSnapshot(snapshot, maxBytes = MISSION_CONTROL_SNAPSHOT_MAX_BYTES
     portfolios: [...portfolios.values()],
     lanes: normalizedLanes,
     providers: [...providers.values()],
+    capacities: Object.entries(snapshot?.providerCapacity || {})
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([providerId, capacity]) => stableClone({ providerId, ...capacity })),
     quotas: [],
+    metadata: stableClone({ stateRoot: snapshot?.stateRoot || null }),
   });
   const actualBytes = Buffer.byteLength(JSON.stringify(projected));
   if (actualBytes > maxBytes) {
@@ -159,6 +163,7 @@ export class MissionControlEventStream {
 
   get status() {
     return {
+      protocolVersion: MISSION_CONTROL_EVENT_PROTOCOL_VERSION,
       streamId: this.#streamId,
       cursor: this.#sequence,
       degraded: Boolean(this.#degraded),
@@ -246,6 +251,7 @@ export class MissionControlEventStream {
         ["portfolios", (entry) => `${entry.repository}\0${entry.id}`, "portfolio.updated", "portfolio.removed", (entry) => ({ repository: entry.repository, portfolioId: entry.id })],
         ["lanes", (entry) => `${entry.repository}\0${entry.id}`, "lane.updated", "lane.removed", (entry) => ({ repository: entry.repository, laneId: entry.id })],
         ["providers", (entry) => `${entry.repository}\0${entry.laneId}\0${entry.id}`, "provider.updated", "provider.removed", (entry) => ({ repository: entry.repository, laneId: entry.laneId, providerId: entry.id })],
+        ["capacities", (entry) => entry.providerId, "capacity.updated", "capacity.removed", (entry) => ({ providerId: entry.providerId })],
         ["quotas", (entry) => entry.providerId, "quota.updated", null, (entry) => ({ providerId: entry.providerId })],
       ];
       for (const [name, keyFor, updateType, removeType, identityFor] of definitions) {
