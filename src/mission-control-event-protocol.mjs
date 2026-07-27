@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-export const MISSION_CONTROL_EVENT_PROTOCOL_VERSION = 1;
+export const MISSION_CONTROL_EVENT_PROTOCOL_VERSION = 2;
 
 export const MISSION_CONTROL_EVENT_TYPES = Object.freeze([
   "snapshot",
@@ -117,6 +117,12 @@ function validateSnapshotCollection(value, name) {
   });
 }
 
+function validateSnapshotMetadata(value) {
+  if (value === undefined) return {};
+  if (!isRecord(value)) throw new Error("snapshot payload.metadata must be an object.");
+  return clone(value);
+}
+
 export function validateMissionControlSnapshotPayload(value) {
   if (!isRecord(value)) throw new Error("snapshot payload must be an object.");
   const repositories = validateSnapshotCollection(value.repositories, "repositories");
@@ -125,6 +131,7 @@ export function validateMissionControlSnapshotPayload(value) {
   const providers = validateSnapshotCollection(value.providers, "providers");
   const capacities = validateSnapshotCollection(value.capacities, "capacities");
   const quotas = validateSnapshotCollection(value.quotas, "quotas");
+  const metadata = validateSnapshotMetadata(value.metadata);
 
   const repositoryIds = new Set();
   for (const repository of repositories) {
@@ -184,7 +191,7 @@ export function validateMissionControlSnapshotPayload(value) {
     capacityIds.add(id);
   }
 
-  return { repositories, portfolios, lanes, providers, capacities, quotas };
+  return { repositories, portfolios, lanes, providers, capacities, quotas, metadata };
 }
 
 export function validateMissionControlEventEnvelope(value) {

@@ -478,31 +478,43 @@ export function projectMissionControlSubscribedSnapshot(eventState, viewModel, {
     .map((lane) => lane.key || `${lane.repository}\0${lane.id}`));
   const tabLanes = matching.filter((lane) => selectedKeys.has(lane.key || `${lane.repository}\0${lane.id}`));
   const stale = tabLanes.filter((lane) => isStaleLane(lane, now, staleAfterMs));
-  const selected = selectedTab === "needsYou"
-    ? tabLanes.filter((lane) => includeStale || !isStaleLane(lane, now, staleAfterMs))
-    : tabLanes;
+  const selected = tabLanes
+    .filter((lane) => includeStale || !isStaleLane(lane, now, staleAfterMs))
+    .sort((left, right) => left.repository.localeCompare(right.repository)
+      || statusRank(left.lifecyclePhase) - statusRank(right.lifecyclePhase)
+      || dateMs(right.updatedAt) - dateMs(left.updatedAt)
+      || left.id.localeCompare(right.id));
+  const operatorSource = [...new Set([
+    ...selected,
+    ...matching.filter((lane) => portfolioTerminalStatus(lane)),
+  ])];
   const preserveTabHistory = ["reviews", "mergeTrain", "history"].includes(selectedTab);
-  const operatorLanes = deduplicateOperatorLanes(selected, {
+  const operatorLanes = deduplicateOperatorLanes(operatorSource, {
     now,
-    includeHistory: preserveTabHistory || (selectedTab === "needsYou" && includeStale),
+    includeHistory: preserveTabHistory || (selectedTab !== "active" && includeStale),
     staleAfterMs,
   });
-  const matchingKeys = new Set(matching.map((lane) => lane.key || `${lane.repository}\0${lane.id}`));
-  const collectionCount = (name) => (viewModel?.collections?.[name] || [])
-    .filter((lane) => matchingKeys.has(lane.key || `${lane.repository}\0${lane.id}`)).length;
-  const operatorCounts = {
-    active: collectionCount("active"),
-    needs_user: collectionCount("needsYou"),
-    waiting: collectionCount("queue"),
-    stopped: collectionCount("history"),
-    failed: 0,
-    history: collectionCount("history"),
-  };
+  const operatorCounts = { active: 0, needs_user: 0, waiting: 0, stopped: 0, failed: 0, history: 0 };
+  for (const lane of operatorLanes) operatorCounts[lane.operatorCategory] = (operatorCounts[lane.operatorCategory] || 0) + 1;
   operatorCounts.failed = operatorCounts.stopped;
   const lifecycleCounts = Object.fromEntries([
     "active", "queued", "blocked", "needs_user", "recovering", "terminal", "stale", "historical",
   ].map((category) => [category, 0]));
-  for (const lane of matching) lifecycleCounts[canonicalLifecycleCategory(lane, now, staleAfterMs)] += 1;
+  for (const lane of operatorLanes) lifecycleCounts[canonicalLifecycleCategory(lane, now, staleAfterMs)] += 1;
+  lifecycleCounts.stale += stale.filter((lane) => !operatorLanes.some((operator) => operator.relatedLaneIds?.includes(lane.id))).length;
+
+  const operatorCategorized = matching.map((lane) => ({ lane, category: operatorLaneCategory(lane, now, staleAfterMs) }));
+  const liveRepositories = new Set(operatorCategorized
+    .filter(({ category }) => category === "active")
+    .map(({ lane }) => lane.repository));
+  const liveOperatorIds = new Set(operatorCategorized.filter(({ lane, category }) => {
+    if (!category) return false;
+    if (["active", "needs_user"].includes(category)) return true;
+    return liveRepositories.size === 0 || liveRepositories.has(lane.repository);
+  }).map(({ lane }) => lane.id));
+  const scopedOutLanes = selectedTab === "active" && liveRepositories.size > 0
+    ? operatorCategorized.filter(({ lane, category }) => category && !liveOperatorIds.has(lane.id)).map(({ lane }) => lane)
+    : [];
 
   const allNeedsUser = matching.filter((lane) => laneNeedsUser(lane));
   const needsUser = allNeedsUser.filter((lane) => attentionRequestIsFresh(lane, now));
@@ -537,8 +549,10 @@ export function projectMissionControlSubscribedSnapshot(eventState, viewModel, {
     mode: selectedTab === "active" ? "live" : selectedTab === "history" ? "all" : "attention",
     selectedTab,
     filter: repositoryFilter,
+    stateRoot: eventState?.metadata?.stateRoot || null,
     repositories: viewModel?.repositories || [],
-    collapsedStale: selectedTab === "needsYou" && !includeStale ? summarizeCollapsedStale(stale) : summarizeCollapsedStale([]),
+    visibleRepositories: new Set(selected.map((lane) => lane.repository)).size,
+    collapsedStale: !includeStale ? summarizeCollapsedStale(stale) : summarizeCollapsedStale([]),
     staleAfterMs,
     includeStale,
     providerActivity,
@@ -546,14 +560,24 @@ export function projectMissionControlSubscribedSnapshot(eventState, viewModel, {
     operatorCounts,
     lifecycleCounts,
     operatorLanes,
+    scopedOut: {
+      total: scopedOutLanes.length,
+      repositories: [...new Set(scopedOutLanes.map((lane) => lane.repository))].sort(),
+    },
     needsUserCount: needsUser.length,
     historicalNeedsUserCount: allNeedsUser.length - needsUser.length,
+    needsUserRequests: needsUser.map((lane) => ({
+      id: lane.id,
+      repository: lane.repository,
+      summary: lane.coordinatorWake?.summary || lane.blocker?.decisionEscalation?.question || lane.task || "Protected decision",
+      requestedAt: attentionRequestAt(lane),
+    })),
     needsUserKeys,
     needsUserSignature: needsUserKeys.join("|"),
     recentActivity,
     totalLanes: matching.length,
     visibleLanes: selected.length,
-    lanes: matching,
+    lanes: selected,
     eventCursor: eventState?.cursor ?? null,
   };
 }

@@ -38,7 +38,14 @@ const snapshot = envelope(10, "snapshot", {
 
 assert.ok(MISSION_CONTROL_EVENT_TYPES.includes("snapshot"));
 assert.equal(validateMissionControlEventEnvelope(snapshot).cursor, 10);
-assert.throws(() => validateMissionControlEventEnvelope({ ...snapshot, version: 2 }), /Unsupported.*version/i);
+assert.throws(() => validateMissionControlEventEnvelope({ ...snapshot, version: MISSION_CONTROL_EVENT_PROTOCOL_VERSION + 1 }), /Unsupported.*version/i);
+assert.throws(() => validateMissionControlEventEnvelope({ ...snapshot, version: 1 }), /Unsupported.*version/i,
+  "a version-1 snapshot must fail closed after capacity events expand the wire contract");
+const { capacities: _omittedCapacities, ...snapshotWithoutCapacitiesPayload } = snapshot.payload;
+assert.deepEqual(validateMissionControlEventEnvelope({
+  ...snapshot,
+  payload: snapshotWithoutCapacitiesPayload,
+}).payload.capacities, [], "a version-2 snapshot from a capacity-unaware producer remains readable");
 assert.throws(() => validateMissionControlEventEnvelope({ ...snapshot, cursor: 9 }), /cursor.*sequence/i);
 assert.throws(() => validateMissionControlEventEnvelope({ ...snapshot, occurredAt: "not-a-date" }), /occurredAt/i);
 assert.throws(() => validateMissionControlEventEnvelope({ ...snapshot, occurredAt: "2026-02-30T12:00:00Z" }), /occurredAt/i);
@@ -122,6 +129,8 @@ const capacityState = reduceMissionControlEvent(initial, capacityUpdate);
 assert.equal(capacityState.capacities.claude.work.inUse, 2);
 assert.equal(capacityState.capacities.claude.review.queued, 4);
 assert.throws(() => validateMissionControlEventEnvelope({ ...capacityUpdate, repository: "norm/example" }), /machine-global/i);
+assert.throws(() => validateMissionControlEventEnvelope({ ...capacityUpdate, version: 1 }), /Unsupported.*version/i,
+  "a capacity delta cannot masquerade as the pre-capacity protocol");
 
 const snapshotAfterDeltas = envelope(15, "snapshot", {
   repositories: Object.values(current.repositories),

@@ -93,6 +93,7 @@ function projectSnapshot(snapshot, maxBytes = MISSION_CONTROL_SNAPSHOT_MAX_BYTES
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([providerId, capacity]) => stableClone({ providerId, ...capacity })),
     quotas: [],
+    metadata: stableClone({ stateRoot: snapshot?.stateRoot || null }),
   });
   const actualBytes = Buffer.byteLength(JSON.stringify(projected));
   if (actualBytes > maxBytes) {

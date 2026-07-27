@@ -45,6 +45,7 @@ import {
 import { PORTFOLIO_STATUSES, PORTFOLIO_STATUS_GROUPS } from "../src/portfolio-status.mjs";
 import {
   missionControlActionAvailability,
+  createMissionControlRepositoryRefreshController,
   createMissionControlPaneLayout,
   missionControlPaneControlIntent,
   missionControlPaneFocusIntent,
@@ -58,6 +59,7 @@ import {
   resolveMissionControlSelection,
   runClipboardCopy,
 } from "../src/mission-control-actions.mjs";
+import { missionControlEventProjection } from "../src/mission-control-event-stream.mjs";
 
 assert.equal(parseRepositoryRemote("https://token@example.com/owner/repo.git"), "owner/repo");
 assert.equal(parseRepositoryRemote("git@github.com:owner/repo.git"), "owner/repo");
@@ -73,6 +75,34 @@ assert.equal(paneFocusIntent("\t", 0), 1);
 assert.equal(paneFocusIntent("\x1b[C", 2), 0);
 assert.equal(paneFocusIntent("\x1b[D", 0), 2);
 assert.equal(paneFocusIntent("j", 1), 1);
+let finishRepositoryRefresh;
+let repositoryRefreshCalls = 0;
+const repositoryRefreshResults = [];
+const repositoryRefreshController = createMissionControlRepositoryRefreshController({
+  refresh: async () => {
+    repositoryRefreshCalls += 1;
+    return new Promise((resolvePromise) => { finishRepositoryRefresh = resolvePromise; });
+  },
+  onResult: (result) => repositoryRefreshResults.push(result),
+});
+const firstRepositoryRefresh = repositoryRefreshController.start();
+const duplicateRepositoryRefresh = repositoryRefreshController.start();
+assert.equal(firstRepositoryRefresh.started, true);
+assert.equal(duplicateRepositoryRefresh.started, false);
+assert.equal(duplicateRepositoryRefresh.promise, firstRepositoryRefresh.promise);
+await Promise.resolve();
+assert.equal(repositoryRefreshCalls, 1, "repeated r input must share one non-blocking supervisor refresh");
+finishRepositoryRefresh({ cursor: 9 });
+assert.deepEqual(await firstRepositoryRefresh.promise, { status: "refreshed", result: { cursor: 9 } });
+await Promise.resolve();
+assert.equal(repositoryRefreshController.inFlight, false);
+assert.equal(repositoryRefreshResults[0].status, "refreshed");
+const failedRepositoryRefreshController = createMissionControlRepositoryRefreshController({
+  refresh: async () => { throw new Error("supervisor unavailable"); },
+});
+const failedRepositoryRefresh = await failedRepositoryRefreshController.start().promise;
+assert.equal(failedRepositoryRefresh.status, "failed");
+assert.match(failedRepositoryRefresh.error.message, /supervisor unavailable/);
 const defaultPaneLayout = createMissionControlPaneLayout();
 assert.equal(defaultPaneLayout.split, true);
 assert.deepEqual(defaultPaneLayout.detached, []);
@@ -354,6 +384,17 @@ const subscribedEnvelope = {
         updatedAt: new Date(now - 2 * 60 * 60 * 1_000).toISOString(),
         portfolio: { portfolioId: "helm-stale", itemId: "issue-239", status: "blocked" },
       },
+      {
+        id: "superseded-blocked-attempt", repository: "norm/subscribed", type: "collaboration",
+        lifecyclePhase: "blocked", status: "blocked", task: "Already delivered blocked attempt",
+        issueNumber: 55, prNumber: 56, updatedAt: new Date(now - 30_000).toISOString(),
+      },
+      {
+        id: "terminal-delivery-evidence", repository: "norm/subscribed", type: "portfolio_lane",
+        lifecyclePhase: "completed", status: "completed", issueNumber: 55, prNumber: 56,
+        updatedAt: new Date(now - 20_000).toISOString(),
+        portfolio: { portfolioId: "helm-delivered", itemId: "issue-55", status: "merged" },
+      },
     ],
   },
 };
@@ -369,7 +410,9 @@ assert.deepEqual(subscribedHiddenStale.providerCapacity.codex, {
   work: { limit: 5, inUse: 2, queued: 1 },
   review: { limit: 10, inUse: 3, queued: 4 },
 }, "subscribed capacity must preserve independent work and review roles");
-assert.deepEqual(subscribedHiddenStale.recentActivity.map((activity) => activity.id), ["recent-completion"]);
+assert.deepEqual(subscribedHiddenStale.recentActivity.map((activity) => activity.id), [
+  "terminal-delivery-evidence", "superseded-blocked-attempt", "recent-completion",
+]);
 assert.equal(subscribedHiddenStale.historicalNeedsUserCount, 1);
 assert.equal(subscribedHiddenStale.collapsedStale.total, 1);
 assert.equal(subscribedHiddenStale.operatorLanes.length, 0, "stale attention stays collapsed by default");
@@ -379,10 +422,42 @@ const subscribedRevealedStale = projectMissionControlSubscribedSnapshot(subscrib
   staleAfterMs: 60 * 60 * 1_000,
   now,
 });
-assert.deepEqual(subscribedRevealedStale.operatorLanes.map((lane) => lane.id), ["historical-input"]);
+assert.deepEqual(subscribedRevealedStale.operatorLanes.map((lane) => lane.id).sort(), ["historical-input", "terminal-delivery-evidence"]);
+const subscribedHiddenQueueStale = projectMissionControlSubscribedSnapshot(subscribedEventState, subscribedViewModel, {
+  selectedTab: "queue",
+  includeStale: false,
+  staleAfterMs: 60 * 60 * 1_000,
+  now,
+});
+assert.equal(subscribedHiddenQueueStale.collapsedStale.total, 1);
+assert.equal(subscribedHiddenQueueStale.operatorLanes.length, 0, "stale filtering applies outside Needs You");
+const subscribedRevealedQueueStale = projectMissionControlSubscribedSnapshot(subscribedEventState, subscribedViewModel, {
+  selectedTab: "queue",
+  includeStale: true,
+  staleAfterMs: 60 * 60 * 1_000,
+  now,
+});
+assert.deepEqual(subscribedRevealedQueueStale.operatorLanes.map((lane) => lane.id).sort(), ["stale-blocked", "terminal-delivery-evidence"]);
+const deliveredQueueGroup = subscribedRevealedQueueStale.operatorLanes
+  .find((lane) => lane.relatedLaneIds?.includes("superseded-blocked-attempt"));
+assert.equal(deliveredQueueGroup.id, "terminal-delivery-evidence");
+assert.equal(deliveredQueueGroup.operatorCategory, "history",
+  "terminal portfolio evidence must supersede an otherwise actionable attempt for the same PR");
+const subscribedHistory = projectMissionControlSubscribedSnapshot(subscribedEventState, subscribedViewModel, {
+  selectedTab: "history",
+  includeStale: true,
+  now,
+});
+assert.equal(
+  ["active", "needs_user", "waiting", "stopped", "history"].reduce((total, category) => total + subscribedHistory.operatorCounts[category], 0),
+  subscribedHistory.operatorLanes.length,
+  "subscribed operator counts must count canonical deduplicated rows exactly once",
+);
+assert.equal(subscribedHistory.operatorCounts.history,
+  subscribedHistory.operatorLanes.filter((lane) => lane.operatorCategory === "history").length);
 const subscribedAfterRecentWindow = projectMissionControlSubscribedSnapshot(subscribedEventState, subscribedViewModel, {
   selectedTab: "active",
-  now: now + 4 * 60 * 1_000 + 1,
+  now: now + 5 * 60 * 1_000 + 1,
 });
 assert.deepEqual(subscribedAfterRecentWindow.recentActivity, [], "client redraw time must expire the five-minute recent window without polling");
 
@@ -488,6 +563,31 @@ try {
   assert.equal(live.needsUserCount, 1);
   assert.match(live.needsUserSignature, new RegExp(needsUserId));
   assert.deepEqual(live.needsUserRequests.map(({ repository, summary }) => ({ repository, summary })), [{ repository: "norm/example", summary: "Authorization required" }]);
+
+  const subscriptionSource = await loadMissionControlSnapshot({ stateRoot: root, view: "all", includeStale: true, now });
+  const subscriptionEnvelope = {
+    version: MISSION_CONTROL_EVENT_PROTOCOL_VERSION,
+    streamId: "mission-control-differential-parity",
+    sequence: 0,
+    cursor: 0,
+    type: "snapshot",
+    occurredAt: new Date(now).toISOString(),
+    payload: missionControlEventProjection(subscriptionSource),
+  };
+  const differentialEventState = createMissionControlEventState(subscriptionEnvelope);
+  const differentialViewModel = projectMissionControlViewModel(differentialEventState);
+  const differentialSubscribed = projectMissionControlSubscribedSnapshot(differentialEventState, differentialViewModel, {
+    selectedTab: "active",
+    now,
+  });
+  for (const field of [
+    "stateRoot", "visibleRepositories", "scopedOut", "needsUserRequests",
+    "historicalNeedsUserCount", "recentActivity", "providerCapacity",
+  ]) {
+    assert.deepEqual(differentialSubscribed[field], live[field], `subscribed ${field} must match the authoritative snapshot projection`);
+  }
+  assert.deepEqual(differentialSubscribed.lanes.map((lane) => lane.id), live.lanes.map((lane) => lane.id),
+    "subscribed visible lanes must use the authoritative repository/status/time/id ordering");
 
   const ledgerNoiseRoot = join(root, "ledger-noise-test");
   await mkdir(ledgerNoiseRoot);

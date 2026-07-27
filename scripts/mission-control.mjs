@@ -19,6 +19,7 @@ import {
 } from "../src/mission-control.mjs";
 import {
   missionControlActionAvailability,
+  createMissionControlRepositoryRefreshController,
   missionControlConfirmation,
   missionControlCopyText,
   createMissionControlPaneLayout,
@@ -164,6 +165,16 @@ const seenAttentionKeys = new Set();
 let resolveExit;
 const exitRequested = new Promise((resolvePromise) => { resolveExit = resolvePromise; });
 const restoreSequence = "\x1b[?25h\x1b[?1049l";
+const repositoryRefresh = createMissionControlRepositoryRefreshController({
+  refresh: refreshMissionControlRepositories,
+  onResult: (outcome) => {
+    if (stopped) return;
+    actionMessage = outcome.status === "refreshed"
+      ? `Repository cache refreshed at event cursor ${outcome.result.cursor}.`
+      : `Repository cache refresh failed: ${outcome.error.message}`;
+    void draw();
+  },
+});
 
 function restore() {
   if (restorePromise) return restorePromise;
@@ -479,17 +490,15 @@ async function handleKey(key) {
   }
   else if (key === "r") {
     clearRepositoryCache();
-    try {
-      const refreshed = await refreshMissionControlRepositories({
-        runtimeRoot: resolve(import.meta.dirname, ".."),
-        workspaceRoot: resolve(import.meta.dirname, ".."),
-        stateDirectory: stateRoot,
-        signal: subscriptionAbort.signal,
-      });
-      actionMessage = `Repository cache refreshed at event cursor ${refreshed.cursor}.`;
-    } catch (error) {
-      actionMessage = `Repository cache refresh failed: ${error.message}`;
-    }
+    const refresh = repositoryRefresh.start({
+      runtimeRoot: resolve(import.meta.dirname, ".."),
+      workspaceRoot: resolve(import.meta.dirname, ".."),
+      stateDirectory: stateRoot,
+      signal: subscriptionAbort.signal,
+    });
+    actionMessage = refresh.started
+      ? "Repository cache refresh started."
+      : "Repository cache refresh already in progress.";
   }
   else if (activePane === 1) {
     const intent = navigationIntent(key, selectedIndex);

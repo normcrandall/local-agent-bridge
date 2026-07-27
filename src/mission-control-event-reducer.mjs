@@ -42,7 +42,7 @@ function retainedEventDigests(digests, cursor) {
 }
 
 function stateFromSnapshot(event, previousState = null) {
-  const { repositories, portfolios, lanes, providers, capacities, quotas } = event.payload;
+  const { repositories, portfolios, lanes, providers, capacities, quotas, metadata } = event.payload;
   const preserveReplayEvidence = previousState?.streamId === event.streamId;
   return {
     version: MISSION_CONTROL_EVENT_PROTOCOL_VERSION,
@@ -57,6 +57,7 @@ function stateFromSnapshot(event, previousState = null) {
     providers: indexed(providers, (entry) => missionControlProviderKey(entry.repository, entry.laneId, entry.id)),
     capacities: indexed(capacities, (entry) => entry.providerId),
     quotas: indexed(quotas, (entry) => entry.providerId),
+    metadata: clone(metadata),
     appliedEventDigests: preserveReplayEvidence
       ? retainedEventDigests(previousState.appliedEventDigests, event.cursor)
       : {},
@@ -214,7 +215,7 @@ export function reduceMissionControlEvent(currentState, envelope) {
       snapshotAt: null,
       updatedAt: null,
       sync: readySync(),
-      repositories: {}, portfolios: {}, lanes: {}, providers: {}, capacities: {}, quotas: {}, appliedEventDigests: {},
+      repositories: {}, portfolios: {}, lanes: {}, providers: {}, capacities: {}, quotas: {}, metadata: {}, appliedEventDigests: {},
     }, "snapshot_required", event, null);
   }
   const state = currentState;
