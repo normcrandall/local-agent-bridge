@@ -180,7 +180,9 @@ export async function reconcileMissionControlRemote({
       const key = `${credential.appId || "unknown"}\0${credential.installationId || "unknown"}\0${ticketKey(ticket)}`;
       const cached = cache.get(key);
       if (cached && Date.now() - cached.at < CACHE_MS) {
-        return { lane: structuredClone(cached.value), failures: [] };
+        const lane = structuredClone(cached.value);
+        lane.provenance = { ...lane.provenance, cacheHit: true };
+        return { lane, failures: [] };
       }
       const value = await reconcileLane(ticket, { credential, apiUrl, fetchImpl, signal });
       cache.set(key, { at: Date.now(), value });
@@ -196,7 +198,19 @@ export async function reconcileMissionControlRemote({
     if (result.lane) lanes.push(result.lane);
     failures.push(...result.failures);
   }
-  const status = failures.some((failure) => failure.reason === "offline") ? "offline" : failures.length ? "degraded" : "current";
+  const factLanes = lanes.filter((lane) => lane.issue || lane.pullRequest);
+  const hasRemoteFacts = factLanes.length > 0;
+  const hasFreshRemoteFacts = factLanes.some((lane) => lane.provenance?.cacheHit !== true);
+  const hasOfflineFailure = failures.some((failure) => failure.reason === "offline");
+  const status = failures.length === 0
+    ? "current"
+    : hasFreshRemoteFacts
+      ? "partial"
+      : hasOfflineFailure
+        ? "offline"
+        : hasRemoteFacts
+          ? "partial"
+          : "degraded";
   return {
     version: 1, status, observedAt, lanes, providerCapacity,
     failures: failures.slice(0, 100),

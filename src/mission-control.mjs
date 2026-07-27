@@ -1547,16 +1547,29 @@ export function renderMissionControl(snapshot, {
   lines.push(truncate(`${formatLocalDateTime(snapshot.generatedAt)} · ${repositoryCount} repo${repositoryCount === 1 ? "" : "s"}${snapshot.filter ? ` · ${snapshot.filter}` : ""}`, usableWidth));
   if (snapshot.reconciliation) {
     const reconciliation = snapshot.reconciliation;
+    const failureLabels = [...new Set((reconciliation.failures || []).map((failure) => {
+      const source = String(failure.source || failure.reason || "remote").replaceAll("_", " ");
+      return `${source}${failure.statusCode ? ` ${failure.statusCode}` : ""}`;
+    }))];
+    const failureSummary = failureLabels.slice(0, 3).join(", ")
+      + (failureLabels.length > 3 ? `, +${failureLabels.length - 3} more` : "");
+    const unavailable = failureSummary ? ` · unavailable: ${failureSummary}` : "";
     const label = reconciliation.status === "current"
       ? `REMOTE CURRENT${reconciliation.observedAt ? ` · ${formatLocalDateTime(reconciliation.observedAt)}` : ""}`
-      : reconciliation.status === "refreshing"
-        ? "REMOTE REFRESHING · local journal remains current"
-        : reconciliation.status === "offline"
-          ? "REMOTE OFFLINE · showing local journal state"
-          : reconciliation.status === "local"
-            ? "LOCAL JOURNAL · remote facts pending"
-            : "REMOTE DEGRADED · showing local journal state";
-    const style = reconciliation.status === "current" ? "36" : reconciliation.status === "refreshing" || reconciliation.status === "local" ? "33" : "31;1";
+      : reconciliation.status === "partial"
+        ? `REMOTE PARTIAL${unavailable}`
+        : reconciliation.status === "refreshing"
+          ? "REMOTE REFRESHING · local journal remains current"
+          : reconciliation.status === "offline"
+            ? `REMOTE OFFLINE · showing local journal state${unavailable}`
+            : reconciliation.status === "local"
+              ? "LOCAL JOURNAL · remote facts pending"
+              : `REMOTE DEGRADED · showing local journal state${unavailable}`;
+    const style = reconciliation.status === "current"
+      ? "36"
+      : reconciliation.status === "partial" || reconciliation.status === "refreshing" || reconciliation.status === "local"
+        ? "33"
+        : "31;1";
     lines.push(truncateAnsi(paint(label, style, color), usableWidth));
   }
   const quotaFooter = renderProviderQuotaFooter(snapshot.providerQuota, { width: usableWidth, color });

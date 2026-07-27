@@ -1309,6 +1309,24 @@ try {
   assert.match(noColor, /ITEM\s+AGENT\s+ROLE\s+UPDATED/);
   assert.match(noColor, /q quit/);
   assert.match(noColor, /D reattach/);
+  const partialRemote = renderMissionControl({
+    ...attention,
+    reconciliation: {
+      status: "partial",
+      observedAt: new Date(now).toISOString(),
+      accepted: 1,
+      rejected: 0,
+      failures: [
+        { source: "statuses", reason: "remote_error", statusCode: 403 },
+        { source: "statuses", reason: "remote_error", statusCode: 403 },
+        { source: "check_runs", reason: "remote_error", statusCode: 403 },
+        { source: "reviews", reason: "remote_error", statusCode: 403 },
+        { source: "pull_request", reason: "remote_error", statusCode: 503 },
+      ],
+    },
+  }, { selectedIndex, timeline, width: 120, height: 28, now, color: false, interactive: true });
+  assert.match(partialRemote, /REMOTE PARTIAL · unavailable: statuses 403, check runs 403, reviews 403, \+1 more/);
+  assert.doesNotMatch(partialRemote, /showing local journal state/);
   const collapsedPaneOutput = renderMissionControl(attention, {
     selectedIndex, timeline, width: 120, height: 20, color: false, activePane: 1,
     paneLayout: { ...defaultPaneLayout, split: false },
