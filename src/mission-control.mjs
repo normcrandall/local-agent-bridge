@@ -1218,6 +1218,20 @@ function detailPane(lane, timeline, width, now, snapshot, expanded = false) {
       const lastActivityAt = activity.lastOutputAt || activity.lastToolAt || activity.lastProgressAt;
       rows.push(paneLine(`ACTIVITY  ${count} events · ${Number(activity.outputBytes || 0)} bytes${lastActivityAt ? ` · ${age(lastActivityAt, now)} ago` : ""}`, "90"));
     }
+    const outputRecords = Array.isArray(lane.output) ? lane.output : [];
+    rows.push(paneLine(""), paneLine(`OUTPUT  ${outputRecords.length} records`, "1"));
+    for (const record of outputRecords.slice(-3)) {
+      const text = typeof record === "string"
+        ? record
+        : typeof record?.text === "string"
+          ? record.text
+          : typeof record?.summary === "string"
+            ? record.summary
+            : JSON.stringify(record);
+      const lines = wrap(text, width);
+      rows.push(...lines.slice(0, 2).map((line) => paneLine(line, "90")));
+      if (lines.length > 2) rows.push(paneLine(`… ${lines.length - 2} more lines`, "90"));
+    }
   }
   const events = coalesceTimeline(timeline, 4);
   if (events.length) {

@@ -925,6 +925,76 @@ try {
   assert.match(rendered, /UPDATED.*2026/);
   assert.match(rendered, /SUMMARY STALE.*heartbeat remains live/);
   assert.match(rendered, /ACTIVITY.*3 events.*412 bytes/);
+  const outputLane = {
+    ...attention.operatorLanes[selectedIndex],
+    output: [
+      ...Array.from({ length: 7 }, (_, index) => ({ text: `hidden output ${index}` })),
+      "tail string",
+      { text: "tail text" },
+      { summary: "tail summary" },
+    ],
+  };
+  const outputSnapshot = { ...attention, lanes: [outputLane], operatorLanes: [outputLane] };
+  const outputRendered = renderMissionControl(outputSnapshot, {
+    selectedIndex: 0,
+    selectedRepository: outputLane.repository,
+    width: 160,
+    height: 80,
+    now,
+    color: false,
+    interactive: false,
+    detailExpanded: true,
+  });
+  assert.match(outputRendered, /OUTPUT\s+10 records/);
+  assert.match(outputRendered, /tail string/);
+  assert.match(outputRendered, /tail text/);
+  assert.match(outputRendered, /tail summary/);
+  assert.doesNotMatch(outputRendered, /hidden output 6/);
+  assert.ok(outputRendered.indexOf("METADATA") < outputRendered.indexOf("OUTPUT  10 records"), "output must not displace expanded metadata");
+  const objectOutputLane = { ...outputLane, output: [{ code: 7 }] };
+  assert.match(renderMissionControl({ ...outputSnapshot, lanes: [objectOutputLane], operatorLanes: [objectOutputLane] }, {
+    selectedRepository: objectOutputLane.repository,
+    width: 160,
+    height: 80,
+    now,
+    color: false,
+    interactive: false,
+    detailExpanded: true,
+  }), /\{"code":7\}/);
+  const emptyTextLane = { ...outputLane, output: [{ text: "" }] };
+  const emptyTextRendered = renderMissionControl({ ...outputSnapshot, lanes: [emptyTextLane], operatorLanes: [emptyTextLane] }, {
+    selectedRepository: emptyTextLane.repository,
+    width: 160,
+    height: 80,
+    now,
+    color: false,
+    interactive: false,
+    detailExpanded: true,
+  });
+  assert.match(emptyTextRendered, /OUTPUT\s+1 records/);
+  assert.doesNotMatch(emptyTextRendered, /\{"text":""\}/, "empty text must remain empty instead of falling back to JSON");
+  const longOutputLane = { ...outputLane, output: [`start ${"middle ".repeat(100)}HIDDEN-TAIL`] };
+  const longOutputRendered = renderMissionControl({ ...outputSnapshot, lanes: [longOutputLane], operatorLanes: [longOutputLane] }, {
+    selectedRepository: longOutputLane.repository,
+    width: 100,
+    height: 80,
+    now,
+    color: false,
+    interactive: false,
+    detailExpanded: true,
+  });
+  assert.match(longOutputRendered, /… \d+ more lines/, "bounded output records must disclose omitted wrapped lines");
+  assert.doesNotMatch(longOutputRendered, /HIDDEN-TAIL/, "output rendering remains bounded to two content lines");
+  const noOutputLane = { ...outputLane, output: undefined };
+  assert.match(renderMissionControl({ ...outputSnapshot, lanes: [noOutputLane], operatorLanes: [noOutputLane] }, {
+    selectedRepository: noOutputLane.repository,
+    width: 160,
+    height: 80,
+    now,
+    color: false,
+    interactive: false,
+    detailExpanded: true,
+  }), /OUTPUT\s+0 records/);
   const authorityRendered = renderSnapshot(attention, { selectedIndex, timeline, width: 200, height: 40, now, detailExpanded: true });
   assert.match(authorityRendered, /REBIND.*veliqon-builder\[bot\].*veliqon-codex-writer\[bot\].*provider_writer_selection/);
   assert.match(authorityRendered, /AUTH.*stripped merge/);
