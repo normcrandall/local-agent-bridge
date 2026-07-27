@@ -93,6 +93,7 @@ try {
       BRIDGE_WORKSPACE_ROOT: workspaceRoot,
       BRIDGE_COLLABORATION_DIR: missingPidState,
       BRIDGE_FIXTURE_SUPERVISOR_PID_MODE: "absent",
+      BRIDGE_FIXTURE_SUPERVISOR_ID_MODE: "absent",
       BRIDGE_FIXTURE_SUPPORT_REFRESH: "1",
     },
     detached: true,
@@ -106,7 +107,11 @@ try {
   }, "missing-PID fixture did not start");
   const missingPidPrevious = await getSupervisorStatus({ ...options, stateDirectory: missingPidState });
   assert.equal(missingPidPrevious.supervisorPid, undefined);
+  assert.equal(missingPidPrevious.supervisorId, undefined);
+  const missingIdentityRefreshStartedAt = Date.now();
   const missingPidSnapshot = await getMissionControlEventSnapshot({ ...options, stateDirectory: missingPidState });
+  assert.ok(Date.now() - missingIdentityRefreshStartedAt < 4_000,
+    "a compatible successor must be accepted without the five-second missing-supervisorId false failure");
   const missingPidCurrent = await getSupervisorStatus({ ...options, stateDirectory: missingPidState });
   missingPidReplacement = missingPidCurrent.supervisorPid;
   assert.equal(missingPidSnapshot.version, MISSION_CONTROL_EVENT_PROTOCOL_VERSION);

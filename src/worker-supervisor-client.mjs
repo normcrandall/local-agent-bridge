@@ -102,6 +102,7 @@ async function waitForSupervisorTransition({ endpoint, previous, signal, timeout
     try {
       const current = await request(endpoint, { type: "ping" }, 300, { signal });
       if (previousId && current?.supervisorId !== previousId) return current;
+      if (!previousId && supervisorSupportsMissionControlProtocol(current)) return current;
     } catch (error) {
       if (endpointUnavailable(error)) return null;
       if (error?.name === "AbortError") throw error;

@@ -431,7 +431,9 @@ const subscribedHiddenQueueStale = projectMissionControlSubscribedSnapshot(subsc
 });
 assert.equal(subscribedHiddenQueueStale.collapsedStale.total, 0,
   "collapsed stale disclosure is exclusive to the canonical attention view");
-assert.equal(subscribedHiddenQueueStale.operatorLanes.length, 0, "stale filtering applies outside Needs You");
+assert.equal(subscribedHiddenQueueStale.mode, "all");
+assert.deepEqual(subscribedHiddenQueueStale.operatorLanes.map((lane) => lane.id).sort(), ["stale-blocked", "terminal-delivery-evidence"],
+  "queue rows must not disappear merely because they exceed the attention stale threshold");
 const subscribedRevealedQueueStale = projectMissionControlSubscribedSnapshot(subscribedEventState, subscribedViewModel, {
   selectedTab: "queue",
   includeStale: true,
@@ -439,6 +441,8 @@ const subscribedRevealedQueueStale = projectMissionControlSubscribedSnapshot(sub
   now,
 });
 assert.deepEqual(subscribedRevealedQueueStale.operatorLanes.map((lane) => lane.id).sort(), ["stale-blocked", "terminal-delivery-evidence"]);
+assert.deepEqual(subscribedHiddenQueueStale.operatorLanes, subscribedRevealedQueueStale.operatorLanes,
+  "includeStale must not change non-attention tabs");
 const deliveredQueueGroup = subscribedRevealedQueueStale.operatorLanes
   .find((lane) => lane.relatedLaneIds?.includes("superseded-blocked-attempt"));
 assert.equal(deliveredQueueGroup.id, "terminal-delivery-evidence");
@@ -449,6 +453,37 @@ const subscribedHistory = projectMissionControlSubscribedSnapshot(subscribedEven
   includeStale: true,
   now,
 });
+const subscribedHistoryDefault = projectMissionControlSubscribedSnapshot(subscribedEventState, subscribedViewModel, {
+  selectedTab: "history",
+  includeStale: false,
+  now,
+});
+assert.equal(subscribedHistoryDefault.mode, "all");
+assert.deepEqual(subscribedHistoryDefault.operatorLanes, subscribedHistory.operatorLanes,
+  "history must never silently suppress rows behind the attention stale toggle");
+assert.equal(
+  subscribedHiddenStale.collapsedStale.total,
+  subscribedRevealedStale.lanes.length - subscribedHiddenStale.lanes.length,
+  "collapsedStale must equal the attention rows actually hidden by the stale toggle",
+);
+for (const [tab, expectedMode] of [
+  ["active", "live"],
+  ["queue", "all"],
+  ["reviews", "all"],
+  ["mergeTrain", "all"],
+  ["history", "all"],
+]) {
+  const withoutStaleToggle = projectMissionControlSubscribedSnapshot(subscribedEventState, subscribedViewModel, {
+    selectedTab: tab, includeStale: false, staleAfterMs: 60 * 60 * 1_000, now,
+  });
+  const withStaleToggle = projectMissionControlSubscribedSnapshot(subscribedEventState, subscribedViewModel, {
+    selectedTab: tab, includeStale: true, staleAfterMs: 60 * 60 * 1_000, now,
+  });
+  assert.equal(withoutStaleToggle.mode, expectedMode, `${tab} must expose its canonical snapshot mode`);
+  assert.equal(withoutStaleToggle.collapsedStale.total, 0, `${tab} must not advertise visible rows as collapsed`);
+  assert.deepEqual(withoutStaleToggle.lanes, withStaleToggle.lanes,
+    `${tab} rows must be invariant under the attention-only stale toggle`);
+}
 assert.equal(
   ["active", "needs_user", "waiting", "stopped", "history"].reduce((total, category) => total + subscribedHistory.operatorCounts[category], 0),
   subscribedHistory.operatorLanes.length,
@@ -546,7 +581,7 @@ try {
     items: [{ id: "issue-12", title: "Queued portfolio work", issueNumber: 12, status: "ready", writer: "claude", blockedBy: [] }],
   }));
 
-  const live = await loadMissionControlSnapshot({ stateRoot: root, policyWorkspace: workspace, now });
+  const live = await loadMissionControlSnapshot({ stateRoot: root, now });
   assert.equal(live.mode, "live");
   assert.equal(live.totalLanes, 4);
   assert.equal(live.visibleLanes, 1);
@@ -565,13 +600,7 @@ try {
   assert.match(live.needsUserSignature, new RegExp(needsUserId));
   assert.deepEqual(live.needsUserRequests.map(({ repository, summary }) => ({ repository, summary })), [{ repository: "norm/example", summary: "Authorization required" }]);
 
-  const subscriptionSource = await loadMissionControlSnapshot({
-    stateRoot: root,
-    policyWorkspace: workspace,
-    view: "all",
-    includeStale: true,
-    now,
-  });
+  const subscriptionSource = await loadMissionControlSnapshot({ stateRoot: root, view: "all", includeStale: true, now });
   const subscriptionEnvelope = {
     version: MISSION_CONTROL_EVENT_PROTOCOL_VERSION,
     streamId: "mission-control-differential-parity",
@@ -587,10 +616,8 @@ try {
     selectedTab: "active",
     now,
   });
-  assert.ok(live.deliveryPolicy, "canonical Mission Control must expose its resolved delivery policy");
-  assert.ok(differentialSubscribed.deliveryPolicy, "subscription metadata must retain the resolved delivery policy");
   for (const field of [
-    "deliveryPolicy", "mode", "stateRoot", "repositories", "visibleRepositories", "scopedOut", "needsUserRequests",
+    "mode", "stateRoot", "repositories", "visibleRepositories", "scopedOut", "needsUserRequests",
     "historicalNeedsUserCount", "recentActivity", "providerActivity", "providerCapacity",
   ]) {
     assert.deepEqual(differentialSubscribed[field], live[field], `subscribed ${field} must match the authoritative snapshot projection`);

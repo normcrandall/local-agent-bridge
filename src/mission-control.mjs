@@ -478,8 +478,9 @@ export function projectMissionControlSubscribedSnapshot(eventState, viewModel, {
     .map((lane) => lane.key || `${lane.repository}\0${lane.id}`));
   const tabLanes = matching.filter((lane) => selectedKeys.has(lane.key || `${lane.repository}\0${lane.id}`));
   const stale = tabLanes.filter((lane) => isStaleLane(lane, now, staleAfterMs));
+  const hidesStale = selectedTab === "needsYou" && !includeStale;
   const selected = tabLanes
-    .filter((lane) => includeStale || !isStaleLane(lane, now, staleAfterMs))
+    .filter((lane) => !hidesStale || !isStaleLane(lane, now, staleAfterMs))
     .sort((left, right) => left.repository.localeCompare(right.repository)
       || statusRank(left.lifecyclePhase) - statusRank(right.lifecyclePhase)
       || dateMs(right.updatedAt) - dateMs(left.updatedAt)
@@ -488,10 +489,10 @@ export function projectMissionControlSubscribedSnapshot(eventState, viewModel, {
     ...selected,
     ...matching.filter((lane) => portfolioTerminalStatus(lane)),
   ])];
-  const preserveTabHistory = ["reviews", "mergeTrain", "history"].includes(selectedTab);
+  const preserveTabHistory = !["active", "needsYou"].includes(selectedTab);
   const operatorLanes = deduplicateOperatorLanes(operatorSource, {
     now,
-    includeHistory: preserveTabHistory || (selectedTab !== "active" && includeStale),
+    includeHistory: preserveTabHistory || (selectedTab === "needsYou" && includeStale),
     staleAfterMs,
   });
   const operatorCounts = { active: 0, needs_user: 0, waiting: 0, stopped: 0, failed: 0, history: 0 };
@@ -559,16 +560,15 @@ export function projectMissionControlSubscribedSnapshot(eventState, viewModel, {
   }
   const needsUserKeys = needsUser.map((lane) => `${lane.id}:${lane.coordinatorWake?.sequence || 0}`).sort();
   return {
-    ...(eventState?.metadata?.deliveryPolicy ? { deliveryPolicy: structuredClone(eventState.metadata.deliveryPolicy) } : {}),
     version: 2,
     generatedAt: new Date(now).toISOString(),
-    mode: selectedTab === "active" ? "live" : selectedTab === "history" ? "all" : "attention",
+    mode: selectedTab === "active" ? "live" : selectedTab === "needsYou" ? "attention" : "all",
     selectedTab,
     filter: repositoryFilter,
     stateRoot: eventState?.metadata?.stateRoot || null,
     repositories: [...repositories.values()].sort((left, right) => left.repository.localeCompare(right.repository)),
     visibleRepositories: new Set(selected.map((lane) => lane.repository)).size,
-    collapsedStale: !includeStale && selectedTab === "needsYou" ? summarizeCollapsedStale(stale) : summarizeCollapsedStale([]),
+    collapsedStale: hidesStale ? summarizeCollapsedStale(stale) : summarizeCollapsedStale([]),
     staleAfterMs,
     includeStale,
     providerActivity,

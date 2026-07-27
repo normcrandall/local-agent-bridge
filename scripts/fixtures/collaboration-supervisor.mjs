@@ -14,6 +14,7 @@ const supervisorId = randomUUID();
 const startedAt = new Date().toISOString();
 const pidMode = process.env.BRIDGE_FIXTURE_SUPERVISOR_PID_MODE || "actual";
 const advertisedPid = pidMode === "absent" ? undefined : pidMode === "invalid" ? "not-a-pid" : process.pid;
+const advertisedSupervisorId = process.env.BRIDGE_FIXTURE_SUPERVISOR_ID_MODE === "absent" ? undefined : supervisorId;
 const supportsRefresh = process.env.BRIDGE_FIXTURE_SUPPORT_REFRESH === "1";
 
 await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
@@ -29,7 +30,7 @@ const server = createServer((socket) => {
     const request = JSON.parse(buffer.slice(0, newline));
     if (request.type === "ping") {
       socket.end(`${JSON.stringify({ ok: true, result: {
-        supervisorId,
+        ...(advertisedSupervisorId === undefined ? {} : { supervisorId: advertisedSupervisorId }),
         ...(advertisedPid === undefined ? {} : { supervisorPid: advertisedPid }),
         protocol: 0,
         startedAt,
@@ -39,7 +40,7 @@ const server = createServer((socket) => {
       } })}\n`);
     } else if (request.type === "refresh" && supportsRefresh) {
       socket.end(`${JSON.stringify({ ok: true, result: {
-        supervisorId,
+        ...(advertisedSupervisorId === undefined ? {} : { supervisorId: advertisedSupervisorId }),
         ...(advertisedPid === undefined ? {} : { supervisorPid: advertisedPid }),
         accepted: true,
       } })}\n`, () => void shutdown());
