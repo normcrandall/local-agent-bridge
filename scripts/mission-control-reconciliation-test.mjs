@@ -122,6 +122,19 @@ reconciler.observeLocal(structuredClone(snapshot));
 assert.equal(reconciler.snapshot.value.lanes[0].github.ci.combinedState, "success", "valid remote facts remain visible across local redraws");
 reconciler.stop();
 
+let resolveStaleStream;
+const staleStream = createMissionControlJournalFirstReconciler({
+  reconcile: () => new Promise((resolve) => { resolveStaleStream = resolve; }),
+});
+staleStream.observeLocal(snapshot);
+const staleRefresh = staleStream.refresh();
+staleStream.observeLocal({ ...structuredClone(snapshot), streamId: "mission-control-two" });
+resolveStaleStream(remote);
+assert.equal((await staleRefresh.promise).status, "stale_stream");
+assert.equal(staleStream.snapshot.value.reconciliation.status, "local", "a stream transition cannot leave reconciliation stuck as refreshing");
+assert.equal(staleStream.refresh().started, true, "a stream transition permits immediate reconciliation of the new stream");
+staleStream.stop();
+
 let abortObserved = false;
 const cancellable = createMissionControlJournalFirstReconciler({
   reconcile: ({ signal }) => new Promise((resolve) => {
@@ -223,6 +236,22 @@ assert.equal(rateLimited.status, "degraded");
 assert.ok(rateLimited.failures.some((failure) => failure.reason === "rate_limited"));
 assert.equal(rateLimited.failures.find((failure) => failure.reason === "rate_limited").retryAfterSeconds, 60);
 assert.equal(rateLimited.lanes[0].pullRequest.state, "open", "partial remote facts survive a rate-limited source");
+
+const failedPullTicket = { repository: "owner/pull-failed", laneId: "pull-failed-lane", issueNumber: 1, prNumber: 2, headSha: "9".repeat(40), journalSequence: 1, journalDigest: "4".repeat(64) };
+const failedPull = await reconcileMissionControlRemote({
+  tickets: [failedPullTicket],
+  allowedLanes: [allowedLaneFor(failedPullTicket)],
+  stateRoot: "/tmp/mission-control-test-state",
+  createCredential: async () => ({ token: "ghs_test", verifiedLogin: "builder[bot]", appId: "9", installationId: "10" }),
+  fetchImpl: async (url) => {
+    const path = new URL(url).pathname;
+    if (path.endsWith("/issues/1")) return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ number: 1, state: "open", labels: [] }) };
+    return { ok: false, status: 503, headers: { get: () => null }, json: async () => ({}) };
+  },
+});
+assert.equal(failedPull.lanes[0].observedHeadSha, null);
+assert.equal(failedPull.lanes[0].exactHead, false, "a failed pull-request read cannot claim exact-head freshness from the requested ticket");
+assert.equal(failedPull.lanes[0].ci, null, "head-bound CI is withheld when the pull-request head was not observed");
 
 const offlineTicket = { repository: "owner/offline", laneId: "offline-lane", issueNumber: 1, headSha: null, journalSequence: 1, journalDigest: "2".repeat(64) };
 const offline = await reconcileMissionControlRemote({

@@ -110,7 +110,18 @@ export function createMissionControlJournalFirstReconciler({ reconcile, onUpdate
     active = Promise.resolve(reconcile({ tickets: [...revisions.values()], signal: requestController.signal }))
       .then((remote) => {
         if (stopped || requestGeneration !== generation || requestController.signal.aborted) return { status: "cancelled" };
-        if ((local.streamId || null) !== ticket.streamId) return { status: "stale_stream" };
+        if ((local.streamId || null) !== ticket.streamId) {
+          lastStartedAt = 0;
+          value = {
+            ...preserveRemoteFacts(local, value),
+            reconciliation: {
+              status: "local", source: "repository_journal", observedAt: value?.reconciliation?.observedAt || null,
+              accepted: 0, rejected: 0, failures: [{ reason: "stale_stream", message: "Remote facts were discarded after the local stream changed." }],
+            },
+          };
+          publish();
+          return { status: "stale_stream", value };
+        }
         value = mergeMissionControlRemote(local, remote, ticket);
         publish();
         return { status: remote.status, value };

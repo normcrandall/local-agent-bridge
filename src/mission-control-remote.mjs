@@ -112,7 +112,7 @@ async function reconcileLane(ticket, { credential, apiUrl, fetchImpl, signal }) 
     () => githubGet({ apiUrl, token: credential.token, path: `${base}/pulls/${ticket.prNumber}`, signal, fetchImpl }),
     "pull_request", degradations,
   ) : null;
-  const observedHeadSha = pull?.head?.sha?.toLowerCase() || ticket.headSha;
+  const observedHeadSha = pull?.head?.sha?.toLowerCase() || null;
   const [reviews, statuses, checks] = ticket.prNumber && observedHeadSha ? await Promise.all([
     optional(() => githubGet({ apiUrl, token: credential.token, path: `${base}/pulls/${ticket.prNumber}/reviews?per_page=100`, signal, fetchImpl }), "reviews", degradations),
     optional(() => githubGet({ apiUrl, token: credential.token, path: `${base}/commits/${observedHeadSha}/status`, signal, fetchImpl }), "statuses", degradations),
