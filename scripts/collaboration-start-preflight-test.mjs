@@ -4,6 +4,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
+  deriveIssueTargetBuilderBinding,
   plannedIssueClaimWorktree,
   resolveClaimedWorktreeHead,
   resolveContinuationIssueClaim,
@@ -34,11 +35,49 @@ try {
     cwd: directory,
     encoding: "utf8",
   }).stdout.trim();
+  const expectedBaseRef = spawnSync("git", ["branch", "--show-current"], {
+    cwd: directory,
+    encoding: "utf8",
+  }).stdout.trim();
   assert.deepEqual(
     resolveIssueClaimRevisions({ workspace: directory, headSha: null, baseRef: "HEAD" }),
     { headSha: expectedHead, baseSha: expectedHead },
   );
   assert.equal(resolveClaimedWorktreeHead(directory), expectedHead);
+  const derivedBuilder = deriveIssueTargetBuilderBinding({
+    workspace: directory,
+    issueTarget: { repository: "owner/repo", issueNumber: 264 },
+    worktree: { taskId: "issue-264", branch: "codex/issue-264", base: "HEAD" },
+    expectedLogin: "veliqon-codex-writer",
+    writerProvider: "codex",
+  });
+  assert.deepEqual(derivedBuilder, {
+    repository: "owner/repo",
+    issueNumber: 264,
+    expectedLogin: "veliqon-codex-writer[bot]",
+    writerProvider: "codex",
+    headSha: expectedHead,
+    baseSha: expectedHead,
+    headRef: "codex/issue-264",
+    baseRef: expectedBaseRef,
+    allowedOperations: ["push_branch", "ensure_pull_request"],
+  });
+  assert.equal(deriveIssueTargetBuilderBinding({ githubBuilder: derivedBuilder }), derivedBuilder,
+    "an explicit caller binding must remain authoritative");
+  assert.throws(() => deriveIssueTargetBuilderBinding({
+    workspace: directory,
+    issueTarget: { repository: "owner/repo", issueNumber: 264 },
+    expectedLogin: "veliqon-codex-writer",
+    writerProvider: "codex",
+  }), /self-contained worktree/);
+  assert.throws(() => deriveIssueTargetBuilderBinding({
+    workspace: directory,
+    issueTarget: { repository: "owner/repo", issueNumber: 264 },
+    worktree: { taskId: "issue-264", branch: "codex/issue-264", base: expectedHead.slice(0, 12) },
+    expectedLogin: "veliqon-codex-writer",
+    writerProvider: "codex",
+  }), /existing local or origin branch/,
+  "an abbreviated commit SHA must not be misclassified as a publication base branch");
   assert.equal(
     plannedIssueClaimWorktree({ workspace: directory, worktree: { taskId: "issue-61" }, mode: "review" }),
     resolve(directory, ".bridge/worktrees/issue-61"),

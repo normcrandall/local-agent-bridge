@@ -116,10 +116,12 @@ export function collaborationReuseCompatibility({
 }
 
 export function collaborationTarget(input = {}) {
-  const repository = input.issueClaim?.repository || input.githubReview?.repository || input.githubBuilder?.repository || null;
+  const repository = input.issueClaim?.repository || input.issueTarget?.repository || input.githubReview?.repository || input.githubBuilder?.repository || null;
   if (input.issueClaim?.issueNumber) return { repository, kind: "issue", number: input.issueClaim.issueNumber, headSha: input.issueClaim.headSha || null };
+  if (input.issueTarget?.issueNumber) return { repository, kind: "issue", number: input.issueTarget.issueNumber, headSha: input.githubBuilder?.headSha || null };
   if (input.githubReview?.prNumber) return { repository, kind: "pr", number: input.githubReview.prNumber, headSha: input.githubReview.headSha || null };
   if (input.githubBuilder?.prNumber) return { repository, kind: "pr", number: input.githubBuilder.prNumber, headSha: input.githubBuilder.headSha || null };
+  if (input.githubBuilder?.issueNumber) return { repository, kind: "issue", number: input.githubBuilder.issueNumber, headSha: input.githubBuilder.headSha || null };
   return null;
 }
 
@@ -128,6 +130,7 @@ export function collaborationIdentity({
   mode,
   writer = null,
   issueClaim = null,
+  issueTarget = null,
   githubReview = null,
   githubBuilder = null,
   resumeKey = null,
@@ -141,7 +144,7 @@ export function collaborationIdentity({
   handoffPath = null,
 } = {}) {
   const explicit = clean(resumeKey);
-  const target = collaborationTarget({ issueClaim, githubReview, githubBuilder });
+  const target = collaborationTarget({ issueClaim, issueTarget, githubReview, githubBuilder });
   if (!explicit && !target) return null;
   const scope = explicit
     ? ["explicit", explicit, resolve(workspace)]

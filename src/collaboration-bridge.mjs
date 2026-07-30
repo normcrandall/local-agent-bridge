@@ -75,6 +75,7 @@ import {
   refreshMergeTarget,
 } from "./merge-train.mjs";
 import {
+  deriveIssueTargetBuilderBinding,
   plannedIssueClaimWorktree,
   resolveClaimedWorktreeHead,
   resolveContinuationIssueClaim,
@@ -829,9 +830,9 @@ server.registerTool(
       permissionProfile: permissionProfileSchema,
       handoffPath: handoffPathSchema,
       githubReview: githubReviewSchema,
-      githubBuilder: githubBuilderSchema,
+      githubBuilder: githubBuilderSchema.describe("Optional explicit writer binding. For github-governed issueTarget/issueClaim work with a self-contained checkout, the broker derives the initial minimal binding when omitted."),
       issueClaim: issueClaimSchema,
-      issueTarget: issueTargetSchema,
+      issueTarget: issueTargetSchema.describe("Canonical GitHub issue pointer. The broker hydrates its contents and, for governed work, derives the initial minimal writer binding; do not duplicate the issue body in task prose."),
       taskNumber: z.number().int().nonnegative().optional().describe("Provider rotation seed only. It never identifies a GitHub issue; use issueTarget for that."),
       rotationOffset: z.number().int().default(0),
       worktree: worktreeSchema,
@@ -874,11 +875,6 @@ server.registerTool(
     const startAgent = delegatedAgents.includes(rotated?.writer) ? rotated.writer : native.startAgent;
     validateAgents(delegatedAgents, startAgent);
     const writer = effectiveMode === "work" ? (native.writer || startAgent) : null;
-    assertAutonomousDeliveryBinding({
-      mode: effectiveMode,
-      workProfile: input.workProfile || "exact",
-      githubBuilder: input.githubBuilder || null,
-    });
     if (input.githubReview && !input.handoffPath) throw new Error("githubReview requires handoffPath.");
     if (input.githubBuilder && effectiveMode !== "work") throw new Error("githubBuilder cannot be delegated when the native chair owns the work; the host must perform its own bound delivery phase.");
     if (input.githubReview && effectiveMode === "work" && delegatedAgents.every((agent) => agent === writer)) {
@@ -892,6 +888,45 @@ server.registerTool(
     const deliveryPolicy = await resolveDeliveryPolicy({
       workspace: requestedWorkspace,
       options: input.deliveryProfile ? { deliveryProfile: input.deliveryProfile } : {},
+    });
+    let requestedGithubBuilder = input.githubBuilder || null;
+    const requestedIssueTarget = input.issueTarget
+      || (input.issueClaim ? { repository: input.issueClaim.repository, issueNumber: input.issueClaim.issueNumber } : null);
+    if (effectiveMode === "work"
+      && deliveryPolicy.deliveryProfile === "github-governed"
+      && requestedIssueTarget
+      && !requestedGithubBuilder) {
+      const { configuredWriterLogin } = await import("./github-app-auth.mjs");
+      const writerProvider = writer || input.writer || startAgent;
+      requestedGithubBuilder = deriveIssueTargetBuilderBinding({
+        workspace: requestedWorkspace,
+        issueTarget: input.issueTarget,
+        issueClaim: input.issueClaim,
+        worktree: input.worktree,
+        expectedLogin: await configuredWriterLogin({
+          provider: writerProvider,
+          configPath: process.env.AGENT_BRIDGE_GITHUB_APPS_CONFIG || process.env.GITHUB_APP_CONFIG,
+        }),
+        writerProvider,
+      });
+    }
+    if (input.issueTarget && input.issueClaim
+      && (input.issueTarget.repository !== input.issueClaim.repository
+        || input.issueTarget.issueNumber !== input.issueClaim.issueNumber)) {
+      throw new Error(`issueTarget ${input.issueTarget.repository}#${input.issueTarget.issueNumber} does not match issueClaim ${input.issueClaim.repository}#${input.issueClaim.issueNumber}.`);
+    }
+    if (requestedIssueTarget && requestedGithubBuilder
+      && requestedGithubBuilder.repository !== requestedIssueTarget.repository) {
+      throw new Error(`githubBuilder repository ${requestedGithubBuilder.repository} does not match issueTarget repository ${requestedIssueTarget.repository}.`);
+    }
+    if (requestedIssueTarget && requestedGithubBuilder?.issueNumber
+      && requestedGithubBuilder.issueNumber !== requestedIssueTarget.issueNumber) {
+      throw new Error(`githubBuilder issue #${requestedGithubBuilder.issueNumber} does not match issueTarget ${requestedIssueTarget.repository}#${requestedIssueTarget.issueNumber}.`);
+    }
+    assertAutonomousDeliveryBinding({
+      mode: effectiveMode,
+      workProfile: input.workProfile || "exact",
+      githubBuilder: requestedGithubBuilder,
     });
     if (effectiveMode === "work" && deliveryPolicy.deliveryProfile === "local-only"
       && (input.githubBuilder || input.issueClaim || input.issueTarget)) {
@@ -922,15 +957,16 @@ server.registerTool(
       allowClaudeFable: input.allowClaudeFable,
       handoffPath: input.handoffPath,
       githubReview: input.githubReview,
-      githubBuilder: input.githubBuilder,
+      githubBuilder: requestedGithubBuilder,
     });
     const identityKey = collaborationIdentity({
       workspace: requestedWorkspace,
       mode: effectiveMode,
       writer,
       issueClaim: canonicalIssueClaim,
+      issueTarget: input.issueTarget,
       githubReview: input.githubReview,
-      githubBuilder: input.githubBuilder,
+      githubBuilder: requestedGithubBuilder,
       resumeKey: input.resumeKey,
       agents: delegatedAgents,
       requestedAgents: input.agents,
@@ -977,14 +1013,6 @@ server.registerTool(
     const snapshotCache = repositorySnapshotCache(requestedWorkspace);
 
     try {
-    // The explicit issue target is authoritative for what this lane implements.
-    // A claim always implies its own target; when both are supplied they must
-    // agree exactly rather than silently preferring one binding.
-    if (input.issueTarget && input.issueClaim
-      && (input.issueTarget.repository !== input.issueClaim.repository
-        || input.issueTarget.issueNumber !== input.issueClaim.issueNumber)) {
-      throw new Error(`issueTarget ${input.issueTarget.repository}#${input.issueTarget.issueNumber} does not match issueClaim ${input.issueClaim.repository}#${input.issueClaim.issueNumber}.`);
-    }
     let resolvedIssueTarget = input.issueTarget
       || (input.issueClaim ? { repository: input.issueClaim.repository, issueNumber: input.issueClaim.issueNumber } : null);
 
@@ -1100,7 +1128,7 @@ server.registerTool(
       });
       const revisions = resolveIssueClaimRevisions({
         workspace: requestedWorkspace,
-        headSha: input.githubBuilder?.headSha,
+        headSha: requestedGithubBuilder?.headSha,
         baseRef: input.worktree?.base || "HEAD",
       });
       const readClient = createIssueClaimHydrationClient({
@@ -1171,24 +1199,24 @@ server.registerTool(
         }
         throw error;
       }
-      let writerBoundGithubBuilder = input.githubBuilder;
-      if (input.githubBuilder && effectiveMode === "work") {
+      let writerBoundGithubBuilder = requestedGithubBuilder;
+      if (requestedGithubBuilder && effectiveMode === "work") {
         const { configuredWriterLogin } = await import("./github-app-auth.mjs");
         const writerProvider = writer || input.writer || startAgent;
         const expectedLogin = await configuredWriterLogin({
           provider: writerProvider,
           configPath: process.env.AGENT_BRIDGE_GITHUB_APPS_CONFIG || process.env.GITHUB_APP_CONFIG,
         });
-        const pinnedLogin = input.githubBuilder.expectedLogins?.[writerProvider] || null;
+        const pinnedLogin = requestedGithubBuilder.expectedLogins?.[writerProvider] || null;
         if (pinnedLogin && !sameGitHubAppLogin(pinnedLogin, expectedLogin)) {
           throw new Error(`Configured ${writerProvider} writer identity ${expectedLogin} does not match the bound authorization ${pinnedLogin}.`);
         }
         writerBoundGithubBuilder = {
-          ...input.githubBuilder,
-          requestedLogin: input.githubBuilder.expectedLogin,
+          ...requestedGithubBuilder,
+          requestedLogin: requestedGithubBuilder.expectedLogin,
           expectedLogin,
           writerProvider,
-          rebindReason: sameGitHubAppLogin(input.githubBuilder.expectedLogin, expectedLogin)
+          rebindReason: sameGitHubAppLogin(requestedGithubBuilder.expectedLogin, expectedLogin)
             ? null
             : "provider_writer_selection",
         };
@@ -1266,7 +1294,7 @@ server.registerTool(
         repository: input.issueClaim?.repository || input.githubReview?.repository || effectiveGithubBuilder?.repository,
         headSha: input.githubReview?.headSha || effectiveGithubBuilder?.headSha || undefined,
         baseSha: effectiveGithubBuilder?.baseSha || resolvedIssueClaim?.baseSha || null,
-        allowMissingHead: !input.issueClaim && !input.githubReview && !input.githubBuilder && !input.worktree,
+        allowMissingHead: !input.issueClaim && !input.githubReview && !requestedGithubBuilder && !input.worktree,
       });
       const taskBase = resolvedTask;
       resolvedTask = [taskBase, formatRepositoryEvidence(repositoryEvidence)].filter(Boolean).join("\n\n");
