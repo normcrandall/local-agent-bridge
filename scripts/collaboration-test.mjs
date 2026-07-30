@@ -524,16 +524,37 @@ try {
   assert.equal(changedBuilderLogin.isError, true,
     "a changed builder login must reach fresh authorization preflight rather than reuse the live lane");
   assert.match(changedBuilderLogin.content?.[0]?.text || "", /Writer hydration|self-contained writer checkout|GitHub-governed implementation/i);
-  const widenedBuilderOperations = await reviewRaceAntigravityClient.callTool({
+  const implementationBuilderOperations = await reviewRaceAntigravityClient.callTool({
     name: "start_collaboration",
     arguments: {
       ...governedBuilderBase,
-      githubBuilder: { ...governedBuilderBase.githubBuilder, allowedOperations: ["ensure_pull_request"] },
+      githubBuilder: {
+        ...governedBuilderBase.githubBuilder,
+        allowedOperations: ["push_branch", "ensure_pull_request"],
+      },
     },
   });
-  assert.equal(widenedBuilderOperations.isError, true,
-    "wider builder operations must reach fresh verification preflight rather than reuse the narrower lane");
-  assert.match(widenedBuilderOperations.content?.[0]?.text || "", /Writer hydration|self-contained writer checkout|verifiedHeadSha|verification/i);
+  assert.notEqual(implementationBuilderOperations.isError, true,
+    "an implement-phase writer must retain its hydrated future publication route without requiring pre-existing verification receipts");
+  assert.notEqual(implementationBuilderOperations.structuredContent.id, governedBuilderId,
+    "wider implementation authority must not reuse the narrower live lane");
+  assert.equal(implementationBuilderOperations.structuredContent.workProfile, "implement");
+  await waitForStop(reviewRaceAntigravityClient, implementationBuilderOperations.structuredContent.id);
+  const unverifiedDeliveryBuilder = await reviewRaceAntigravityClient.callTool({
+    name: "start_collaboration",
+    arguments: {
+      ...governedBuilderBase,
+      task: "Exercise receipt-gated GitHub delivery start.",
+      workProfile: "deliver",
+      githubBuilder: {
+        ...governedBuilderBase.githubBuilder,
+        allowedOperations: ["push_branch", "ensure_pull_request"],
+      },
+    },
+  });
+  assert.equal(unverifiedDeliveryBuilder.isError, true,
+    "a deliver-phase writer must still fail closed without an exact verified head");
+  assert.match(unverifiedDeliveryBuilder.content?.[0]?.text || "", /verifiedHeadSha|verification receipts/i);
 
   // issueClaim is the primary collaboration target, but it must not mask a
   // changed exact-head PR review binding. Seed a live compatible lane, prove an

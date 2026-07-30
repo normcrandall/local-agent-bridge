@@ -520,7 +520,7 @@ for (const term of [
   "commit and pull-request history",
   "plan_portfolio",
   "create_portfolio",
-  "maxParallel: 2",
+  "maxParallel: 5",
   "dependency edge",
   "conflict edge",
   "path reservation",
