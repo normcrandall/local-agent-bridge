@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createAgentPool, autonomousWorkProfile, providerFallbackSlots } from "../src/agent-pool.mjs";
+import { createAgentPool, autonomousWorkProfile, providerBuilderForPhase, providerFallbackSlots } from "../src/agent-pool.mjs";
 import { claudeToolRequest, codexToolRequest } from "../src/tool-requests.mjs";
 import { classifyCoordinatorWake, enqueueCoordinatorWake } from "../src/coordinator-wake.mjs";
 import { createCollaboration, updateCollaboration } from "../src/collaboration-store.mjs";
@@ -54,6 +54,19 @@ assert.doesNotThrow(() => createAgentPool({ root, workProfile: "deliver", github
 // non-autonomous caller keeps its explicitly selected deliver profile.
 assert.equal(autonomousWorkProfile({ autonomous: true, githubBuilder: boundBuilder, mode: "work", workProfile: "deliver" }), "implement");
 assert.equal(autonomousWorkProfile({ autonomous: false, githubBuilder: boundBuilder, mode: "work", workProfile: "deliver" }), "deliver");
+
+// The broker retains the hydrated binding in collaboration state, but the
+// provider cannot see or invoke it until the receipt-gated delivery phase.
+assert.equal(providerBuilderForPhase({ workProfile: "implement", githubBuilder: boundBuilder }), null);
+assert.equal(providerBuilderForPhase({ workProfile: "deliver", githubBuilder: boundBuilder }), boundBuilder);
+const implementCodexRequest = codexToolRequest({
+  prompt: "implement only", cwd: "/workspace", mode: "work", workProfile: "implement",
+  githubBuilder: providerBuilderForPhase({ workProfile: "implement", githubBuilder: boundBuilder }),
+  githubBuilderBridgePath: "/tmp/github-builder-bridge.mjs",
+});
+assert.equal(implementCodexRequest.arguments.config["sandbox_workspace_write.network_access"], false);
+assert.equal(implementCodexRequest.arguments.config["mcp_servers.github_builder.enabled"], undefined);
+assert.match(implementCodexRequest.arguments.prompt, /Do not push, create or modify pull requests/);
 
 // Inspect the ACTUAL generated Claude request: with the builder bound and the
 // autonomous downgrade applied, the profile is implement (no git push / gh pr

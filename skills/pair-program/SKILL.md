@@ -28,7 +28,7 @@ Call `collaboration.start_collaboration` with:
 - `taskNumber`: enables deterministic rotation.
 - `mode: work`, one `writer`, and `workProfile: implement|deliver`.
 - Use the machine-default `github-governed` profile for issue/PR work, including the hydrated issue binding, self-contained checkout, and builder App. Pass `deliveryProfile: "local-only"` only for intentionally unpublished work and omit every GitHub target, claim, and builder.
-- Publish governed work only in a continuation after the chair records exact-head observed verification receipts; set `githubBuilder.verifiedHeadSha` to that clean head before enabling `ensure_pull_request`.
+- For governed implementation, bind `githubBuilder.allowedOperations` with `push_branch` and `ensure_pull_request` at start so hydration can prove the future publication route, but use `workProfile: implement`; the broker retains and withholds the route from the provider, and no verified head is required in that phase. Publish only after the chair records exact-head observed verification receipts, then continue with `workProfile: deliver` and `githubBuilder.verifiedHeadSha` set to that clean head.
 - `permissionProfile: standard` unless the user explicitly says `yolo`. If explicit, warn before starting and set `permissionProfile: yolo` for the writer. Reviewers remain source-read-only, but an Antigravity review carrying `verificationCommands` automatically uses `--dangerously-skip-permissions` because `agy` exposes no exact command grant; static Antigravity reviews remain sandboxed.
 - exact `verificationCommands`, unusual `workCommands`, and repository handoff path.
 - `githubReview` when the PR is the source of truth.

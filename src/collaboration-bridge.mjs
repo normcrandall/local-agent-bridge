@@ -135,9 +135,16 @@ function assertAutonomousDeliveryBinding({ mode, workProfile, githubBuilder }) {
   }
 }
 
-function assertGovernedPublicationVerification({ policy, githubBuilder, repositoryEvidence, verificationPlan, requestedCommands }) {
+function assertGovernedPublicationVerification({ policy, workProfile = "exact", githubBuilder, repositoryEvidence, verificationPlan, requestedCommands }) {
   const profile = policy?.deliveryProfile || policy?.profile;
   if (profile !== "github-governed" || !githubBuilder?.allowedOperations?.includes("ensure_pull_request")) return;
+  // The implementation phase must carry the future publication route so
+  // checkout hydration can prove Git and builder custody before the writer
+  // starts. The worker withholds that binding from an implement-profile
+  // provider, and provider network access is disabled. Enforce receipt-backed
+  // publication only when the lane advances out of implementation (normally
+  // via a deliver continuation).
+  if (workProfile === "implement") return;
   if (!githubBuilder.verifiedHeadSha) {
     throw new Error("GitHub-governed PR publication requires githubBuilder.verifiedHeadSha from broker verification receipts; implement and verify first, then continue with a delivery-bound phase.");
   }
@@ -1270,6 +1277,7 @@ server.registerTool(
       });
       assertGovernedPublicationVerification({
         policy: deliveryPolicy,
+        workProfile: input.workProfile || "exact",
         githubBuilder: effectiveGithubBuilder,
         repositoryEvidence,
         verificationPlan,
@@ -2594,6 +2602,7 @@ server.registerTool(
   }) => {
     blockNestedCollaboration();
     const current = await readCollaboration(WORKSPACE_ROOT, id);
+    const effectiveContinuationWorkProfile = workProfile || current.workProfile || "exact";
     const storedClaimedTask = current.taskBase || current.task;
     if (current.issueContext || current.issueTarget || current.issueClaim
       || String(storedClaimedTask || "").includes(CLAIMED_ISSUE_CONTEXT_MARKER)) {
@@ -2635,7 +2644,7 @@ server.registerTool(
     if (githubBuilder && current.mode !== "work") throw new Error("githubBuilder is available only in work mode.");
     assertAutonomousDeliveryBinding({
       mode: current.mode,
-      workProfile: workProfile || current.workProfile || "exact",
+      workProfile: effectiveContinuationWorkProfile,
       githubBuilder: githubBuilder || current.githubBuilder || null,
     });
     if ((permissionProfile || current.permissionProfile) === "yolo" && current.mode !== "work") {
@@ -2760,6 +2769,7 @@ server.registerTool(
     });
     assertGovernedPublicationVerification({
       policy: current.deliveryPolicy,
+      workProfile: effectiveContinuationWorkProfile,
       githubBuilder: activeGithubBuilder,
       repositoryEvidence: continuationEvidence,
       verificationPlan: continuationVerificationPlan,
@@ -2816,7 +2826,7 @@ server.registerTool(
         verificationCommands: continuationVerificationPlan.pendingCommands,
         verificationReceipts: continuationVerificationPlan.reusable,
         workCommands: workCommands || previous.workCommands || [],
-        workProfile: workProfile || previous.workProfile || "exact",
+        workProfile: effectiveContinuationWorkProfile,
         permissionProfile: permissionProfile || previous.permissionProfile || "standard",
         handoffPath: handoffPath || previous.handoffPath || null,
         githubReview: githubReview || previous.githubReview || null,

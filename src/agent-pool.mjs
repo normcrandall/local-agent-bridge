@@ -73,6 +73,13 @@ export function autonomousWorkProfile({ autonomous, githubBuilder, mode, workPro
   return workProfile;
 }
 
+// GitHub-governed implementation retains its broker-side publication binding
+// for hydration and a later deliver continuation, but the implementing provider
+// must not receive those mutation tools before exact-head verification exists.
+export function providerBuilderForPhase({ workProfile, githubBuilder }) {
+  return workProfile === "implement" ? null : githubBuilder;
+}
+
 export function localReviewPublicationPolicy(agent, result) {
   if (!["ollama", "docker"].includes(agent) || !result?.available || !result.binding) return result;
   return {
@@ -156,6 +163,8 @@ export function createAgentPool({
       throw new Error("Autonomous delivery requires a bound githubBuilder; raw push, gh pull-request mutation, PAT, or ambient git credentials are not permitted in autonomous council/portfolio flows.");
     }
   }
+
+  githubBuilder = providerBuilderForPhase({ workProfile, githubBuilder });
 
   const clients = {};
   const reviewPublication = new Map();
