@@ -496,6 +496,31 @@ try {
   assert.match(issueTargetOnlyRun.task, /^Implement the bound GitHub issue\. The issue body is intentionally not duplicated here\./,
     "hydration must preserve the concise caller objective before appending canonical issue context");
 
+  const mismatchedIssueBuilder = await reviewRaceClaudeClient.callTool({
+    name: "start_collaboration",
+    arguments: {
+      task: "This mismatched binding must fail before provider launch.",
+      workspace: cleanWorkspace,
+      agents: ["claude"],
+      startAgent: "claude",
+      mode: "work",
+      writer: "claude",
+      workProfile: "implement",
+      providerFailover: { enabled: false },
+      issueTarget: { repository: "veliqon/collaboration-fixture", issueNumber: 98 },
+      githubBuilder: {
+        repository: "veliqon/other-repository",
+        issueNumber: 99,
+        headSha: claimedHead,
+        expectedLogin: "test-builder[bot]",
+        allowedOperations: ["push_branch", "ensure_pull_request"],
+      },
+    },
+  });
+  assert.equal(mismatchedIssueBuilder.isError, true,
+    "an explicit builder must not redirect an issue-targeted lane to another repository or issue");
+  assert.match(mismatchedIssueBuilder.content?.[0]?.text || "", /does not match issueTarget/);
+
   const governedBuilderBase = {
     task: "Exercise GitHub builder authority reuse compatibility.",
     workspace: cleanWorkspace,
@@ -523,6 +548,7 @@ try {
     agents: ["claude"],
     requestedAgents: ["claude"],
     startAgent: "claude",
+    issueTarget: governedBuilderBase.issueTarget,
     githubBuilder: governedBuilderBase.githubBuilder,
   });
   const governedBuilderId = "bridge-24800000-0000-4000-8000-000000000001";
@@ -536,6 +562,7 @@ try {
     writer: "claude",
     agents: ["claude"],
     startAgent: "claude",
+    issueTarget: governedBuilderBase.issueTarget,
     githubBuilder: governedBuilderBase.githubBuilder,
     runtime: { activeCall: { agent: "claude", status: "running" } },
   });

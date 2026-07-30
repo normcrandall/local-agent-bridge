@@ -910,6 +910,19 @@ server.registerTool(
         writerProvider,
       });
     }
+    if (input.issueTarget && input.issueClaim
+      && (input.issueTarget.repository !== input.issueClaim.repository
+        || input.issueTarget.issueNumber !== input.issueClaim.issueNumber)) {
+      throw new Error(`issueTarget ${input.issueTarget.repository}#${input.issueTarget.issueNumber} does not match issueClaim ${input.issueClaim.repository}#${input.issueClaim.issueNumber}.`);
+    }
+    if (requestedIssueTarget && requestedGithubBuilder
+      && requestedGithubBuilder.repository !== requestedIssueTarget.repository) {
+      throw new Error(`githubBuilder repository ${requestedGithubBuilder.repository} does not match issueTarget repository ${requestedIssueTarget.repository}.`);
+    }
+    if (requestedIssueTarget && requestedGithubBuilder?.issueNumber
+      && requestedGithubBuilder.issueNumber !== requestedIssueTarget.issueNumber) {
+      throw new Error(`githubBuilder issue #${requestedGithubBuilder.issueNumber} does not match issueTarget ${requestedIssueTarget.repository}#${requestedIssueTarget.issueNumber}.`);
+    }
     assertAutonomousDeliveryBinding({
       mode: effectiveMode,
       workProfile: input.workProfile || "exact",
@@ -951,6 +964,7 @@ server.registerTool(
       mode: effectiveMode,
       writer,
       issueClaim: canonicalIssueClaim,
+      issueTarget: input.issueTarget,
       githubReview: input.githubReview,
       githubBuilder: requestedGithubBuilder,
       resumeKey: input.resumeKey,
@@ -999,14 +1013,6 @@ server.registerTool(
     const snapshotCache = repositorySnapshotCache(requestedWorkspace);
 
     try {
-    // The explicit issue target is authoritative for what this lane implements.
-    // A claim always implies its own target; when both are supplied they must
-    // agree exactly rather than silently preferring one binding.
-    if (input.issueTarget && input.issueClaim
-      && (input.issueTarget.repository !== input.issueClaim.repository
-        || input.issueTarget.issueNumber !== input.issueClaim.issueNumber)) {
-      throw new Error(`issueTarget ${input.issueTarget.repository}#${input.issueTarget.issueNumber} does not match issueClaim ${input.issueClaim.repository}#${input.issueClaim.issueNumber}.`);
-    }
     let resolvedIssueTarget = input.issueTarget
       || (input.issueClaim ? { repository: input.issueClaim.repository, issueNumber: input.issueClaim.issueNumber } : null);
 

@@ -21,14 +21,23 @@ function currentBranch(workspace) {
   return branch;
 }
 
+function hasRef(workspace, ref) {
+  return spawnSync("git", ["show-ref", "--verify", "--quiet", ref], {
+    cwd: workspace,
+    encoding: "utf8",
+  }).status === 0;
+}
+
 function publicationBaseRef(workspace, base) {
   const value = String(base || "HEAD").trim();
   if (value === "HEAD") return currentBranch(workspace);
-  if (value.startsWith("refs/heads/")) return value.slice("refs/heads/".length);
-  if (value.startsWith("refs/remotes/origin/")) return value.slice("refs/remotes/origin/".length);
-  if (value.startsWith("origin/")) return value.slice("origin/".length);
-  if (/^[A-Za-z0-9._/-]+$/.test(value) && !/^[0-9a-f]{40}$/i.test(value)) return value;
-  throw new Error("A derived GitHub writer binding requires worktree.base to identify a branch, not only a commit SHA.");
+  const localRef = value.startsWith("refs/heads/") ? value : `refs/heads/${value}`;
+  if (hasRef(workspace, localRef)) return localRef.slice("refs/heads/".length);
+  const remoteRef = value.startsWith("refs/remotes/origin/")
+    ? value
+    : `refs/remotes/${value.startsWith("origin/") ? value : `origin/${value}`}`;
+  if (hasRef(workspace, remoteRef)) return remoteRef.slice("refs/remotes/origin/".length);
+  throw new Error("A derived GitHub writer binding requires worktree.base to identify an existing local or origin branch, not only a commit SHA.");
 }
 
 export function deriveIssueTargetBuilderBinding({
@@ -53,6 +62,9 @@ export function deriveIssueTargetBuilderBinding({
   });
   const baseRef = publicationBaseRef(workspace, worktree.base || "HEAD");
   if (worktree.branch === baseRef) {
+    if (!worktree.base) {
+      throw new Error("worktree.base must explicitly identify the pull-request base when the workspace is already on the publication branch.");
+    }
     throw new Error("The derived GitHub writer publication branch must differ from the pull-request base branch.");
   }
   return {

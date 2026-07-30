@@ -70,6 +70,14 @@ try {
     expectedLogin: "veliqon-codex-writer",
     writerProvider: "codex",
   }), /self-contained worktree/);
+  assert.throws(() => deriveIssueTargetBuilderBinding({
+    workspace: directory,
+    issueTarget: { repository: "owner/repo", issueNumber: 264 },
+    worktree: { taskId: "issue-264", branch: "codex/issue-264", base: expectedHead.slice(0, 12) },
+    expectedLogin: "veliqon-codex-writer",
+    writerProvider: "codex",
+  }), /existing local or origin branch/,
+  "an abbreviated commit SHA must not be misclassified as a publication base branch");
   assert.equal(
     plannedIssueClaimWorktree({ workspace: directory, worktree: { taskId: "issue-61" }, mode: "review" }),
     resolve(directory, ".bridge/worktrees/issue-61"),

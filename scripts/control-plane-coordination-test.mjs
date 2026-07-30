@@ -115,6 +115,43 @@ try {
       allowedOperations: ["ensure_pull_request", "push_branch"],
     },
   }), "equivalent builder login and operation-set spellings must remain compatible");
+  const issueTargetRequest = {
+    workspace,
+    mode: "work",
+    writer: "claude",
+    agents: ["claude"],
+    startAgent: "claude",
+    issueTarget: {
+      repository: "veliqon/nolvaren-next",
+      issueNumber: 264,
+    },
+    githubBuilder: {
+      repository: "veliqon/nolvaren-next",
+      issueNumber: 264,
+      headSha: "c".repeat(40),
+      expectedLogin: "veliqon-claude-writer",
+      headRef: "claude/issue-264",
+      baseRef: "main",
+      allowedOperations: ["push_branch", "ensure_pull_request"],
+    },
+  };
+  const issueTargetIdentity = collaborationIdentity(issueTargetRequest);
+  assert.ok(issueTargetIdentity, "an issue target must provide a durable collaboration identity without an issue claim or PR");
+  assert.equal(issueTargetIdentity, collaborationIdentity(issueTargetRequest),
+    "repeated starts for the same issue target and exact writer binding must reuse one collaboration");
+  assert.notEqual(issueTargetIdentity, collaborationIdentity({
+    ...issueTargetRequest,
+    issueTarget: { ...issueTargetRequest.issueTarget, issueNumber: 265 },
+    githubBuilder: { ...issueTargetRequest.githubBuilder, issueNumber: 265, headRef: "claude/issue-265" },
+  }), "different issue targets must not collide");
+  assert.notEqual(issueTargetIdentity, collaborationIdentity({
+    ...issueTargetRequest,
+    githubBuilder: { ...issueTargetRequest.githubBuilder, headRef: "claude/issue-264-retry" },
+  }), "different writer branches for one issue must not reuse authority accidentally");
+  assert.equal(issueTargetIdentity, collaborationIdentity({
+    ...issueTargetRequest,
+    issueTarget: null,
+  }), "persisted builder issue metadata must preserve identity if an older state lacks issueTarget");
   assert.deepEqual(
     Object.keys(collaborationReuseCompatibility(reviewRequest)),
     [...COLLABORATION_REUSE_DIMENSIONS],
