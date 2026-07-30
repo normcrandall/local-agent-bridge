@@ -140,10 +140,10 @@ function assertGovernedPublicationVerification({ policy, workProfile = "exact", 
   if (profile !== "github-governed" || !githubBuilder?.allowedOperations?.includes("ensure_pull_request")) return;
   // The implementation phase must carry the future publication route so
   // checkout hydration can prove Git and builder custody before the writer
-  // starts. Publication is still impossible in this profile: provider network
-  // access is disabled and the bound builder independently requires a verified
-  // head. Enforce receipt-backed publication only when the lane advances out of
-  // implementation (normally via a deliver continuation).
+  // starts. The worker withholds that binding from an implement-profile
+  // provider, and provider network access is disabled. Enforce receipt-backed
+  // publication only when the lane advances out of implementation (normally
+  // via a deliver continuation).
   if (workProfile === "implement") return;
   if (!githubBuilder.verifiedHeadSha) {
     throw new Error("GitHub-governed PR publication requires githubBuilder.verifiedHeadSha from broker verification receipts; implement and verify first, then continue with a delivery-bound phase.");

@@ -23,7 +23,7 @@ When Claude is the designated work-mode writer, select `workProfile: implement` 
 
 Use the machine-default `github-governed` delivery profile for issue/PR implementation, with a hydrated issue binding, self-contained checkout, and builder App. Pass `deliveryProfile: "local-only"` only for deliberately unpublished work and omit all GitHub targets, claims, and builders.
 
-Governed implementation starts with `push_branch` and `ensure_pull_request` bound for hydration under `workProfile: implement`; those operations remain unusable and require no verified head during implementation. Governed publication follows a verified continuation: record observed verification receipts for the committed clean head, then switch to `workProfile: deliver` with `githubBuilder.verifiedHeadSha` set to that head.
+Governed implementation starts with `push_branch` and `ensure_pull_request` bound for hydration under `workProfile: implement`; the broker retains and withholds those operations from the provider, and no verified head is required during implementation. Governed publication follows a verified continuation: record observed verification receipts for the committed clean head, then switch to `workProfile: deliver` with `githubBuilder.verifiedHeadSha` set to that head.
 
 Use the same profile distinction for a Codex writer: `implement` keeps network disabled and `deliver` enables the authorized push/PR lifecycle. Pin every council run to an explicit absolute workspace; changing the chair CLI directory does not migrate stored collaboration state.
 
