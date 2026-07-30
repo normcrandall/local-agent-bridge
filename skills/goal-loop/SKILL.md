@@ -3,9 +3,9 @@ name: goal-loop
 description: Build a feature, application, document, or other workspace artifact through bounded plan, implement, review, and verification cycles with Claude, Codex, and Antigravity. Use when the user says to keep working until a concrete goal is done, asks for an autonomous build loop, wants several models to plan and cross-review implementation, or needs a resumable collaboration with explicit completion criteria.
 ---
 
-For work-mode phases, use the machine-default `github-governed` profile when the goal is bound to a GitHub issue and PR; include the hydrated issue binding, self-contained checkout, and builder App. Pass `deliveryProfile: "local-only"` only for deliberately unpublished work and omit all GitHub bindings.
+For work-mode phases, use the machine-default `github-governed` profile when the goal is bound to a GitHub issue and PR. Pass the concise objective, `issueTarget` (or `issueClaim`), and self-contained checkout; the broker hydrates the issue and derives the initial minimal writer-App binding. Never duplicate issue contents in prose or omit the target to bypass policy. Pass `deliveryProfile: "local-only"` only for deliberately unpublished work and omit all GitHub bindings.
 
-For governed delivery, bind `push_branch` and `ensure_pull_request` at implementation start so hydration can prove the future route, while `workProfile: implement` makes the broker retain and withhold that route from the provider and requires no verified head. Implement and commit, record observed verification receipts for the exact clean head, then continue with `workProfile: deliver` and `githubBuilder.verifiedHeadSha` at that head.
+For governed delivery, use `workProfile: implement`; the broker derives or validates `push_branch` and `ensure_pull_request` so hydration can prove the future route, retains and withholds it from the provider, and requires no verified head. Implement and commit, record observed verification receipts for the exact clean head, then continue with `workProfile: deliver` and `githubBuilder.verifiedHeadSha` at that head.
 
 # Goal Loop
 

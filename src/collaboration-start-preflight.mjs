@@ -11,6 +11,63 @@ function revParse(workspace, revision, errorMessage) {
   return result.stdout.trim();
 }
 
+function currentBranch(workspace) {
+  const result = spawnSync("git", ["branch", "--show-current"], {
+    cwd: workspace,
+    encoding: "utf8",
+  });
+  const branch = result.status === 0 ? result.stdout.trim() : "";
+  if (!branch) throw new Error("Unable to derive the governed pull-request base branch from the workspace.");
+  return branch;
+}
+
+function publicationBaseRef(workspace, base) {
+  const value = String(base || "HEAD").trim();
+  if (value === "HEAD") return currentBranch(workspace);
+  if (value.startsWith("refs/heads/")) return value.slice("refs/heads/".length);
+  if (value.startsWith("refs/remotes/origin/")) return value.slice("refs/remotes/origin/".length);
+  if (value.startsWith("origin/")) return value.slice("origin/".length);
+  if (/^[A-Za-z0-9._/-]+$/.test(value) && !/^[0-9a-f]{40}$/i.test(value)) return value;
+  throw new Error("A derived GitHub writer binding requires worktree.base to identify a branch, not only a commit SHA.");
+}
+
+export function deriveIssueTargetBuilderBinding({
+  workspace,
+  issueTarget = null,
+  issueClaim = null,
+  worktree = null,
+  expectedLogin,
+  writerProvider,
+  githubBuilder = null,
+}) {
+  if (githubBuilder) return githubBuilder;
+  const target = issueClaim || issueTarget;
+  if (!target?.repository || !target?.issueNumber) return null;
+  if (!worktree?.branch) {
+    throw new Error("An issueTarget-only GitHub writer requires a self-contained worktree with an explicit publication branch.");
+  }
+  const revisions = resolveIssueClaimRevisions({
+    workspace,
+    headSha: issueClaim?.headSha || null,
+    baseRef: worktree.base || issueClaim?.baseSha || "HEAD",
+  });
+  const baseRef = publicationBaseRef(workspace, worktree.base || "HEAD");
+  if (worktree.branch === baseRef) {
+    throw new Error("The derived GitHub writer publication branch must differ from the pull-request base branch.");
+  }
+  return {
+    repository: target.repository,
+    issueNumber: target.issueNumber,
+    expectedLogin: canonicalGitHubAppLogin(expectedLogin),
+    writerProvider,
+    headSha: revisions.headSha,
+    baseSha: revisions.baseSha,
+    headRef: worktree.branch,
+    baseRef,
+    allowedOperations: ["push_branch", "ensure_pull_request"],
+  };
+}
+
 export function resolveIssueClaimRevisions({ workspace, headSha, baseRef }) {
   const resolvedHeadSha = headSha || revParse(
     workspace,

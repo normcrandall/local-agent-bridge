@@ -464,6 +464,38 @@ try {
     waitForStop(reviewRaceAntigravityClient, chairedReview.structuredContent.id),
   ]);
 
+  const issueTargetOnlyStart = await reviewRaceClaudeClient.callTool({
+    name: "start_collaboration",
+    arguments: {
+      task: "Implement the bound GitHub issue. The issue body is intentionally not duplicated here.",
+      workspace: cleanWorkspace,
+      agents: ["claude"],
+      startAgent: "claude",
+      mode: "work",
+      writer: "claude",
+      workProfile: "implement",
+      maxTurns: 1,
+      providerFailover: { enabled: false },
+      issueTarget: { repository: "veliqon/collaboration-fixture", issueNumber: 98 },
+      worktree: {
+        taskId: "issue-target-only",
+        branch: "claude/issue-98-target-only",
+        base: "HEAD",
+        root: join(stateDirectory, "writer-checkouts"),
+      },
+    },
+  });
+  assert.notEqual(issueTargetOnlyStart.isError, true,
+    "an issueTarget and self-contained checkout must be sufficient for the broker to derive the governed writer binding");
+  assert.equal(issueTargetOnlyStart.structuredContent.githubBuilder.repository, "veliqon/collaboration-fixture");
+  assert.equal(issueTargetOnlyStart.structuredContent.githubBuilder.issueNumber, 98);
+  assert.deepEqual(issueTargetOnlyStart.structuredContent.githubBuilder.allowedOperations, ["push_branch", "ensure_pull_request"]);
+  const issueTargetOnlyRun = await waitForStop(reviewRaceClaudeClient, issueTargetOnlyStart.structuredContent.id);
+  assert.match(issueTargetOnlyRun.task, /Acceptance/,
+    "the provider task must contain the immutable issue body hydrated from issueTarget");
+  assert.match(issueTargetOnlyRun.task, /^Implement the bound GitHub issue\. The issue body is intentionally not duplicated here\./,
+    "hydration must preserve the concise caller objective before appending canonical issue context");
+
   const governedBuilderBase = {
     task: "Exercise GitHub builder authority reuse compatibility.",
     workspace: cleanWorkspace,
