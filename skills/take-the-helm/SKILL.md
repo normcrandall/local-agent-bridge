@@ -7,7 +7,7 @@ description: Give the Claude, Codex, and Antigravity council operational ownersh
 
 Own the outcome. Treat the user as the sponsor, not the day-to-day operator. Drive the queue, make reversible decisions, keep the three-model council aligned, and surface only genuine escalation boundaries.
 
-Invoking this skill is standing authorization to perform the queue's routine, reversible implementation, branch, commit, push, pull-request, review, repair, CI, and repository-policy-authorized merge actions without asking again. The authorization is scoped to the named objective and repositories and never overrides GitHub rules, exact-head review, verification, identity isolation, or the hard escalation boundaries below. Never ask the user to say "continue" while an automatic next action exists.
+Invoking this skill is standing authorization to perform the queue's routine, reversible implementation, branch, commit, push, pull-request, review, repair, and CI actions without asking again. Merge authority becomes active only after the chair supplies the broker-created durable `helm-<uuid>` portfolio ID and the target repository matches machine-local `mergePolicy.autonomousMergeRepositories`; self-asserted composition grants no merge authority. A delegated writer's `githubBuilder.allowedOperations` still omits `merge`; the native coordinator performs an eligible exact-head merge through collaboration `merge_pull_request`. Without both machine-checkable proofs, stop at a green reviewed PR for human merge. The authorization is scoped to the named objective and repositories and never overrides GitHub rules, exact-head review, verification, identity isolation, or the hard escalation boundaries below. Never ask the user to say "continue" while an automatic next action exists.
 
 ## Compose the existing workflows
 
@@ -172,6 +172,14 @@ claimed -> implementing -> delivering -> reviewing -> repairing -> reviewing
                                                         |
                                                         v
 queued_to_merge -> integrating -> merged -> release claim/worktree -> dispatch next frontier
+
+reviewing -- changes requested or CI red --> repairing --> delivering --> reviewing
+reviewing -- target or PR head advanced --> delivering/revalidate --> reviewing
+queued_to_merge/integrating -- conflict --> arbitrating --> repairing --> reviewing
+repairing -- 12 review rounds --> split/re-spec/council disposition
+any active state -- determinate provider failure --> recovery/failover in the same lane
+any active state -- true external blocker --> blocked while independent lanes continue
+any active state -- needs_user or indeterminate --> protected lane boundary; inspect or cancel, never replace
 ```
 
 Apply these transition rules:
@@ -181,7 +189,9 @@ Apply these transition rules:
 3. Resolve the PR number and remote head from the builder receipt. Immediately start a separate read-only review collaboration with `githubReview` bound to that exact PR head and an ordered roster of eligible non-writer providers. Every governed PR receives this GitHub-native review automatically; a local summary or writer self-review never substitutes for it.
 4. On `CHANGES_REQUESTED`, validate the findings, continue the original writer for repair, verify the new head, republish, and dispatch a fresh exact-head review. Repeat without asking the user.
 5. On exact-head approval with required CI green, enqueue, validate, authorize, and merge when standing repository policy permits. Record the merge, close or reconcile the issue, release the claim, retire recoverable checkout state, recompute the frontier, and fill every safe slot.
-6. If a provider or bounded collaboration leg ends before its transition is complete, resume or replace that leg according to ownership and failover policy. A cycle, turn, or provider limit is not a portfolio stop condition.
+6. If a provider or bounded collaboration leg ends before its transition is complete, resume it automatically. Replace it only after a confirmed determinate failure or cancellation, after proving the previous writer has stopped and reconciling checkout and claim ownership. `needs_user`, lost transport, and `indeterminate` ownership never permit automatic replacement; protect that lane and continue independent lanes. A cycle, turn, or provider limit is not a portfolio stop condition.
+7. Route CI red after approval back to the same writer for repair and fresh verification; a changed target or PR head invalidates receipts and returns the lane to delivery/revalidation and exact-head review.
+8. Route merge conflicts to `arbitrating`, then exactly one integration writer repairs and republishes before a new review. At the 12-round breaker, record and execute the council's `split`, re-specification, or owner-gated disposition instead of silently parking the lane. Record a true external blocker as `blocked`, but keep every independent safe lane moving.
 
 After processing any event, repeatedly choose the first applicable automatic action: repair a failed delivery, dispatch a missing review, repair findings, re-review a changed head, advance a green PR through the merge train, release merged work, or start the next safe issue. Yield only when all active lanes are genuinely waiting on provider/CI events, and retain the durable wake so the next event resumes the scheduler without a user prompt.
 

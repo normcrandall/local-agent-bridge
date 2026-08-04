@@ -1,7 +1,7 @@
 interface:
   display_name: "Goal Loop"
   short_description: "Build toward verified completion with an AI council"
-  default_prompt: "Use $goal-loop to build this through bounded plan, implement, review, and verification cycles; when composed by take-the-helm, return each bounded leg to its autonomous scheduler instead of asking me to continue."
+  default_prompt: "Use $goal-loop to build this through bounded plan, implement, review, and verification cycles."
 dependencies:
   tools:
     - type: "mcp"

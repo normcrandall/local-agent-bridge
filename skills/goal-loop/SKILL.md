@@ -30,7 +30,7 @@ Before starting, derive and show:
 - **Non-goals:** nearby work that must not expand the loop.
 - **Writer:** exactly one participant allowed to mutate the workspace.
 - **Native chair:** when the current Codex App, Claude Code, or Antigravity session owns the work, declare it with `chair` and delegate only to peers.
-- **Merge policy:** standalone goals default to `human merge`. When composed by `take-the-helm`, inherit its scoped standing authorization and repository merge policy; do not ask again for an ordinary exact-head merge.
+- **Merge policy:** standalone goals default to `human merge`. A goal loop inherits `take-the-helm` merge authority only when the chair supplies a broker-created durable `helm-<uuid>` portfolio ID and the target repository matches machine-local `mergePolicy.autonomousMergeRepositories`; self-asserted composition grants no authority. The delegated writer's builder allowlist omits `merge`, and the native coordinator uses collaboration `merge_pull_request` for an eligible exact-head merge. Without both proofs, retain `human merge`.
 - **Bounds:** default four cycles and six peer turns per cycle.
 
 Make reasonable reversible assumptions. Ask the user only when a missing decision would materially change the deliverable, authorize an external side effect, or make “done” impossible to verify.
@@ -149,7 +149,7 @@ Stop the loop when any condition is true:
 - The user cancels: `cancelled`.
 - No requested provider remains available: `unavailable`.
 
-Never silently extend the cycle limit. The user may explicitly start another bounded phase with the same collaboration ID.
+In standalone mode, never silently extend the cycle limit; only the user may start another bounded phase with the same collaboration ID.
 
 These conditions govern a standalone `$goal-loop`. Under `$take-the-helm`, only the helm's objective, explicit run-mode boundary, hard escalation, cancellation, or portfolio budget may stop the overall run; the scheduler automatically replaces or continues bounded goal-loop legs.
 
