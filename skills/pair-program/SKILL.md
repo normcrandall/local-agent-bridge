@@ -50,6 +50,8 @@ Never substitute a long-running Bash, sleep, gh, or PR polling loop for broker p
 
 For a native coordinator, every stopped leg produces a durable `coordinatorWake`. Read the new turn and completion receipt, perform `nextAction`, then call `acknowledge_coordinator_wake` with the exact sequence before dispatching repair, re-review, merge validation, or another task. Host Stop/AfterAgent hooks hold the turn open and SessionStart restores missed receipts. Do not acknowledge without processing. `needs_user` and `indeterminate` remain protected stop boundaries.
 
+When composed by `take-the-helm`, a writer handoff is a scheduler event, not the end of the task. Without another user message, the chair must verify and acknowledge it, record exact-head receipts, continue governed delivery to create or update the PR, resolve the remote PR/head from the builder receipt, and immediately dispatch a separate non-writer collaboration with exact-head `githubReview`. Every governed PR receives a formal GitHub-native review automatically. `CHANGES_REQUESTED` returns to the same writer for repair and fresh exact-head re-review; approval plus green checks advances to the authorized merge path and then the next queued task. Never ask the user to say "continue" between these transitions.
+
 ## Rotate and review
 
 For task N, let the selected writer implement test-first, verify, commit, and deliver only within its profile. Every other agent remains read-only. Reviewers author the handoff and formal PR review through their provider-specific, user-owned Apps selected from machine-local configuration. Omit identity fields unless repository policy requires strict login pins; never embed App credentials or maintainer-specific identities in the skill. On task N+1, run role selection again; do not transfer an active task's writer merely to satisfy rotation.
@@ -70,4 +72,4 @@ Resolve reversible technical disagreements with `decisionPolicy` and one `DECISI
 - Archive terminal history with `archive_collaboration` or retention-based `prune_collaborations`; never prune active or indeterminate ownership.
 - Ensure claim leases are released only at terminal delivery (merge, cancel, obsolete) or explicit recovery. Failed, indeterminate, completed, and review-pending work stays claimed so another provider cannot silently duplicate it.
 
-Finish only when acceptance criteria, local gates, hosted CI, durable handoff, formal reviewer publication, and clean ownership state are all verified.
+Finish only when acceptance criteria, local gates, hosted CI, durable handoff, formal reviewer publication, and clean ownership state are all verified. Under `take-the-helm`, also require the authorized merge or a documented hard boundary plus immediate portfolio rescheduling; an ended provider call, created PR, or completed local review is never sufficient.

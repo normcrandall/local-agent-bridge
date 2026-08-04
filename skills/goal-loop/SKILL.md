@@ -30,7 +30,7 @@ Before starting, derive and show:
 - **Non-goals:** nearby work that must not expand the loop.
 - **Writer:** exactly one participant allowed to mutate the workspace.
 - **Native chair:** when the current Codex App, Claude Code, or Antigravity session owns the work, declare it with `chair` and delegate only to peers.
-- **Merge policy:** default `human merge`; enable a builder-App merge only when the user explicitly authorizes it.
+- **Merge policy:** standalone goals default to `human merge`. When composed by `take-the-helm`, inherit its scoped standing authorization and repository merge policy; do not ask again for an ordinary exact-head merge.
 - **Bounds:** default four cycles and six peer turns per cycle.
 
 Make reasonable reversible assumptions. Ask the user only when a missing decision would materially change the deliverable, authorize an external side effect, or make “done” impossible to verify.
@@ -130,13 +130,15 @@ Decision: complete | continue | needs user | stopped
 
 Use `continue_collaboration` with the same ID for the next cycle. Include failed checks, reviewer findings, current diff or artifact summary, and the next smallest slice. Preserve `workProfile` and pass the same or deliberately updated `verificationCommands`, additive `workCommands`, and `handoffPath`; when PR publication is required, pass `githubReview` with the refreshed head SHA. Preserve provider sessions; do not start a separate roundtable for each cycle.
 
+When composed by `take-the-helm`, the goal loop bounds one lane leg, not the portfolio lifetime. A completed writer turn automatically advances to governed delivery and exact-head PR review. A cycle limit or two no-progress cycles trigger diagnosis, recovery, failover, decomposition, or a fresh bounded leg; they never become a request for the user to say "continue". Return control to the helm scheduler with a machine-actionable next state instead of stopping the queue.
+
 If the host was declared as `chair`, keep its provider out of delegated agents and record completed host work with `record_native_chair_turn`. This preserves one portable history without launching a duplicate same-provider CLI session.
 
 Before advancing a native-chair cycle, inspect the terminal `coordinatorWake`, process its `nextAction`, and call `acknowledge_coordinator_wake` with the exact sequence. Stop/AfterAgent hooks hold the coordinator open while a collaboration is active or an actionable wake remains; SessionStart restores the receipt after a restart. Never acknowledge merely to silence the hook. A `needs_user` or `indeterminate` wake is intentionally non-actionable and may end the host turn.
 
 Mark the goal complete only when every “done when” condition has current evidence. Peer agreement without verification is insufficient.
 
-## Stop conditions
+## Standalone stop conditions
 
 Stop the loop when any condition is true:
 
@@ -148,6 +150,8 @@ Stop the loop when any condition is true:
 - No requested provider remains available: `unavailable`.
 
 Never silently extend the cycle limit. The user may explicitly start another bounded phase with the same collaboration ID.
+
+These conditions govern a standalone `$goal-loop`. Under `$take-the-helm`, only the helm's objective, explicit run-mode boundary, hard escalation, cancellation, or portfolio budget may stop the overall run; the scheduler automatically replaces or continues bounded goal-loop legs.
 
 ## Finish visibly
 

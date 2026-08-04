@@ -278,6 +278,9 @@ assert.match(pairProgram, /acknowledge_coordinator_wake/);
 assert.match(pairProgram, /provider-specific, user-owned Apps/);
 assert.match(pairProgram, /agent-review=success/);
 assert.match(pairProgram, /never replace the App with a personal PAT/);
+assert.match(pairProgram, /writer handoff is a scheduler event/);
+assert.match(pairProgram, /Every governed PR receives a formal GitHub-native review automatically/);
+assert.match(pairProgram, /Never ask the user to say "continue"/);
 
 const collaborationDoctor = await readFile(resolve(root, "skills/collaboration-doctor/SKILL.md"), "utf8");
 for (const term of [
@@ -322,6 +325,9 @@ assert.match(goalLoop, /never retry the merge or review through a personal PAT/)
 for (const term of ["detail: status", "includeTurns: 0", "afterTurn"]) assert.ok(goalLoop.includes(term));
 assert.match(goalLoop, /Never substitute a long-running Bash, sleep, gh, or PR polling loop/);
 assert.match(goalLoop, /acknowledge_coordinator_wake/);
+assert.match(goalLoop, /When composed by `take-the-helm`/);
+assert.match(goalLoop, /never become a request for the user to say "continue"/);
+assert.match(goalLoop, /only the helm's objective, explicit run-mode boundary, hard escalation, cancellation, or portfolio budget may stop/);
 
 const readme = await readFile(resolve(root, "README.md"), "utf8");
 const localBridge = await readFile(resolve(root, "bridge"), "utf8");
@@ -552,6 +558,15 @@ assert.match(takeTheHelm, /agent-review=success/);
 assert.match(takeTheHelm, /never use an owner PAT bypass/);
 assert.match(takeTheHelm, /Routine uncertainty.*is not an escalation/);
 assert.match(takeTheHelm, /Continue with two models or one model/);
+assert.match(takeTheHelm, /standing authorization to perform the queue's routine/);
+assert.match(takeTheHelm, /Never ask the user to say "continue"/);
+assert.match(takeTheHelm, /Drive the mandatory lane state machine/);
+assert.match(takeTheHelm, /claimed -> implementing -> delivering -> reviewing -> repairing -> reviewing/);
+assert.match(takeTheHelm, /Every governed PR receives this GitHub-native review automatically/);
+assert.match(takeTheHelm, /A cycle, turn, or provider limit is not a portfolio stop condition/);
+assert.match(takeTheHelm, /Do not ask “what next\?” or “should I continue\?”/);
+assert.doesNotMatch(takeTheHelm, /Max parallel: <default 2>/);
+assert.match(takeTheHelm, /Max parallel: <default 5>/);
 
 const pathExists = (path) => stat(path).then(() => true, (error) => (error.code === "ENOENT" ? false : Promise.reject(error)));
 

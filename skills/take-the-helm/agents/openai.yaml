@@ -1,7 +1,7 @@
 interface:
   display_name: "Take the Helm"
   short_description: "Drive parallel issue lanes through a safe merge train"
-  default_prompt: "Use $take-the-helm to take ownership of this objective, schedule independent issues into parallel worktree lanes, serialize exact-SHA integration through the bridge merge train, arbitrate conflicts, and continue without asking me unless a true escalation boundary is reached."
+  default_prompt: "Use $take-the-helm to own this objective end to end. Continuously schedule safe issue lanes, automatically deliver and formally review every PR, repair findings, merge authorized exact heads, and dispatch the next frontier without asking me to continue unless a true escalation boundary is reached."
 dependencies:
   tools:
     - type: "mcp"
