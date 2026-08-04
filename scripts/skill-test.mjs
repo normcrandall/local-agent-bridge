@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 
 import { homedir, hostname, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { exportSkills, lintSkillCatalog, verifySkillExport } from "./skill-portability.mjs";
+import { DEFAULT_MAX_PARALLEL } from "../src/portfolio-scheduler.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const home = process.env.HOME || homedir();
@@ -269,6 +270,7 @@ assert.doesNotMatch(history, /waitSeconds: 20/);
 for (const term of ["detail: status", "includeTurns: 0", "afterTurn"]) assert.ok(history.includes(term));
 
 const pairProgram = await readFile(resolve(root, "skills/pair-program/SKILL.md"), "utf8");
+const pairProgramOpenAi = await readFile(resolve(root, "skills/pair-program/agents/openai.yaml"), "utf8");
 for (const term of ["bridge capabilities", "bridge preflight", "bridge roles", "worktree", "ciTracking", "bridge reconcile", "budget", "bridge recover", "githubReview"]) {
   assert.ok(pairProgram.includes(term), `pair-program skill is missing ${term}`);
 }
@@ -278,6 +280,11 @@ assert.match(pairProgram, /acknowledge_coordinator_wake/);
 assert.match(pairProgram, /provider-specific, user-owned Apps/);
 assert.match(pairProgram, /agent-review=success/);
 assert.match(pairProgram, /never replace the App with a personal PAT/);
+assert.match(pairProgram, /writer handoff is a scheduler event/);
+assert.match(pairProgram, /Every governed PR receives a formal GitHub-native review automatically/);
+assert.match(pairProgram, /Never ask the user to say "continue"/);
+assert.match(pairProgramOpenAi, /one writer and deterministic reviewer rotation/);
+assert.match(pairProgramOpenAi, /automatically deliver and dispatch an independent exact-head GitHub review/);
 
 const collaborationDoctor = await readFile(resolve(root, "skills/collaboration-doctor/SKILL.md"), "utf8");
 for (const term of [
@@ -302,6 +309,7 @@ assert.match(collaborationDoctor, /no provider is eligible/);
 assert.doesNotMatch(collaborationDoctor, /TODO/);
 
 const goalLoop = await readFile(resolve(root, "skills/goal-loop/SKILL.md"), "utf8");
+const goalLoopOpenAi = await readFile(resolve(root, "skills/goal-loop/agents/openai.yaml"), "utf8");
 assert.match(goalLoop, /GOAL LOOP STARTING/);
 assert.match(goalLoop, /LOOP CHECKPOINT/);
 assert.match(goalLoop, /GOAL COMPLETE/);
@@ -322,6 +330,15 @@ assert.match(goalLoop, /never retry the merge or review through a personal PAT/)
 for (const term of ["detail: status", "includeTurns: 0", "afterTurn"]) assert.ok(goalLoop.includes(term));
 assert.match(goalLoop, /Never substitute a long-running Bash, sleep, gh, or PR polling loop/);
 assert.match(goalLoop, /acknowledge_coordinator_wake/);
+assert.match(goalLoop, /chair supplies a broker-created durable `helm-<uuid>`/);
+assert.match(goalLoop, /`mergePolicy\.autonomousMergeRepositories`/);
+assert.match(goalLoop, /self-asserted composition grants no authority/);
+assert.match(goalLoop, /delegated writer's builder allowlist omits `merge`/);
+assert.match(goalLoop, /never become a request for the user to say "continue"/);
+assert.match(goalLoop, /only the helm's objective, explicit run-mode boundary, hard escalation, cancellation, or portfolio budget may stop/);
+assert.match(goalLoop, /In standalone mode, never silently extend the cycle limit/);
+assert.match(goalLoopOpenAi, /bounded plan, implement, review, and verification cycles/);
+assert.doesNotMatch(goalLoopOpenAi, /take-the-helm|autonomous scheduler|asking me to continue/);
 
 const readme = await readFile(resolve(root, "README.md"), "utf8");
 const localBridge = await readFile(resolve(root, "bridge"), "utf8");
@@ -335,10 +352,20 @@ for (const guidance of [claudeGuidance, codexGuidance]) {
   assert.match(guidance, /acknowledge_coordinator_wake/);
   assert.match(guidance, /five live work calls and ten concurrent review calls/);
   assert.doesNotMatch(guidance, /one live work call and two concurrent review calls/);
+  assert.match(guidance, /drain actionable coordinator wakes/);
+  assert.match(guidance, /Every governed PR must receive a formal non-writer review without the user asking/);
+  assert.match(guidance, /they do not justify asking the user to say "continue"/);
+  assert.match(guidance, /Stop only at the skill's explicit objective, run-mode, budget, cancellation, or hard-escalation boundaries/);
+  assert.match(guidance, /delegated writer's allowlist always omits `merge`/);
+  assert.match(guidance, /chair-supplied broker-created `helm-<uuid>`/);
+  assert.match(guidance, /`mergePolicy\.autonomousMergeRepositories`/);
+  assert.match(guidance, /self-asserted composition grants no authority/);
 }
 assert.match(readme, /collaboration_wake/);
 assert.match(readme, /coordinatorWake/);
 assert.match(readme, /Do not replace broker polling with one long-running Bash/);
+assert.match(readme, /every remaining lane is at a protected `needs_user`\/`indeterminate` boundary or hard escalation/);
+assert.match(readme, /"No ready work" is terminal only when no delivery, review, repair, CI, merge, recovery, or queued-provider event remains/);
 const aiHeroSkillEntries = await readdir(resolve(home, ".agents/skills"), { withFileTypes: true }).catch((error) => {
   if (error?.code === "ENOENT") return [];
   throw error;
@@ -520,7 +547,7 @@ for (const term of [
   "commit and pull-request history",
   "plan_portfolio",
   "create_portfolio",
-  "maxParallel: 5",
+  `maxParallel: ${DEFAULT_MAX_PARALLEL}`,
   "dependency edge",
   "conflict edge",
   "path reservation",
@@ -552,6 +579,23 @@ assert.match(takeTheHelm, /agent-review=success/);
 assert.match(takeTheHelm, /never use an owner PAT bypass/);
 assert.match(takeTheHelm, /Routine uncertainty.*is not an escalation/);
 assert.match(takeTheHelm, /Continue with two models or one model/);
+assert.match(takeTheHelm, /standing authorization to perform the queue's routine/);
+assert.match(takeTheHelm, /Merge authority becomes active only after the chair supplies the broker-created durable `helm-<uuid>`/);
+assert.match(takeTheHelm, /`mergePolicy\.autonomousMergeRepositories`/);
+assert.match(takeTheHelm, /self-asserted composition grants no merge authority/);
+assert.match(takeTheHelm, /delegated writer's `githubBuilder\.allowedOperations` still omits `merge`/);
+assert.match(takeTheHelm, /Never ask the user to say "continue"/);
+assert.match(takeTheHelm, /Drive the mandatory lane state machine/);
+assert.match(takeTheHelm, /claimed -> implementing -> delivering -> reviewing -> repairing -> reviewing/);
+assert.match(takeTheHelm, /Every governed PR receives this GitHub-native review automatically/);
+assert.match(takeTheHelm, /A cycle, turn, or provider limit is not a portfolio stop condition/);
+assert.match(takeTheHelm, /determinate failure or cancellation/);
+assert.match(takeTheHelm, /`needs_user`, lost transport, and `indeterminate` ownership never permit automatic replacement/);
+for (const failureEdge of ["CI red after approval", "target or PR head advanced", "merge conflicts", "12-round breaker", "`blocked`"]) {
+  assert.ok(takeTheHelm.includes(failureEdge), `Take the helm is missing failure edge: ${failureEdge}`);
+}
+assert.match(takeTheHelm, /Do not ask “what next\?” or “should I continue\?”/);
+assert.ok(takeTheHelm.includes(`Max parallel: <default ${DEFAULT_MAX_PARALLEL}>`));
 
 const pathExists = (path) => stat(path).then(() => true, (error) => (error.code === "ENOENT" ? false : Promise.reject(error)));
 

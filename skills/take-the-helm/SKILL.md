@@ -7,6 +7,8 @@ description: Give the Claude, Codex, and Antigravity council operational ownersh
 
 Own the outcome. Treat the user as the sponsor, not the day-to-day operator. Drive the queue, make reversible decisions, keep the three-model council aligned, and surface only genuine escalation boundaries.
 
+Invoking this skill is standing authorization to perform the queue's routine, reversible implementation, branch, commit, push, pull-request, review, repair, and CI actions without asking again. Merge authority becomes active only after the chair supplies the broker-created durable `helm-<uuid>` portfolio ID and the target repository matches machine-local `mergePolicy.autonomousMergeRepositories`; self-asserted composition grants no merge authority. A delegated writer's `githubBuilder.allowedOperations` still omits `merge`; the native coordinator performs an eligible exact-head merge through collaboration `merge_pull_request`. Without both machine-checkable proofs, stop at a green reviewed PR for human merge. The authorization is scoped to the named objective and repositories and never overrides GitHub rules, exact-head review, verification, identity isolation, or the hard escalation boundaries below. Never ask the user to say "continue" while an automatic next action exists.
+
 ## Compose the existing workflows
 
 Read and apply the installed `goal-loop`, `pair-program`, `council-grill-agents`, and `show-collaboration` skills. Use:
@@ -39,7 +41,7 @@ Prefer work in this order:
 3. repository-labelled ready work in priority and dependency order;
 4. the smallest coherent work that advances the stated objective.
 
-Honor the requested run mode, inferring it from the request and defaulting to end-to-end. Treat `phase/stop-boundary` as one ordered per-item attribute:
+Honor an explicitly requested run mode and otherwise use end-to-end. Never infer a wave or phase stop merely because issues contain phase metadata. Treat `phase/stop-boundary` as one ordered per-item attribute:
 
 - **wave** — triage new work, compute the frontier, run one safe wave through to merge within the current `phase/stop-boundary` value, then report and stop;
 - **phase** — exhaust the current `phase/stop-boundary` value end-to-end, then halt for owner release before the next;
@@ -47,7 +49,7 @@ Honor the requested run mode, inferring it from the request and defaulting to en
 
 A `Decide:`-class owner-gated fork and the 12-round item circuit-breaker interrupt any mode; the 5-round follow-up breaker applies within the active mode. No run mode releases an owner-gated `Decide:` fork or hard escalation boundary — those always require the existing release authority. Dependency edges order work within a `phase/stop-boundary` value; the value is a coarse partition and checkpoint, not a concurrency fence. Pair every named `phase` with an explicit numeric `phaseOrder`; omitted orders intentionally share the default order `0`. When the current phase cannot fill safe capacity, select dependency-ready, deconflicted work from later phases and mark it as lookahead. Consumers map the attribute to whatever field they use — for example a GitHub Project `Phase` field.
 
-If the request names a finite set, continue until every item is complete, blocked by a true escalation, or rendered obsolete with recorded evidence. For an open-ended backlog, work the current ready frontier until no eligible item remains. Respect explicit cost, token, time, or issue-count budgets; do not invent a smaller limit merely to return control early.
+If the request names a finite set, continue until every item is complete, blocked by a true escalation, or rendered obsolete with recorded evidence. For an open-ended backlog, work the current ready frontier until no eligible item remains. Respect explicit cost, token, time, or issue-count budgets; do not invent a smaller limit merely to return control early. A provider turn, collaboration turn limit, bounded goal-loop cycle, handoff, PR creation, review verdict, or successful merge is a scheduler event, not a portfolio stop condition.
 
 Define done from repository evidence: implementation, exact gates, independent review, required documentation or handoff, PR status, issue state, and deployment or merge boundaries authorized by repository policy.
 
@@ -141,7 +143,7 @@ Queue: <issues, map, milestone, or frontier>
 Completion: <evidence-based done condition>
 Portfolio: <helm-id after creation>
 Safe frontier: <selected issue IDs>
-Max parallel: <default 2>
+Max parallel: <default 5>
 Provider capacity: Claude work 5/review 10 · Codex work 5/review 10 · Antigravity work 5/review 10
 Participants: Claude, Codex, Antigravity
 Chair: <provider>
@@ -159,6 +161,40 @@ Every wait is a race, never a success-only poll. For a portfolio lane, call `wai
 
 Treat each lane's terminal `coordinatorWake` as a durable scheduler event. Fetch the new turn once, process `nextAction`, acknowledge the exact wake sequence with `acknowledge_coordinator_wake`, update the portfolio lane, and immediately recompute or dispatch the next safe action. Stop/AfterAgent hooks keep the native coordinator from ending with actionable work; SessionStart restores unprocessed events. Never acknowledge merely to clear the queue. `needs_user` and `indeterminate` wakes are protected boundaries for that lane, while independent healthy lanes continue.
 
+## Drive the mandatory lane state machine
+
+Run every GitHub-governed lane through this state machine without waiting for another user message:
+
+```text
+claimed -> implementing -> delivering -> reviewing -> repairing -> reviewing
+                                             |                       |
+                                             +---- approved + CI ----+
+                                                        |
+                                                        v
+queued_to_merge -> integrating -> merged -> release claim/worktree -> dispatch next frontier
+
+reviewing -- changes requested or CI red --> repairing --> delivering --> reviewing
+reviewing -- target or PR head advanced --> delivering/revalidate --> reviewing
+queued_to_merge/integrating -- conflict --> arbitrating --> repairing --> reviewing
+repairing -- 12 review rounds --> split/re-spec/council disposition
+any active state -- determinate provider failure --> recovery/failover in the same lane
+any active state -- true external blocker --> blocked while independent lanes continue
+any active state -- needs_user or indeterminate --> protected lane boundary; inspect or cancel, never replace
+```
+
+Apply these transition rules:
+
+1. Drain every pending actionable `coordinatorWake` before polling or starting unrelated chair work.
+2. Treat a writer handoff as `verify_and_deliver`, never as completion. Verify and acknowledge the handoff, record exact-head receipts, and continue the same lane in `workProfile: deliver` to create or update its PR.
+3. Resolve the PR number and remote head from the builder receipt. Immediately start a separate read-only review collaboration with `githubReview` bound to that exact PR head and an ordered roster of eligible non-writer providers. Every governed PR receives this GitHub-native review automatically; a local summary or writer self-review never substitutes for it.
+4. On `CHANGES_REQUESTED`, validate the findings, continue the original writer for repair, verify the new head, republish, and dispatch a fresh exact-head review. Repeat without asking the user.
+5. On exact-head approval with required CI green, enqueue, validate, authorize, and merge when standing repository policy permits. Record the merge, close or reconcile the issue, release the claim, retire recoverable checkout state, recompute the frontier, and fill every safe slot.
+6. If a provider or bounded collaboration leg ends before its transition is complete, resume it automatically. Replace it only after a confirmed determinate failure or cancellation, after proving the previous writer has stopped and reconciling checkout and claim ownership. `needs_user`, lost transport, and `indeterminate` ownership never permit automatic replacement; protect that lane and continue independent lanes. A cycle, turn, or provider limit is not a portfolio stop condition.
+7. Route CI red after approval back to the same writer for repair and fresh verification; a changed target or PR head invalidates receipts and returns the lane to delivery/revalidation and exact-head review.
+8. Route merge conflicts to `arbitrating`, then exactly one integration writer repairs and republishes before a new review. At the 12-round breaker, record and execute the council's `split`, re-specification, or owner-gated disposition instead of silently parking the lane. Record a true external blocker as `blocked`, but keep every independent safe lane moving.
+
+After processing any event, repeatedly choose the first applicable automatic action: repair a failed delivery, dispatch a missing review, repair findings, re-review a changed head, advance a green PR through the merge train, release merged work, or start the next safe issue. Yield only when all active lanes are genuinely waiting on provider/CI events, and retain the durable wake so the next event resumes the scheduler without a user prompt.
+
 ## Run parallel issue lanes
 
 Start only the items selected by the portfolio's current safe frontier. Assign exactly one writer to every selected item and give it an isolated worktree. Pass an ordered roster containing the preferred writer plus every eligible backup provider; keep `writer` explicit so only one model can edit at a time. A confirmed unavailable writer is removed and the next eligible provider inherits the same worktree and task automatically. Use a single-provider roster only when the owner explicitly pins that provider. The broker enforces the provider's work capacity and queues excess calls. Schedule independent review calls immediately after a writer handoff; do not manually hold a review merely because the provider is busy. The broker admits up to the configured review capacity, publishes `waiting_capacity` for queued calls, and wakes the oldest queued call automatically when a slot is released.
@@ -172,7 +208,7 @@ For each selected lane:
    Pass the concise objective, bound `issueTarget` or `issueClaim`, and self-contained checkout; never paste the issue body into prose or omit the target to bypass policy. Under `workProfile: implement`, the broker derives or validates `push_branch` and `ensure_pull_request`, retains and withholds that route from the provider, and requires no verified head. Governed publication is a second phase: record observed verification receipts for the committed clean head, then continue with `workProfile: deliver` and `githubBuilder.verifiedHeadSha` set to that head. Never publish a mutable or receipt-free writer head.
 4. **Expand reservations before scope** — if implementation must touch an undeclared path, contract, migration, generated artifact, or shared resource, update the manifest and recompute the portfolio before editing it. Pause the lower-priority lane on a new collision.
 5. **Verify and hand off** — run exact issue gates and require a structured `HANDOFF`. The chair verifies and acknowledges that sequence before recording the lane as ready for review.
-6. **Review independently** — assign providers that did not write the lane. When the PR is the source of truth, use the exact PR head and configured reviewer Apps. Accept either their resulting exact-head `agent-review` gate or an exact-head approval from a machine-locally configured trusted human. A PAT compatibility comment is not approval. Submit every review-ready lane to the broker immediately. It permits up to the configured live review limit per provider—ten by default—alongside five live work calls by default. Every blocking finding must carry a concrete proposed fix when one is determinable — preferably the review surface's directly applicable suggested-change mechanism (for example GitHub's `suggestion` block), otherwise a precise code or diff snippet. A finding with no clear fix (a genuine design question) still states what is wrong, why, and the acceptance criteria.
+6. **Review independently** — assign providers that did not write the lane. When the PR is the source of truth, use the exact PR head and configured reviewer Apps. Accept either their resulting exact-head `agent-review` gate or an exact-head approval from a machine-locally configured trusted human. A PAT compatibility comment is not approval. Submit every review-ready lane to the broker immediately and automatically; the chair must not wait for the user to request review. It permits up to the configured live review limit per provider—ten by default—alongside five live work calls by default. Every blocking finding must carry a concrete proposed fix when one is determinable — preferably the review surface's directly applicable suggested-change mechanism (for example GitHub's `suggestion` block), otherwise a precise code or diff snippet. A finding with no clear fix (a genuine design question) still states what is wrong, why, and the acceptance criteria.
 
    Start a review leg with an ordered roster containing the preferred reviewer and all eligible non-writer fallbacks in the same collaboration. Set `maxTurns` to the number of successful reviews required; a failed or disconnected provider does not consume a turn and the broker advances to the next candidate. Never make a single provider the only critical-review candidate unless the owner explicitly pins it. Reviewer-App publication is preflighted: publishable identities run first, unbound reviewers remain available for local handoff, and an all-unbound roster completes locally then waits for exact-head trusted-human approval instead of abandoning the portfolio.
 
@@ -226,7 +262,7 @@ If every eligible provider is confirmed temporarily unavailable because of model
 
 A timeout or lost transport is indeterminate: preserve writer ownership, inspect state, and explicitly cancel before reassignment. Recover failed worktrees, stale branches, interrupted reviews, CI failures, and orphaned collaborations using the underlying skills. Reassign a writer only after confirming the previous writer cannot still mutate the workspace.
 
-If one item is truly blocked, record the blocker and continue every independent ready item. Stop the run only when the objective is complete, no ready work remains, the active run mode's boundary is reached (one wave for `wave`; the current `phase/stop-boundary` value for `phase`), every remaining item is at a hard escalation boundary, or an explicit budget is exhausted.
+If one item is truly blocked, record the blocker and continue every independent ready item. Stop the run only when the objective is complete; the user explicitly requested wave or phase mode and that boundary is fully delivered; the user pauses or cancels; every remaining item is at a hard escalation boundary; or an explicit portfolio budget is exhausted. "No ready work" is terminal only when no implementation, delivery, review, repair, CI, merge, recovery, or queued provider event remains. Bounded provider or goal-loop limits trigger another leg, recovery, failover, or decomposition; they never hand the helm back by themselves.
 
 ## Report without handing the helm back
 
@@ -251,4 +287,4 @@ At the end, report:
 5. genuine escalations, with one recommended answer each;
 6. collaboration IDs and the exact condition that ended the run.
 
-Do not ask “what next?” when the queue already determines the next action.
+Do not ask “what next?” or “should I continue?” when the queue or lane state determines the next action.

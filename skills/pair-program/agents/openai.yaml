@@ -1,4 +1,4 @@
 interface:
   display_name: "Pair Program"
   short_description: "Rotate writers and reviewers safely"
-  default_prompt: "Use $pair-program to implement the next task with one writer and rotating cross-model review."
+  default_prompt: "Use $pair-program to implement with one writer and deterministic reviewer rotation, then automatically deliver and dispatch an independent exact-head GitHub review; repair and re-review until the configured completion boundary is met."
